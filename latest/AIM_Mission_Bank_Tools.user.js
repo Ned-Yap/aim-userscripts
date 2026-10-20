@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.28
+// @version      3.29
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.28';
+    const SCRIPT_VERSION = '3.29';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -361,6 +361,7 @@
                 registerMissionSop();
                 registerCoverage();
                 registerSchedule();
+                registerSmart();
             } else if (msg.type === 'TOKEN_VALUE') {
                 mbSharedToken = String(msg.token || '');   // v3.28: GitHub PAT for the 🗓 feed (read-only)
             } else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SCRIPT_ID) {
@@ -480,6 +481,8 @@
                 handleCoverageToggle(msg);
             } else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SCH_SCRIPT_ID) {
                 handleScheduleToggle(msg);
+            } else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SMT_SCRIPT_ID) {
+                handleSmartToggle(msg);
             } else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === MISSION_SOP_SCRIPT_ID) {
                 // Cross-tab guard: BroadcastChannel delivers to EVERY open tab — only
                 // the tab that pressed/clicked may act (tabId from CP v1.43+; visibility
@@ -1750,6 +1753,898 @@
         if (panelState && panelState.mode === 'schedule') { try { renderScheduleView(); } catch (e) {} }
     }
 
+    // [#303 smart planner core] — vendored VERBATIM from ShortKeys/AIM_Smart_Planner.js (tests: AIM_Smart_Planner_Test.js)
+    // AIM Smart Planner — pure planning core for the Smart Mission feature (#303).
+    // Reference copy; paste VERBATIM into Mission Bank Tools (module "[#303 smart planner core]").
+    // No DOM, no fetch, no Tampermonkey — runs in Node for the offline tests and in the browser
+    // when vendored. No hotkeys. Log tag: whatever the host script uses (console only on warn).
+    //
+    // CONTRACT (this is what we hand Percepto for a server-side port):
+    //
+    //   plan(input) → SmartPlan
+    //
+    //   input = {
+    //     now: ISO string (plan build time, site local wall clock is derived from `tz` offset min),
+    //     site: { id, name, tzOffsetMin, base:{lat,lng} },
+    //     tiers: [ { id:'P1', label, rank:1, everyDays:3.5, role:'target'|'target-when-due'|'filler'|'ignore',
+    //                targetWithinDays, fillerMaxAddedMin, homewardOnly, color } … ]        (DEFAULT_TIERS)
+    //     tierRegex: string (optional, DEFAULT_TIER_REGEX) — first capture group → tier id 'P<group>'
+    //     rules: [ { id, kind, label, enabled, params:{…} } … ]                              (DEFAULT_RULES)
+    //     pads: [ { padId, name, lat, lng, tier:'P1' | subtype:'P1 - v - pumping rod', assets:[…],
+    //               lastCaptured: ISO|null, grade:'A'|'B'|'C'|null, pendingFlight: bool,
+    //               blocked: { why:'rig'|'hold'|'tfr'|…, until: ISO|null } | null,
+    //               micro: { appId, name, steps, energyPct, minutes } | null } … ]
+    //     pairwise: { [padIdA]: { [padIdB]: feet }, base: { [padId]: feet } }   (missing pairs → haversine ×1.25, counted in offGraph)
+    //     weather: { hours: [ { t: ISO, windMph, gustMph, dirDeg (FROM), tempF, precipMm } … ] } | null
+    //     calibration: { flightMin, chargeMin } | null   (per-site measured; overrides the `turnaround` rule)
+    //     frozen: [ { name, day:'YYYY-MM-DD', padIds:[…] } … ]   (slots that already flew today — kept as-is)
+    //   }
+    //
+    //   SmartPlan = {
+    //     version, builtAt, siteId, horizonDays, tiers:[…resolved], rules:[…resolved],
+    //     slots: [ { slot, name, day, frozen, flights:[ { n, pads:[ { padId, name, tier, dueOn, overdueDays,
+    //                 reason:'due'|'target'|'filler', transitFt, etaMin, batteryPctAtLanding, windFactor } ],
+    //                 distanceFt, minutes, energyPct } ], totals:{ pads, flights, wallClockMin, byTier:{} },
+    //                 budgetMin, lostHours, warnings:[…] } ],
+    //     owedNotPlanned: [ { padId, name, tier, dueOn, overdueDays, why:'blocked:rig'|'no-micro'|'no-time'|'out-of-range'|… } ],
+    //     ignored: [ { padId, name, why } ], offGraph: n, assumptions:[…], warnings:[…]
+    //   }
+    //
+    // INVARIANTS (tested offline in ShortKeys/AIM_Smart_Planner_Test.js):
+    //   - every flight lands with ≥ reserve % battery under the model; nothing is planned without a micro
+    //   - targets are ordered by the SPUR WALK doctrine (deepest first, peel home, jump when a fresh
+    //     out-leg is cheaper); fillers never steer the walk and only ride on leftover battery
+    //   - blocked pads are never planned but always reported as owed
+    //   - a tier unknown to `tiers` is reported, never silently treated as any other tier
+    //   - frozen slots are emitted first and their pads count as pending-captured
+
+    const AIM_SMART_PLANNER = (function () {
+        'use strict';
+
+        const VERSION = '0.1';
+        const FT_PER_M = 3.28084;
+        const DEFAULT_TIER_REGEX = '^P\\s*([0-9]+\\+?)\\s*[-\\u2013\\u2014:]';
+
+        const DEFAULT_TIERS = [
+            { id: 'P1', label: 'Priority 1', rank: 1, everyDays: 3.5, role: 'target', color: '#ff7b00' },
+            { id: 'P2', label: 'Priority 2', rank: 2, everyDays: 7, role: 'target-when-due', targetWithinDays: 2, color: '#ffe14d' },
+            { id: 'P2+', label: 'Priority 2+', rank: 3, everyDays: 14, role: 'target-when-due', targetWithinDays: 2, color: '#c9e34d' },
+            { id: 'P3', label: 'Priority 3', rank: 4, everyDays: 30, role: 'filler', fillerMaxAddedMin: 5, homewardOnly: true, color: '#99aadd' },
+        ];
+
+        // Rules are an editable list. The planner reads MERGED params per kind (enabled rules only,
+        // later entries override earlier ones) so the panel can attach / edit / disable any of them
+        // live. Unknown kinds are reported in plan.warnings and otherwise ignored.
+        const RULE_KINDS = {
+            'horizon':     { label: 'Planning horizon', params: { days: 7 } },
+            'ops-window':  { label: 'Ops day', params: { start: '08:00', hours: 8, usePct: 80 } },
+            'turnaround':  { label: 'Flight / charge minutes', params: { flightMin: 22, chargeMin: 80 } },
+            'battery':     { label: 'Battery model', params: { reservePct: 25, usableFt: 36000, cruiseMph: 30, perStepPct: 1.2, perStepMin: 0.5 } },
+            'wind':        { label: 'Wind', params: { k: 1.0, maxMph: null, gustMaxMph: null } },
+            'temp':        { label: 'Temperature', params: { minF: null, maxF: null } },
+            'precip':      { label: 'Precipitation', params: { maxMmPerHour: null } },
+            'block':       { label: 'Blocked pads', params: { kinds: ['rig', 'hold', 'tfr'] } },
+            'pending':     { label: 'Landed, images not in yet', params: { hours: 2 } },
+            'untiered':    { label: 'Assets with no tier prefix', params: { role: 'ignore', everyDays: 30 } },
+        };
+
+        const DEFAULT_RULES = Object.keys(RULE_KINDS).map(kind => ({
+            id: kind, kind, label: RULE_KINDS[kind].label, enabled: true, params: Object.assign({}, RULE_KINDS[kind].params),
+        }));
+
+        // ---- small helpers -------------------------------------------------------------------
+        function clone(o) { return JSON.parse(JSON.stringify(o)); }
+        function toRad(d) { return d * Math.PI / 180; }
+        function haversineFt(a, b) {
+            if (!a || !b || !isFinite(a.lat) || !isFinite(b.lat)) return null;
+            const R = 6371000;
+            const dLat = toRad(b.lat - a.lat), dLng = toRad(b.lng - a.lng);
+            const s = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLng / 2) ** 2;
+            return 2 * R * Math.asin(Math.sqrt(s)) * FT_PER_M;
+        }
+        function bearingDeg(a, b) {
+            if (!a || !b) return null;
+            const y = Math.sin(toRad(b.lng - a.lng)) * Math.cos(toRad(b.lat));
+            const x = Math.cos(toRad(a.lat)) * Math.sin(toRad(b.lat)) - Math.sin(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.cos(toRad(b.lng - a.lng));
+            return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+        }
+        function angDiff(a, b) { const d = Math.abs(((a - b) % 360 + 540) % 360 - 180); return d; }
+        function dayKey(ms, tzOffsetMin) {
+            const d = new Date(ms + (tzOffsetMin || 0) * 60000);
+            return d.toISOString().slice(0, 10);
+        }
+        function dayStartMs(day, tzOffsetMin, hhmm) {
+            const [h, m] = String(hhmm || '00:00').split(':').map(Number);
+            return Date.parse(day + 'T00:00:00Z') - (tzOffsetMin || 0) * 60000 + ((h || 0) * 60 + (m || 0)) * 60000;
+        }
+        function addDays(day, n) { return new Date(Date.parse(day + 'T00:00:00Z') + n * 86400000).toISOString().slice(0, 10); }
+
+        // ---- tiers ----------------------------------------------------------------------------
+        function resolveTiers(list) {
+            const src = Array.isArray(list) && list.length ? list : DEFAULT_TIERS;
+            const out = src.map((t, i) => Object.assign({ rank: i + 1, role: 'target', everyDays: 30, color: '#9ad' }, clone(t)));
+            out.sort((a, b) => a.rank - b.rank);
+            return out;
+        }
+        function tierOf(subtype, tiers, regexSrc) {
+            const re = new RegExp(regexSrc || DEFAULT_TIER_REGEX, 'i');
+            const m = re.exec(String(subtype || '').trim());
+            if (!m) return { id: null, known: false, raw: null };
+            const id = 'P' + m[1].replace(/\s+/g, '');
+            const t = (tiers || DEFAULT_TIERS).find(x => String(x.id).toUpperCase() === id.toUpperCase());
+            return { id: t ? t.id : id, known: !!t, raw: m[0] };
+        }
+
+        // ---- rules ----------------------------------------------------------------------------
+        function resolveRules(list) {
+            const src = Array.isArray(list) && list.length ? list : DEFAULT_RULES;
+            const merged = {};
+            const warnings = [];
+            Object.keys(RULE_KINDS).forEach(k => { merged[k] = { enabled: false, params: clone(RULE_KINDS[k].params) }; });
+            src.forEach(r => {
+                if (!r || !r.kind) return;
+                if (!RULE_KINDS[r.kind]) { warnings.push(`rule "${r.id || '?'}" has unknown kind "${r.kind}" — ignored`); return; }
+                if (r.enabled === false) return;
+                merged[r.kind].enabled = true;
+                Object.assign(merged[r.kind].params, r.params || {});
+            });
+            return { merged, list: src.map(clone), warnings };
+        }
+        function ruleParams(rules, kind) { return rules.merged[kind] && rules.merged[kind].enabled ? rules.merged[kind].params : null; }
+
+        // ---- weather --------------------------------------------------------------------------
+        function weatherAt(weather, ms) {
+            if (!weather || !Array.isArray(weather.hours) || !weather.hours.length) return null;
+            let best = null, bestD = Infinity;
+            weather.hours.forEach(h => { const d = Math.abs(Date.parse(h.t) - ms); if (d < bestD) { bestD = d; best = h; } });
+            return bestD <= 2 * 3600000 ? best : null;
+        }
+        function hourBlocked(h, rules) {
+            if (!h) return null;
+            const w = ruleParams(rules, 'wind'), t = ruleParams(rules, 'temp'), p = ruleParams(rules, 'precip');
+            if (w && w.maxMph != null && h.windMph != null && h.windMph > w.maxMph) return `wind ${h.windMph} mph > ${w.maxMph}`;
+            if (w && w.gustMaxMph != null && h.gustMph != null && h.gustMph > w.gustMaxMph) return `gust ${h.gustMph} mph > ${w.gustMaxMph}`;
+            if (t && t.minF != null && h.tempF != null && h.tempF < t.minF) return `${h.tempF}°F < ${t.minF}`;
+            if (t && t.maxF != null && h.tempF != null && h.tempF > t.maxF) return `${h.tempF}°F > ${t.maxF}`;
+            if (p && p.maxMmPerHour != null && h.precipMm != null && h.precipMm > p.maxMmPerHour) return `precip ${h.precipMm} mm`;
+            return null;
+        }
+        function windFactor(h, travelBearing, rules) {
+            const w = ruleParams(rules, 'wind'), b = ruleParams(rules, 'battery') || RULE_KINDS.battery.params;
+            if (!w || !h || h.windMph == null || travelBearing == null || h.dirDeg == null) return 1;
+            const head = h.windMph * Math.cos(toRad(travelBearing - h.dirDeg)); // + = headwind (wind FROM ahead)
+            const f = 1 + (w.k == null ? 1 : w.k) * head / (b.cruiseMph || 30);
+            return Math.min(3, Math.max(0.5, f));
+        }
+
+        // ---- the plan -------------------------------------------------------------------------
+        function plan(input) {
+            const warnings = [];
+            const assumptions = ['Plan assumes no mechanical or technical faults.'];
+            const nowMs = Date.parse(input.now || new Date().toISOString());
+            const tz = (input.site && input.site.tzOffsetMin) || 0;
+            const tiers = resolveTiers(input.tiers);
+            const rules = resolveRules(input.rules);
+            warnings.push(...rules.warnings);
+            const R = kind => ruleParams(rules, kind) || clone(RULE_KINDS[kind].params);
+            const horizonDays = Math.max(1, Number(R('horizon').days) || 7);
+            const ops = R('ops-window');
+            const turn = Object.assign({}, R('turnaround'), input.calibration || {});
+            const bat = R('battery');
+            const reservePct = ruleParams(rules, 'battery') ? Number(bat.reservePct) || 0 : 0;
+            const blockKinds = new Set((ruleParams(rules, 'block') || { kinds: [] }).kinds || []);
+            const pendingHrs = ruleParams(rules, 'pending') ? Number(R('pending').hours) || 0 : 0;
+            const untiered = R('untiered');
+            const base = input.site && input.site.base;
+            const cruiseFtPerMin = (bat.cruiseMph || 30) * 5280 / 60;
+            assumptions.push(`Cushion: ${reservePct}% battery reserve on every landing, ${ops.usePct}% of a ${ops.hours} h ops day from ${ops.start}.`);
+            if (input.calibration) assumptions.push(`Flight ${turn.flightMin} min / charge ${turn.chargeMin} min from site records.`);
+            else assumptions.push(`Flight ${turn.flightMin} min / charge ${turn.chargeMin} min (rule defaults, not calibrated).`);
+
+            // -- pads: tier, due, availability
+            const tierById = new Map(tiers.map(t => [t.id.toUpperCase(), t]));
+            const frozenPadIds = new Set();
+            (input.frozen || []).forEach(f => (f.padIds || []).forEach(id => frozenPadIds.add(String(id))));
+            const ignored = [], owedNotPlanned = [];
+            const pads = [];
+            (input.pads || []).forEach(p => {
+                if (!p || p.padId == null) return;
+                const padId = String(p.padId);
+                let tierId = p.tier || null, known = true;
+                if (!tierId) { const t = tierOf(p.subtype, tiers, input.tierRegex); tierId = t.id; known = t.known || !t.id; }
+                let tier = tierId ? tierById.get(String(tierId).toUpperCase()) : null;
+                if (tierId && !tier) { ignored.push({ padId, name: p.name, why: `unknown tier "${tierId}" — add it to the tier table` }); return; }
+                if (!tier) {
+                    if (untiered.role === 'ignore') { ignored.push({ padId, name: p.name, why: 'no tier prefix' }); return; }
+                    tier = { id: 'untiered', label: 'Untiered', rank: 999, everyDays: untiered.everyDays || 30, role: untiered.role, color: '#888' };
+                }
+                if (tier.role === 'ignore') { ignored.push({ padId, name: p.name, why: `tier ${tier.id} role = ignore` }); return; }
+                const last = p.lastCaptured ? Date.parse(p.lastCaptured) : null;
+                const dueMs = last != null && isFinite(last) ? last + tier.everyDays * 86400000 : nowMs;
+                const overdueDays = (nowMs - dueMs) / 86400000;
+                const pendingMs = p.pendingFlight ? Date.parse(p.pendingFlight) : null;
+                const pending = frozenPadIds.has(padId) || (p.pendingFlight === true) || (pendingMs != null && isFinite(pendingMs) && nowMs - pendingMs <= pendingHrs * 3600000);
+                pads.push({
+                    padId, name: p.name || padId, lat: p.lat, lng: p.lng, tier, assets: p.assets || [],
+                    lastCaptured: p.lastCaptured || null, grade: p.grade || null, dueMs, overdueDays, pending,
+                    blocked: p.blocked && p.blocked.why ? { why: p.blocked.why, untilMs: p.blocked.until ? Date.parse(p.blocked.until) : null } : null,
+                    micro: p.micro || null,
+                });
+            });
+            const padById = new Map(pads.map(p => [p.padId, p]));
+
+            // -- distances
+            let offGraph = 0;
+            const pw = input.pairwise || {};
+            function dist(a, b) { // a,b = padId or 'base'
+                if (a === b) return 0;
+                let ft = null;
+                if (a === 'base') ft = pw.base && pw.base[b];
+                else if (b === 'base') ft = pw.base && pw.base[a];
+                else ft = (pw[a] && pw[a][b]) != null ? pw[a][b] : (pw[b] && pw[b][a]);
+                if (ft != null && isFinite(ft)) return Number(ft);
+                const pa = a === 'base' ? base : padById.get(a), pb = b === 'base' ? base : padById.get(b);
+                const h = haversineFt(pa, pb);
+                if (h == null) return Infinity;
+                offGraph++;
+                return h * 1.25;
+            }
+            function pos(id) { return id === 'base' ? base : padById.get(id); }
+            function padEnergyPct(p) { return p.micro && p.micro.energyPct != null ? Number(p.micro.energyPct) : (p.micro ? (Number(p.micro.steps) || 0) * bat.perStepPct : 0); }
+            function padMinutes(p) { return p.micro && p.micro.minutes != null ? Number(p.micro.minutes) : (p.micro ? (Number(p.micro.steps) || 0) * bat.perStepMin : 0); }
+            function transitPct(ft, wf) { return ft / (bat.usableFt || 36000) * 100 * wf; }
+            function transitMin(ft, wf) { return ft / cruiseFtPerMin * wf; }
+
+            // -- slot / day budget
+            const today = dayKey(nowMs, tz);
+            function dayBudget(day) {
+                const start = dayStartMs(day, tz, ops.start);
+                const hours = Number(ops.hours) || 8;
+                let lost = 0; const lostWhy = [];
+                for (let h = 0; h < hours; h++) {
+                    const why = hourBlocked(weatherAt(input.weather, start + h * 3600000), rules);
+                    if (why) { lost++; lostWhy.push(`${String(h + Number(ops.start.split(':')[0])).padStart(2, '0')}:00 ${why}`); }
+                }
+                const usable = Math.max(0, hours - lost) * 60 * ((Number(ops.usePct) || 100) / 100);
+                return { start, budgetMin: usable, lostHours: lost, lostWhy };
+            }
+
+            // -- availability on a given day
+            function availableOn(p, dayMs) {
+                if (!p.micro) return 'no-micro';
+                if (p.blocked && blockKinds.has(p.blocked.why)) {
+                    if (p.blocked.untilMs != null && isFinite(p.blocked.untilMs) && p.blocked.untilMs <= dayMs) return null;
+                    return `blocked:${p.blocked.why}`;
+                }
+                return null;
+            }
+
+            // -- owed classification
+            const horizonEndMs = nowMs + horizonDays * 86400000;
+            function roleFor(p) {
+                const t = p.tier;
+                if (t.role === 'target') return 'target';
+                if (t.role === 'target-when-due') return p.dueMs <= nowMs + (Number(t.targetWithinDays) || 0) * 86400000 ? 'target' : 'filler';
+                return 'filler';
+            }
+            const owed = pads.filter(p => !p.pending && p.dueMs <= horizonEndMs);
+
+            // -- frozen slots first
+            const slots = [];
+            (input.frozen || []).forEach((f, i) => {
+                slots.push({ slot: slots.length + 1, name: f.name || `SMART ${slots.length + 1}`, day: f.day || today, frozen: true,
+                    flights: [], totals: { pads: (f.padIds || []).length, flights: 0, wallClockMin: 0, byTier: {} }, budgetMin: 0, lostHours: 0,
+                    warnings: ['frozen — already flying today, not rebuilt'], padIds: (f.padIds || []).map(String) });
+            });
+
+            // -- spur walk over targets (doctrine from MBT lasso v2.36)
+            const JUMP_TOL_FT = 500;
+            const remaining = new Set(owed.map(p => p.padId));
+            const planned = new Set();
+            let day = today;
+            let slotDay = dayBudget(day);
+            let slot = null;
+            let wallClock = 0;
+            const defer = []; // pads skipped on a day for weather/blocks → retried next day
+
+            function newSlot() {
+                slot = { slot: slots.length + 1, name: `SMART ${slots.length + 1}`, day, frozen: false, flights: [],
+                    totals: { pads: 0, flights: 0, wallClockMin: 0, byTier: {} }, budgetMin: Math.round(slotDay.budgetMin), lostHours: slotDay.lostHours,
+                    warnings: slotDay.lostWhy.slice() };
+                slots.push(slot);
+                wallClock = 0;
+            }
+            function nextDay() {
+                day = addDays(day, 1);
+                slotDay = dayBudget(day);
+                slot = null;
+            }
+
+            function targetsNow(dayMs) {
+                return [...remaining].map(id => padById.get(id)).filter(p => roleFor(p) === 'target' && !availableOn(p, dayMs));
+            }
+            function fillersNow(dayMs) {
+                return [...remaining].map(id => padById.get(id)).filter(p => roleFor(p) === 'filler' && !availableOn(p, dayMs));
+            }
+            function dBase(id) { return dist('base', id); }
+
+            // flight simulation: returns the flight or null if even the first pad does not fit
+            function fits(flight, fromId, p, etaMs) {
+                const wf = windFactor(weatherAt(input.weather, etaMs), bearingDeg(pos(fromId), pos(p.padId)), rules);
+                const legFt = dist(fromId, p.padId);
+                const homeFt = dist(p.padId, 'base');
+                const wfHome = windFactor(weatherAt(input.weather, etaMs + transitMin(legFt, wf) * 60000), bearingDeg(pos(p.padId), base), rules);
+                const pct = transitPct(legFt, wf) + padEnergyPct(p) + transitPct(homeFt, wfHome);
+                const min = transitMin(legFt, wf) + padMinutes(p) + transitMin(homeFt, wfHome);
+                const ok = flight.energyPct + pct <= 100 - reservePct && flight.minutes + min <= (Number(turn.flightMin) || 22) + 0.5;
+                return { ok, wf, legFt, homeFt, pct: transitPct(legFt, wf) + padEnergyPct(p), min: transitMin(legFt, wf) + padMinutes(p), homePct: transitPct(homeFt, wfHome), homeMin: transitMin(homeFt, wfHome) };
+            }
+            function visit(flight, p, f, reason, dueFrom) {
+                flight.energyPct += f.pct; flight.minutes += f.min; flight.distanceFt += f.legFt;
+                flight.pads.push({ padId: p.padId, name: p.name, tier: p.tier.id, dueOn: new Date(p.dueMs).toISOString().slice(0, 10),
+                    overdueDays: Math.round(p.overdueDays * 10) / 10, reason, transitFt: Math.round(f.legFt), etaMin: Math.round(wallClock + flight.minutes),
+                    batteryPctAtLanding: Math.round(100 - flight.energyPct - f.homePct), windFactor: Math.round(f.wf * 100) / 100, grade: p.grade });
+                flight.cur = p.padId; flight.lastHome = { pct: f.homePct, min: f.homeMin, ft: f.homeFt };
+                remaining.delete(p.padId); planned.add(p.padId);
+                slot.totals.pads++; slot.totals.byTier[p.tier.id] = (slot.totals.byTier[p.tier.id] || 0) + 1;
+            }
+            function closeFlight(flight) {
+                if (!flight.pads.length) return;
+                flight.energyPct += flight.lastHome.pct; flight.minutes += flight.lastHome.min; flight.distanceFt += flight.lastHome.ft;
+                flight.energyPct = Math.round(flight.energyPct); flight.minutes = Math.round(flight.minutes); flight.distanceFt = Math.round(flight.distanceFt);
+                delete flight.cur; delete flight.lastHome;
+                slot.flights.push(flight); slot.totals.flights++;
+                wallClock += flight.minutes + (Number(turn.chargeMin) || 0);
+                slot.totals.wallClockMin = Math.round(wallClock - (Number(turn.chargeMin) || 0));
+            }
+
+            let guard = 0;
+            let dayIdx = 0;
+            while (dayIdx < horizonDays && guard++ < 10000) {
+                const dayMs = dayStartMs(day, tz, ops.start);
+                let targets = targetsNow(dayMs);
+                if (!targets.length) {
+                    // nothing targetable today — fillers alone are never worth a day (they ride on target
+                    // flights). Roll to the next day only if a block lifts inside the horizon.
+                    const liftsLater = [...remaining].map(id => padById.get(id)).some(p => roleFor(p) === 'target' && p.micro
+                        && p.blocked && blockKinds.has(p.blocked.why) && p.blocked.untilMs != null && isFinite(p.blocked.untilMs) && p.blocked.untilMs <= horizonEndMs);
+                    if (!liftsLater) break;
+                    nextDay(); dayIdx++; continue;
+                }
+                if (!slot) newSlot();
+                if (slotDay.budgetMin <= 0) { slot.warnings.push('no flyable hours'); nextDay(); dayIdx++; continue; }
+                // build one flight
+                const flight = { n: slot.flights.length + 1, pads: [], distanceFt: 0, minutes: 0, energyPct: 0, cur: 'base', lastHome: { pct: 0, min: 0, ft: 0 } };
+                const flightStartMs = dayMs + wallClock * 60000;
+                // does another flight fit the day?
+                if (wallClock + (Number(turn.flightMin) || 22) > slotDay.budgetMin) { nextDay(); dayIdx++; continue; }
+                let cur = 'base';
+                let spurDepth = null;
+                let endFlight = false;
+                while (!endFlight && guard++ < 10000) {
+                    targets = targetsNow(dayMs).filter(p => !flight.pads.find(x => x.padId === p.padId));
+                    let next = null;
+                    if (targets.length) {
+                        if (cur === 'base' || spurDepth == null) {
+                            next = targets.reduce((a, b) => dBase(b.padId) > dBase(a.padId) ? b : a); // deepest = new area
+                        } else {
+                            const cands = targets.filter(p => dBase(p.padId) <= spurDepth + JUMP_TOL_FT);
+                            if (cands.length) {
+                                const nn = cands.reduce((a, b) => dist(cur, b.padId) < dist(cur, a.padId) ? b : a);
+                                next = dist(cur, nn.padId) > dBase(nn.padId) ? targets.reduce((a, b) => dBase(b.padId) > dBase(a.padId) ? b : a) : nn;
+                            } else next = targets.reduce((a, b) => dBase(b.padId) > dBase(a.padId) ? b : a);
+                        }
+                    }
+                    let took = false;
+                    if (next) {
+                        const f = fits(flight, cur, next, flightStartMs + flight.minutes * 60000);
+                        if (f.ok) {
+                            visit(flight, next, f, next.overdueDays >= 0 ? 'due' : 'target');
+                            cur = next.padId; spurDepth = dBase(cur); took = true;
+                        } else if (cur === 'base') {
+                            // the deepest target does not fit from base at all → try the nearest target that does
+                            const alt = targets.map(p => ({ p, f: fits(flight, cur, p, flightStartMs) })).filter(x => x.f.ok)
+                                .sort((a, b) => dBase(b.p.padId) - dBase(a.p.padId))[0];
+                            if (alt) { visit(flight, alt.p, alt.f, alt.p.overdueDays >= 0 ? 'due' : 'target'); cur = alt.p.padId; spurDepth = dBase(cur); took = true; }
+                            else {
+                                targets.forEach(p => { if (!defer.find(d => d.padId === p.padId)) { defer.push({ padId: p.padId, why: 'out-of-range' }); remaining.delete(p.padId); } });
+                                endFlight = true;
+                            }
+                        }
+                    }
+                    if (!took) {
+                        // next target does not fit (or none left) → opportunistic fill, then go home
+                        let filled = flight.pads.length > 0; // fillers only ride on a flight that has a target
+                        while (filled && guard++ < 10000) {
+                            filled = false;
+                            const fillers = fillersNow(dayMs).filter(p => !flight.pads.find(x => x.padId === p.padId));
+                            const scored = fillers.map(p => {
+                                const f = fits(flight, cur, p, flightStartMs + flight.minutes * 60000);
+                                if (!f.ok) return null;
+                                const addedMin = f.min + f.homeMin - (flight.lastHome ? flight.lastHome.min : 0);
+                                const t = p.tier;
+                                if (t.fillerMaxAddedMin != null && addedMin > Number(t.fillerMaxAddedMin)) return null;
+                                if (t.homewardOnly && cur !== 'base') {
+                                    const toF = bearingDeg(pos(cur), pos(p.padId)), toB = bearingDeg(pos(cur), base);
+                                    if (toF != null && toB != null && angDiff(toF, toB) > 90) return null;
+                                }
+                                return { p, f, addedMin };
+                            }).filter(Boolean).sort((a, b) => a.p.tier.rank - b.p.tier.rank || b.p.overdueDays - a.p.overdueDays || a.addedMin - b.addedMin);
+                            if (scored.length) { visit(flight, scored[0].p, scored[0].f, 'filler'); cur = scored[0].p.padId; filled = true; }
+                        }
+                        endFlight = true;
+                    }
+                }
+                if (!flight.pads.length) { nextDay(); dayIdx++; continue; }
+                closeFlight(flight);
+            }
+
+            // -- report what is owed but not planned
+            const dayMsNow = dayStartMs(today, tz, ops.start);
+            owed.forEach(p => {
+                if (planned.has(p.padId)) return;
+                const d = defer.find(x => x.padId === p.padId);
+                const why = d ? d.why : (availableOn(p, dayMsNow) || (roleFor(p) === 'filler' ? 'filler-no-ride' : 'no-time'));
+                owedNotPlanned.push({ padId: p.padId, name: p.name, tier: p.tier.id, dueOn: new Date(p.dueMs).toISOString().slice(0, 10), overdueDays: Math.round(p.overdueDays * 10) / 10, why });
+            });
+            owedNotPlanned.sort((a, b) => padById.get(a.padId).tier.rank - padById.get(b.padId).tier.rank || b.overdueDays - a.overdueDays);
+            if (offGraph) warnings.push(`${offGraph} pad pair(s) had no routed distance — straight-line ×1.25 used`);
+            slots.forEach((s, i) => { s.slot = i + 1; if (!s.frozen) s.name = `SMART ${i + 1}`; });
+
+            return {
+                version: VERSION, builtAt: new Date(nowMs).toISOString(), siteId: input.site ? input.site.id : null, horizonDays,
+                tiers, rules: rules.list, slots, owedNotPlanned, ignored, offGraph, assumptions, warnings,
+                pending: pads.filter(p => p.pending).map(p => ({ padId: p.padId, name: p.name, tier: p.tier.id })),
+            };
+        }
+
+        return { VERSION, DEFAULT_TIERS, DEFAULT_TIER_REGEX, DEFAULT_RULES, RULE_KINDS, tierOf, resolveTiers, resolveRules, plan, haversineFt, bearingDeg };
+    })();
+
+
+    // ========================================================
+    // 🧠 Smart Mission Planner (#303) — v3.29
+    // Stable-named one-day slot missions rebuilt from what is still OWED per
+    // tier cadence. Phase 1 = read-only: build inputs from live data, run the
+    // pure planner core, show the plan (panel + map overlay + report). The
+    // core is vendored VERBATIM from ShortKeys/AIM_Smart_Planner.js — edit
+    // there, run its tests, then re-paste. Tiers + rules are an editable
+    // list (GM `aim-mb-smart-cfg`, client-wide); every edit re-plans in place.
+    // ========================================================
+    const SMT_SCRIPT_ID = 'aim-mb-smart';
+    const SMT_CFG_KEY = 'aim-mb-smart-cfg';
+    const SMT_BTN_ID = 'aim-mb-smart-btn';
+    const SMT_WX_TTL_MS = 60 * 60 * 1000;
+    const SMT_SLOT_COLORS = ['#14d2dc', '#5fff5f', '#ffb300', '#ff6ec7', '#b388ff', '#ff8a65', '#4dd0e1', '#c6ff00'];
+    const SMT_REASON_LABEL = { due: 'due', target: 'target', filler: 'filler' };
+    const SMT_ROLE_LABEL = { 'target': 'always a target', 'target-when-due': 'target when due soon, else filler', 'filler': 'filler only', 'ignore': 'not planned' };
+    const SMT_DEFAULT_CFG = { prefix: 'DB', tierRegex: null, tiers: null, rules: null, batteryProfile: 'tattu' };
+    let smtCfgCache = null;
+    const smtBySite = {};          // siteKey → { at, input, plan, inputMeta }
+    let smtRunning = null;
+    let smtWx = null;              // { at, key, hours }
+    let smtOverlay = null;         // { layers:[], L, map }
+    function smtCfg() {
+        if (smtCfgCache) return smtCfgCache;
+        const o = gmGet(SMT_CFG_KEY, {});
+        smtCfgCache = Object.assign({}, SMT_DEFAULT_CFG, (o && typeof o === 'object') ? o : {});
+        if (!Array.isArray(smtCfgCache.tiers) || !smtCfgCache.tiers.length) smtCfgCache.tiers = JSON.parse(JSON.stringify(AIM_SMART_PLANNER.DEFAULT_TIERS));
+        if (!Array.isArray(smtCfgCache.rules) || !smtCfgCache.rules.length) smtCfgCache.rules = JSON.parse(JSON.stringify(AIM_SMART_PLANNER.DEFAULT_RULES));
+        return smtCfgCache;
+    }
+    function smtCfgSave(patch) { const c = Object.assign(smtCfg(), patch || {}); gmSet(SMT_CFG_KEY, c); smtCfgCache = c; return c; }
+    function smtSlotName(n) { return `${String(smtCfg().prefix || '').trim()} SMART ${n}`.trim(); }
+    function smtSlotRe() { const p = String(smtCfg().prefix || '').trim(); return new RegExp(`^${p ? p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s+' : ''}SMART\\s+(\\d+)$`, 'i'); }
+
+    // ---- inputs from live data ----
+    async function smtWeather(base) {
+        if (!base || !isFinite(base.lat)) return { hours: null, err: 'no base position' };
+        const key = `${base.lat.toFixed(3)},${base.lng.toFixed(3)}`;
+        if (smtWx && smtWx.key === key && Date.now() - smtWx.at < SMT_WX_TTL_MS) return { hours: smtWx.hours, err: '' };
+        const url = `https://api.open-meteo.com/v1/forecast?latitude=${base.lat.toFixed(4)}&longitude=${base.lng.toFixed(4)}&hourly=temperature_2m,wind_speed_10m,wind_gusts_10m,wind_direction_10m,precipitation&wind_speed_unit=mph&temperature_unit=fahrenheit&forecast_days=7&timezone=UTC`;
+        try {
+            const r = await fetch(url);
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            const j = await r.json();
+            const h = j && j.hourly; if (!h || !Array.isArray(h.time)) throw new Error('no hourly block');
+            const hours = h.time.map((t, i) => ({ t: t.endsWith('Z') ? t : t + ':00Z', windMph: h.wind_speed_10m[i], gustMph: h.wind_gusts_10m[i], dirDeg: h.wind_direction_10m[i], tempF: h.temperature_2m[i], precipMm: h.precipitation[i] }));
+            smtWx = { at: Date.now(), key, hours };
+            return { hours, err: '' };
+        } catch (e) { console.warn(`${TAG} smart: weather fetch failed`, e); return { hours: null, err: e.message || String(e) }; }
+    }
+    function smtMedian(arr) { if (!arr.length) return null; const a = arr.slice().sort((x, y) => x - y); return a[Math.floor(a.length / 2)]; }
+    function smtCalibration(sid) {
+        const rows = logBySite[sid] ? buildLogRows(sid) : [];
+        const since = Date.now() - 30 * 86400000;
+        const done = rows.filter(r => r.whenMs && r.whenMs >= since && r.stateCode === 2 && !r._aborted && r.durationMs > 3 * 60000 && r.durationMs < 60 * 60000);
+        const flightMin = smtMedian(done.map(r => r.durationMs / 60000));
+        const byGroup = new Map();
+        done.forEach(r => { if (!r.missionGroup) return; if (!byGroup.has(r.missionGroup)) byGroup.set(r.missionGroup, []); byGroup.get(r.missionGroup).push(r); });
+        const gaps = [];
+        byGroup.forEach(list => { list.sort((a, b) => a.whenMs - b.whenMs); for (let i = 1; i < list.length; i++) { const gap = (list[i].whenMs - list[i - 1].whenMs - list[i - 1].durationMs) / 60000; if (gap >= 5 && gap <= 240) gaps.push(gap); } });
+        const chargeMin = smtMedian(gaps);
+        if (flightMin == null) return { cal: null, note: `no completed flights in the last 30 days (${rows.length} log rows) — rule defaults used` };
+        return { cal: { flightMin: Math.round(flightMin), chargeMin: chargeMin != null ? Math.round(chargeMin) : undefined }, note: `flight ${Math.round(flightMin)} min from ${done.length} flights${chargeMin != null ? `, charge ${Math.round(chargeMin)} min from ${gaps.length} gaps` : ', charge gap unknown (rule default)'}` };
+    }
+    async function smtRigBlocks(sid) {
+        // SST writes rigs/<env-sid>.json to the data repo (#291); rows with a pad id and a live status block that pad.
+        if (!mbSharedToken) return { byPad: new Map(), note: 'no GitHub token — rig/crane blocks not read' };
+        try {
+            const j = await mbGhGetJson(`rigs/${envSiteKey(sid)}.json`);
+            const byPad = new Map();
+            const rows = j && j.rows ? Object.values(j.rows) : [];
+            rows.forEach(r => { if (!r || r.padId == null) return; if (!['staged', 'active', 'ending', 'new'].includes(r.status)) return; const until = r.end ? new Date(r.end).toISOString() : null; byPad.set(String(r.padId), { why: 'rig', until, what: `${r.job || 'rig'} ${r.well || ''}`.trim() }); });
+            return { byPad, note: `${byPad.size} pad(s) blocked by rigs/cranes (sheet day ${j && j.day ? j.day : '?'})` };
+        } catch (e) { console.warn(`${TAG} smart: rig state read failed`, e); return { byPad: new Map(), note: `rig state read failed — ${e.message || e}` }; }
+    }
+    function smtHoldBlocks(sid, plans, assetById) {
+        const byPad = new Map();
+        if (!schStore) return { byPad, note: 'no Jira tickets loaded (open 🗓 This week once) — holds not applied' };
+        let n = 0;
+        try {
+            schRows(sid).forEach(r => {
+                if (!r.app || !r.t.hold || r.done) return;
+                const set = plans.plannedByName.get(String(r.app.name || '').trim().toUpperCase()); if (!set) return;
+                set.forEach(id => { const a = assetById.get(id); if (!a) return; const pid = String(a.rootId != null ? a.rootId : a.id); if (!byPad.has(pid)) { byPad.set(pid, { why: 'hold', until: null, what: `${r.t.key}: ${r.t.hold}` }); n++; } });
+            });
+        } catch (e) { console.warn(`${TAG} smart: hold join failed`, e); }
+        return { byPad, note: `${n} pad(s) on a Jira hold` };
+    }
+    async function smtBuildInput(sid, onProgress) {
+        const prog = m => { try { if (onProgress) onProgress(m); } catch (e) {} console.log(`${TAG} smart: ${m}`); };
+        const cfg = smtCfg();
+        const notes = [];
+        prog('entities, missions, log…');
+        await schEnsureSite(sid);
+        const ent = schEnt[sid];
+        const missions = (missionsBySite[sid] && missionsBySite[sid].missions) || [];
+        if (!ent || !ent.assets || !ent.assets.length) throw new Error('no assets on this site');
+        const siteKey = covSiteKey(sid);
+        let bucket = covBySite[siteKey] || covLoadCached(siteKey);
+        if (!bucket) { prog('no coverage read yet — reading every asset\'s images (this is the slow part)…'); await covFetch(sid, (d, t) => prog(`coverage ${d} / ${t} assets`), false); bucket = covBySite[siteKey]; }
+        if (!bucket) throw new Error('coverage read produced nothing');
+        const recById = new Map(bucket.recs.map(r => [r.id, r]));
+        const assetById = new Map(ent.assets.map(a => [a.id, a]));
+        prog('pads + micro missions…');
+        const det = mcvDetect(ent, missions);
+        const soloByPad = new Map();
+        det.solos.forEach(s => { const k = s.pad.id; if (!soloByPad.has(k)) soloByPad.set(k, s.mission); });
+        const plans = covPlansFor(sid, ent);
+        const [rig, wx] = await Promise.all([smtRigBlocks(sid), smtWeather(ent.base)]);
+        notes.push(rig.note); if (wx.err) notes.push(`weather: ${wx.err}`);
+        const hold = smtHoldBlocks(sid, plans, assetById); notes.push(hold.note);
+        const calib = smtCalibration(sid); notes.push(`calibration: ${calib.note}`);
+        // pending: flights landed in the last N hours → their planned pads
+        const pendRule = (cfg.rules || []).find(r => r.kind === 'pending' && r.enabled !== false);
+        const pendHrs = pendRule ? Number((pendRule.params || {}).hours) || 0 : 0;
+        const logRows = logBySite[sid] ? buildLogRows(sid) : [];
+        const pendingPads = new Map();
+        const frozen = [];
+        const todayKey = covDayKey(new Date().toISOString());
+        const slotRe = smtSlotRe();
+        logRows.forEach(r => {
+            if (!r.whenMs || !r.name) return;
+            const set = plans.plannedByName.get(r.name.trim().toUpperCase());
+            const landed = r.whenMs + (r.durationMs || 0);
+            if (set && pendHrs && Date.now() - landed <= pendHrs * 3600000 && !r._aborted) set.forEach(id => { const a = assetById.get(id); if (a) pendingPads.set(String(a.rootId != null ? a.rootId : a.id), new Date(landed).toISOString()); });
+            if (slotRe.test(r.name.trim()) && covDayKey(r.whenISO) === todayKey) {
+                const nm = r.name.trim(); let f = frozen.find(x => x.name.toUpperCase() === nm.toUpperCase());
+                if (!f) { f = { name: nm, day: todayKey, padIds: [] }; frozen.push(f); }
+                if (set) set.forEach(id => { const a = assetById.get(id); if (a) { const pid = String(a.rootId != null ? a.rootId : a.id); if (!f.padIds.includes(pid)) f.padIds.push(pid); } });
+            }
+        });
+        // pads = nested roots; tier = best rank among the pad's assets; lastCaptured = oldest among tiered assets
+        const tiers = AIM_SMART_PLANNER.resolveTiers(cfg.tiers);
+        const rankOf = id => { const t = tiers.find(x => x.id.toUpperCase() === String(id).toUpperCase()); return t ? t.rank : 1e9; };
+        const roots = ent.assets.filter(a => a.parentId == null);
+        const ag = agCfg();
+        const usableFt = cfg.batteryProfile === 'tulip' ? ag.tulipBudgetFt : ag.tattuBudgetFt;
+        const pads = [];
+        const unknownTiers = new Map();
+        roots.forEach(root => {
+            const members = [root].concat((root.descendants || []).map(id => assetById.get(id)).filter(Boolean));
+            let tierId = null, bestRank = 1e9, oldest = null, anyUntiered = false;
+            members.forEach(a => {
+                const t = AIM_SMART_PLANNER.tierOf(a.poi, tiers, cfg.tierRegex);
+                if (!t.id) { anyUntiered = true; return; }
+                if (!t.known) { unknownTiers.set(t.id, (unknownTiers.get(t.id) || 0) + 1); return; }
+                const rk = rankOf(t.id); if (rk < bestRank) { bestRank = rk; tierId = t.id; }
+                const rec = recById.get(a.id);
+                const last = rec && rec.lastAt ? Date.parse(rec.lastAt) : null;
+                if (last == null) oldest = -Infinity; else if (oldest !== -Infinity && (oldest == null || last < oldest)) oldest = last;
+            });
+            const micro = soloByPad.get(root.id) || null;
+            const c = genCentroid(root.ring);
+            const blocked = rig.byPad.get(String(root.id)) || hold.byPad.get(String(root.id)) || null;
+            pads.push({
+                padId: String(root.id), name: root.name, lat: c.lat, lng: c.lng, tier: tierId, subtype: tierId ? null : (anyUntiered ? '' : root.poi), assets: members.map(a => a.id),
+                lastCaptured: oldest == null || oldest === -Infinity ? null : new Date(oldest).toISOString(), grade: null,
+                pendingFlight: pendingPads.get(String(root.id)) || false, blocked,
+                micro: micro ? { appId: micro.id, name: micro.name, steps: pcmStepCount(micro), energyPct: Math.round((agIntraFt(micro) + pcmStepCount(micro) * ag.stepCostFt) / usableFt * 1000) / 10, minutes: smtMicroMinutes(micro) } : null,
+                _root: root, _micro: micro,
+            });
+        });
+        unknownTiers.forEach((n, id) => notes.push(`${n} asset(s) carry tier "${id}" which is not in the tier table`));
+        // pairwise distances on the trusted route graph (same engine as 🔋 / lasso)
+        prog(`routing ${pads.filter(p => p._micro).length} pads…`);
+        const pairwise = { base: {} };
+        let pwNote = '';
+        try {
+            const sol = rngSolveCached(ent);
+            const byAsset = new Map(sol.results.map(r => [r.asset.id, r]));
+            const rows = pads.filter(p => p._micro).map(p => { const r = byAsset.get(p._root.id); return { asset: p._root, mission: p._micro, ft: r && r.worstFt ? r.worstFt : AIM_SMART_PLANNER.haversineFt(ent.base, { lat: p.lat, lng: p.lng }) * 1.25, pad: p }; });
+            if (rows.length) {
+                const pw = lassoBuildPairwise(rows, ent, byAsset);
+                if (pw && pw.ok) {
+                    rows.forEach((r, i) => { pairwise[r.pad.padId] = {}; pairwise.base[r.pad.padId] = pw.dBase(i); rows.forEach((s, j) => { if (i !== j) pairwise[r.pad.padId][s.pad.padId] = pw.dPad(i, j); }); });
+                    pwNote = `${rows.length} pads routed (${pw.offCount()} legs straight-line)`;
+                } else pwNote = 'route graph failed — straight-line distances';
+            }
+        } catch (e) { console.warn(`${TAG} smart: pairwise failed`, e); pwNote = `route graph failed (${e.message || e}) — straight-line distances`; }
+        notes.push(pwNote);
+        const rules = JSON.parse(JSON.stringify(cfg.rules));
+        const batRule = rules.find(r => r.kind === 'battery'); if (batRule) { batRule.params = batRule.params || {}; if (batRule.params.usableFt == null || batRule.params.usableFt === '') batRule.params.usableFt = usableFt; }
+        const input = {
+            now: new Date().toISOString(), site: { id: sid, name: getCurrentSiteName() || `Site ${sid}`, tzOffsetMin: -new Date().getTimezoneOffset(), base: ent.base },
+            tiers: cfg.tiers, tierRegex: cfg.tierRegex || undefined, rules, pads: pads.map(p => { const o = Object.assign({}, p); delete o._root; delete o._micro; return o; }),
+            pairwise, weather: wx.hours ? { hours: wx.hours } : null, calibration: calib.cal, frozen,
+        };
+        return { input, meta: { notes, pads: pads.length, withMicro: pads.filter(p => p._micro).length, covAt: bucket.at, wxAt: smtWx ? smtWx.at : null } };
+    }
+    function smtMicroMinutes(m) {
+        const app = m.app_data || {};
+        const dwell = (Number(app.wait_flight_time) || 0) + (Number(app.extra_flight_time) || 0);
+        const navFt = agIntraFt(m);
+        const steps = pcmStepCount(m);
+        return Math.round((dwell / 60 + navFt / 2640 + steps * 0.25) * 10) / 10;
+    }
+    function smtPlanFromInput(sid, input) {
+        const cfg = smtCfg();
+        input.tiers = cfg.tiers; input.tierRegex = cfg.tierRegex || undefined;
+        input.rules = JSON.parse(JSON.stringify(cfg.rules));
+        const batRule = input.rules.find(r => r.kind === 'battery'); const ag = agCfg();
+        if (batRule) { batRule.params = batRule.params || {}; if (batRule.params.usableFt == null || batRule.params.usableFt === '') batRule.params.usableFt = cfg.batteryProfile === 'tulip' ? ag.tulipBudgetFt : ag.tattuBudgetFt; }
+        input.now = new Date().toISOString();
+        const plan = AIM_SMART_PLANNER.plan(input);
+        plan.slots.forEach(s => { if (!s.frozen) s.name = smtSlotName(s.slot); });
+        return plan;
+    }
+    function smtRun(sid, force) {
+        const siteKey = covSiteKey(sid);
+        const cur = smtBySite[siteKey];
+        if (cur && !force) { try { cur.plan = smtPlanFromInput(sid, cur.input); cur.at = Date.now(); } catch (e) { console.error(`${TAG} smart: re-plan failed`, e); showToast(`Smart plan failed: ${e.message || e}`, '#ff5252'); } renderSmartView(); return Promise.resolve(cur); }
+        if (smtRunning) return smtRunning;
+        updateTitle();
+        setBodyHtml('<div style="padding:40px;text-align:center;color:#888">Building the smart plan…<div id="aim-mb-smt-prog" style="color:#14d2dc;margin-top:8px">starting…</div></div>');
+        smtRunning = (async () => {
+            const t0 = Date.now();
+            const { input, meta } = await smtBuildInput(sid, m => { const el = panelEl && panelEl.querySelector('#aim-mb-smt-prog'); if (el) el.textContent = m; });
+            const plan = smtPlanFromInput(sid, input);
+            smtBySite[siteKey] = { at: Date.now(), input, plan, meta };
+            console.log(`${TAG} smart: planned ${plan.slots.length} slot(s) / ${plan.slots.reduce((n, s) => n + s.totals.flights, 0)} flight(s) in ${Date.now() - t0} ms`, plan);
+            return smtBySite[siteKey];
+        })();
+        return smtRunning.then(r => { smtRunning = null; if (panelState && panelState.mode === 'smart') renderSmartView(); return r; },
+            e => { smtRunning = null; console.error(`${TAG} smart: build failed`, e); setBodyHtml(`<div style="padding:40px;text-align:center;color:#ff5252">Smart plan failed: ${escapeHtml(e.message || String(e))}</div>`); throw e; });
+    }
+
+    // ---- render ----
+    function smtTierColor(id) { const t = (smtCfg().tiers || []).find(x => x.id === id); return t && t.color ? t.color : '#9ad'; }
+    function smtFmtMin(m) { m = Math.round(m || 0); return m >= 60 ? `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, '0')} m` : `${m} min`; }
+    function smtFmtFt(ft) { return ft >= 1000 ? `${(ft / 1000).toFixed(1)}k ft` : `${Math.round(ft)} ft`; }
+    function renderSmartView() {
+        const sid = getCurrentSiteID(); if (!sid) return;
+        panelState.drillId = null; updateTitle();
+        const st = panelState.smt || (panelState.smt = { open: new Set(), showCfg: false, overlay: false });
+        const cur = smtBySite[covSiteKey(sid)];
+        if (!cur) { setBodyHtml('<div style="padding:40px;text-align:center;color:#888">No plan yet — press ↻ Replan.</div>'); return; }
+        const { plan, meta } = cur;
+        if (!st.seeded && plan.slots.length) { st.open.add(plan.slots[0].name); st.seeded = true; }
+        const cfg = smtCfg();
+        const tiers = plan.tiers;
+        const totFlights = plan.slots.reduce((n, s) => n + s.totals.flights, 0), totPads = plan.slots.reduce((n, s) => n + s.totals.pads, 0);
+        const tierPill = id => `<span style="display:inline-block;padding:0 6px;border-radius:3px;font-weight:700;background:${smtTierColor(id)};color:#000">${escapeHtml(id)}</span>`;
+        const ageMin = Math.round((Date.now() - cur.at) / 60000);
+        const slotHtml = plan.slots.map((s, si) => {
+            const col = SMT_SLOT_COLORS[si % SMT_SLOT_COLORS.length];
+            const open = st.open.has(s.name);
+            const byTier = Object.keys(s.totals.byTier).sort((a, b) => (tiers.find(t => t.id === a) || {}).rank - (tiers.find(t => t.id === b) || {}).rank).map(t => `${tierPill(t)} ${s.totals.byTier[t]}`).join(' ');
+            const flights = s.flights.map(f => `
+                <div style="margin:4px 0 2px 10px;color:#aaa;font-size:11px">🔋 Flight ${f.n} — ${f.pads.length} pad(s) · ${smtFmtFt(f.distanceFt)} · ${smtFmtMin(f.minutes)} · ${f.energyPct}% used</div>
+                <table class="aim-mb-table" style="margin-left:10px;width:calc(100% - 10px)"><thead><tr><th style="width:28px">#</th><th>Pad</th><th style="width:40px">Tier</th><th style="width:84px">Due</th><th style="width:60px">Why</th><th style="width:70px">Transit</th><th style="width:62px">ETA</th><th style="width:72px">Land at</th><th style="width:48px">Wind</th></tr></thead><tbody>
+                ${f.pads.map((p, pi) => `<tr data-smt-pad="${escapeHtml(p.padId)}" style="cursor:pointer"><td style="color:${col};font-weight:700">${pi + 1}</td><td>${escapeHtml(p.name)}</td><td>${tierPill(p.tier)}</td><td style="color:${p.overdueDays > 0 ? '#ff5252' : p.overdueDays > -1 ? '#ffb300' : '#9ad'}">${p.dueOn}${p.overdueDays > 0 ? ` <span style="font-size:10px">+${p.overdueDays} d</span>` : ''}</td><td style="color:${p.reason === 'filler' ? '#ffb300' : '#5fff5f'}">${SMT_REASON_LABEL[p.reason] || p.reason}</td><td>${smtFmtFt(p.transitFt)}</td><td>+${smtFmtMin(p.etaMin)}</td><td style="color:${p.batteryPctAtLanding < 30 ? '#ffb300' : '#5fff5f'}">${p.batteryPctAtLanding}%</td><td style="color:${p.windFactor > 1.1 ? '#ff9800' : p.windFactor < 0.9 ? '#5fff5f' : '#888'}">×${p.windFactor}</td></tr>`).join('')}
+                </tbody></table>`).join('');
+            return `<div style="border:1px solid #2a3340;border-left:4px solid ${col};border-radius:4px;margin:6px 0;background:#121820">
+                <div data-smt-slot="${escapeHtml(s.name)}" style="display:flex;align-items:center;gap:10px;padding:6px 10px;cursor:pointer;user-select:none">
+                    <span style="color:${col};font-weight:700;font-size:13px">${open ? '▾' : '▸'} ${escapeHtml(s.name)}</span>
+                    <span style="color:#ccc">${s.day}${s.frozen ? ' · <span style="color:#ffb300">frozen (flying today)</span>' : ''}</span>
+                    <span style="color:#888">${s.totals.flights} flight(s) · ${s.totals.pads} pads · ${smtFmtMin(s.totals.wallClockMin)} of ${smtFmtMin(s.budgetMin)}${s.lostHours ? ` · <span style="color:#ff9800">${s.lostHours} h lost to weather</span>` : ''}</span>
+                    <span style="flex:1"></span><span>${byTier}</span>
+                </div>
+                ${open ? `<div style="padding:0 8px 8px">${s.warnings.length ? `<div style="color:#ff9800;font-size:11px;margin:2px 0 4px 10px">${s.warnings.map(escapeHtml).join(' · ')}</div>` : ''}${flights || '<div style="color:#888;margin-left:10px">no flights</div>'}</div>` : ''}
+            </div>`;
+        }).join('');
+        const owedHtml = plan.owedNotPlanned.length ? `<div style="margin-top:10px"><div style="color:#ff9800;font-weight:700;margin-bottom:4px">Owed but not planned — ${plan.owedNotPlanned.length}</div>
+            <table class="aim-mb-table"><thead><tr><th>Pad</th><th style="width:40px">Tier</th><th style="width:84px">Due</th><th>Why</th></tr></thead><tbody>
+            ${plan.owedNotPlanned.map(o => `<tr data-smt-pad="${escapeHtml(o.padId)}" style="cursor:pointer"><td>${escapeHtml(o.name)}</td><td>${tierPill(o.tier)}</td><td style="color:${o.overdueDays > 0 ? '#ff5252' : '#9ad'}">${o.dueOn}${o.overdueDays > 0 ? ` +${o.overdueDays} d` : ''}</td><td style="color:${/^blocked/.test(o.why) ? '#ff5252' : '#ffb300'}">${escapeHtml(o.why)}</td></tr>`).join('')}
+            </tbody></table></div>` : '<div style="margin-top:10px;color:#5fff5f">Everything owed inside the horizon is planned.</div>';
+        const notes = (meta.notes || []).concat(plan.warnings || []);
+        const cfgHtml = st.showCfg ? smtCfgHtml(cfg, plan) : '';
+        const html = `
+            <div class="aim-mb-toolbar">
+                <button class="aim-mb-tbtn" data-smt-act="replan" title="Re-read site data (entities, coverage, missions, rigs, weather) and plan again">↻ Replan <span style="opacity:.7">${ageMin < 1 ? 'now' : ageMin + ' min ago'}</span></button>
+                <button class="aim-mb-tbtn${st.overlay ? ' active' : ''}" data-smt-act="overlay" title="Draw the slot routes + visit numbers on the map">🗺 Map</button>
+                <button class="aim-mb-tbtn${st.showCfg ? ' active' : ''}" data-smt-act="cfg" title="Tiers, cadence and flight rules — edits re-plan instantly">⚙ Tiers &amp; rules</button>
+                <button class="aim-mb-tbtn" data-smt-act="report" title="Copy the plan as a table for Google Sheets">📋 Report</button>
+                <span style="flex:1"></span>
+                <span style="color:#888;font-size:11px">${plan.slots.length} slot(s) · ${totFlights} flight(s) · ${totPads} pads · horizon ${plan.horizonDays} d · ${meta.withMicro}/${meta.pads} pads have a micro</span>
+            </div>
+            <div style="padding:6px 10px;background:#2a1f00;border-bottom:1px solid #5a4200;color:#ffd54f;font-size:11px">⚠ ${escapeHtml(plan.assumptions.join(' '))} Phase 1 — read-only: nothing is written to the Mission Bank.</div>
+            ${cfgHtml}
+            <div class="aim-mb-table-wrap" style="padding:6px 10px">
+                ${slotHtml || '<div style="color:#888">Nothing to plan — no owed, targetable pads with a micro mission.</div>'}
+                ${owedHtml}
+                ${plan.ignored.length ? `<div style="margin-top:8px;color:#888;font-size:11px">${plan.ignored.length} pad(s) not considered: ${escapeHtml(Object.entries(plan.ignored.reduce((m, i) => { m[i.why] = (m[i.why] || 0) + 1; return m; }, {})).map(([k, v]) => `${v} × ${k}`).join(' · '))}</div>` : ''}
+                ${plan.pending.length ? `<div style="margin-top:4px;color:#888;font-size:11px">${plan.pending.length} pad(s) pending (flown, images not in yet): ${escapeHtml(plan.pending.map(p => p.name).slice(0, 12).join(', '))}${plan.pending.length > 12 ? '…' : ''}</div>` : ''}
+                <div style="margin-top:8px;color:#777;font-size:11px">${notes.map(escapeHtml).join('<br>')}</div>
+            </div>`;
+        setBodyHtml(html);
+        const body = panelEl.querySelector('.aim-mb-body');
+        body.querySelectorAll('[data-smt-act]').forEach(b => { b.onclick = (e) => {
+            e.stopPropagation(); const act = b.dataset.smtAct;
+            if (act === 'replan') smtRun(sid, true).catch(() => {});
+            else if (act === 'cfg') { st.showCfg = !st.showCfg; renderSmartView(); }
+            else if (act === 'report') smtReport(sid);
+            else if (act === 'overlay') { st.overlay = !st.overlay; if (st.overlay) smtDrawOverlay(sid); else smtClearOverlay(); renderSmartView(); }
+        }; });
+        body.querySelectorAll('[data-smt-slot]').forEach(h => { h.onclick = () => { const k = h.dataset.smtSlot; if (st.open.has(k)) st.open.delete(k); else st.open.add(k); renderSmartView(); }; });
+        body.querySelectorAll('[data-smt-pad]').forEach(r => { r.onclick = () => { const id = Number(r.dataset.smtPad); covPanTo(sid, id); }; });
+        smtBindCfg(body, sid);
+        if (st.overlay) smtDrawOverlay(sid);
+    }
+    // ---- tiers + rules editor (edits re-plan in place) ----
+    function smtCfgHtml(cfg, plan) {
+        const inp = (attr, v, w, extra) => `<input ${attr} value="${escapeHtml(v == null ? '' : String(v))}" style="width:${w}px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:11px;padding:1px 3px" ${extra || ''}>`;
+        const roleSel = (i, v) => `<select data-smt-tier="${i}" data-k="role" style="background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;font-size:11px">${Object.keys(SMT_ROLE_LABEL).map(r => `<option value="${r}" ${r === v ? 'selected' : ''}>${SMT_ROLE_LABEL[r]}</option>`).join('')}</select>`;
+        const tierRows = cfg.tiers.map((t, i) => `<tr>
+            <td>${inp(`data-smt-tier="${i}" data-k="id"`, t.id, 44)}</td><td>${inp(`data-smt-tier="${i}" data-k="label"`, t.label, 90)}</td><td>${inp(`data-smt-tier="${i}" data-k="rank" type="number" step="1"`, t.rank, 40)}</td>
+            <td>${inp(`data-smt-tier="${i}" data-k="everyDays" type="number" step="0.5" min="0.5"`, t.everyDays, 52)}</td><td>${roleSel(i, t.role)}</td>
+            <td>${inp(`data-smt-tier="${i}" data-k="targetWithinDays" type="number" step="0.5"`, t.targetWithinDays, 44)}</td><td>${inp(`data-smt-tier="${i}" data-k="fillerMaxAddedMin" type="number" step="1"`, t.fillerMaxAddedMin, 44)}</td>
+            <td><input type="checkbox" data-smt-tier="${i}" data-k="homewardOnly" ${t.homewardOnly ? 'checked' : ''}></td><td><input type="color" data-smt-tier="${i}" data-k="color" value="${escapeHtml(t.color || '#99aadd')}" style="width:28px;height:18px;padding:0;border:none;background:none"></td>
+            <td><button class="aim-mb-tbtn" data-smt-tierdel="${i}" title="Remove tier">✕</button></td></tr>`).join('');
+        const kinds = AIM_SMART_PLANNER.RULE_KINDS;
+        const ruleRows = cfg.rules.map((r, i) => { const k = kinds[r.kind]; const params = Object.assign({}, k ? k.params : {}, r.params || {}); return `<tr style="${r.enabled === false ? 'opacity:.5' : ''}">
+            <td><input type="checkbox" data-smt-rule="${i}" data-k="enabled" ${r.enabled !== false ? 'checked' : ''}></td>
+            <td title="${escapeHtml(r.kind)}">${escapeHtml(r.label || (k ? k.label : r.kind))}${k ? '' : ' <span style="color:#ff5252">(unknown kind)</span>'}</td>
+            <td>${Object.keys(params).map(pk => `<label style="margin-right:8px;white-space:nowrap">${escapeHtml(pk)} ${inp(`data-smt-rule="${i}" data-k="${escapeHtml(pk)}"`, Array.isArray(params[pk]) ? params[pk].join(',') : params[pk], pk === 'start' ? 48 : pk === 'kinds' ? 90 : 46)}</label>`).join('')}</td>
+            <td><button class="aim-mb-tbtn" data-smt-ruledel="${i}" title="Remove rule">✕</button></td></tr>`; }).join('');
+        return `<div style="padding:8px 10px;background:#141a22;border-bottom:1px solid #2a3340;font-size:11px">
+            <div style="display:flex;gap:16px;align-items:center;margin-bottom:6px;flex-wrap:wrap">
+                <b style="color:#14d2dc">Tiers &amp; cadence</b>
+                <label>Slot name prefix ${inp('data-smt-cfg="prefix"', cfg.prefix, 60)} → <span style="color:#ccc">${escapeHtml(smtSlotName(1))}</span></label>
+                <label>Battery profile <select data-smt-cfg="batteryProfile" style="background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;font-size:11px"><option value="tattu" ${cfg.batteryProfile !== 'tulip' ? 'selected' : ''}>Tattu (${agCfg().tattuBudgetFt} ft)</option><option value="tulip" ${cfg.batteryProfile === 'tulip' ? 'selected' : ''}>Tulip (${agCfg().tulipBudgetFt} ft)</option></select></label>
+                <label title="JavaScript regex; first capture group becomes the tier id P&lt;group&gt;">Tier prefix regex ${inp('data-smt-cfg="tierRegex"', cfg.tierRegex || AIM_SMART_PLANNER.DEFAULT_TIER_REGEX, 220)}</label>
+                <button class="aim-mb-tbtn" data-smt-act2="tier-add">+ Tier</button>
+                <button class="aim-mb-tbtn" data-smt-act2="reset" title="Back to the built-in tiers and rules">↺ Defaults</button>
+            </div>
+            <table class="aim-mb-table"><thead><tr><th>Id</th><th>Label</th><th>Rank</th><th>Every (d)</th><th>Role</th><th title="target-when-due: becomes a target this many days before due">Target within (d)</th><th title="filler: max minutes a detour may add">Filler max (min)</th><th title="filler: only when heading home">Homeward</th><th>Color</th><th></th></tr></thead><tbody>${tierRows}</tbody></table>
+            <div style="display:flex;gap:16px;align-items:center;margin:8px 0 4px"><b style="color:#14d2dc">Flight rules</b>
+                <label>Add <select data-smt-cfg="addRule" style="background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;font-size:11px"><option value="">rule…</option>${Object.keys(kinds).map(k => `<option value="${k}">${escapeHtml(kinds[k].label)}</option>`).join('')}</select></label>
+                <span style="color:#777">Empty = no limit. Weather limits (wind / gust / °F) come from the drone spec — fill them in once you have the numbers.</span></div>
+            <table class="aim-mb-table"><thead><tr><th style="width:24px">On</th><th style="width:170px">Rule</th><th>Parameters</th><th></th></tr></thead><tbody>${ruleRows}</tbody></table>
+        </div>`;
+    }
+    function smtBindCfg(body, sid) {
+        const replan = () => smtRun(sid, false);
+        const num = v => { if (v === '' || v == null) return null; const n = Number(v); return isFinite(n) ? n : null; };
+        body.querySelectorAll('[data-smt-tier]').forEach(el => { el.onchange = () => {
+            const cfg = smtCfg(); const t = cfg.tiers[Number(el.dataset.smtTier)]; if (!t) return; const k = el.dataset.k;
+            if (el.type === 'checkbox') t[k] = el.checked;
+            else if (k === 'id' || k === 'label' || k === 'color') t[k] = el.value.trim();
+            else { const n = num(el.value); if (n == null) delete t[k]; else t[k] = n; }
+            smtCfgSave({ tiers: cfg.tiers }); replan();
+        }; });
+        body.querySelectorAll('[data-smt-tierdel]').forEach(b => { b.onclick = () => { const cfg = smtCfg(); cfg.tiers.splice(Number(b.dataset.smtTierdel), 1); smtCfgSave({ tiers: cfg.tiers }); replan(); }; });
+        body.querySelectorAll('[data-smt-rule]').forEach(el => { el.onchange = () => {
+            const cfg = smtCfg(); const r = cfg.rules[Number(el.dataset.smtRule)]; if (!r) return; const k = el.dataset.k;
+            if (k === 'enabled') r.enabled = el.checked;
+            else { r.params = r.params || {}; const v = el.value.trim(); if (k === 'kinds') r.params[k] = v ? v.split(/[,\s]+/).filter(Boolean) : []; else if (k === 'start' || k === 'role') r.params[k] = v; else r.params[k] = num(v); }
+            smtCfgSave({ rules: cfg.rules }); replan();
+        }; });
+        body.querySelectorAll('[data-smt-ruledel]').forEach(b => { b.onclick = () => { const cfg = smtCfg(); cfg.rules.splice(Number(b.dataset.smtRuledel), 1); smtCfgSave({ rules: cfg.rules }); replan(); }; });
+        body.querySelectorAll('[data-smt-cfg]').forEach(el => { el.onchange = () => {
+            const k = el.dataset.smtCfg; const v = el.value;
+            if (k === 'addRule') { if (!v) return; const cfg = smtCfg(); const kd = AIM_SMART_PLANNER.RULE_KINDS[v]; cfg.rules.push({ id: `${v}-${Date.now().toString(36)}`, kind: v, label: kd.label, enabled: true, params: JSON.parse(JSON.stringify(kd.params)) }); smtCfgSave({ rules: cfg.rules }); replan(); return; }
+            if (k === 'tierRegex') { try { new RegExp(v); } catch (e) { showToast(`Bad regex: ${e.message}`, '#ff5252'); return; } smtCfgSave({ tierRegex: v === AIM_SMART_PLANNER.DEFAULT_TIER_REGEX ? null : v }); smtRun(sid, true).catch(() => {}); return; }
+            smtCfgSave({ [k]: v }); replan();
+        }; });
+        body.querySelectorAll('[data-smt-act2]').forEach(b => { b.onclick = () => {
+            const act = b.dataset.smtAct2; const cfg = smtCfg();
+            if (act === 'tier-add') { cfg.tiers.push({ id: `P${cfg.tiers.length + 1}`, label: `Priority ${cfg.tiers.length + 1}`, rank: cfg.tiers.length + 1, everyDays: 30, role: 'filler', color: '#9ad' }); smtCfgSave({ tiers: cfg.tiers }); replan(); }
+            else if (act === 'reset') { if (!window.confirm('Reset tiers and rules to the built-in defaults?')) return; smtCfgSave({ tiers: JSON.parse(JSON.stringify(AIM_SMART_PLANNER.DEFAULT_TIERS)), rules: JSON.parse(JSON.stringify(AIM_SMART_PLANNER.DEFAULT_RULES)), tierRegex: null }); smtRun(sid, true).catch(() => {}); }
+        }; });
+    }
+    // ---- map overlay (canvas renderer — the Styler observer rebuilds on SVG mutations) ----
+    function smtClearOverlay() { if (!smtOverlay) return; smtOverlay.layers.forEach(l => { try { smtOverlay.map.removeLayer(l); } catch (e) {} }); smtOverlay = null; }
+    function smtDrawOverlay(sid) {
+        smtClearOverlay();
+        const cur = smtBySite[covSiteKey(sid)]; if (!cur) return;
+        const L = composerGetL(); const map = getLeafletMap();
+        if (!L || !map) { showToast('No map in this view for the overlay.', '#ff9800'); return; }
+        const padById = new Map(cur.input.pads.map(p => [p.padId, p]));
+        const base = cur.input.site.base;
+        const renderer = L.canvas({ padding: 0.5 });
+        const layers = [];
+        cur.plan.slots.forEach((s, si) => {
+            const col = SMT_SLOT_COLORS[si % SMT_SLOT_COLORS.length];
+            let n = 0;
+            s.flights.forEach(f => {
+                const pts = [[base.lat, base.lng]];
+                f.pads.forEach(p => { const pd = padById.get(p.padId); if (!pd) return; pts.push([pd.lat, pd.lng]); n++;
+                    const m = L.marker([pd.lat, pd.lng], { interactive: false, icon: L.divIcon({ className: 'aim-smt-badge', html: `<div style="background:${col};color:#000;font:700 11px/18px Lato,sans-serif;width:18px;height:18px;border-radius:9px;text-align:center;border:1px solid #000;box-shadow:0 0 3px #000">${n}</div>`, iconSize: [18, 18], iconAnchor: [9, 9] }) });
+                    m.addTo(map); layers.push(m); });
+                pts.push([base.lat, base.lng]);
+                const line = L.polyline(pts, { renderer, color: col, weight: 2, opacity: 0.85, dashArray: f.n % 2 ? null : '6 4', interactive: false }).addTo(map);
+                layers.push(line);
+            });
+        });
+        smtOverlay = { layers, L, map };
+    }
+    // ---- report (Sheets rich clipboard, like 🗓) ----
+    function smtReport(sid) {
+        const cur = smtBySite[covSiteKey(sid)]; if (!cur) return;
+        const cols = ['Slot', 'Day', 'Flight', '#', 'Pad', 'Tier', 'Due', 'Overdue (d)', 'Why', 'Transit (ft)', 'ETA (min)', 'Battery at landing (%)', 'Wind ×'];
+        const rows = [];
+        cur.plan.slots.forEach(s => s.flights.forEach(f => f.pads.forEach((p, i) => rows.push([s.name, s.day, f.n, i + 1, p.name, p.tier, p.dueOn, p.overdueDays, p.reason, p.transitFt, p.etaMin, p.batteryPctAtLanding, p.windFactor]))));
+        cur.plan.owedNotPlanned.forEach(o => rows.push(['— not planned —', '', '', '', o.name, o.tier, o.dueOn, o.overdueDays, o.why, '', '', '', '']));
+        const title = `Smart plan — ${getCurrentSiteName() || 'site ' + sid} — built ${new Date(cur.at).toLocaleString()} — ${cur.plan.assumptions.join(' ')}`;
+        const th = 'background:#1a1a1a;color:#14d2dc;border:1px solid #444;padding:3px 6px;font-weight:700', td = 'border:1px solid #444;padding:3px 6px';
+        const html = `<table style="border-collapse:collapse;font-family:Arial;font-size:11px"><tr><td colspan="${cols.length}" style="font-weight:700;padding:2px 6px">${escapeHtml(title)}</td></tr><tr>${cols.map(c => `<th style="${th}">${escapeHtml(c)}</th>`).join('')}</tr>${rows.map(r => `<tr>${r.map((v, i) => `<td style="${td}${i === 5 ? `;background:${smtTierColor(String(v))};color:#000;font-weight:700` : ''}">${escapeHtml(String(v == null ? '' : v))}</td>`).join('')}</tr>`).join('')}</table>`;
+        const tsv = [title, cols.join('\t')].concat(rows.map(r => r.map(v => String(v == null ? '' : v).replace(/[\t\n]/g, ' ')).join('\t'))).join('\n');
+        try {
+            navigator.clipboard.write([new ClipboardItem({ 'text/html': new Blob([html], { type: 'text/html' }), 'text/plain': new Blob([tsv], { type: 'text/plain' }) })])
+                .then(() => showToast(`Smart plan (${rows.length} rows) copied — paste into Google Sheets.`, '#5fff5f'), (e) => { console.warn(`${TAG} smart: rich copy failed`, e); copyToClipboard(tsv); showToast('Copied as plain text (TSV).', '#ff9800'); });
+        } catch (e) { copyToClipboard(tsv); showToast('Copied as plain text (TSV).', '#ff9800'); }
+    }
+    // ---- launcher + Control Panel ----
+    function injectSmtButton(doc, row) {
+        if (doc.getElementById(SMT_BTN_ID)) return;
+        const btn = doc.createElement('button');
+        btn.id = SMT_BTN_ID; btn.type = 'button'; btn.className = 'ant-btn'; btn.textContent = '🧠';
+        btn.title = 'Smart plan — what is still owed per tier, packed into one-day slot missions (AIM Mission Bank Tools)';
+        Object.assign(btn.style, { minWidth: 'unset', width: '30px', padding: '0', height: '26px', fontSize: '13px', lineHeight: '24px', borderRadius: '4px', background: '#b388ff', border: '1px solid #b388ff', color: '#000', marginLeft: '4px', cursor: 'pointer' });
+        try { btn.style.setProperty('color', '#000', 'important'); btn.style.setProperty('-webkit-text-fill-color', '#000', 'important'); } catch (e) {}
+        btn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); openPanel('smart'); };
+        row.appendChild(btn);
+    }
+    function smtRuleParam(kind, key) { const r = (smtCfg().rules || []).find(x => x.kind === kind && x.enabled !== false); const d = AIM_SMART_PLANNER.RULE_KINDS[kind]; return r && r.params && r.params[key] != null ? r.params[key] : (d ? d.params[key] : null); }
+    function registerSmart() {
+        if (!controlChannel) return;
+        controlChannel.postMessage({
+            type: 'REGISTER', scriptId: SMT_SCRIPT_ID, name: '🧠 Smart plan (owed pads → slot missions)',
+            description: 'Plans stable-named one-day SMART slot missions from what is still owed per tier cadence: P1 targets in spur-walk order, lower tiers as fillers on leftover battery, rig/hold pads skipped, weather hours lost. Opens from the 🧠 button on the Mission Bank. Tiers + rules are edited inside the panel (⚙ Tiers & rules).',
+            version: SCRIPT_VERSION, group: 'Mission Bank Macros', scope: 'mission-bank', priority: 27,
+            toggles: [
+                { id: 'horizonDays', label: 'Planning horizon', type: 'number', min: 1, max: 31, step: 1, default: Number(smtRuleParam('horizon', 'days')) || 7, unit: 'days' },
+                { id: 'reservePct', label: 'Battery reserve on every landing', type: 'number', min: 0, max: 60, step: 1, default: Number(smtRuleParam('battery', 'reservePct')) || 25, unit: '%' },
+                { id: 'opsHours', label: 'Ops day length', type: 'number', min: 1, max: 16, step: 0.5, default: Number(smtRuleParam('ops-window', 'hours')) || 8, unit: 'h' },
+            ],
+        });
+    }
+    function handleSmartToggle(msg) {
+        const id = msg.toggleId; const v = Number(msg.value !== undefined ? msg.value : msg.enabled);
+        if (!isFinite(v)) return;
+        const map = { horizonDays: ['horizon', 'days'], reservePct: ['battery', 'reservePct'], opsHours: ['ops-window', 'hours'] };
+        const m = map[id]; if (!m) return;
+        if (Number(smtRuleParam(m[0], m[1])) === v) return;   // CP echoes from TOP + IFRAME — idempotent
+        const cfg = smtCfg(); let r = cfg.rules.find(x => x.kind === m[0]);
+        if (!r) { const kd = AIM_SMART_PLANNER.RULE_KINDS[m[0]]; r = { id: m[0], kind: m[0], label: kd.label, enabled: true, params: JSON.parse(JSON.stringify(kd.params)) }; cfg.rules.push(r); }
+        r.enabled = true; r.params = r.params || {}; r.params[m[1]] = v;
+        smtCfgSave({ rules: cfg.rules });
+        const sid = getCurrentSiteID();
+        if (sid && panelState && panelState.mode === 'smart' && smtBySite[covSiteKey(sid)]) { try { smtRun(sid, false); } catch (e) {} }
+    }
+
     // ========================================================
     // Helpers — GM storage
     // ========================================================
@@ -2798,6 +3693,7 @@
         }
         try { injectCovButton(doc, row); } catch (e) { console.warn(`${TAG} coverage button:`, e); }   // v3.09 📅 Coverage (after SUM, compact — v3.16)
         try { injectSchButton(doc, row); } catch (e) { console.warn(`${TAG} schedule button:`, e); }   // v3.28 🗓 This week
+        try { injectSmtButton(doc, row); } catch (e) { console.warn(`${TAG} smart button:`, e); }      // v3.29 🧠 Smart plan (#303)
     }
 
     // Neon-green SUM button styling — matches the Site Setup SUM button
@@ -12495,6 +13391,8 @@
         if (panelGeom.snap) snapPanel(panelGeom.snap); // re-fit dock to current map size
         if (mode === 'coverage') { covRefresh(siteID, false); return; }   // v3.09 (#292)
         if (mode === 'schedule') { schOpen(siteID, false); return; }        // v3.28 (#293)
+        if (mode !== 'smart') smtClearOverlay();
+        if (mode === 'smart') { smtRun(siteID, false).catch(() => {}); return; }   // v3.29 (#303)
         if (mode === 'log') {
             const bucket = logBySite[siteID];
             if (!bucket) {
@@ -12519,6 +13417,7 @@
 
     function closePanel() {
         if (panelEl) panelEl.style.display = 'none';
+        try { smtClearOverlay(); } catch (e) {}
         closeOpenMenus();
         panelState = null;
     }
@@ -13061,7 +13960,7 @@
         const name = getCurrentSiteName();
         const sid = getCurrentSiteID();
         const site = name || (sid ? `Site ${sid}` : '?');
-        const prefix = (panelState && panelState.mode === 'log') ? '📋 Mission Log' : (panelState && panelState.mode === 'coverage') ? '📅 Coverage — flown vs SLA' : (panelState && panelState.mode === 'schedule') ? '🗓 This week — Jira ROC schedule' : '📋 Mission Bank Summary';
+        const prefix = (panelState && panelState.mode === 'log') ? '📋 Mission Log' : (panelState && panelState.mode === 'coverage') ? '📅 Coverage — flown vs SLA' : (panelState && panelState.mode === 'schedule') ? '🗓 This week — Jira ROC schedule' : (panelState && panelState.mode === 'smart') ? '🧠 Smart plan — owed pads → slot missions' : '📋 Mission Bank Summary';
         if (titleEl) titleEl.innerHTML = `${prefix} — <span data-site>${escapeHtml(site)}</span>`;
     }
 
@@ -13085,6 +13984,7 @@
         if (panelState.mode === 'log') { renderLogTableView(); return; }
         if (panelState.mode === 'coverage') { renderCoverageView(); return; }
         if (panelState.mode === 'schedule') { renderScheduleView(); return; }   // v3.28
+        if (panelState.mode === 'smart') { renderSmartView(); return; }         // v3.29 (#303)
         panelState.drillId = null;
         updateTitle();
         // Rebuild dynamic step-type columns from the loaded missions so
@@ -18106,6 +19006,7 @@ ${snapPlacemarks}
         registerMissionSop();
         registerCoverage();
         registerSchedule();
+        registerSmart();
         try { if (controlChannel) controlChannel.postMessage({ type: 'REQUEST_TOKEN' }); } catch (e) {}   // v3.28: 🗓 feed needs the shared PAT
         covChannelGet();   // v3.14: no broadcast on load — the map paints only once the panel is opened / 🎨 Map pressed
         // Inject the force-show-dots CSS rule into the iframe head.
