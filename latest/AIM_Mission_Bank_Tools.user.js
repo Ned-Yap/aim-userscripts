@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.18
+// @version      3.19
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.18';
+    const SCRIPT_VERSION = '3.19';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -569,6 +569,7 @@
     };
     let covBySiteMonthStart = null, covBySiteWeekStart = null;   // set per fetch for the join's recount
     const covGroupsBySite = {};   // v3.18: sid → { groupId: { flights[], totals } } (rebuilt by every join; not persisted)
+    const covFlightsBySite = {};  // v3.19: sid → { flightId: { gid, name, whenMs } } for id/group search
     let covHasMissionId = null;   // v3.17: does /images/ `only=` accept mission_id? self-tested on the first read
     let covCfgCache = null;
     function covCfg() {
@@ -791,8 +792,19 @@
         const appByName = new Map(apps.map(a => [String(a.name || '').trim().toUpperCase(), a]));
         const groups = {};   // v3.18: per group id → flights + totals (shared by every asset row in that group; feeds the Group popup)
         covGroupsBySite[sid] = groups;
+        const flightsIdx = {}; covFlightsBySite[sid] = flightsIdx;
+        logRows.forEach(fl => { flightsIdx[String(fl.id)] = { gid: (fl.missionGroup != null && Number(fl.missionGroup) >= 0) ? String(fl.missionGroup) : '', name: fl.name || '', whenMs: fl.whenMs || 0 }; });
+        // v3.19: expected flights per mission NAME = median flight count of its
+        // COMPLETED groups in the log (battery estimate only as a fallback).
+        const histByName = new Map();
+        byGroup.forEach(list => { if (!list.length || !list.every(fl => fl.stateCode === 2 && !fl._aborted)) return; const k = String(list[0].name || '').trim().toUpperCase(); if (!histByName.has(k)) histByName.set(k, []); histByName.get(k).push(list.length); });
+        const expectedFor = name => { const h = histByName.get(String(name || '').trim().toUpperCase()); if (h && h.length) { const a = h.slice().sort((x, y) => x - y); return a[Math.floor(a.length / 2)]; } const app = appByName.get(String(name || '').trim().toUpperCase()); try { return app && app.battery_consumption != null ? estimateFlights(Number(app.battery_consumption) || 0) : null; } catch (e) { return null; } };
         recs.forEach(r => {
             r.lm = null;
+            // v3.19: every flight / group that ever imaged this asset (search by id or group)
+            const fids = new Set(), gids = new Set();
+            (r.fliesAll || []).forEach(f => { const fl = flightOf(f); if (fl) { fids.add(String(fl.id)); if (fl.missionGroup != null && Number(fl.missionGroup) >= 0) gids.add(String(fl.missionGroup)); } });
+            r.flightIds = [...fids]; r.groupIds = [...gids];
             const f0 = (r.flies && r.flies[0]) || null;
             if (!f0) return;
             const t = flightOf(f0);
@@ -808,8 +820,7 @@
             const abortN = flights.filter(isAbort).length;
             const sum = k => flights.reduce((a, fl) => a + (Number(fl[k]) || 0), 0);
             const gImgs = sum('images'), gPlanned = sum('plannedImages');
-            const app = appByName.get(String(f0.mission).trim().toUpperCase());
-            let expected = null; try { expected = app ? estimateFlights(Number(app.battery_consumption) || 0) : null; } catch (e) { expected = null; }
+            const expected = expectedFor(f0.mission);
             const lastWhen = flights.length ? Math.max(...flights.map(fl => fl.whenMs || 0)) : 0;
             const recent = lastWhen && (Date.now() - lastWhen) < 12 * 3600000;
             let groupLabel = '', groupKind = '';
@@ -980,9 +991,23 @@
     function covVisibleRecs(bucket) {
         const st = panelState.cov || (panelState.cov = { tier: '', status: '', search: '' });
         const q = (panelState.search || '').trim().toLowerCase();
-        const lmStr = r => r.lm ? `${r.lm.id || ''} ${r.lm.group || ''} ${r.lm.pilot || ''} ${r.lm.drone || ''}`.toLowerCase() : '';
+        const lmStr = r => r.lm ? `${r.lm.pilot || ''} ${r.lm.drone || ''}`.toLowerCase() : '';
+        // v3.19: a numeric query is a flight id or a group id → every asset that
+        // flight/group CAPTURED (any fly, not just the asset's last one) or that
+        // the group's mission PLANS. Non-numeric queries search names as before.
+        const sid = getCurrentSiteID();
+        const idQ = /^\d{3,}$/.test(q) ? q : null;
+        let idCtx = null;
+        if (idQ) {
+            const groups = covGroupsBySite[sid] || {}, flights = covFlightsBySite[sid] || {};
+            const g = groups[idQ]; const fl = flights[idQ];
+            const name = g ? g.name : fl ? fl.name : '';
+            idCtx = { kind: g ? 'group' : fl ? 'flight' : 'unknown', id: idQ, name, group: g || (fl && fl.gid ? groups[fl.gid] : null), planned: null };
+            st.idCtx = idCtx;
+        } else st.idCtx = null;
+        const matchesId = r => { if (!idQ) return false; if (idCtx.kind === 'group') return (r.groupIds || []).includes(idQ); if (idCtx.kind === 'flight') return (r.flightIds || []).includes(idQ); return (r.flightIds || []).includes(idQ) || (r.groupIds || []).includes(idQ) || (r.lm && String(r.lm.id) === idQ); };
         let rows = bucket.recs.filter(r => (!st.tier || (r.tier || 'none') === st.tier) && (!st.status || r.status === st.status)
-            && (!q || r.name.toLowerCase().includes(q) || (r.pad || '').toLowerCase().includes(q) || (r.lastMission || '').toLowerCase().includes(q) || lmStr(r).includes(q)));
+            && (!q || (idQ ? matchesId(r) : (r.name.toLowerCase().includes(q) || (r.pad || '').toLowerCase().includes(q) || (r.lastMission || '').toLowerCase().includes(q) || lmStr(r).includes(q)))));
         const col = COV_COL_BY_ID[panelState.sortKey] || COV_COL_BY_ID.status;
         const dir = panelState.sortDir === 'asc' ? 1 : -1;
         rows.sort((a, b) => { const x = col.sort(a), y = col.sort(b); return (x < y ? -1 : x > y ? 1 : a.name.localeCompare(b.name)) * dir; });
@@ -1034,6 +1059,7 @@
                 <button class="aim-mb-tbtn" data-cov-act="csv">⬇ CSV</button>
                 <button class="aim-mb-tbtn${st.paint === false ? '' : ' active'}" data-cov-act="paint" title="Paint these colours on the map (needs Map Styler → Assets → 📅 Coverage colours ON). Click to toggle.">🎨 Map ${st.paint === false ? 'off' : 'on'}</button>
             </div>
+            ${st.idCtx ? `<div style="padding:5px 10px;border-bottom:1px solid #2a2a2a;font-size:11px;background:rgba(20,210,220,0.06);color:#bbb">${st.idCtx.kind === 'unknown' ? `<b style="color:#ffb300">${escapeHtml(st.idCtx.id)}</b> is not a flight or group id in this site's log — showing assets whose last flight matches.` : `<b style="color:#14d2dc">${st.idCtx.kind === 'group' ? 'Group' : 'Flight'} ${escapeHtml(st.idCtx.id)}</b> <span style="color:#9aa">${escapeHtml(st.idCtx.name)}</span>${st.idCtx.group ? ` · ${st.idCtx.group.flights.length} flight${st.idCtx.group.flights.length === 1 ? '' : 's'} · ${escapeHtml(st.idCtx.group.label)} · assets ${st.idCtx.group.captured}${st.idCtx.group.plannedAssets != null ? ` / ${st.idCtx.group.plannedAssets} planned` : ''}${st.idCtx.group.incidental ? ` +${st.idCtx.group.incidental} incidental` : ''} · images ${st.idCtx.group.images}` : ''} — <b style="color:#e6e6e6">${rows.length}</b> asset${rows.length === 1 ? '' : 's'} captured (any flight, targeted or incidental)${st.idCtx.group ? ` <span data-cov-group="${escapeHtml(st.idCtx.group.id)}" style="color:#9ad;cursor:pointer;text-decoration:underline dotted">· flights ▾</span>` : ''}</span>`}</div>` : ''}
             <div style="padding:5px 10px;border-bottom:1px solid #2a2a2a;font-size:11px;color:#bbb;display:flex;flex-wrap:wrap;gap:4px 0;align-items:center">
                 ${sum}
                 <span style="flex:1"></span>
@@ -1126,7 +1152,7 @@
         pop.innerHTML = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px"><b style="color:#14d2dc">Group ${escapeHtml(String(g.id))}</b> <span style="color:#9aa">${escapeHtml(g.name)}</span> <span style="color:${col};font-weight:700">${escapeHtml(g.label)}</span> <span style="color:#777">${g.doneN} done${g.abortN ? ` · ${g.abortN} aborted` : ''}${g.progN ? ` · ${g.progN} in progress` : ''} of ${g.flights.length} flown${g.expected ? ` · ~${g.expected} expected` : ''}</span><span style="flex:1"></span><button data-cov-group-close style="background:none;border:1px solid #444;color:#aaa;border-radius:3px;cursor:pointer;padding:0 6px">✕</button></div>
             <div style="color:#9aa;margin-bottom:6px">Assets: <b style="color:#e6e6e6">${g.captured}${g.plannedAssets != null ? ` / ${g.plannedAssets}` : ''}</b>${g.incidental ? ` <span style="color:#777">+${g.incidental} incidental</span>` : ''} · Images: <b style="color:#e6e6e6">${g.images}${g.plannedImages ? ` / ${g.plannedImages}` : ''}</b></div>
             <table style="width:100%;border-collapse:collapse"><thead><tr style="color:#14d2dc;text-align:left"><th>#</th><th>Flight</th><th>Start</th><th>Pilot</th><th>Drone</th><th>Result</th><th style="text-align:center">Images</th><th style="text-align:center">Dur</th></tr></thead><tbody>${rows}</tbody></table>
-            <div style="color:#777;margin-top:6px">Expected flights come from the Mission Bank mission's battery estimate (same number as Est. Flights in the Summary).</div>`;
+            <div style="color:#777;margin-top:6px">Expected flights = the median flight count of this mission's completed groups in the log (battery estimate when there is no history). Type the group id in the panel search to list every asset it captured or planned.</div>`;
         document.body.appendChild(pop);
         pop.querySelector('[data-cov-group-close]').onclick = () => pop.remove();
         pop.querySelectorAll('a[data-cov-link]').forEach(a => { a.onclick = (e) => { e.preventDefault(); e.stopPropagation(); try { (window.top || window).open(a.href, '_blank'); } catch (err) { window.open(a.href, '_blank'); } }; });
