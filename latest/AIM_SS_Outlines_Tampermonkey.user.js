@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.169
+// @version      34.170
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -69,7 +69,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.169';
+    const SCRIPT_VERSION = '34.170';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -6184,6 +6184,8 @@
             ours:     { bg: '#01579b', text: 'OUR PAD — producing' },
             dead:     { bg: '#757575', text: 'PLUGGED / EXPIRED — not a hazard' },
         }[f.cls] || { bg: '#616161', text: String(f.cls).toUpperCase() };
+        if (p.kind === 'facility' && f.cls === 'live') BANNER.text = 'THIRD-PARTY FACILITY — compressor station / plant / battery, keep off';
+        if (p.kind === 'facility' && f.cls === 'ours') BANNER.text = 'OUR FACILITY';
         const row = (label, html) => html ? `<div style="display:flex;gap:6px;margin-top:2px"><span style="color:#666;min-width:78px;flex:none">${label}</span><span>${html}</span></div>` : '';
         const nice = (s) => String(s || '').toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
         const parts = [];
@@ -6227,6 +6229,10 @@
         } else if (p.kind === 'frac') {
             parts.push(row('Frac crew', `${esc(p.status)}${p.frac_days ? ` · ${p.frac_days} days` : ''}`));
             if (p.first_date) parts.push(row('On pad', `${fmt(p.first_date)}${p.last_date ? ` → ${fmt(p.last_date)}` : ''}`));
+        } else if (p.kind === 'facility') {
+            parts.push(row('Facility', `${esc(p.facility_type || 'midstream site')}${p.compressor_units ? ` · ${p.compressor_units} compressor unit${p.compressor_units > 1 ? 's' : ''}` : ''}${p.gas_cap_mmcfd ? ` · ${p.gas_cap_mmcfd} MMcf/d` : ''}`));
+            parts.push(row('Status', esc(p.status)));
+            if (p.owner_company && p.owner_company !== p.operator) parts.push(row('Owner', esc(p.owner_company)));
         } else if (p.footprint_m2) {
             parts.push(row('Footprint', `${Math.round(p.footprint_m2 * 10.7639).toLocaleString()} ft²${p.building_count > 1 ? ` · ${p.building_count} buildings` : ''}`));
         }
