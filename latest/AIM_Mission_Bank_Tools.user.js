@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.32
+// @version      3.33
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.32';
+    const SCRIPT_VERSION = '3.33';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -1779,8 +1779,6 @@
     }
 
     // [#303 smart planner core] — vendored VERBATIM from ShortKeys/AIM_Smart_Planner.js (tests: AIM_Smart_Planner_Test.js)
-    // AIM Smart Planner — pure planning core for the Smart Mission feature (#303).
-    // Reference copy; paste VERBATIM into Mission Bank Tools (module "[#303 smart planner core]").
     // No DOM, no fetch, no Tampermonkey — runs in Node for the offline tests and in the browser
     // when vendored. No hotkeys. Log tag: whatever the host script uses (console only on warn).
     //
@@ -1826,7 +1824,7 @@
     const AIM_SMART_PLANNER = (function () {
         'use strict';
 
-        const VERSION = '0.1';
+        const VERSION = '0.2';
         const FT_PER_M = 3.28084;
         const DEFAULT_TIER_REGEX = '^P\\s*([0-9]+\\+?)\\s*[-\\u2013\\u2014:]';
 
@@ -1885,6 +1883,11 @@
         function dayStartMs(day, tzOffsetMin, hhmm) {
             const [h, m] = String(hhmm || '00:00').split(':').map(Number);
             return Date.parse(day + 'T00:00:00Z') - (tzOffsetMin || 0) * 60000 + ((h || 0) * 60 + (m || 0)) * 60000;
+        }
+        function baseLabel(name, i) {
+            const m = String(name || '').match(/\b(north|south|east|west|n|s|e|w|ne|nw|se|sw)\b/i);
+            if (m) return m[1].length <= 2 ? m[1].toUpperCase() : m[1][0].toUpperCase();
+            return `B${i + 1}`;
         }
         function addDays(day, n) { return new Date(Date.parse(day + 'T00:00:00Z') + n * 86400000).toISOString().slice(0, 10); }
 
@@ -2008,23 +2011,39 @@
             });
             const padById = new Map(pads.map(p => [p.padId, p]));
 
-            // -- distances
+            // -- bases + distances. Every pad has a HOME base (nearest by routed distance); a flight
+            //    starts and ends at that base and each base plans its own slots in parallel.
+            //    'base' inside dist()/pos() means the base currently being planned (curBase).
+            const bases = (Array.isArray(input.bases) && input.bases.length ? input.bases : [Object.assign({ id: 'base', name: 'Base' }, base || {})])
+                .map((b, i) => Object.assign({}, b, { id: String(b.id != null ? b.id : `base:${i}`), name: b.name || `Base ${i + 1}`, label: b.label || baseLabel(b.name, i), idx: i }));
+            const multiBase = bases.length > 1;
+            let curBase = bases[0];
             let offGraph = 0;
             const pw = input.pairwise || {};
-            function dist(a, b) { // a,b = padId or 'base'
-                if (a === b) return 0;
-                let ft = null;
-                if (a === 'base') ft = pw.base && pw.base[b];
-                else if (b === 'base') ft = pw.base && pw.base[a];
-                else ft = (pw[a] && pw[a][b]) != null ? pw[a][b] : (pw[b] && pw[b][a]);
+            function baseDist(padId, b) {
+                let ft = pw.bases && pw.bases[padId] ? pw.bases[padId][b.id] : null;
+                if (ft == null && !multiBase && pw.base) ft = pw.base[padId];
                 if (ft != null && isFinite(ft)) return Number(ft);
-                const pa = a === 'base' ? base : padById.get(a), pb = b === 'base' ? base : padById.get(b);
-                const h = haversineFt(pa, pb);
+                const h = haversineFt(b, padById.get(padId));
                 if (h == null) return Infinity;
                 offGraph++;
                 return h * 1.25;
             }
-            function pos(id) { return id === 'base' ? base : padById.get(id); }
+            function homeOf(padId) { let best = null; bases.forEach(b => { const d = baseDist(padId, b); if (best == null || d < best.d) best = { b, d }; }); return best ? best.b : bases[0]; }
+            function dist(a, b) { // a,b = padId or 'base' (= curBase)
+                if (a === b) return 0;
+                if (a === 'base') return baseDist(b, curBase);
+                if (b === 'base') return baseDist(a, curBase);
+                const ft = (pw[a] && pw[a][b]) != null ? pw[a][b] : (pw[b] && pw[b][a]);
+                if (ft != null && isFinite(ft)) return Number(ft);
+                const h = haversineFt(padById.get(a), padById.get(b));
+                if (h == null) return Infinity;
+                offGraph++;
+                return h * 1.25;
+            }
+            function pos(id) { return id === 'base' ? curBase : padById.get(id); }
+            pads.forEach(p => { p.home = homeOf(p.padId); });
+            if (multiBase) assumptions.push(`${bases.length} bases — each pad flies from its nearest base; bases plan in parallel.`);
             function padEnergyPct(p) { return p.micro && p.micro.energyPct != null ? Number(p.micro.energyPct) : (p.micro ? (Number(p.micro.steps) || 0) * bat.perStepPct : 0); }
             function padMinutes(p) { return p.micro && p.micro.minutes != null ? Number(p.micro.minutes) : (p.micro ? (Number(p.micro.steps) || 0) * bat.perStepMin : 0); }
             function transitPct(ft, wf) { return ft / (bat.usableFt || 36000) * 100 * wf; }
@@ -2072,18 +2091,22 @@
                     warnings: ['frozen — already flying today, not rebuilt'], padIds: (f.padIds || []).map(String) });
             });
 
-            // -- spur walk over targets (doctrine from MBT lasso v2.36)
+            // -- spur walk over targets (doctrine from MBT lasso v2.36), one partition per base
             const JUMP_TOL_FT = 500;
-            const remaining = new Set(owed.map(p => p.padId));
             const planned = new Set();
+            const defer = []; // pads skipped on a day for weather/blocks → retried next day
+            function planPartition(baseObj, padIds) {
+            curBase = baseObj;
+            const remaining = new Set(padIds);
             let day = today;
             let slotDay = dayBudget(day);
             let slot = null;
             let wallClock = 0;
-            const defer = []; // pads skipped on a day for weather/blocks → retried next day
+            let slotCount = 0;
 
             function newSlot() {
-                slot = { slot: slots.length + 1, name: `SMART ${slots.length + 1}`, day, frozen: false, flights: [],
+                slotCount++;
+                slot = { slot: slots.length + 1, name: multiBase ? `SMART ${baseObj.label} ${slotCount}` : `SMART ${slotCount}`, base: { id: baseObj.id, name: baseObj.name, label: baseObj.label }, day, frozen: false, flights: [],
                     totals: { pads: 0, flights: 0, wallClockMin: 0, byTier: {} }, budgetMin: Math.round(slotDay.budgetMin), lostHours: slotDay.lostHours,
                     warnings: slotDay.lostWhy.slice() };
                 slots.push(slot);
@@ -2108,7 +2131,7 @@
                 const wf = windFactor(weatherAt(input.weather, etaMs), bearingDeg(pos(fromId), pos(p.padId)), rules);
                 const legFt = dist(fromId, p.padId);
                 const homeFt = dist(p.padId, 'base');
-                const wfHome = windFactor(weatherAt(input.weather, etaMs + transitMin(legFt, wf) * 60000), bearingDeg(pos(p.padId), base), rules);
+                const wfHome = windFactor(weatherAt(input.weather, etaMs + transitMin(legFt, wf) * 60000), bearingDeg(pos(p.padId), curBase), rules);
                 const pct = transitPct(legFt, wf) + padEnergyPct(p) + transitPct(homeFt, wfHome);
                 const min = transitMin(legFt, wf) + padMinutes(p) + transitMin(homeFt, wfHome);
                 const ok = flight.energyPct + pct <= 100 - reservePct && flight.minutes + min <= (Number(turn.flightMin) || 22) + 0.5;
@@ -2118,7 +2141,7 @@
                 flight.energyPct += f.pct; flight.minutes += f.min; flight.distanceFt += f.legFt;
                 flight.pads.push({ padId: p.padId, name: p.name, tier: p.tier.id, dueOn: new Date(p.dueMs).toISOString().slice(0, 10),
                     overdueDays: Math.round(p.overdueDays * 10) / 10, reason, transitFt: Math.round(f.legFt), etaMin: Math.round(wallClock + flight.minutes),
-                    batteryPctAtLanding: Math.round(100 - flight.energyPct - f.homePct), windFactor: Math.round(f.wf * 100) / 100, grade: p.grade });
+                    batteryPctAtLanding: Math.round(100 - flight.energyPct - f.homePct), windFactor: Math.round(f.wf * 100) / 100, grade: p.grade, base: curBase.name });
                 flight.cur = p.padId; flight.lastHome = { pct: f.homePct, min: f.homeMin, ft: f.homeFt };
                 remaining.delete(p.padId); planned.add(p.padId);
                 slot.totals.pads++; slot.totals.byTier[p.tier.id] = (slot.totals.byTier[p.tier.id] || 0) + 1;
@@ -2200,7 +2223,7 @@
                                 const t = p.tier;
                                 if (t.fillerMaxAddedMin != null && addedMin > Number(t.fillerMaxAddedMin)) return null;
                                 if (t.homewardOnly && cur !== 'base') {
-                                    const toF = bearingDeg(pos(cur), pos(p.padId)), toB = bearingDeg(pos(cur), base);
+                                    const toF = bearingDeg(pos(cur), pos(p.padId)), toB = bearingDeg(pos(cur), curBase);
                                     if (toF != null && toB != null && angDiff(toF, toB) > 90) return null;
                                 }
                                 return { p, f, addedMin };
@@ -2213,6 +2236,8 @@
                 if (!flight.pads.length) { nextDay(); dayIdx++; continue; }
                 closeFlight(flight);
             }
+            }
+            bases.forEach(b => planPartition(b, owed.filter(p => p.home.id === b.id).map(p => p.padId)));
 
             // -- report what is owed but not planned
             const dayMsNow = dayStartMs(today, tz, ops.start);
@@ -2224,17 +2249,21 @@
             });
             owedNotPlanned.sort((a, b) => padById.get(a.padId).tier.rank - padById.get(b.padId).tier.rank || b.overdueDays - a.overdueDays);
             if (offGraph) warnings.push(`${offGraph} pad pair(s) had no routed distance — straight-line ×1.25 used`);
-            slots.forEach((s, i) => { s.slot = i + 1; if (!s.frozen) s.name = `SMART ${i + 1}`; });
+            slots.sort((a, b) => (a.frozen ? -1 : 0) - (b.frozen ? -1 : 0) || String(a.day).localeCompare(String(b.day)) || ((a.base ? bases.findIndex(x => x.id === a.base.id) : -1) - (b.base ? bases.findIndex(x => x.id === b.base.id) : -1)));
+            slots.forEach((s, i) => { s.slot = i + 1; });
 
             return {
                 version: VERSION, builtAt: new Date(nowMs).toISOString(), siteId: input.site ? input.site.id : null, horizonDays,
                 tiers, rules: rules.list, slots, owedNotPlanned, ignored, offGraph, assumptions, warnings,
+                bases: bases.map(b => ({ id: b.id, name: b.name, label: b.label, lat: b.lat, lng: b.lng, pads: pads.filter(p => p.home.id === b.id).length })),
+                homes: pads.reduce((m, p) => { m[p.padId] = p.home.id; return m; }, {}),
                 pending: pads.filter(p => p.pending).map(p => ({ padId: p.padId, name: p.name, tier: p.tier.id })),
             };
         }
 
         return { VERSION, DEFAULT_TIERS, DEFAULT_TIER_REGEX, DEFAULT_RULES, RULE_KINDS, tierOf, resolveTiers, resolveRules, plan, haversineFt, bearingDeg };
     })();
+
 
 
     // ========================================================
@@ -2272,8 +2301,8 @@
         return smtCfgCache;
     }
     function smtCfgSave(patch) { const c = Object.assign(smtCfg(), patch || {}); gmSet(SMT_CFG_KEY, c); smtCfgCache = c; return c; }
-    function smtSlotName(n) { return `${String(smtCfg().prefix || '').trim()} SMART ${n}`.trim(); }
-    function smtSlotRe() { const p = String(smtCfg().prefix || '').trim(); return new RegExp(`^${p ? p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s+' : ''}SMART\\s+(\\d+)$`, 'i'); }
+    function smtSlotName(core) { return `${String(smtCfg().prefix || '').trim()} ${core || 'SMART 1'}`.trim(); }
+    function smtSlotRe() { const p = String(smtCfg().prefix || '').trim(); return new RegExp(`^${p ? p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s+' : ''}SMART\\s+(?:[A-Z0-9]+\\s+)?(\\d+)$`, 'i'); }
 
     // ---- inputs from live data ----
     async function smtWeather(base) {
@@ -2411,7 +2440,11 @@
         unknownTiers.forEach((n, id) => notes.push(`${n} asset(s) carry tier "${id}" which is not in the tier table`));
         // pairwise distances on the trusted route graph (same engine as 🔋 / lasso)
         prog(`routing ${pads.filter(p => p._micro).length} pads…`);
-        const pairwise = { base: {} };
+        const pairwise = { base: {}, bases: {} };
+        const baseEnts = (ent.baseEnts && ent.baseEnts.length) ? ent.baseEnts : [];
+        const basesIn = baseEnts.length ? baseEnts.map((b, i) => ({ id: `base:${i}`, name: b.name || `Base ${i + 1}`, lat: b.coords[0].lat, lng: b.coords[0].lng }))
+            : (ent.base ? [{ id: 'base:0', name: 'Base', lat: ent.base.lat, lng: ent.base.lng }] : []);
+        let geo = null;
         let pwNote = '';
         try {
             const sol = rngSolveCached(ent);
@@ -2420,8 +2453,13 @@
             if (rows.length) {
                 const pw = lassoBuildPairwise(rows, ent, byAsset);
                 if (pw && pw.ok) {
-                    rows.forEach((r, i) => { pairwise[r.pad.padId] = {}; pairwise.base[r.pad.padId] = pw.dBase(i); rows.forEach((s, j) => { if (i !== j) pairwise[r.pad.padId][s.pad.padId] = pw.dPad(i, j); }); });
-                    pwNote = `${rows.length} pads routed (${pw.offCount()} legs straight-line)`;
+                    rows.forEach((r, i) => {
+                        pairwise[r.pad.padId] = {}; pairwise.base[r.pad.padId] = pw.dBase(i);
+                        const each = pw.dBaseEach(i); const o = {}; basesIn.forEach((b, k) => { if (each[k] != null) o[b.id] = each[k]; }); pairwise.bases[r.pad.padId] = o;
+                        rows.forEach((s, j) => { if (i !== j) pairwise[r.pad.padId][s.pad.padId] = pw.dPad(i, j); });
+                    });
+                    geo = { built: pw.built, runs: pw.runs, padKeys: pw.padKeys, baseKeys: pw.baseKeys, idxByPad: new Map(rows.map((r, i) => [r.pad.padId, i])) };
+                    pwNote = `${rows.length} pads routed from ${basesIn.length} base(s) (${pw.offCount()} legs straight-line)`;
                 } else pwNote = 'route graph failed — straight-line distances';
             }
         } catch (e) { console.warn(`${TAG} smart: pairwise failed`, e); pwNote = `route graph failed (${e.message || e}) — straight-line distances`; }
@@ -2429,11 +2467,11 @@
         const rules = JSON.parse(JSON.stringify(cfg.rules));
         const batRule = rules.find(r => r.kind === 'battery'); if (batRule) { batRule.params = batRule.params || {}; if (batRule.params.usableFt == null || batRule.params.usableFt === '') batRule.params.usableFt = usableFt; }
         const input = {
-            now: new Date().toISOString(), site: { id: sid, name: getCurrentSiteName() || `Site ${sid}`, tzOffsetMin: -new Date().getTimezoneOffset(), base: ent.base },
+            now: new Date().toISOString(), site: { id: sid, name: getCurrentSiteName() || `Site ${sid}`, tzOffsetMin: -new Date().getTimezoneOffset(), base: ent.base }, bases: basesIn,
             tiers: cfg.tiers, tierRegex: cfg.tierRegex || undefined, rules, pads: pads.map(p => { const o = Object.assign({}, p); delete o._root; delete o._micro; return o; }),
             pairwise, weather: wx.hours ? { hours: wx.hours } : null, calibration: calib.cal, frozen,
         };
-        return { input, meta: { notes, pads: pads.length, withMicro: pads.filter(p => p._micro).length, covAt: bucket.at, wxAt: smtWx ? smtWx.at : null } };
+        return { input, geo, meta: { notes, pads: pads.length, withMicro: pads.filter(p => p._micro).length, covAt: bucket.at, wxAt: smtWx ? smtWx.at : null } };
     }
     function smtMicroMinutes(m) {
         const app = m.app_data || {};
@@ -2450,7 +2488,7 @@
         if (batRule) { batRule.params = batRule.params || {}; if (batRule.params.usableFt == null || batRule.params.usableFt === '') batRule.params.usableFt = cfg.batteryProfile === 'tulip' ? ag.tulipBudgetFt : ag.tattuBudgetFt; }
         input.now = new Date().toISOString();
         const plan = AIM_SMART_PLANNER.plan(input);
-        plan.slots.forEach(s => { if (!s.frozen) s.name = smtSlotName(s.slot); });
+        plan.slots.forEach(s => { if (!s.frozen) s.name = smtSlotName(s.name); });
         return plan;
     }
     function smtRun(sid, force) {
@@ -2462,9 +2500,9 @@
         setBodyHtml('<div style="padding:40px;text-align:center;color:#888">Building the smart plan…<div id="aim-mb-smt-prog" style="color:#14d2dc;margin-top:8px">starting…</div></div>');
         smtRunning = (async () => {
             const t0 = Date.now();
-            const { input, meta } = await smtBuildInput(sid, m => { const el = panelEl && panelEl.querySelector('#aim-mb-smt-prog'); if (el) el.textContent = m; });
+            const { input, geo, meta } = await smtBuildInput(sid, m => { const el = panelEl && panelEl.querySelector('#aim-mb-smt-prog'); if (el) el.textContent = m; });
             const plan = smtPlanFromInput(sid, input);
-            smtBySite[siteKey] = { at: Date.now(), input, plan, meta };
+            smtBySite[siteKey] = { at: Date.now(), input, plan, meta, geo };
             console.log(`${TAG} smart: planned ${plan.slots.length} slot(s) / ${plan.slots.reduce((n, s) => n + s.totals.flights, 0)} flight(s) in ${Date.now() - t0} ms`, plan);
             return smtBySite[siteKey];
         })();
@@ -2565,7 +2603,7 @@
         return `<div style="padding:8px 10px;background:#141a22;border-bottom:1px solid #2a3340;font-size:11px">
             <div style="display:flex;gap:16px;align-items:center;margin-bottom:6px;flex-wrap:wrap">
                 <b style="color:#14d2dc">Tiers &amp; cadence</b>
-                <label>Slot name prefix ${inp('data-smt-cfg="prefix"', cfg.prefix, 60)} → <span style="color:#ccc">${escapeHtml(smtSlotName(1))}</span></label>
+                <label>Slot name prefix ${inp('data-smt-cfg="prefix"', cfg.prefix, 60)} → <span style="color:#ccc">${escapeHtml(smtSlotName('SMART N 1'))}</span></label>
                 <label>Battery profile <select data-smt-cfg="batteryProfile" style="background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;font-size:11px"><option value="tattu" ${cfg.batteryProfile !== 'tulip' ? 'selected' : ''}>Tattu (${agCfg().tattuBudgetFt} ft)</option><option value="tulip" ${cfg.batteryProfile === 'tulip' ? 'selected' : ''}>Tulip (${agCfg().tulipBudgetFt} ft)</option></select></label>
                 <label title="JavaScript regex; first capture group becomes the tier id P&lt;group&gt;">Tier prefix regex ${inp('data-smt-cfg="tierRegex"', cfg.tierRegex || AIM_SMART_PLANNER.DEFAULT_TIER_REGEX, 220)}</label>
                 <button class="aim-mb-tbtn" data-smt-act2="tier-add">+ Tier</button>
@@ -2610,28 +2648,56 @@
     }
     // ---- map overlay (canvas renderer — the Styler observer rebuilds on SVG mutations) ----
     function smtClearOverlay() { if (!smtOverlay) return; smtOverlay.layers.forEach(l => { try { smtOverlay.map.removeLayer(l); } catch (e) {} }); smtOverlay = null; }
+    // Walk the Dijkstra predecessor chain of pad row i back from graph key X → lat/lng list (pad i → X).
+    function smtPathKeys(geo, i, toKey) {
+        const run = geo.runs[i]; if (!run || !run.dist.has(toKey)) return null;
+        const keys = [toKey]; let cur = toKey, guard = 0;
+        while (run.prev.has(cur) && guard++ < 50000) { cur = run.prev.get(cur); keys.push(cur); }
+        if (cur !== geo.padKeys[i]) return null;
+        return keys.reverse().map(k => geo.built.graph.verts.get(k)).filter(Boolean).map(v => [v.lat, v.lng]);
+    }
+    function smtRouteLatLngs(geo, from, to, padById, bases) {
+        // from/to = padId or 'base:<k>'; returns [[lat,lng]…] along the legal route, null when unknown
+        if (!geo) return null;
+        const isBase = x => /^base:/.test(String(x));
+        const baseKey = x => { const k = Number(String(x).split(':')[1]); return geo.baseKeys[k] || null; };
+        if (isBase(from) && !isBase(to)) { const i = geo.idxByPad.get(to); const bk = baseKey(from); if (i == null || !bk) return null; const p = smtPathKeys(geo, i, bk); return p ? p.reverse() : null; }
+        if (!isBase(from) && isBase(to)) { const i = geo.idxByPad.get(from); const bk = baseKey(to); if (i == null || !bk) return null; return smtPathKeys(geo, i, bk); }
+        if (!isBase(from) && !isBase(to)) { const i = geo.idxByPad.get(from), j = geo.idxByPad.get(to); if (i == null || j == null) return null; return smtPathKeys(geo, i, geo.padKeys[j]); }
+        return null;
+    }
     function smtDrawOverlay(sid) {
         smtClearOverlay();
         const cur = smtBySite[covSiteKey(sid)]; if (!cur) return;
         const L = composerGetL(); const map = getLeafletMap();
         if (!L || !map) { showToast('No map in this view for the overlay.', '#ff9800'); return; }
         const padById = new Map(cur.input.pads.map(p => [p.padId, p]));
-        const base = cur.input.site.base;
+        const baseById = new Map((cur.plan.bases || []).map(b => [b.id, b]));
         const renderer = L.canvas({ padding: 0.5 });
         const layers = [];
+        let straight = 0;
+        const ll = id => { if (/^base:/.test(id)) { const b = baseById.get(id); return b ? [b.lat, b.lng] : null; } const p = padById.get(id); return p ? [p.lat, p.lng] : null; };
         cur.plan.slots.forEach((s, si) => {
             const col = SMT_SLOT_COLORS[si % SMT_SLOT_COLORS.length];
+            const homeId = s.base ? s.base.id : (cur.plan.bases && cur.plan.bases[0] ? cur.plan.bases[0].id : null);
             let n = 0;
             s.flights.forEach(f => {
-                const pts = [[base.lat, base.lng]];
-                f.pads.forEach(p => { const pd = padById.get(p.padId); if (!pd) return; pts.push([pd.lat, pd.lng]); n++;
+                const seq = [homeId].concat(f.pads.map(p => p.padId)).concat([homeId]).filter(Boolean);
+                const pts = [];
+                for (let k = 1; k < seq.length; k++) {
+                    let leg = smtRouteLatLngs(cur.geo, seq[k - 1], seq[k], padById, cur.plan.bases);
+                    if (!leg || leg.length < 2) { const a = ll(seq[k - 1]), b = ll(seq[k]); if (!a || !b) continue; leg = [a, b]; straight++; }
+                    if (pts.length) leg = leg.slice(1);
+                    pts.push(...leg);
+                }
+                f.pads.forEach(p => { const pd = padById.get(p.padId); if (!pd) return; n++;
                     const m = L.marker([pd.lat, pd.lng], { interactive: false, icon: L.divIcon({ className: 'aim-smt-badge', html: `<div style="background:${col};color:#000;font:700 11px/18px Lato,sans-serif;width:18px;height:18px;border-radius:9px;text-align:center;border:1px solid #000;box-shadow:0 0 3px #000">${n}</div>`, iconSize: [18, 18], iconAnchor: [9, 9] }) });
                     m.addTo(map); layers.push(m); });
-                pts.push([base.lat, base.lng]);
-                const line = L.polyline(pts, { renderer, color: col, weight: 2, opacity: 0.85, dashArray: f.n % 2 ? null : '6 4', interactive: false }).addTo(map);
-                layers.push(line);
+                if (pts.length >= 2) { const line = L.polyline(pts, { renderer, color: col, weight: 2.5, opacity: 0.9, dashArray: f.n % 2 ? null : '6 4', interactive: false }).addTo(map); layers.push(line); }
             });
         });
+        (cur.plan.bases || []).forEach(b => { const m = L.marker([b.lat, b.lng], { interactive: false, icon: L.divIcon({ className: 'aim-smt-badge', html: `<div style="background:#fff;color:#000;font:700 10px/16px Lato,sans-serif;padding:0 5px;height:16px;border-radius:3px;border:1px solid #000;white-space:nowrap">🏠 ${escapeHtml(b.label)}</div>`, iconSize: null, iconAnchor: [0, 8] }) }); m.addTo(map); layers.push(m); });
+        if (straight) console.warn(`${TAG} smart: ${straight} overlay leg(s) had no routed path — drawn straight`);
         smtOverlay = { layers, L, map };
     }
     // ---- report (Sheets rich clipboard, like 🗓) ----
@@ -7820,7 +7886,9 @@
             const cfg = agCfg();
             const costOf = (i) => agIntraFt(rows[i].mission) + pcmStepCount(rows[i].mission) * cfg.stepCostFt;
             const idxOf = new Map(rows.map((r, i) => [r, i]));
-            return { ok: true, rows, idxOf, dPad, dBase, costOf, offCount: () => off };
+            // v3.33 (#303): per-base distances + the graph/runs so the smart overlay can draw the real routes
+            const dBaseEach = (i) => built.baseKeys.map(bk => { const d = runs[i].dist.get(bk); return d == null ? null : d * 3.28084; });
+            return { ok: true, rows, idxOf, dPad, dBase, dBaseEach, costOf, offCount: () => off, built, runs, padKeys, baseKeys: built.baseKeys };
         } catch (e) {
             console.warn(`${TAG} [lasso] pairwise graph failed — furthest→closest fallback`, e);
             return { ok: false };
