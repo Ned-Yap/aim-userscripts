@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.17
+// @version      3.18
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.17';
+    const SCRIPT_VERSION = '3.18';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -568,6 +568,7 @@
         targetedOnly: true,                            // v3.17: a fly counts only when the mission PLANS the asset (incidental in-frame tags ignored)
     };
     let covBySiteMonthStart = null, covBySiteWeekStart = null;   // set per fetch for the join's recount
+    const covGroupsBySite = {};   // v3.18: sid → { groupId: { flights[], totals } } (rebuilt by every join; not persisted)
     let covHasMissionId = null;   // v3.17: does /images/ `only=` accept mission_id? self-tested on the first read
     let covCfgCache = null;
     function covCfg() {
@@ -787,6 +788,9 @@
             add(capByKey, `${String(f.mission).toUpperCase()}|${f.day}`, r.id, targeted);
         }));
         const capFor = (flight, name, day) => (flight && capByFlight.get(String(flight.id))) || capByKey.get(`${String(name).toUpperCase()}|${day}`) || { t: new Set(), i: new Set() };
+        const appByName = new Map(apps.map(a => [String(a.name || '').trim().toUpperCase(), a]));
+        const groups = {};   // v3.18: per group id → flights + totals (shared by every asset row in that group; feeds the Group popup)
+        covGroupsBySite[sid] = groups;
         recs.forEach(r => {
             r.lm = null;
             const f0 = (r.flies && r.flies[0]) || null;
@@ -798,16 +802,32 @@
             const gT = new Set(), gI = new Set();
             if (flights.length > 1) flights.forEach(fl => { const c = capFor(fl, fl.name, covDayKey(new Date(fl.whenMs).toISOString())); c.t.forEach(x => gT.add(x)); c.i.forEach(x => gI.add(x)); });
             else { fc.t.forEach(x => gT.add(x)); fc.i.forEach(x => gI.add(x)); }
-            const done = flights.length > 0 && flights.every(fl => fl.stateCode === 2 && !fl._aborted);
-            const aborted = flights.some(fl => fl._aborted || fl.stateCode === 3 || fl.stateCode === 4 || fl.stateCode === 5);
+            const isAbort = fl => fl._aborted || fl.stateCode === 3 || fl.stateCode === 4 || fl.stateCode === 5;
+            const doneN = flights.filter(fl => fl.stateCode === 2 && !fl._aborted).length;
+            const progN = flights.filter(fl => fl.stateCode === 0 || fl.stateCode === 1).length;
+            const abortN = flights.filter(isAbort).length;
             const sum = k => flights.reduce((a, fl) => a + (Number(fl[k]) || 0), 0);
             const gImgs = sum('images'), gPlanned = sum('plannedImages');
+            const app = appByName.get(String(f0.mission).trim().toUpperCase());
+            let expected = null; try { expected = app ? estimateFlights(Number(app.battery_consumption) || 0) : null; } catch (e) { expected = null; }
+            const lastWhen = flights.length ? Math.max(...flights.map(fl => fl.whenMs || 0)) : 0;
+            const recent = lastWhen && (Date.now() - lastWhen) < 12 * 3600000;
+            let groupLabel = '', groupKind = '';
+            if (!flights.length) { groupLabel = ''; }
+            else if (progN) { groupLabel = 'In progress'; groupKind = 'prog'; }
+            else if (doneN === flights.length) { groupLabel = 'Complete'; groupKind = 'done'; }
+            else if (recent && (!expected || flights.length < expected)) { groupLabel = 'In progress'; groupKind = 'prog'; }   // flew within 12 h, not at the expected flight count yet
+            else if (doneN === 0) { groupLabel = 'Aborted'; groupKind = 'abort'; }
+            else { groupLabel = 'Complete with aborts'; groupKind = 'mixed'; }
+            const gid = t && t.missionGroup != null && Number(t.missionGroup) >= 0 ? String(t.missionGroup) : '';
+            if (gid && !groups[gid]) groups[gid] = { id: gid, name: f0.mission, expected, doneN, progN, abortN, label: groupLabel, kind: groupKind, images: gImgs, plannedImages: gPlanned, captured: gT.size, incidental: gI.size, plannedAssets: plan ? plan.size : null,
+                flights: flights.map(fl => ({ id: fl.id, whenMs: fl.whenMs, pilot: fl.createdBy, drone: fl.drone, state: fl.stateLabel, aborted: !!fl._aborted, images: fl.images, plannedImages: fl.plannedImages, durationS: fl.durationS })) };
             r.lm = {
                 id: t ? t.id : null, group: t ? t.missionGroup : '', pilot: t ? t.createdBy : '', state: t ? t.stateLabel : '', aborted: !!(t && t._aborted),
                 drone: t ? t.drone : '', durationS: t ? t.durationS : null, whenMs: t ? t.whenMs : null,
                 images: t ? t.images : null, plannedImages: t ? t.plannedImages : null,
                 captured: fc.t.size, incidental: fc.i.size, plannedAssets: plan ? plan.size : null,
-                flights: flights.length, groupDone: done, groupAborted: aborted, groupLabel: !flights.length ? '' : done ? 'Complete' : aborted ? 'Aborted' : 'In progress',
+                flights: flights.length, expected, doneN, progN, abortN, groupDone: groupKind === 'done', groupAborted: groupKind === 'abort', groupKind, groupLabel,
                 groupCaptured: gT.size, groupIncidental: gI.size, groupImages: gImgs, groupPlannedImages: gPlanned,
             };
         });
@@ -917,11 +937,12 @@
           cell: r => r.lastMission ? `<td><span data-cov-open-app="${escapeHtml(r.lastMission)}" style="color:#9ad;cursor:pointer;text-decoration:underline dotted" title="Open "${escapeHtml(r.lastMission)}" in the Mission Bank editor">${escapeHtml(r.lastMission)}</span></td>` : '<td></td>' },
         { id: 'mid', label: 'ID', title: 'Takeoff mission id — opens Mission Playback in a new tab', def: true, sort: r => (r.lm && r.lm.id) || 0, val: r => (r.lm && r.lm.id) || '',
           cell: (r, sid) => { const lm = r.lm; return `<td>${lm && lm.id ? `<a href="${covMissionUrl(sid, lm.id)}" data-cov-link="${lm.id}" style="color:#14d2dc;text-decoration:underline" title="Open Mission Playback for ${lm.id}">${lm.id}</a>` : (lm ? '<span style="color:#666" title="No takeoff mission with this name within 12 h of the image">?</span>' : '')}</td>`; } },
-        { id: 'gstate', label: 'Group result', title: 'All flights in the mission group: Complete = every flight completed · In progress · Aborted = a flight aborted/failed/cancelled', def: true, sort: r => (r.lm && r.lm.groupLabel || '').toLowerCase(), asc: true, val: r => r.lm ? `${r.lm.groupLabel}${r.lm.flights > 1 ? ` (${r.lm.flights} flights)` : ''}` : '',
-          cell: r => { const lm = r.lm; if (!lm || !lm.groupLabel) return '<td></td>'; const col = lm.groupDone ? '#39ff14' : lm.groupAborted ? '#ff5252' : '#ffb300'; return `<td style="color:${col}">${lm.groupDone ? '✓ ' : lm.groupAborted ? '✗ ' : '⏳ '}${escapeHtml(lm.groupLabel)}${lm.flights > 1 ? ` <span style="color:#777">(${lm.flights} flights)</span>` : ''}</td>`; } },
+        { id: 'gstate', label: 'Group result', title: 'Mission group (all flights): ✓ every flight completed · ⏳ a flight is in progress, or it flew within 12 h and is short of the expected flight count · ✗ aborted/failed/cancelled. "3/6 ~8" = 3 flights done of 6 flown, ~8 expected from the mission\'s battery estimate.', def: true, sort: r => (r.lm && r.lm.groupLabel || '').toLowerCase(), asc: true, val: r => r.lm && r.lm.flights ? `${r.lm.groupLabel} · ${r.lm.doneN}/${r.lm.flights} done${r.lm.abortN ? ` · ${r.lm.abortN} aborted` : ''}${r.lm.expected ? ` · ~${r.lm.expected} expected` : ''}` : '',
+          cell: r => { const lm = r.lm; if (!lm || !lm.flights) return '<td></td>'; const col = lm.groupKind === 'done' ? '#39ff14' : lm.groupKind === 'abort' ? '#ff5252' : lm.groupKind === 'mixed' ? '#ffb347' : '#ffb300'; const ico = lm.groupKind === 'done' ? '✓' : lm.groupKind === 'abort' ? '✗' : lm.groupKind === 'mixed' ? '✓' : '⏳';
+              return `<td style="color:${col};white-space:nowrap">${ico} ${escapeHtml(lm.groupLabel)} <span style="color:#777">${lm.doneN}/${lm.flights}${lm.expected ? ` ~${lm.expected}` : ''}${lm.abortN ? ` · <span style="color:#ff5252">${lm.abortN} ✗</span>` : ''}</span></td>`; } },
         { id: 'state', label: 'Flight result', title: 'This takeoff mission (flight) only', def: false, sort: r => (r.lm && r.lm.state || '').toLowerCase(), asc: true, val: r => (r.lm && r.lm.state) || '',
           cell: r => { const st = r.lm && r.lm.state || ''; const ok = /complet/i.test(st) && !(r.lm && r.lm.aborted); const bad = (r.lm && r.lm.aborted) || /abort|fail|cancel/i.test(st); return `<td style="color:${ok ? '#39ff14' : bad ? '#ff5252' : '#ffb300'}">${escapeHtml(st)}${r.lm && r.lm.aborted && !/abort/i.test(st) ? ' (aborted)' : ''}</td>`; } },
-        { id: 'group', label: 'Group', title: 'Mission group id', def: true, sort: r => (r.lm && r.lm.group) || 0, val: r => (r.lm && r.lm.group) || '', cell: r => `<td style="color:#9aa">${r.lm ? escapeHtml(String(r.lm.group || '')) : ''}</td>` },
+        { id: 'group', label: 'Group', title: 'Mission group id — click for every flight in the group', def: true, sort: r => (r.lm && r.lm.group) || 0, val: r => (r.lm && r.lm.group) || '', cell: r => `<td>${r.lm && r.lm.group !== '' && Number(r.lm.group) >= 0 ? `<span data-cov-group="${escapeHtml(String(r.lm.group))}" style="color:#9ad;cursor:pointer;text-decoration:underline dotted" title="Show the ${r.lm.flights} flight${r.lm.flights === 1 ? '' : 's'} in group ${escapeHtml(String(r.lm.group))}">${escapeHtml(String(r.lm.group))}</span>` : (r.lm ? `<span style="color:#666">${escapeHtml(String(r.lm.group || ''))}</span>` : '')}</td>` },
         { id: 'pilot', label: 'Pilot', def: true, sort: r => (r.lm && r.lm.pilot || '').toLowerCase(), asc: true, val: r => (r.lm && r.lm.pilot) || '', cell: r => `<td style="color:#9aa">${r.lm ? escapeHtml(r.lm.pilot || '') : ''}</td>` },
         { id: 'gcaptured', label: 'Assets', title: 'Whole mission group: planned assets captured / planned (pads the mission visits + nested). "+N" = extra assets tagged incidentally (in frame, not planned).', def: true, sort: r => (r.lm && r.lm.groupCaptured) || 0, val: r => r.lm ? `${r.lm.groupCaptured}${r.lm.plannedAssets != null ? ' / ' + r.lm.plannedAssets : ''}${r.lm.groupIncidental ? ' +' + r.lm.groupIncidental : ''}` : '',
           cell: r => { const lm = r.lm; if (!lm) return '<td></td>'; return `<td style="text-align:center">${lm.groupCaptured}${lm.plannedAssets != null ? ` / ${lm.plannedAssets}` : ''}${lm.groupIncidental ? ` <span style="color:#777" title="incidental (in frame, not planned)">+${lm.groupIncidental}</span>` : ''}</td>`; } },
@@ -1045,10 +1066,11 @@
             h.ondragleave = () => { h.style.borderLeft = ''; };
             h.ondrop = (e) => { e.preventDefault(); const to = h.dataset.covSort; if (!dragId || dragId === to) return; const st = covColsState(); const from = st.order.indexOf(dragId), at = st.order.indexOf(to); if (from < 0 || at < 0) return; st.order.splice(from, 1); st.order.splice(at, 0, dragId); covColsSave(); dragId = null; rerender(); };
         });
-        body.querySelectorAll('tr[data-cov-id]').forEach(tr => { tr.onclick = (e) => { if (e.target && e.target.closest && e.target.closest('[data-cov-link],[data-cov-open-app]')) return; covPanTo(sid, Number(tr.dataset.covId)); }; });
+        body.querySelectorAll('tr[data-cov-id]').forEach(tr => { tr.onclick = (e) => { if (e.target && e.target.closest && e.target.closest('[data-cov-link],[data-cov-open-app],[data-cov-group]')) return; covPanTo(sid, Number(tr.dataset.covId)); }; });
         // Playback link: left-click is swallowed somewhere between the panel and the iframe — open it ourselves.
         body.querySelectorAll('a[data-cov-link]').forEach(a => { a.onclick = (e) => { e.preventDefault(); e.stopPropagation(); try { (window.top || window).open(a.href, '_blank'); } catch (err) { window.open(a.href, '_blank'); } }; });
         body.querySelectorAll('[data-cov-open-app]').forEach(el => { el.onclick = (e) => { e.preventDefault(); e.stopPropagation(); covOpenInEditor(sid, el.dataset.covOpenApp); }; });
+        body.querySelectorAll('[data-cov-group]').forEach(el => { el.onclick = (e) => { e.preventDefault(); e.stopPropagation(); covOpenGroup(sid, el.dataset.covGroup, e); }; });
         body.querySelectorAll('[data-cov-col]').forEach(cb => { cb.onchange = () => { const st = covColsState(); if (cb.checked) st.hidden.delete(cb.dataset.covCol); else st.hidden.add(cb.dataset.covCol); covColsSave(); rerender(); const m = panelEl.querySelector('[data-cov-colsmenu]'); if (m) m.style.display = 'block'; }; });
         body.querySelectorAll('[data-cov-cfg]').forEach(inp => { inp.onchange = () => {
             const k = inp.dataset.covCfg; const v = k === 'rulebook' ? String(inp.value) : inp.type === 'checkbox' ? !!inp.checked : Number(inp.value);
@@ -1081,6 +1103,34 @@
             };
         });
         body.onclick = (e) => { if (e.target.closest('[data-cov-colsmenu],[data-cov-gear],[data-cov-act]')) return; body.querySelectorAll('[data-cov-colsmenu],[data-cov-gear]').forEach(m => { m.style.display = 'none'; }); };
+    }
+    // v3.18: group popup — every flight in a mission group with its own
+    // Playback link; the panel's rows only ever show each asset's LAST flight.
+    function covOpenGroup(sid, gid, ev) {
+        let g = covGroupsBySite[sid] && covGroupsBySite[sid][String(gid)];
+        const bucket = covBySite[covSiteKey(sid)];
+        if (!g && bucket) { covRejoin(sid, bucket).then(() => { if (covGroupsBySite[sid] && covGroupsBySite[sid][String(gid)]) covOpenGroup(sid, gid, ev); }); showToast('Rebuilding the mission join…', '#14d2dc'); return; }
+        if (!g) { showToast(`Group ${gid}: no flights known.`, '#ff9800'); return; }
+        const old = document.getElementById('aim-mb-cov-group'); if (old) old.remove();
+        const pop = document.createElement('div');
+        pop.id = 'aim-mb-cov-group';
+        const x = Math.min(window.innerWidth - 640, Math.max(8, (ev && ev.clientX ? ev.clientX : 200) - 100));
+        const y = Math.min(window.innerHeight - 320, Math.max(8, (ev && ev.clientY ? ev.clientY : 200) + 12));
+        pop.style.cssText = `position:fixed;left:${x}px;top:${y}px;width:620px;max-height:60vh;overflow:auto;z-index:2147483600;background:#121519;border:1px solid #14d2dc;border-radius:6px;box-shadow:0 8px 28px rgba(0,0,0,.6);font:11px 'Lato','Segoe UI',sans-serif;color:#e6e6e6;padding:8px 10px`;
+        const col = g.kind === 'done' ? '#39ff14' : g.kind === 'abort' ? '#ff5252' : '#ffb300';
+        const fmtWhen = ms => ms ? new Date(ms).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
+        const rows = g.flights.slice().sort((a, b) => (a.whenMs || 0) - (b.whenMs || 0)).map((f, i) => {
+            const bad = f.aborted || /abort|fail|cancel/i.test(f.state || ''); const ok = /complet/i.test(f.state || '') && !f.aborted;
+            return `<tr><td style="color:#777">${i + 1}</td><td><a href="${covMissionUrl(sid, f.id)}" data-cov-link style="color:#14d2dc">${f.id}</a></td><td>${escapeHtml(fmtWhen(f.whenMs))}</td><td style="color:#9aa">${escapeHtml(f.pilot || '')}</td><td style="color:#9aa">${escapeHtml(f.drone || '')}</td><td style="color:${ok ? '#39ff14' : bad ? '#ff5252' : '#ffb300'}">${escapeHtml(f.state || '')}${f.aborted && !/abort/i.test(f.state || '') ? ' (aborted)' : ''}</td><td style="text-align:center">${f.images != null ? `${f.images}${f.plannedImages ? ' / ' + f.plannedImages : ''}` : ''}</td><td style="text-align:center;color:#9aa">${f.durationS != null ? covFmtDur(f.durationS) : ''}</td></tr>`;
+        }).join('');
+        pop.innerHTML = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px"><b style="color:#14d2dc">Group ${escapeHtml(String(g.id))}</b> <span style="color:#9aa">${escapeHtml(g.name)}</span> <span style="color:${col};font-weight:700">${escapeHtml(g.label)}</span> <span style="color:#777">${g.doneN} done${g.abortN ? ` · ${g.abortN} aborted` : ''}${g.progN ? ` · ${g.progN} in progress` : ''} of ${g.flights.length} flown${g.expected ? ` · ~${g.expected} expected` : ''}</span><span style="flex:1"></span><button data-cov-group-close style="background:none;border:1px solid #444;color:#aaa;border-radius:3px;cursor:pointer;padding:0 6px">✕</button></div>
+            <div style="color:#9aa;margin-bottom:6px">Assets: <b style="color:#e6e6e6">${g.captured}${g.plannedAssets != null ? ` / ${g.plannedAssets}` : ''}</b>${g.incidental ? ` <span style="color:#777">+${g.incidental} incidental</span>` : ''} · Images: <b style="color:#e6e6e6">${g.images}${g.plannedImages ? ` / ${g.plannedImages}` : ''}</b></div>
+            <table style="width:100%;border-collapse:collapse"><thead><tr style="color:#14d2dc;text-align:left"><th>#</th><th>Flight</th><th>Start</th><th>Pilot</th><th>Drone</th><th>Result</th><th style="text-align:center">Images</th><th style="text-align:center">Dur</th></tr></thead><tbody>${rows}</tbody></table>
+            <div style="color:#777;margin-top:6px">Expected flights come from the Mission Bank mission's battery estimate (same number as Est. Flights in the Summary).</div>`;
+        document.body.appendChild(pop);
+        pop.querySelector('[data-cov-group-close]').onclick = () => pop.remove();
+        pop.querySelectorAll('a[data-cov-link]').forEach(a => { a.onclick = (e) => { e.preventDefault(); e.stopPropagation(); try { (window.top || window).open(a.href, '_blank'); } catch (err) { window.open(a.href, '_blank'); } }; });
+        setTimeout(() => { const off = (e) => { if (!pop.contains(e.target)) { pop.remove(); document.removeEventListener('mousedown', off, true); } }; document.addEventListener('mousedown', off, true); }, 0);
     }
     // Open a Mission Bank mission in Percepto's editor: click its row link in
     // the native list when it is rendered (keeps React state coherent), else
