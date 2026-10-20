@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.384
+// @version      4.385
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.384';
+    const SCRIPT_VERSION = '4.385';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -238,7 +238,7 @@
     const RIG_TAG = '[AIM RIG]';
     const RIG_TAG_PREFIX = 'AIM RIG NFZ|';
     const RIG_COLS = ['WELL_NAME', 'SURFACE_LATITUDE', 'SURFACE_LONGITUDE', 'JOB_TYPE_CATEGORY', 'START_DATE', 'END_DATE'];
-    const RIG_DEFAULT_CFG = { nearPadFt: 500, insetFt: 15, graceDays: 1, snoozeDays: 3, exclude: '' };
+    const RIG_DEFAULT_CFG = { nearPadFt: 500, insetFt: 15, graceDays: 1, snoozeDays: 3, padCoverPct: 75, exclude: '' };   // v4.385 padCoverPct: below this share of its FFZ the pad polygon is distrusted → NFZ = whole FFZ inset
     const RIG_STATUS_LABEL = { upcoming: 'Upcoming', staged: 'Staged', active: 'Active NFZ', ending: 'VERIFY — gone?', cleared: 'Cleared', unmatched: 'Unmatched', offsite: 'Off-site' };
     const RIG_STATUS_COLOR = { upcoming: '#ffb300', staged: '#7adfe6', active: '#ff5555', ending: '#ff9100', cleared: '#8a8f98', unmatched: '#ff6060', offsite: '#666' };
     let rigCfgCache = null, rigLayers = [], rigRowsByKey = null, rigStateSid = null;
@@ -30022,6 +30022,12 @@
         }
         return ringSelfIntersects(out) ? null : out;
     }
+    function rigRingAreaFt2(ring) {
+        if (!ring || ring.length < 3) return 0;
+        const lat0 = ring[0].lat, kx = Math.cos(lat0 * Math.PI / 180) * 364000, ky = 364000;
+        let a = 0; for (let i = 0; i < ring.length; i++) { const p = ring[i], q = ring[(i + 1) % ring.length]; a += (p.lng - ring[0].lng) * kx * (q.lat - lat0) * ky - (q.lng - ring[0].lng) * kx * (p.lat - lat0) * ky; }
+        return Math.abs(a) / 2;
+    }
     function rigGeometry(sid, padId) {
         const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
         const pad = ents.find(e => e.id === padId); const ring = pad && entityCoords(pad); if (!ring || ring.length < 3) return null;
@@ -30037,6 +30043,11 @@
             const best = (r || []).map(poly => poly[0]).filter(x => x && x.length >= 4).sort((a, b) => b.length - a.length)[0];
             if (!best) return { points: ring.map(p => ({ lat: p.lat, lng: p.lng })), note: 'intersection empty → pad outline' };
             const pts = best.slice(0, -1).map(([lng, lat]) => ({ lat, lng }));
+            // v4.385 SAFEGUARD: a pad asset drawn over only part of its pad (LILLY 49 UNIT 3LS
+            // covered half) would leave the rest of the pad unblocked. If the asset covers
+            // less than padCoverPct of its FFZ-inset, use the whole FFZ inset and flag it.
+            const cover = rigRingAreaFt2(pts) / Math.max(1, rigRingAreaFt2(inset));
+            if (cover < (Number(rigCfg().padCoverPct) || 75) / 100) return { points: inset, flag: true, note: `⚠ pad polygon covers only ${Math.round(cover * 100)} % of its FFZ "${ffz.name}" → NFZ = whole FFZ inset ${rigCfg().insetFt} ft (fix the pad asset to shrink it)` };
             const same = pts.length === ring.length && pts.every((p, i) => Math.abs(p.lat - ring[i].lat) < 1e-7 && Math.abs(p.lng - ring[i].lng) < 1e-7);
             return { points: pts, note: same ? `pad outline (FFZ "${ffz.name}" is the standard 15 ft ring)` : `pad ∩ "${ffz.name}" inset ${rigCfg().insetFt} ft` };
         } catch (e) { console.warn(`${RIG_TAG} clip failed`, e); return { points: ring.map(p => ({ lat: p.lat, lng: p.lng })), note: 'clip error → pad outline' }; }
@@ -30182,7 +30193,7 @@
                 <td style="padding:3px 6px;color:${c.padId ? '#cfd6dc' : '#ff6060'}" title="${esc(c.how)}${c.flag ? ' · ' + esc(c.flag) : ''}">${c.padId ? esc(c.padName) : '—'}${c.flag ? ' <span style="color:#ffb347">⚠</span>' : ''}</td>
                 <td style="padding:3px 6px;color:#9aa;white-space:nowrap">${esc(c.start || '?')} → ${esc(c.end || '—')}${c.changes && c.changes.length ? ` <span style="color:#ffb347" title="${esc(c.changes.join('\n'))}">✎${c.changes.length}</span>` : ''}</td>
                 <td style="padding:3px 6px;color:#9aa;text-align:center" title="days since start">${days != null && days >= 0 && c.status !== 'upcoming' ? days : (days != null && days < 0 ? `<span style="color:#666">in ${-days} d</span>` : '')}</td>
-                <td style="padding:3px 6px;color:#9aa">${c.nfzName ? esc(c.nfzName) : ''}${c.pulled ? ` <span style="color:#ffb347" title="mission(s) pulled — restore when cleared">⛔ ${esc(c.pulled)}</span>` : ''}</td>
+                <td style="padding:3px 6px;color:#9aa">${(() => { const g = c.padId && c.status !== 'cleared' ? rigGeometry(sid, c.padId) : null; return g ? `<span title="${esc(g.note)}" style="color:${g.flag ? '#ffb347' : '#777'};cursor:help">${g.flag ? '⚠ whole FFZ' : 'ⓘ'}</span> ` : ''; })()}${c.nfzName ? esc(c.nfzName) : ''}${c.pulled ? ` <span style="color:#ffb347" title="mission(s) pulled — restore when cleared">⛔ ${esc(c.pulled)}</span>` : ''}</td>
                 <td style="padding:3px 6px;white-space:nowrap">${act}</td></tr>`;
         }).join('');
         host.innerHTML = `
@@ -30250,6 +30261,7 @@
                 { id: 'insetFt', label: 'NFZ inset from a custom FFZ edge', type: 'number', min: 0, max: 100, step: 1, default: c.insetFt, unit: 'ft' },
                 { id: 'graceDays', label: 'Days a row may be missing before "verify"', type: 'number', min: 0, max: 10, step: 1, default: c.graceDays, unit: 'days' },
                 { id: 'snoozeDays', label: '"Still there" snooze', type: 'number', min: 1, max: 30, step: 1, default: c.snoozeDays, unit: 'days' },
+                { id: 'padCoverPct', label: 'Use the whole FFZ when the pad asset covers less than', type: 'number', min: 10, max: 100, step: 5, default: c.padCoverPct, unit: '%' },
             ] });
     }
     function rigHandleToggle(msg) { const id = msg.toggleId; const v = Number(msg.value !== undefined ? msg.value : msg.enabled); if (!Object.prototype.hasOwnProperty.call(RIG_DEFAULT_CFG, id) || !isFinite(v)) return; rigCfgSet(id, v); }
