@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.400
+// @version      4.401
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.400';
+    const SCRIPT_VERSION = '4.401';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -30247,6 +30247,7 @@
             if (!confirm(`Restore ${c.fpBackups.length} flight path(s) exactly as before the cut for ${c.well}?`)) return;
             try { await rigRestoreFps(sid, c); } catch (e) { console.warn(`${RIG_TAG} restore failed`, e); showToast(`Restore failed: ${e.message}`, 'rgba(255,96,96,0.55)'); return; }
             c.status = 'cleared'; c.clearedAt = rigToday(); rigSyncStage(c);
+            const hostEl = document.getElementById('aim-rig-controls'); if (hostEl) hostEl.dataset.showCleared = '1';
             rigLog(sid, `confirmed gone: ${c.well} — flight paths restored${(c.missions || []).some(m => m.pulled && !m.restored) ? ' · RESTORE the pulled missions' : ''}`);
             if ((c.missions || []).some(m => m.pulled && !m.restored)) showToast(`${c.well} cleared — put the pulled missions back (click the stage pill)`, 'rgba(255,180,0,0.7)');
             rigStateSave(sid); rigRenderPanel(sid); rigDraw(sid); return;
@@ -30259,6 +30260,7 @@
             if (!(r.status === 200 || r.status === 204)) throw new Error(`server ${r.status}`);
             st.backups = st.backups || []; st.backups.unshift({ at: new Date().toISOString(), key, nfzId: c.nfzId, body: c.nfzBody }); st.backups = st.backups.slice(0, 50);
             c.status = 'cleared'; c.clearedAt = rigToday(); c.deletedNfzId = c.nfzId; c.nfzId = null; rigSyncStage(c);
+            const hostEl2 = document.getElementById('aim-rig-controls'); if (hostEl2) hostEl2.dataset.showCleared = '1';
             rigLog(sid, `confirmed gone: ${c.well} — NFZ ${c.deletedNfzId} deleted${c.pulled ? ` · RESTORE mission(s): ${c.pulled}` : ''}`);
             if (c.pulled) showToast(`${c.well} cleared — restore the pulled mission(s): ${c.pulled}`, 'rgba(255,180,0,0.7)');
             try { await fetchMapObjects(sid, true); } catch (e) {}
@@ -30481,7 +30483,8 @@
             const days = c.start ? Math.round((new Date(rigToday()) - new Date(c.start)) / 86400000) : null;
             const act = c.status === 'ending' ? `<button data-rig-act="gone" data-k="${esc(k)}" style="background:rgba(255,96,96,0.2);border:1px solid #ff6060;color:#ffb0b0;border-radius:3px;padding:1px 6px;cursor:pointer">✓ Gone — ${c.fpBackups && c.fpBackups.length && !c.fpRestored ? 'restore paths' : c.manualCut ? 'close (reconnect by hand)' : 'remove NFZ'}</button> <button data-rig-act="snooze" data-k="${esc(k)}" style="background:none;border:1px solid #555;color:#ccc;border-radius:3px;padding:1px 6px;cursor:pointer">↩ Still there (${rigCfg().snoozeDays} d)</button>`
                 : c.status === 'active' ? `<button data-rig-act="end" data-k="${esc(k)}" style="background:none;border:1px solid #555;color:#ccc;border-radius:3px;padding:1px 6px;cursor:pointer">Mark gone</button>`
-                : (c.status === 'staged' || c.status === 'upcoming' || c.status === 'unmatched' || c.status === 'offsite') ? `<button data-rig-act="drop" data-k="${esc(k)}" style="background:none;border:1px solid #555;color:#999;border-radius:3px;padding:1px 6px;cursor:pointer">Ignore</button>` : '';
+                : (c.status === 'staged' || c.status === 'upcoming' || c.status === 'unmatched' || c.status === 'offsite') ? `<button data-rig-act="drop" data-k="${esc(k)}" style="background:none;border:1px solid #555;color:#999;border-radius:3px;padding:1px 6px;cursor:pointer">Ignore</button>`
+                : c.status === 'cleared' && c.padId ? `<button data-rig-act="undo-gone" data-k="${esc(k)}" title="It is still there: back to Staged — then 🛡 Protect cuts / blocks it again with a fresh backup" style="background:rgba(255,154,61,0.15);border:1px solid #ff9a3d;color:#ffb060;border-radius:3px;padding:1px 6px;cursor:pointer">↩ Undo gone — re-stage</button>` : '';
             const stg = c.stage || '';
             return `<tr data-rig-row="${esc(k)}" style="border-bottom:1px solid #222;cursor:pointer">
                 <td style="padding:3px 6px;color:${col};font-weight:700;white-space:nowrap" title="${esc(c.status === 'unmatched' || c.status === 'offsite' ? (c.how || '') : (c.endedWhy || ''))}">${esc(c.status === 'active' ? (c.fpCut ? 'Active — arcs cut' : c.manualCut ? 'Active — cut by hand' : 'Active NFZ') : (RIG_STATUS_LABEL[c.status] || c.status))}${c.endedWhy ? ` <span style="color:#888;font-weight:400">(${esc(c.endedWhy)})</span>` : ''}</td>
@@ -30623,6 +30626,7 @@
             else if (act === 'snooze') { const c = st.rows[k]; if (c) { c.status = 'active'; c.snoozeUntil = rigAddDays(rigToday(), rigCfg().snoozeDays); c.endedWhy = ''; const n = prompt('Still there — note (who confirmed / what you saw)?', c.note || ''); if (n != null) c.note = n; rigLog(sid, `still there: ${c.well} until ${c.snoozeUntil}${n ? ' — ' + n : ''}`); rigStateSave(sid); rigRenderPanel(sid); rigDraw(sid); } }
             else if (act === 'end') { const c = st.rows[k]; if (c) { c.status = 'ending'; c.endedWhy = `marked gone ${rigToday()}`; c.endedKind = 'csm'; c.endedAt = rigToday(); rigSyncStage(c); rigStateSave(sid); rigRenderPanel(sid); rigDraw(sid); } }
             else if (act === 'missions') rigMissionsPopup(sid, k, e);
+            else if (act === 'undo-gone') { const c = st.rows[k]; if (c) { c.status = 'staged'; c.endedWhy = ''; c.endedKind = ''; c.clearedAt = ''; c.deletedNfzId = null; c.nfzId = null; c.nfzName = ''; c.fpCut = null; c.fpRestored = false; c.committedAt = ''; c.issueStatus = ''; c.issueId = ''; (c.missions || []).forEach(m => { m.pulled = false; m.restored = false; }); rigReclassify(sid); rigLog(sid, `undo gone: ${c.well} re-staged (still there)`); rigStateSave(sid); host.dataset.showCleared = '0'; rigRenderPanel(sid); rigDraw(sid); showToast(`${c.well} is back to Staged — click 🛡 Protect staged to block it again`, 'rgba(255,154,61,0.7)'); } }
             else if (act === 'issue-retry') { const c = st.rows[k]; if (c && c.padIds && c.padIds.length) { const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || []; const pads = c.padIds.map(id => ents.find(x => x.id === id)).filter(Boolean); if (pads.length) { rigIssueCreate(sid, c, pads, c.fpCut && c.fpCut.length ? `Action: flight-path arcs CUT — ${c.fpCut.map(f => `${f.name} −${f.cut}`).join(', ')} (restored exactly on ✓ Gone)` : c.manualCut ? 'Action: path already disconnected by hand — restore by hand when clear' : `Action: NFZ "${c.nfzName}" created`); rigStateSave(sid); rigRenderPanel(sid); } } }
             else if (act === 'report-sheets') rigReport(sid, 'sheets');
             else if (act === 'report-csv') rigReport(sid, 'csv');
