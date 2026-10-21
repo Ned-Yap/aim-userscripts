@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.394
+// @version      4.395
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.394';
+    const SCRIPT_VERSION = '4.395';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -30223,7 +30223,7 @@
         writes.forEach(w => { if (w.x.c.status === 'active') { rigStamp(w.x.c, 'corrected'); rigIssueCreate(sid, w.x.c, w.x.pads, `Action: NFZ "${w.x.c.nfzName}" created (${w.x.g.note})`); } });
         let cutOk = 0;
         for (const x of cuts) {
-            if (!x.plan.length) { logL(`${x.c.well}: custom FFZ but no flight-path arc crosses the pad(s) — nothing to cut; issue only`); x.c.status = 'active'; x.c.committedAt = rigToday(); x.c.fpCut = []; rigStamp(x.c, 'corrected'); rigIssueCreate(sid, x.c, x.pads, 'Action: NONE POSSIBLE — custom FFZ, no path crosses the pad; remove the missions below'); continue; }
+            if (!x.plan.length) { logL(`${x.c.well}: custom FFZ but no flight-path arc crosses the pad(s) — already disconnected by hand; issue only`); x.c.status = 'active'; x.c.committedAt = rigToday(); x.c.fpCut = []; x.c.manualCut = true; rigStamp(x.c, 'corrected'); rigIssueCreate(sid, x.c, x.pads, 'Action: flight path was ALREADY disconnected by hand (no arc crosses the pad) — the tool has nothing to restore later; put the path back by hand when the equipment leaves. Remove the missions below.'); continue; }
             try { await rigCutCommit(sid, x.c, x.plan, csrf, siteCfg, logL); x.c.status = 'active'; x.c.committedAt = rigToday(); cutOk++; rigStamp(x.c, 'corrected'); rigIssueCreate(sid, x.c, x.pads, `Action: flight-path arcs CUT inside ${x.pads.map(p => p.name).join(' + ')} — ${x.c.fpCut.map(f => `${f.name} −${f.cut}`).join(', ')} (restored exactly on ✓ Gone)`); }
             catch (e) { fail++; console.warn(`${RIG_TAG} cut "${x.c.well}":`, e.message); logL(`${x.c.well}: cut FAILED — ${e.message}`); }
         }
@@ -30243,7 +30243,7 @@
             if ((c.missions || []).some(m => m.pulled && !m.restored)) showToast(`${c.well} cleared — put the pulled missions back (click the stage pill)`, 'rgba(255,180,0,0.7)');
             rigStateSave(sid); rigRenderPanel(sid); rigDraw(sid); return;
         }
-        if (!c.nfzId) { c.status = 'cleared'; c.clearedAt = rigToday(); rigSyncStage(c); rigStateSave(sid); rigRenderPanel(sid); rigDraw(sid); return; }
+        if (!c.nfzId) { c.status = 'cleared'; c.clearedAt = rigToday(); rigSyncStage(c); if (c.manualCut) { showToast(`${c.well} cleared — the flight path was disconnected BY HAND, reconnect it by hand`, 'rgba(255,180,0,0.75)'); rigLog(sid, `${c.well} cleared — manual flight-path cut must be restored by hand`); } rigStateSave(sid); rigRenderPanel(sid); rigDraw(sid); return; }
         if (!confirm(`Delete NFZ "${c.nfzName}" (${c.well})?\nThe NFZ JSON is kept in this panel's state for re-creation.`)) return;
         const csrf = getCsrfToken(); if (!csrf) { showToast('No CSRF token — make one native save first', 'rgba(255,96,96,0.55)'); return; }
         try {
@@ -30382,6 +30382,7 @@
         if (c.padId) o.push(`pad ${c.padName} via ${c.how || '?'}${c.flag ? ' ⚠' : ''}`); else if (c.how) o.push(c.how);
         if (c.design === 'custom') o.push(`custom FFZ (${c.designPct}% standard)${c.pads && c.pads.length > 1 ? ` spanning ${c.pads.join(' + ')}` : ''}`);
         if (c.fpCut && c.fpCut.length) o.push(`arcs cut ${c.committedAt || at('corrected')}: ${c.fpCut.map(f => `${f.name} −${f.cut}`).join(', ')}`);
+        else if (c.manualCut) o.push(`path already disconnected by hand ${c.committedAt || ''} — RESTORE BY HAND when clear`);
         else if (c.fpCut) o.push(`no path crossed the pad — issue only ${c.committedAt || ''}`);
         else if (c.nfzName) o.push(`NFZ ${c.nfzName} created ${c.committedAt || at('corrected')}`);
         const ms = c.missions || [];
@@ -30459,7 +30460,7 @@
                 <td style="padding:3px 6px;color:${c.padId ? '#cfd6dc' : '#ff6060'}" title="${esc(c.how)}${c.flag ? ' · ' + esc(c.flag) : ''}">${c.padId ? esc(c.padName) : '—'}${c.flag ? ' <span style="color:#ffb347">⚠</span>' : ''}</td>
                 <td style="padding:3px 6px;color:#9aa;white-space:nowrap">${esc(c.start || '?')} → ${esc(c.end || '—')}${c.changes && c.changes.length ? ` <span style="color:#ffb347" title="${esc(c.changes.join('\n'))}">✎${c.changes.length}</span>` : ''}</td>
                 <td style="padding:3px 6px;color:#9aa;text-align:center" title="days since start">${days != null && days >= 0 && c.status !== 'upcoming' ? days : (days != null && days < 0 ? `<span style="color:#666">in ${-days} d</span>` : '')}</td>
-                <td style="padding:3px 6px;color:#9aa">${(() => { if (!c.padId || c.status === 'cleared') return ''; const d = rigFfzDesign(sid, c.padId); if (d.kind === 'custom') return `<span title="FFZ is a custom corridor (${Math.round(d.pct * 100)} % of its edge sits 15 ft off the pad) — the drone flies ON this pad, so no NFZ: the flight-path arcs inside ${d.pads.map(p => p.name).join(' + ')} get cut instead" style="color:#ff6060;cursor:help">✂ cut arcs${d.pads.length > 1 ? ` (${d.pads.length} pads)` : ''}</span> `; const g = rigGeometry(sid, c.padId); return g ? `<span title="${esc(g.note)}" style="color:${g.flag ? '#ffb347' : '#777'};cursor:help">${g.flag ? '⚠ whole FFZ' : 'NFZ'}</span> ` : ''; })()}${c.fpCut ? `<span style="color:#ff9a3d" title="${esc(c.fpCut.map(f => `${f.name}: −${f.cut} arcs, ${f.left} left`).join('\n'))}">${c.fpRestored ? 'restored' : `${c.fpCut.reduce((n, f) => n + f.cut, 0)} arcs cut`}</span>` : ''}${c.nfzName ? esc(c.nfzName) : ''}${c.issueStatus ? ` <span style="color:${c.issueStatus === 'created' ? '#5fff5f' : c.issueStatus === 'pending' ? '#7adfe6' : '#ff6060'}" title="AIM Issue: ${esc(c.issueStatus)}${c.issueId ? ' ' + esc(c.issueId) : ''}">${c.issueStatus === 'created' ? '🚩' : c.issueStatus === 'pending' ? '🚩…' : '🚩✗'}</span>` : ''}${c.pulled ? ` <span style="color:#ffb347" title="mission(s) pulled — restore when cleared">⛔ ${esc(c.pulled)}</span>` : ''}</td>
+                <td style="padding:3px 6px;color:#9aa">${(() => { if (!c.padId || c.status === 'cleared') return ''; const d = rigFfzDesign(sid, c.padId); if (d.kind === 'custom') return `<span title="FFZ is a custom corridor (${Math.round(d.pct * 100)} % of its edge sits 15 ft off the pad) — the drone flies ON this pad, so no NFZ: the flight-path arcs inside ${d.pads.map(p => p.name).join(' + ')} get cut instead" style="color:#ff6060;cursor:help">✂ cut arcs${d.pads.length > 1 ? ` (${d.pads.length} pads)` : ''}</span> `; const g = rigGeometry(sid, c.padId); return g ? `<span title="${esc(g.note)}" style="color:${g.flag ? '#ffb347' : '#777'};cursor:help">${g.flag ? '⚠ whole FFZ' : 'NFZ'}</span> ` : ''; })()}${c.manualCut ? `<span style="color:#ffb347" title="Flight path was already disconnected by hand — nothing for the tool to restore">✂ by hand</span> ` : ''}${c.fpCut ? `<span style="color:#ff9a3d" title="${esc(c.fpCut.map(f => `${f.name}: −${f.cut} arcs, ${f.left} left`).join('\n'))}">${c.fpRestored ? 'restored' : `${c.fpCut.reduce((n, f) => n + f.cut, 0)} arcs cut`}</span>` : ''}${c.nfzName ? esc(c.nfzName) : ''}${c.issueStatus ? ` <span style="color:${c.issueStatus === 'created' ? '#5fff5f' : c.issueStatus === 'pending' ? '#7adfe6' : '#ff6060'}" title="AIM Issue: ${esc(c.issueStatus)}${c.issueId ? ' ' + esc(c.issueId) : ''}">${c.issueStatus === 'created' ? '🚩' : c.issueStatus === 'pending' ? '🚩…' : '🚩✗'}</span>` : ''}${c.pulled ? ` <span style="color:#ffb347" title="mission(s) pulled — restore when cleared">⛔ ${esc(c.pulled)}</span>` : ''}</td>
                 <td style="padding:3px 6px;white-space:nowrap">${act}</td></tr>`;
         }).join('');
         host.innerHTML = `
