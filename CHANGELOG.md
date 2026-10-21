@@ -1,3 +1,7 @@
+## 2026-10-21 — 🏗 Rigs & cranes: re-file an issue — Site Setup Tools latest v4.405 (latest only, feature #291)
+
+- The green 🚩 on a row is now clickable: confirm → files a fresh AIM Issue for that row (for when the old one was deleted). Nothing else on the row changes.
+
 ## 2026-10-21 — PROMOTE: Site Setup Tools v4.404 + AIM Issues v1.45 → PROD (everything in latest/ since 4.322 / 1.41)
 
 - **Site Setup Tools 4.322 → 4.404.** Coworkers get the whole ⊕ Generate hub (#294: tile menu, one tool per page, ‹ back, shared Dry run footer) and every tool on it: 🏗 **Rigs & cranes** (#291 — daily sheet → pad match → NFZ or trim-first path cut, preview + confirm, stages, story history in GitHub, report, RPIC reports, Obstacle issue + Slack ping), 📥 **Asset Importer v2** (#295–#299, #301: notes checklist, type combine, Move point, ✏ Shape, 🎯 Priority tiers, 🛢 Enverus cross-check + fill-in, 📋 client review report, Analyze compare), 🛟 **Safe Zone Planner** (#302), 🔍 Scan Import (#289), 🛗 Elevators (#290), 🚧 Hazard SOP check (#288). Scan Import, Elevators and the Safe Zone Planner have NOT been exercised on a live site yet — use Dry run first.
