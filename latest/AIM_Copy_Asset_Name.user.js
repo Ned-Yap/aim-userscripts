@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.391
+// @version      4.392
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.391';
+    const SCRIPT_VERSION = '4.392';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -30368,13 +30368,35 @@
         }
         c.fpRestored = true;
     }
+    // v4.392: one sentence per fact, in order — the history line tells the whole story.
+    function rigStory(c) {
+        const o = []; const at = k => c.stamps && c.stamps[k] ? c.stamps[k].at.slice(0, 10) : '';
+        if (c.source === 'rpic') o.push(`reported by ${c.by || 'RPIC'} ${c.firstSeen || ''}${c.job ? ` (${c.job})` : ''}`);
+        else o.push(`on sheet ${c.firstSeen || '?'}${c.lastSeen && c.lastSeen !== c.firstSeen ? ` → ${c.lastSeen}` : ''}${c.lastSeen && c.firstSeen ? ` (${Math.round((new Date(c.lastSeen) - new Date(c.firstSeen)) / 86400000) + 1} d)` : ''}`);
+        if (c.changes && c.changes.length) o.push(`dates changed ×${c.changes.length}`);
+        if (c.padId) o.push(`pad ${c.padName} via ${c.how || '?'}${c.flag ? ' ⚠' : ''}`); else if (c.how) o.push(c.how);
+        if (c.design === 'custom') o.push(`custom FFZ (${c.designPct}% standard)${c.pads && c.pads.length > 1 ? ` spanning ${c.pads.join(' + ')}` : ''}`);
+        if (c.fpCut && c.fpCut.length) o.push(`arcs cut ${c.committedAt || at('corrected')}: ${c.fpCut.map(f => `${f.name} −${f.cut}`).join(', ')}`);
+        else if (c.fpCut) o.push(`no path crossed the pad — issue only ${c.committedAt || ''}`);
+        else if (c.nfzName) o.push(`NFZ ${c.nfzName} created ${c.committedAt || at('corrected')}`);
+        const ms = c.missions || [];
+        if (ms.length) { const pulled = ms.filter(m => m.pulled); o.push(pulled.length === ms.length ? `${ms.length} mission(s) pulled${at('safe') ? ` → safe ${at('safe')}` : ''}` : `${pulled.length}/${ms.length} missions pulled (${ms.filter(m => !m.pulled).map(m => m.name).join(', ')} still live)`); }
+        else if (c.committedAt) o.push('no missions on the pad');
+        if (c.issueId) o.push(`issue ${c.issueId}`);
+        if (c.endedWhy) o.push(c.endedWhy);
+        if (c.snoozeUntil && c.status === 'active') o.push(`still there until ${c.snoozeUntil}`);
+        if (c.clearedAt) { o.push(c.fpRestored ? `paths restored ${c.clearedAt}` : c.deletedNfzId ? `NFZ removed ${c.clearedAt}` : `cleared ${c.clearedAt}`); const back = ms.filter(m => m.pulled); if (back.length) o.push(back.every(m => m.restored) ? 'missions restored' : `${back.filter(m => m.restored).length}/${back.length} missions restored`); }
+        if (at('closed')) o.push(`closed ${at('closed')}`);
+        if (c.note) o.push(`note: ${c.note}`);
+        return o.join(' · ');
+    }
     function rigReportRows(sid) {
         const st = rigStateLoad(sid); const g = (c, k) => (c.stamps && c.stamps[k] && c.stamps[k].at) || '';
         return Object.values(st.rows).filter(c => c.padId || c.committedAt).sort((a, b) => String(b.start || b.firstSeen || '').localeCompare(String(a.start || a.firstSeen || ''))).map(c => ({
             'Well': c.well, 'Pad(s)': (c.pads || [c.padName]).filter(Boolean).join(' + '), 'Job': c.job, 'Source': c.source, 'Start': c.start || '', 'End': c.end || '', 'Status': RIG_STATUS_LABEL[c.status] || c.status, 'Stage': RIG_STAGE_LABEL[c.stage] || c.stage || '',
             'Staged': g(c, 'staged'), 'Site Setup corrected': g(c, 'corrected'), 'Missions pending': g(c, 'missions'), 'Safe': g(c, 'safe'), 'Verify': g(c, 'verify'), 'Restoring': g(c, 'restoring'), 'Closed': g(c, 'closed'),
             'Action': c.fpCut ? `cut ${c.fpCut.reduce((n, f) => n + f.cut, 0)} arcs in ${c.fpCut.map(f => f.name).join(', ')}` : (c.nfzName ? `NFZ ${c.nfzName}` : ''), 'Missions pulled': (c.missions || []).filter(m => m.pulled).map(m => `${m.name} ${m.steps}`).join('; '), 'Missions restored': (c.missions || []).filter(m => m.restored).map(m => m.name).join('; '),
-            'Issue': c.issueId || '', 'Days exposed': rigDaysOn(c) == null ? '' : rigDaysOn(c), 'Outcome': c.endedWhy || '', 'Note': c.note || '' }));
+            'Issue': c.issueId || '', 'Days exposed': rigDaysOn(c) == null ? '' : rigDaysOn(c), 'Story': rigStory(c) }));
     }
     function rigReport(sid, kind) {
         const rows = rigReportRows(sid); if (!rows.length) { showToast('No records yet', 'rgba(255,180,0,0.6)'); return; }
@@ -30394,6 +30416,7 @@
         const esc = v => String(v == null ? '' : v).replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
         const ms = c.missions || [];
         pop.innerHTML = `<div style="display:flex;gap:8px;align-items:center;margin-bottom:6px"><b style="color:#ff9a3d">${esc(c.well)}</b> <span style="color:${RIG_STAGE_COLOR[c.stage] || '#ccc'}">${esc(RIG_STAGE_LABEL[c.stage] || c.stage || '')}</span><span style="flex:1"></span><button data-x style="background:none;border:1px solid #444;color:#aaa;border-radius:3px;cursor:pointer;padding:0 6px">✕</button></div>
+            <div style="color:#bbb;margin-bottom:6px;line-height:1.5">${esc(rigStory(c))}</div>
             <div style="color:#9aa;margin-bottom:6px">${c.fpCut ? `Arcs cut: ${c.fpCut.map(f => `${esc(f.name)} (−${f.cut}, ${f.left} left)`).join('; ')}${c.fpRestored ? ' · restored' : ''}` : c.nfzName ? `NFZ: ${esc(c.nfzName)}` : 'nothing written yet'}${c.issueId ? ` · issue ${esc(c.issueId)}` : ''}</div>
             <div style="color:#7adfe6;font-weight:700;margin-bottom:4px">Missions with steps on the pad${c.pads && c.pads.length > 1 ? 's' : ''} — tick as you pull / restore them</div>
             ${ms.length ? ms.map((m, i) => `<div style="display:flex;gap:10px;align-items:center;padding:2px 0;border-bottom:1px solid #222"><span style="flex:1"><b>${esc(m.name)}</b> <span style="color:#9aa">steps ${esc(m.steps)}</span></span><label style="cursor:pointer"><input type="checkbox" data-m="${i}" data-f="pulled" ${m.pulled ? 'checked' : ''}> pulled</label><label style="cursor:pointer;color:${m.pulled ? '#ccc' : '#555'}"><input type="checkbox" data-m="${i}" data-f="restored" ${m.restored ? 'checked' : ''} ${m.pulled ? '' : 'disabled'}> restored</label></div>`).join('') : '<div style="color:#777">No mission has a step within 15 ft of this pad.</div>'}
@@ -30530,11 +30553,11 @@
         const months = Object.keys(byMonth).sort().slice(-6).map(m => `${m} <b style="color:#cfd6dc">${byMonth[m]}</b>`).join(' · ') || '—';
         const nfzN = rows.filter(r => r.c.committedAt).length, delN = rows.filter(r => r.c.deletedNfzId).length;
         const body = rows.map(({ k, c }) => { const col = RIG_STATUS_COLOR[c.status] || '#ccc'; const d = rigDaysOn(c);
-            return `<tr style="border-bottom:1px solid #222;white-space:nowrap"><td style="padding:3px 6px;color:${col}">${esc(RIG_STATUS_LABEL[c.status] || c.status)}</td><td style="padding:3px 6px;color:#e6e6e6">${esc(c.well)}${c.source === 'rpic' ? ' <span style="color:#7adfe6">👁</span>' : ''}</td><td style="padding:3px 6px;color:#9aa">${esc(c.job)}</td><td style="padding:3px 6px;color:#9aa">${esc(c.padName || '—')}</td><td style="padding:3px 6px;color:#9aa;white-space:nowrap">${esc(c.start || '?')} → ${esc(c.end || '—')}</td><td style="padding:3px 6px;color:#9aa;text-align:center">${d == null ? '' : d}</td><td style="padding:3px 6px;color:#9aa;white-space:nowrap">${c.committedAt ? `${c.fpCut ? 'arcs cut' : 'NFZ'} ${esc(c.committedAt)}` : ''}</td><td style="padding:3px 6px;color:#9aa;white-space:nowrap">${esc(c.clearedAt || '')}</td><td style="padding:3px 6px;color:${RIG_STAGE_COLOR[c.stage] || '#9aa'}">${esc(RIG_STAGE_LABEL[c.stage] || c.stage || '')}</td><td style="padding:3px 6px;color:#9aa">${esc(c.endedWhy || '')}${c.pulled ? ` · ⛔ ${esc(c.pulled)}` : ''}${c.note ? ` · ${esc(c.note)}` : ''}</td><td style="padding:3px 6px;white-space:nowrap">${c.status === 'cleared' ? `<button data-rig-act="restage" data-k="${esc(k)}" title="Back to Staged — ⬠ Create re-creates the NFZ (banked body when it had one)" style="background:none;border:1px solid #7adfe6;color:#7adfe6;border-radius:3px;padding:1px 6px;cursor:pointer">↻ Re-stage</button>` : ''}</td></tr>`; }).join('');
+            return `<tr style="border-bottom:1px solid #222;white-space:nowrap"><td style="padding:3px 6px;color:${col}">${esc(RIG_STATUS_LABEL[c.status] || c.status)}</td><td style="padding:3px 6px;color:#e6e6e6">${esc(c.well)}${c.source === 'rpic' ? ' <span style="color:#7adfe6">👁</span>' : ''}</td><td style="padding:3px 6px;color:#9aa">${esc(c.job)}</td><td style="padding:3px 6px;color:#9aa">${esc(c.padName || '—')}</td><td style="padding:3px 6px;color:#9aa;white-space:nowrap">${esc(c.start || '?')} → ${esc(c.end || '—')}</td><td style="padding:3px 6px;color:#9aa;text-align:center">${d == null ? '' : d}</td><td style="padding:3px 6px;color:#9aa;white-space:nowrap">${c.committedAt ? `${c.fpCut ? 'arcs cut' : 'NFZ'} ${esc(c.committedAt)}` : ''}</td><td style="padding:3px 6px;color:#9aa;white-space:nowrap">${esc(c.clearedAt || '')}</td><td style="padding:3px 6px;color:${RIG_STAGE_COLOR[c.stage] || '#9aa'}">${esc(RIG_STAGE_LABEL[c.stage] || c.stage || '')}</td><td style="padding:3px 6px;color:#bbb;white-space:normal;min-width:320px">${esc(rigStory(c))}${c.pulled ? ` · ⛔ ${esc(c.pulled)}` : ''}</td><td style="padding:3px 6px;white-space:nowrap">${c.status === 'cleared' ? `<button data-rig-act="restage" data-k="${esc(k)}" title="Back to Staged — ⬠ Create re-creates the NFZ (banked body when it had one)" style="background:none;border:1px solid #7adfe6;color:#7adfe6;border-radius:3px;padding:1px 6px;cursor:pointer">↻ Re-stage</button>` : ''}</td></tr>`; }).join('');
         host.innerHTML = `
             <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px"><b style="color:#ff9a3d">📜 Rigs & cranes — history</b><span style="flex:1"></span><label style="color:#888;font-size:10px;cursor:pointer"><input type="checkbox" data-rig-histall ${all ? 'checked' : ''}> include off-site / unmatched</label><button data-rig-act="hist-csv" style="background:none;border:1px solid #555;color:#aaa;border-radius:3px;padding:2px 8px;cursor:pointer;font-size:11px">⬇ CSV</button><button data-rig-act="view-live" style="background:rgba(255,154,61,0.18);border:1px solid #ff9a3d;color:#ffb060;border-radius:3px;padding:2px 10px;cursor:pointer;font-size:11px">← back to live</button></div>
             <div style="font-size:11px;color:#bbb;line-height:1.7;margin-bottom:6px"><b style="color:#cfd6dc">${rows.length}</b> records · <b style="color:#cfd6dc">${done.length}</b> cleared · <b style="color:#cfd6dc">${nfzN}</b> NFZs created · <b style="color:#cfd6dc">${delN}</b> removed · avg <b style="color:#cfd6dc">${avg}</b> days on pad (cleared rows)<br>jobs: ${top(c => c.job)}<br>pads: ${top(c => c.padName)}<br>by month: ${months}</div>
-            <div style="max-height:320px;overflow:auto;border:1px solid #2a2a2a;border-radius:3px"><table style="width:100%;border-collapse:collapse;font-size:11px"><thead><tr style="color:#7adfe6;text-align:left;position:sticky;top:0;background:#14171b"><th style="padding:4px 6px">Status</th><th style="padding:4px 6px">Well</th><th style="padding:4px 6px">Job</th><th style="padding:4px 6px">Pad</th><th style="padding:4px 6px">Start → End</th><th style="padding:4px 6px">Days</th><th style="padding:4px 6px">Site setup</th><th style="padding:4px 6px">Cleared</th><th style="padding:4px 6px">Stage</th><th style="padding:4px 6px">Outcome</th><th></th></tr></thead><tbody>${body || '<tr><td colspan="11" style="padding:10px;color:#777">Nothing yet.</td></tr>'}</tbody></table></div>`;
+            <div style="max-height:320px;overflow:auto;border:1px solid #2a2a2a;border-radius:3px"><table style="width:100%;border-collapse:collapse;font-size:11px"><thead><tr style="color:#7adfe6;text-align:left;position:sticky;top:0;background:#14171b"><th style="padding:4px 6px">Status</th><th style="padding:4px 6px">Well</th><th style="padding:4px 6px">Job</th><th style="padding:4px 6px">Pad</th><th style="padding:4px 6px">Start → End</th><th style="padding:4px 6px">Days</th><th style="padding:4px 6px">Site setup</th><th style="padding:4px 6px">Cleared</th><th style="padding:4px 6px">Stage</th><th style="padding:4px 6px">Story</th><th></th></tr></thead><tbody>${body || '<tr><td colspan="11" style="padding:10px;color:#777">Nothing yet.</td></tr>'}</tbody></table></div>`;
         const ha = host.querySelector('[data-rig-histall]'); if (ha) ha.onchange = () => { host.dataset.histAll = ha.checked ? '1' : '0'; rigRenderHistory(sid, host); };
         host.querySelectorAll('[data-rig-act]').forEach(b => { b.onclick = (e) => { e.stopPropagation(); const act = b.dataset.rigAct;
             if (act === 'view-live') { host.dataset.view = ''; rigRenderPanel(sid); }
