@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.393
+// @version      4.394
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.393';
+    const SCRIPT_VERSION = '4.394';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -30331,7 +30331,7 @@
     }
     function rigIssueChannelGet() {
         if (rigIssueChannel) return rigIssueChannel;
-        try { rigIssueChannel = new BroadcastChannel('AIM_VALIDATOR_ISSUES'); rigIssueChannel.onmessage = (ev) => { const m = ev.data || {}; if (m.type !== 'ISSUE_CREATED' || !m.ref) return; const sid = getCurrentSiteID(); const st = sid && rigStateLoad(sid); if (!st) return; const c = Object.values(st.rows).find(x => x.issueRef === m.ref); if (c) { c.issueId = m.id; rigStateSave(sid); rigRenderPanel(sid); } }; } catch (e) { console.warn(`${RIG_TAG} issue channel`, e); }
+        try { rigIssueChannel = new BroadcastChannel('AIM_VALIDATOR_ISSUES'); rigIssueChannel.onmessage = (ev) => { const m = ev.data || {}; if (m.type !== 'ISSUE_CREATED' || !m.ref) return; const sid = getCurrentSiteID(); const st = sid && rigStateLoad(sid); if (!st) return; const c = Object.values(st.rows).find(x => x.issueRef === m.ref); if (c) { c.issueId = m.id; c.issueStatus = 'created'; rigLog(sid, `issue ${m.id} created for ${c.well}`); rigStateSave(sid); rigRenderPanel(sid); } }; } catch (e) { console.warn(`${RIG_TAG} issue channel`, e); }
         return rigIssueChannel;
     }
     function rigIssueCreate(sid, c, pads, action) {
@@ -30340,7 +30340,11 @@
         c.issueRef = `rig-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
         const ms = (c.missions || []).map(m => `${m.name} (steps ${m.steps})`).join('; ') || 'none found';
         const note = `🏗 ${c.job || 'equipment'} on ${c.well} — pad ${pads.map(p => p.name).join(' + ')}\n${action}\nSheet: ${c.start || '?'} → ${c.end || 'open'} · source: ${c.source}${c.by ? ' (' + c.by + ')' : ''}\nMissions to REMOVE until clear: ${ms}`;
-        try { ch.postMessage({ type: 'ISSUE_CREATE', siteID: String(sid), ref: c.issueRef, shape: 'polygon', polygon: ring.map(p => [p.lat, p.lng]), note, priority: 'HIGH', notify: RIG_NOTIFY, source: 'rig' }); } catch (e) { console.warn(`${RIG_TAG} issue post failed`, e); }
+        c.issueStatus = 'pending';
+        try { ch.postMessage({ type: 'ISSUE_CREATE', siteID: String(sid), ref: c.issueRef, shape: 'polygon', polygon: ring.map(p => [p.lat, p.lng]), note, priority: 'HIGH', notify: RIG_NOTIFY, source: 'rig' }); rigLog(sid, `issue requested for ${c.well} (ref ${c.issueRef})`); }
+        catch (e) { c.issueStatus = 'failed'; console.warn(`${RIG_TAG} issue post failed`, e); }
+        // v4.394: AIM Issues must answer with ISSUE_CREATED — if it doesn't, say so loudly.
+        setTimeout(() => { if (c.issueStatus === 'pending') { c.issueStatus = 'no answer'; rigLog(sid, `⚠ AIM Issues did not create the issue for ${c.well} — is AIM Issues ≥ 1.43 installed and running on this site?`); showToast(`⚠ Issue NOT created for ${c.well} — AIM Issues ≥ 1.43 must be running on this site`, 'rgba(255,96,96,0.7)'); rigStateSave(sid); rigRenderPanel(sid); } }, 4000);
     }
     async function rigCutCommit(sid, c, plan, csrf, siteCfg, logL) {
         c.fpBackups = plan.map(x => ({ id: x.fp.id, name: x.fp.name || `#${x.fp.id}`, body: buildWriteBody(x.fp, siteCfg), arcs: x.fp.arcs.length, cut: x.cut.length }));
@@ -30455,7 +30459,7 @@
                 <td style="padding:3px 6px;color:${c.padId ? '#cfd6dc' : '#ff6060'}" title="${esc(c.how)}${c.flag ? ' · ' + esc(c.flag) : ''}">${c.padId ? esc(c.padName) : '—'}${c.flag ? ' <span style="color:#ffb347">⚠</span>' : ''}</td>
                 <td style="padding:3px 6px;color:#9aa;white-space:nowrap">${esc(c.start || '?')} → ${esc(c.end || '—')}${c.changes && c.changes.length ? ` <span style="color:#ffb347" title="${esc(c.changes.join('\n'))}">✎${c.changes.length}</span>` : ''}</td>
                 <td style="padding:3px 6px;color:#9aa;text-align:center" title="days since start">${days != null && days >= 0 && c.status !== 'upcoming' ? days : (days != null && days < 0 ? `<span style="color:#666">in ${-days} d</span>` : '')}</td>
-                <td style="padding:3px 6px;color:#9aa">${(() => { if (!c.padId || c.status === 'cleared') return ''; const d = rigFfzDesign(sid, c.padId); if (d.kind === 'custom') return `<span title="FFZ is a custom corridor (${Math.round(d.pct * 100)} % of its edge sits 15 ft off the pad) — the drone flies ON this pad, so no NFZ: the flight-path arcs inside ${d.pads.map(p => p.name).join(' + ')} get cut instead" style="color:#ff6060;cursor:help">✂ cut arcs${d.pads.length > 1 ? ` (${d.pads.length} pads)` : ''}</span> `; const g = rigGeometry(sid, c.padId); return g ? `<span title="${esc(g.note)}" style="color:${g.flag ? '#ffb347' : '#777'};cursor:help">${g.flag ? '⚠ whole FFZ' : 'NFZ'}</span> ` : ''; })()}${c.fpCut ? `<span style="color:#ff9a3d" title="${esc(c.fpCut.map(f => `${f.name}: −${f.cut} arcs, ${f.left} left`).join('\n'))}">${c.fpRestored ? 'restored' : `${c.fpCut.reduce((n, f) => n + f.cut, 0)} arcs cut`}</span>` : ''}${c.nfzName ? esc(c.nfzName) : ''}${c.pulled ? ` <span style="color:#ffb347" title="mission(s) pulled — restore when cleared">⛔ ${esc(c.pulled)}</span>` : ''}</td>
+                <td style="padding:3px 6px;color:#9aa">${(() => { if (!c.padId || c.status === 'cleared') return ''; const d = rigFfzDesign(sid, c.padId); if (d.kind === 'custom') return `<span title="FFZ is a custom corridor (${Math.round(d.pct * 100)} % of its edge sits 15 ft off the pad) — the drone flies ON this pad, so no NFZ: the flight-path arcs inside ${d.pads.map(p => p.name).join(' + ')} get cut instead" style="color:#ff6060;cursor:help">✂ cut arcs${d.pads.length > 1 ? ` (${d.pads.length} pads)` : ''}</span> `; const g = rigGeometry(sid, c.padId); return g ? `<span title="${esc(g.note)}" style="color:${g.flag ? '#ffb347' : '#777'};cursor:help">${g.flag ? '⚠ whole FFZ' : 'NFZ'}</span> ` : ''; })()}${c.fpCut ? `<span style="color:#ff9a3d" title="${esc(c.fpCut.map(f => `${f.name}: −${f.cut} arcs, ${f.left} left`).join('\n'))}">${c.fpRestored ? 'restored' : `${c.fpCut.reduce((n, f) => n + f.cut, 0)} arcs cut`}</span>` : ''}${c.nfzName ? esc(c.nfzName) : ''}${c.issueStatus ? ` <span style="color:${c.issueStatus === 'created' ? '#5fff5f' : c.issueStatus === 'pending' ? '#7adfe6' : '#ff6060'}" title="AIM Issue: ${esc(c.issueStatus)}${c.issueId ? ' ' + esc(c.issueId) : ''}">${c.issueStatus === 'created' ? '🚩' : c.issueStatus === 'pending' ? '🚩…' : '🚩✗'}</span>` : ''}${c.pulled ? ` <span style="color:#ffb347" title="mission(s) pulled — restore when cleared">⛔ ${esc(c.pulled)}</span>` : ''}</td>
                 <td style="padding:3px 6px;white-space:nowrap">${act}</td></tr>`;
         }).join('');
         host.innerHTML = `
@@ -30465,7 +30469,7 @@
                 <span style="color:#888;font-size:10px">drag & drop works · sheet day from the file name (Diamondback_Rig_Data_10.16.26.csv) · last ingest: <b style="color:#cfd6dc">${esc(st.day || 'never')}</b> · <span id="aim-rig-sync"></span> · <span id="aim-rig-feed"></span></span>
                 <span style="flex:1"></span>
                 <button data-rig-act="manual" style="background:none;border:1px solid #7adfe6;color:#7adfe6;border-radius:3px;padding:2px 8px;cursor:pointer;font-size:11px">👁 Add RPIC report</button>
-                <button data-rig-act="commit" style="background:rgba(255,154,61,0.18);border:1px solid #ff9a3d;color:#ffb060;border-radius:3px;padding:2px 10px;cursor:pointer;font-size:11px;font-weight:700">⬠ Create staged NFZs${cnt.staged ? ` (${cnt.staged})` : ''}</button>
+                <button data-rig-act="commit" style="background:rgba(255,154,61,0.18);border:1px solid #ff9a3d;color:#ffb060;border-radius:3px;padding:2px 10px;cursor:pointer;font-size:11px;font-weight:700">🛡 Protect staged${cnt.staged ? ` (${cnt.staged})` : ''}</button>
                 <label style="color:#888;font-size:10px;cursor:pointer"><input type="checkbox" data-rig-showcleared ${showCleared ? 'checked' : ''}> show cleared</label>
                 <label style="color:#888;font-size:10px;cursor:pointer" title="Rows with no pad on this site: off-site wells and wells with no GPS / no name match"><input type="checkbox" data-rig-hidenoise ${hideNoise ? 'checked' : ''}> hide off-site / unmatched</label>
                 <button data-rig-act="view-history" title="Every obstruction this site has had: stats, outcomes, re-stage" style="background:none;border:1px solid #555;color:#aaa;border-radius:3px;padding:2px 8px;cursor:pointer;font-size:11px">📜 History</button>
