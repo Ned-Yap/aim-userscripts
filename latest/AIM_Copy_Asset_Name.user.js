@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.405
+// @version      4.406
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.405';
+    const SCRIPT_VERSION = '4.406';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -15864,8 +15864,8 @@
     //     checkbox arms that shadow automatically over
     //     AIM_SITEDIFF_CTRL (Site Diff v0.61+)
     // ============================================================
-    const DELETABLE_TYPES = { 4: 'NFZ', 15: 'FP', 16: 'FFZ' };
-    const DELETE_ORDER = [4, 15, 16];
+    const DELETABLE_TYPES = { 4: 'NFZ', 15: 'FP', 16: 'FFZ', 3: 'Asset' };   // assets joined 2026-10-21 (client-confirmed removals ride the same ceremony)
+    const DELETE_ORDER = [4, 15, 16, 3];
     const DELETE_GAP_MS = 120;
     const BULKDEL_MODAL_ID = 'aim-ai-bulkdel-modal';
 
@@ -16022,7 +16022,7 @@
         const siteID = getCurrentSiteID();
         if (!siteID) { showToast('No site loaded', 'rgba(255,85,85,0.7)'); return; }
         if (!sumPanelState.selectedIds.size) {
-            showToast('Select rows first — ☑ the FFZs / FPs / NFZs to delete', 'rgba(255,85,85,0.7)');
+            showToast('Select rows first — ☑ the FFZs / FPs / NFZs / assets to delete', 'rgba(255,85,85,0.7)');
             return;
         }
         const old = document.getElementById(BULKDEL_MODAL_ID);
@@ -22976,11 +22976,12 @@
         dupMode: 'update',                          // v4.347: name matches an existing asset → 'skip' | 'update' (type + notes only) | 'copy' (create "-N")
         lastUpdated: [],                            // v4.347: [{id, before}] bodies from the last commit's updates — ↩ undo re-POSTs them
         ana: { movedFt: 200, scope: 'selected', result: null, tab: null },   // 📊 Analyze (quarterly compare)
+        resp: { rows: null, fileName: null, at: null, applied: false, tab: null, moves: [], renames: [], removeIds: [], removeNames: [] },   // 📬 Client response
         env: { apiCol: null, open: false, notes: true, checkedAt: null, summary: null, running: false, opFilter: '', mismatchFt: 300, scope: 'selected', includeOurs: false,
             missing: null, missingAt: null, missingOp: '', missingSel: new Set(), missStatus: { producing: true, drilled: true, inactive: true, plugged: false }, finding: false },   // v4.366: fill-in   // v4.356: Enverus cross-check · v4.358: client review report
         pri: { on: false, open: false, oilCol: null, waterCol: null, blpdCol: null, priCol: null, clusterFt: 100, padFt: 50, p1Min: 250, p1Max: 1500, summary: null, zeroUntier: true, envUntier: true },   // v4.347: priority tiers · v4.357: zero-production / Enverus-dead wells get no tier
         advOpen: false,                             // v4.331: ▸ Advanced (subset tools + delete mode) expanded — GM-remembered
-        secOpen: { bounds: true, data: true, type: false, place: false, env: false, create: true, adv: false },   // v4.352: collapsible sections — GM-remembered
+        secOpen: { bounds: true, data: true, type: false, place: false, env: false, resp: false, create: true, adv: false },   // v4.352: collapsible sections — GM-remembered
         mapOpen: false,                             // v4.331: column-mapping row expanded (auto-collapses once applied)
         // LIVE selection model (v4.250): selected = manual override ?? inside-any-shape.
         // Shapes are movable, so membership RECOMPUTES (impRecomputeSel) instead of
@@ -23031,7 +23032,8 @@
         { id: 'type', num: '3', title: 'Type & priority', color: '255,179,71' },
         { id: 'place', num: '4', title: 'Placement & flags', color: '255,95,255' },
         { id: 'env', num: '5', title: 'Enverus check', color: '255,214,102' },
-        { id: 'create', num: '6', title: 'Create / update', color: '95,255,95' },
+        { id: 'resp', num: '6', title: 'Client response', color: '126,200,255' },
+        { id: 'create', num: '7', title: 'Create / update', color: '95,255,95' },
         { id: 'adv', num: '', title: 'Advanced', color: '160,160,160' },
     ];
     function impSecOpenHtml(id) {
@@ -23077,6 +23079,8 @@
         const dupsIn = live.filter(p => p.sel && p.dup).length, upd = imp.dupMode === 'update' ? dupsIn : 0, tot = live.filter(p => p.sel && (!p.dup || imp.dupMode !== 'skip')).length;
         let dry = true; try { dry = !!document.getElementById('aim-gen-dryrun').checked; } catch (e) {}
         set('create', !imp.points.length ? 'after the data file' : `${tot - upd ? `create ${tot - upd}` : ''}${(tot - upd) && upd ? ' + ' : ''}${upd ? `update ${upd}` : ''}${!tot ? 'nothing selected' : ''} · ${impSizeFt} ft · ${dry ? '<span style="color:#5fff5f">dry run</span>' : '<b style="color:#ff6060">LIVE</b>'}${tot > IMP_BIG_BATCH ? ' · <span style="color:#ff6060">over the 1000 gate</span>' : ''}`);
+        const RS = imp.resp.rows;
+        set('resp', !imp.points.length ? 'after the data file' : (!RS ? 'load the client\'s answered review (xlsx / csv)' : `${impEsc(imp.resp.fileName || '')} · ${RS.length} rows${imp.resp.applied ? ' · <span style="color:#5fff5f">applied to staged</span>' : ' · <span style="color:#ffb347">not applied yet</span>'}${imp.resp.moves.length ? ` · ${imp.resp.moves.length} site move${imp.resp.moves.length === 1 ? '' : 's'}` : ''}${imp.resp.renames.length ? ` · ${imp.resp.renames.length} rename${imp.resp.renames.length === 1 ? '' : 's'}` : ''}${imp.resp.removeIds.length ? ` · <span style="color:#ff8a80">${imp.resp.removeIds.length} to delete</span>` : ''}`));
         const E = imp.env.summary;
         set('env', !imp.points.length ? 'after the data file' : (imp.env.running ? '⏳ checking…' : (!E ? `${impEnvKey() ? 'ready' : '<span style="color:#ff6060">key not set</span>'} · ${imp.env.apiCol ? `API = ${impEsc(imp.env.apiCol)}` : '<span style="color:#ffb347">pick the API column</span>'} · not run yet` : `<span style="color:#5fff5f">${E.producing} producing</span> · <span style="color:#ffb347">${E.inactive} inactive</span> · <span style="color:#ff6060">${E.plugged} plugged</span>${E.notFound ? ` · ${E.notFound} not found` : ''} · checked ${impEsc(imp.env.checkedAt || '')}`)));
         set('adv', `${imp.target === 'assets' ? '<b style="color:#ff8a80">🗑 delete mode ON</b> · ' : ''}pick single points · select all / clear · delete existing assets`);
@@ -23346,6 +23350,8 @@
     function impPriDemote(p) {
         const c = imp.pri; p.pri.untier = '';
         if (!p.pri.tier) return;
+        if (p.client && p.client.producing) return;                                   // the client confirmed it is producing — beats Enverus
+        if (p.client && (p.client.inactive || p.client.planned && !p.client.producing)) { p.pri.untier = 'client'; p.pri.tier = ''; return; }   // client says inactive / not yet drilled
         if (c.zeroUntier && !c.priCol && p.pri.blpd === 0) { p.pri.untier = 'zero'; p.pri.tier = ''; return; }
         if (c.envUntier && p.env && p.env.found) { const b = impEnvBucket(p.env); if (b === 'inactive' || b === 'plugged') { p.pri.untier = 'env'; p.pri.tier = ''; } }
     }
@@ -23355,7 +23361,7 @@
         const q = p.pri;
         const line = q.tier
             ? `${q.tier} · ${c.priCol ? 'from the client\'s priority column' : `pad total ${fmt(q.padTotal)} BLPD across ${q.padN} asset${q.padN === 1 ? '' : 's'}${q.padWith < q.padN ? ` (${q.padWith} with numbers)` : ''}`}${q.blpd != null ? ` · this asset ${fmt(q.blpd)} BLPD` : ''}${q.padName && !/^new pad/.test(q.padName) ? ` · pad ${q.padName}` : ''}`
-            : (q.untier === 'zero' ? 'not tiered — zero production (0 BLPD in the client list)' : (q.untier === 'env' ? `not tiered — Enverus reports ${p.env && p.env.status ? p.env.status : 'inactive'}` : `not tiered — ${q.flags[0] || 'no numbers'}`));
+            : (q.untier === 'client' ? `not tiered — client confirmed ${p.client && p.client.status ? p.client.status.toLowerCase() : 'inactive'}` : (q.untier === 'zero' ? 'not tiered — zero production (0 BLPD in the client list)' : (q.untier === 'env' ? `not tiered — Enverus reports ${p.env && p.env.status ? p.env.status : 'inactive'}` : `not tiered — ${q.flags[0] || 'no numbers'}`)));
         return [`Priority\n${line}`, `Prioritized\n${dateStr}`];
     }
     function impTierPrefix(p, subtype) {
@@ -23572,7 +23578,7 @@
     const IMP_STAMP_RE = /^Imported by (.+?) on (\d{4}-\d{2}-\d{2} \d{2}:\d{2}) from (.+?)(?: · (created|updated) by import)?\s*$/m;
     function impComposeNotes(p, when, how) {
         const r = imp.rows[p.i] || {};
-        const parts = [`Original name\n${p.rawName || p.name}`].concat(p.src === 'enverus' ? [`Source\nAdded from Enverus — not in the client's list (${imp.fileName || 'file'})`] : []).concat(impPriNotesBlocks(p, String(when).slice(0, 10))).concat(impEnvNotesBlock(p));
+        const parts = [`Original name\n${p.rawName || p.name}`].concat(p.src === 'enverus' ? [`Source\nAdded from Enverus — not in the client's list (${imp.fileName || 'file'})`] : []).concat(impClientNotesBlock(p)).concat(impPriNotesBlocks(p, String(when).slice(0, 10))).concat(impEnvNotesBlock(p));
         impNotesCols().forEach(c => { const v = String(r[c.col] == null ? '' : r[c.col]).trim(); if (v) parts.push(`${c.label || impCleanLabel(c.col)}\n${v}`); });
         parts.push(`Imported by ${impAuthor() || 'AIM user'} on ${when} from ${imp.fileName || 'file'} · ${how === 'update' ? 'updated' : 'created'} by import`);
         return parts.join('\n\n').slice(0, 2000);
@@ -23592,6 +23598,350 @@
             (m[4] === 'updated' ? groups.get(key).updated : groups.get(key).created).push(e);
         });
         return [...groups.values()].sort((a, b) => b.when.localeCompare(a.when));
+    }
+    // ---- 📬 CLIENT RESPONSE — the client's answered review comes back as the same sheet with
+    // "Diamondback response", "Correct coordinates", "Source", "Needs internal confirmation?" columns.
+    // Every row is classified (move / keep / keep-list / add / add-centroid / remove / remove-dup /
+    // status / rename / none / review), shown for verification, then applied to the STAGED points;
+    // changes to EXISTING assets (moves, renames) are queued for one dry-run-able write with undo,
+    // removals are handed to the standard Bulk → Delete. Rows the client still has to confirm, rows
+    // with two different coordinates, centroid guesses and anything unreadable are never applied.
+    // 📬 CLIENT RESPONSE parser — shared text between the offline test and the userscript patch.
+    // Input: rows as objects keyed by the sheet's header text. Output: one action per row.
+    function impRespCol(headers, rx) { return headers.find(h => rx.test(String(h))) || null; }
+    function impRespCoords(s) { const m = String(s || '').match(/(-?\d{1,3}\.\d{3,})\s*,\s*(-?\d{1,3}\.\d{3,})/); return m ? { lat: parseFloat(m[1]), lng: parseFloat(m[2]) } : null; }
+    function impRespClassify(r) {
+        const J = String(r.response || '').trim(), L = String(r.source || ''), M = String(r.confirm || '').trim();
+        const out = { action: 'review', coords: null, status: '', lastProd: '', reason: '', recommend: '', renames: [], confirm: /^yes/i.test(M), flags: [], note: '' };
+        const kc = impRespCoords(r.coordsK), jc = impRespCoords(J);
+        const st = J.match(/[Ss]tatus:? ([A-Z][A-Z \-\/]+?)(?=[,;.)(]| \(|$)/); if (st) out.status = st[1].trim().toUpperCase();
+        const pr = J.match(/([\d.,]+) BOPD \/ ([\d.,]+) BWPD/i); if (pr) { out.bopd = parseFloat(pr[1].replace(/,/g, '')); out.bwpd = parseFloat(pr[2].replace(/,/g, '')); }
+        const lp = J.match(/last production ([0-9]{4}-[0-9]{2}-[0-9]{2}|no recorded date)/i); if (lp) out.lastProd = lp[1];
+        const dr = J.match(/downtime reason: ([^.;]+)/i); if (dr) out.reason = dr[1].trim();
+        const rc = J.match(/Recommend ([^.]+)/i); if (rc) out.recommend = rc[1].trim();
+        if (/^UPDATE to/i.test(J)) {
+            if (/matches the list|list location/i.test(J)) { out.action = 'keep'; out.note = 'client says the coordinate in the list is right (their pasted coordinate is the public-records point, ignored)'; }
+            else { out.action = 'move'; out.coords = kc || jc; if (!out.coords) { out.action = 'review'; out.flags.push('UPDATE without a readable coordinate'); } }
+        } else if (/^USE the coordinates in the current list/i.test(J)) { out.action = 'keep-list'; out.coords = kc || jc; }
+        else if (/^ADD coordinates/i.test(J)) {
+            out.coords = kc || jc;
+            if (!out.coords) { out.action = 'review'; out.flags.push('ADD without a readable coordinate'); }
+            else if (/centroid/i.test(L) || /centroid of well locations/i.test(J)) { out.action = 'add-centroid'; out.note = 'a centroid guess, not a surface location — skipped on your instruction'; }
+            else out.action = 'add';
+        }
+        else if (/^REMOVE the duplicate row/i.test(J)) out.action = 'remove-dup';
+        else if (/^REMOVE/i.test(J)) { out.action = 'remove'; out.note = /sold/i.test(J) ? 'sold' : (/inactive/i.test(J) ? 'inactive' : ''); }
+        else if (/^CONFIRMED PRODUCING/i.test(J)) { out.action = 'status'; out.status = out.status || 'PRODUCING'; }
+        else if (/^CONFIRMED INACTIVE/i.test(J)) { out.action = 'status'; if (!out.status || out.status === 'PRODUCING') out.status = out.status === 'PRODUCING' ? 'PRODUCING (DOWN)' : 'INACTIVE'; out.inactive = true; }
+        else if (/^Zero (production|oil\/water) is correct/i.test(J)) { out.action = 'status'; out.zero = true; if (!out.status) out.status = 'ZERO PRODUCTION'; }
+        else if (/^RENAME/i.test(J)) {
+            out.action = 'rename';
+            const re = /'([^']+)' for API (\d{10})/g; let m; while ((m = re.exec(J))) out.renames.push({ name: m[1].trim(), api: m[2] });
+            if (!out.renames.length) { out.action = 'review'; out.flags.push('RENAME without parsable names'); }
+        }
+        else if (/^No change/i.test(J)) out.action = 'none';
+        else out.flags.push('response text not understood');
+        if (out.confirm) out.flags.push('they still need to confirm internally');
+        return out;
+    }
+    function impRespParseRows(rows, headers) {
+        const H = {
+            name: impRespCol(headers, /^asset/i), api: impRespCol(headers, /^api/i), finding: impRespCol(headers, /what we found/i), inList: impRespCol(headers, /^in your list/i),
+            response: impRespCol(headers, /response/i), coordsK: impRespCol(headers, /correct coord/i), source: impRespCol(headers, /^source/i), confirm: impRespCol(headers, /confirmation/i), importance: impRespCol(headers, /importance/i),
+        };
+        if (!H.name || !H.response) throw new Error('could not find the "Asset" and "Diamondback response" columns');
+        const out = [];
+        rows.forEach((row, i) => {
+            const name = String(row[H.name] || '').trim(); if (!name) return;
+            const r = { i, name, api: String(row[H.api] || '').replace(/\D/g, '').slice(0, 10), finding: String(row[H.finding] || ''), inList: String(row[H.inList] || ''), response: String(row[H.response] || ''), coordsK: String(row[H.coordsK] || ''), source: String(row[H.source] || ''), confirm: String(row[H.confirm] || ''), importance: String(row[H.importance] || '') };
+            Object.assign(r, impRespClassify(r));
+            r.listCoords = impRespCoords(r.inList);
+            r.planned = /^planned well/i.test(r.finding);                      // the finding, not the wording, says which rows are planned wells
+            if (r.planned && /PRODUCING/i.test(r.status)) r.plannedProducing = true;
+            out.push(r);
+        });
+        // conflicts: the same well with two different target coordinates → both become review
+        const byKey = new Map();
+        out.forEach(r => { if (!r.coords) return; const k = r.api || r.name.toUpperCase(); if (!byKey.has(k)) byKey.set(k, []); byKey.get(k).push(r); });
+        byKey.forEach(list => {
+            if (list.length < 2) return;
+            for (let a = 0; a < list.length; a++) for (let b = a + 1; b < list.length; b++) {
+                const d = Math.hypot((list[a].coords.lat - list[b].coords.lat) * 111320, (list[a].coords.lng - list[b].coords.lng) * 111320 * Math.cos(list[a].coords.lat * Math.PI / 180));
+                if (d > 10) { [list[a], list[b]].forEach(r => { if (r.action !== 'review') { r.prevAction = r.action; r.action = 'review'; } r.flags.push(`two different coordinates for this well in the response (${Math.round(d / 0.3048)} ft apart)`); }); }
+            }
+        });
+        return out;
+    }
+    // Minimal .xlsx reader (no library): central directory → entries → inflate via DecompressionStream('deflate-raw').
+    // Returns { sheets: [{ name, rows: [[cell,...], ...] }] } with cells as strings.
+    async function impXlsxRead(buf) {
+        const u8 = new Uint8Array(buf), dv = new DataView(buf);
+        let eocd = -1;
+        for (let i = u8.length - 22; i >= Math.max(0, u8.length - 65557); i--) { if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; } }
+        if (eocd < 0) throw new Error('not a zip / xlsx file');
+        const n = dv.getUint16(eocd + 10, true), cdOff = dv.getUint32(eocd + 16, true);
+        const entries = new Map(); let p = cdOff;
+        const td = new TextDecoder('utf-8');
+        for (let k = 0; k < n; k++) {
+            if (dv.getUint32(p, true) !== 0x02014b50) break;
+            const method = dv.getUint16(p + 10, true), csize = dv.getUint32(p + 20, true), usize = dv.getUint32(p + 24, true);
+            const fnLen = dv.getUint16(p + 28, true), exLen = dv.getUint16(p + 30, true), cmLen = dv.getUint16(p + 32, true), lho = dv.getUint32(p + 42, true);
+            const name = td.decode(u8.subarray(p + 46, p + 46 + fnLen));
+            entries.set(name, { method, csize, usize, lho });
+            p += 46 + fnLen + exLen + cmLen;
+        }
+        async function read(name) {
+            const e = entries.get(name); if (!e) return null;
+            const fnLen = dv.getUint16(e.lho + 26, true), exLen = dv.getUint16(e.lho + 28, true);
+            const start = e.lho + 30 + fnLen + exLen;
+            const data = u8.subarray(start, start + e.csize);
+            if (e.method === 0) return td.decode(data);
+            if (e.method !== 8) throw new Error(`unsupported zip method ${e.method}`);
+            const ds = new DecompressionStream('deflate-raw');
+            const out = new Response(new Blob([data]).stream().pipeThrough(ds));
+            return await out.text();
+        }
+        const unesc = (s) => String(s).replace(/<[^>]+>/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&#(\d+);/g, (m, d) => String.fromCharCode(+d)).replace(/&amp;/g, '&');
+        const ssXml = await read('xl/sharedStrings.xml');
+        const ss = ssXml ? [...ssXml.matchAll(/<si>([\s\S]*?)<\/si>/g)].map(m => unesc(m[1])) : [];
+        const wb = await read('xl/workbook.xml'); if (!wb) throw new Error('xl/workbook.xml missing');
+        const rels = await read('xl/_rels/workbook.xml.rels') || '';
+        const relMap = {}; [...rels.matchAll(/<Relationship\b[^>]*>/g)].forEach(m => { const t = m[0]; const id = (t.match(/Id="([^"]+)"/) || [])[1], tg = (t.match(/Target="([^"]+)"/) || [])[1]; if (id && tg) relMap[id] = tg; });
+        const sheets = [];
+        for (const m of wb.matchAll(/<sheet\b[^>]*>/g)) {
+            const t = m[0]; const name = unesc((t.match(/name="([^"]*)"/) || [])[1] || ''); const rid = (t.match(/r:id="([^"]+)"/) || [])[1];
+            let path = relMap[rid] || ''; if (!path) continue; path = path.startsWith('/') ? path.slice(1) : (path.startsWith('xl/') ? path : 'xl/' + path);
+            const xml = await read(path); if (!xml) continue;
+            const rows = [];
+            for (const rm of xml.matchAll(/<row\b[^>]*>([\s\S]*?)<\/row>/g)) {
+                const cells = [];
+                for (const cm of rm[1].matchAll(/<c r="([A-Z]+)(\d+)"([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g)) {
+                    const col = cm[1], attrs = cm[3] || '', inner = cm[4] || '';
+                    let idx = 0; for (const ch of col) idx = idx * 26 + (ch.charCodeAt(0) - 64); idx -= 1;
+                    const v = inner.match(/<v>([\s\S]*?)<\/v>/); const t = attrs.match(/t="([a-z]+)"/);
+                    let val = '';
+                    if (v) val = (t && t[1] === 's') ? (ss[+v[1]] || '') : unesc(v[1]);
+                    else { const is = inner.match(/<is>([\s\S]*?)<\/is>/); if (is) val = unesc(is[1]); }
+                    while (cells.length < idx) cells.push('');
+                    cells[idx] = val;
+                }
+                rows.push(cells);
+            }
+            sheets.push({ name, rows });
+        }
+        return { sheets };
+    }
+    const IMP_RESP_LABEL = { move: 'Move to the corrected location', keep: 'Keep the list coordinate (client confirmed)', 'keep-list': 'Our map is off — move our asset to the list coordinate', add: 'Add coordinates (row had none)', 'add-centroid': 'Centroid guess — skipped', remove: 'Remove from the inspection list', 'remove-dup': 'Drop the duplicate row', status: 'Status confirmed', rename: 'Rename (battery tiebreaker)', none: 'No change', review: 'Needs a human look' };
+    const IMP_RESP_COLOR = { move: '#ffb347', keep: '#5fff5f', 'keep-list': '#ffb347', add: '#7adfe6', 'add-centroid': '#888', remove: '#ff8a80', 'remove-dup': '#ff8a80', status: '#ffe14d', rename: '#c39bd3', none: '#5fff5f', review: '#ff5252' };
+    function impRespLoad(file) {
+        const name = file.name || 'response';
+        const done = (headers, rows) => {
+            const parsed = impRespParseRows(rows, headers);
+            if (!parsed.length) throw new Error('no rows with an asset name');
+            imp.resp.rows = parsed; imp.resp.fileName = name; imp.resp.at = impNowStamp(); imp.resp.applied = false; imp.resp.tab = null;
+            imp.resp.moves = []; imp.resp.renames = []; imp.resp.removeIds = []; imp.resp.removeNames = [];
+            impRespCrossRef();
+            impMarkDirty(); impRenderRespUi(); impSyncUi();
+            const c = impRespCounts();
+            impStatus(`📬 ${impEsc(name)}: ${parsed.length} rows read — ${c.move || 0} move · ${(c.keep || 0) + (c['keep-list'] || 0)} keep · ${c.add || 0} add · ${c.remove || 0} remove · ${c.status || 0} status · ${c.rename || 0} rename${c.review ? ` · <b style="color:#ff5252">${c.review} need a look</b>` : ''} — check the lists, then ✔ Apply`);
+        };
+        const rd = new FileReader();
+        if (/\.xlsx$/i.test(name)) {
+            rd.onload = () => { impXlsxRead(rd.result).then(wb => {
+                const sh = wb.sheets.find(x => x.rows.some(r => r.some(c => /what we found/i.test(c)) && r.some(c => /response/i.test(c)))) || wb.sheets[0];
+                const hi = sh.rows.findIndex(r => r.some(c => /what we found/i.test(c)) && r.some(c => /response/i.test(c)));
+                if (hi < 0) throw new Error('no sheet with "What we found" + "response" headers');
+                const headers = sh.rows[hi]; const rows = sh.rows.slice(hi + 1).map(r => Object.fromEntries(headers.map((h, i) => [h, r[i] || ''])));
+                done(headers, rows);
+            }).catch(e => { console.warn(`${TAG} 📬 xlsx:`, e); impStatus(`📬 could not read the workbook: ${impEsc(e && e.message || e)} — export the sheet as CSV and load that`, '#ff6060'); }); };
+            rd.onerror = () => impStatus('📬 file read failed', '#ff6060');
+            rd.readAsArrayBuffer(file);
+        } else {
+            rd.onload = () => { try { const p = impParseCsv(String(rd.result || '')); const hi = 0; done(p.headers, p.rows); } catch (e) { console.warn(`${TAG} 📬 csv:`, e); impStatus(`📬 could not read the CSV: ${impEsc(e && e.message || e)}`, '#ff6060'); } };
+            rd.onerror = () => impStatus('📬 file read failed', '#ff6060');
+            rd.readAsText(file);
+        }
+    }
+    function impRespCounts() { const c = {}; (imp.resp.rows || []).forEach(r => { c[r.action] = (c[r.action] || 0) + 1; }); return c; }
+    function impRespPointFor(r) {
+        const live = imp.points.filter(p => !p.done || p.removed);
+        if (r.api) { const byApi = live.find(p => impEnvApiOf(p) === r.api); if (byApi) return byApi; }
+        const k = impNormName(r.name);
+        return live.find(p => impNormName(p.rawName || p.name) === k) || null;
+    }
+    function impRespAssetFor(r, p) {
+        if (p && p.dup && p.dupId != null) return (imp.assetIndex || []).find(a => a.id === p.dupId) || null;
+        const k = (genCleanName(r.name) || '').toLowerCase();
+        return (imp.assetIndex || []).find(a => a.clean === k) || null;
+    }
+    // cross-reference every coordinate the client gave with the Enverus pin we already have (cross-check) — > 300 ft = look
+    function impRespCrossRef() {
+        (imp.resp.rows || []).forEach(r => {
+            r.envFt = null; r.siteFt = null;
+            const p = impRespPointFor(r);
+            if (r.coords && p && p.env && p.env.found && isFinite(p.env.lat)) r.envFt = Math.round(approxMeters(r.coords.lat, r.coords.lng, p.env.lat, p.env.lng) / GEN_FT_TO_M);
+            const a = impRespAssetFor(r, p);
+            if (r.coords && a) r.siteFt = Math.round(approxMeters(r.coords.lat, r.coords.lng, a.centroid.lat, a.centroid.lng) / GEN_FT_TO_M);
+            if (r.action === 'move' && r.envFt != null && r.envFt > 300) { r.flags.push(`client coordinate is ${r.envFt.toLocaleString()} ft from the Enverus pin — check before moving`); r.look = true; }
+            r.hasPoint = !!p; r.onSite = !!a; r.assetName = a ? a.name : '';
+        });
+    }
+    function impRespApplyStaged() {
+        const R = imp.resp; if (!R.rows) return;
+        if (!imp.assetIndex) impBuildAssetIndex();
+        const moves = [], renames = [], removeIds = new Set(), removeNames = [];
+        let nMoved = 0, nAdded = 0, nRemoved = 0, nStatus = 0, nRenamed = 0, nSkipped = 0;
+        const m = imp.mapping || {};
+        const setClient = (p, r, extra) => { p.client = Object.assign({ action: r.action, status: r.status, lastProd: r.lastProd, reason: r.reason, recommend: r.recommend, source: r.source, file: R.fileName, at: R.at, zero: !!r.zero, inactive: !!r.inactive, producing: /PRODUCING/.test(r.status || '') && !r.zero && !r.inactive, planned: !!r.planned }, extra || {}); };
+        const addPoint = (r, coords) => {
+            const inv = (imp.invalidRows || []).find(x => impNormName(x.name) === impNormName(r.name));
+            const i = inv ? inv.i : null;
+            let row; if (i != null) row = imp.rows[i]; else { row = {}; imp.headers.forEach(h => { row[h] = ''; }); if (m.name) row[m.name] = r.name; if (m.type) row[m.type] = r.planned ? 'PLANNED WELL' : ''; imp.rows.push(row); }
+            const idx = i != null ? i : imp.rows.length - 1;
+            if (m.lat) row[m.lat] = String(coords.lat); if (m.lng) row[m.lng] = String(coords.lng);
+            if (r.api && imp.env.apiCol && !row[imp.env.apiCol]) row[imp.env.apiCol] = r.api;
+            const p = { i: idx, name: r.name, rawName: r.name, lat: coords.lat, lng: coords.lng, typeRaw: m.type ? (row[m.type] || '').trim() : '', notes: '', sel: false, dup: false, dupWhy: '', child: null, near: null, done: false, src: 'client' };
+            imp.points.push(p);
+            if (inv) imp.invalidRows = imp.invalidRows.filter(x => x !== inv);
+            return p;
+        };
+        R.rows.forEach(r => {
+            if (r.confirm || r.action === 'review' || r.action === 'add-centroid' || r.action === 'none') { nSkipped++; return; }
+            let p = impRespPointFor(r);
+            const a = impRespAssetFor(r, p);
+            if (r.action === 'move' || r.action === 'keep-list' || r.action === 'add') {
+                const target = r.action === 'keep-list' ? (r.listCoords || r.coords) : r.coords;
+                if (!target) { nSkipped++; return; }
+                if (!p && r.action !== 'move') p = addPoint(r, target);
+                if (!p) { nSkipped++; return; }
+                if (r.action !== 'keep-list') { if (!p.orig) p.orig = { lat: p.lat, lng: p.lng }; p.lat = target.lat; p.lng = target.lng; if (r.action === 'move') nMoved++; else nAdded++; }
+                setClient(p, r, { coords: target });
+                if (r.bopd != null && imp.pri.oilCol) imp.rows[p.i][imp.pri.oilCol] = String(r.bopd);
+                if (r.bwpd != null && imp.pri.waterCol) imp.rows[p.i][imp.pri.waterCol] = String(r.bwpd);
+                if (a && approxMeters(target.lat, target.lng, a.centroid.lat, a.centroid.lng) > 3) moves.push({ id: a.id, name: a.name, from: { lat: a.centroid.lat, lng: a.centroid.lng }, to: target, why: r.action === 'keep-list' ? 'client confirmed the list coordinate' : (r.source || 'client'), look: !!r.look, p });
+                return;
+            }
+            if (r.action === 'remove' || r.action === 'remove-dup') {
+                if (r.action === 'remove-dup') { const k = impNormName(r.name); const pair = imp.points.filter(q => !q.done && impNormName(q.rawName || q.name) === k); const victim = pair.find(q => /-DUP\d*$/.test(q.name)) || pair[1]; if (victim) { victim.removed = true; victim.done = true; victim.sel = false; setClient(victim, r); nRemoved++; } return; }
+                if (p) { p.removed = true; p.done = true; p.sel = false; setClient(p, r); nRemoved++; }
+                if (a) { removeIds.add(a.id); removeNames.push(a.name); }
+                return;
+            }
+            if (r.action === 'status') { if (p) { setClient(p, r); nStatus++; } return; }
+            if (r.action === 'rename') {
+                r.renames.forEach(x => {
+                    const q = imp.points.find(z => !z.done && impEnvApiOf(z) === x.api) || null;
+                    if (q) { const from = q.name; q.name = x.name; setClient(q, r, { renamedFrom: from, renamedTo: x.name }); nRenamed++; const aa = (imp.assetIndex || []).find(z => z.clean === (genCleanName(from) || '').toLowerCase() || z.clean === (genCleanName(q.rawName || from) || '').toLowerCase()); if (aa) renames.push({ id: aa.id, from: aa.name, to: genCleanName(x.name) || x.name }); }
+                });
+                return;
+            }
+            if (r.action === 'keep') { if (p) setClient(p, r); return; }
+        });
+        R.moves = moves; R.renames = renames.filter((x, i, arr) => arr.findIndex(y => y.id === x.id) === i); R.removeIds = [...removeIds]; R.removeNames = removeNames; R.applied = true;
+        imp._rootCache = null;
+        impBuildAssetIndex(); impComputeDups(); impRecomputeSel();
+        impRenderStaged(); impRenderShapes(); impRenderTypeMapUi(); impRenderMappingUi();
+        try { impRenderPriUi(); } catch (e) {}
+        impMarkDirty(); impSyncUi(); impRenderRespUi();
+        impStatus(`✔ client response applied to the staged points: ${nMoved} moved · ${nAdded} added with coordinates · ${nRemoved} removed from the import · ${nStatus} statuses · ${nRenamed} renamed · ${nSkipped} left alone (review / needs their confirmation / centroid / no change). Site side: <b>${moves.length}</b> asset move${moves.length === 1 ? '' : 's'}, <b>${R.renames.length}</b> rename${R.renames.length === 1 ? '' : 's'}, <b>${R.removeIds.length}</b> to delete — see below.`);
+    }
+    async function impRespApplySite() {
+        const R = imp.resp; const sid = genState.siteID;
+        if (!R.applied) { impStatus('✔ Apply to staged first', '#ffb347'); return; }
+        if (liteBlockedWrite('apply client corrections')) return;
+        const moves = R.moves.filter(x => !x.look), looks = R.moves.filter(x => x.look), renames = R.renames;
+        if (!moves.length && !renames.length) { impStatus('Nothing to write to the site from this response', '#5fff5f'); return; }
+        const dry = (() => { try { return !!document.getElementById('aim-gen-dryrun').checked; } catch (e) { return true; } })();
+        if (dry) { impStatus(`DRY RUN — would move <b>${moves.length}</b> existing asset${moves.length === 1 ? '' : 's'} (polygon slid to the client's coordinate, shape kept)${looks.length ? ` (${looks.length} held back for a look)` : ''} and rename <b>${renames.length}</b>: ${impEsc(moves.slice(0, 6).map(x => `${x.name} → ${Math.round(approxMeters(x.from.lat, x.from.lng, x.to.lat, x.to.lng) / GEN_FT_TO_M).toLocaleString()} ft`).concat(renames.slice(0, 4).map(x => `${x.from} → ${x.to}`)).join(' · '))}${moves.length + renames.length > 10 ? ' …' : ''}. Untick Dry run to write.`); return; }
+        const csrf = getCsrfToken(); if (!csrf) { impStatus('No CSRF token — make one native save anywhere in Percepto first, then retry', '#ff6060'); return; }
+        if (!confirm(`Write to the site: move ${moves.length} existing asset(s) to the client's corrected coordinates (shape kept) and rename ${renames.length}?\n\nA backup of each asset downloads first; ↩ Undo last import puts them back.`)) return;
+        try { await fetchMapObjects(sid, true); } catch (e) {}
+        const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || []; const byId = new Map(ents.map(e => [e.id, e]));
+        let siteCfg = null; try { siteCfg = await fetchSiteConfig(sid); } catch (e) {}
+        if (!siteCfg) { impStatus('Could not read the site config — nothing written', '#ff6060'); return; }
+        const plan = [];
+        moves.forEach(x => { const e = byId.get(x.id); if (!e) return; const ring = entityCoords(e); if (!ring || ring.length < 3) return; const c = ringCentroid(ring); const dl = x.to.lat - c.lat, dg = x.to.lng - c.lng; plan.push({ kind: 'move', e, name: e.name, points: ring.map(v => ({ lat: v.lat + dl, lng: v.lng + dg })) }); });
+        renames.forEach(x => { const e = byId.get(x.id); if (!e) return; plan.push({ kind: 'rename', e, name: x.to, newName: x.to }); });
+        try { downloadJSONFile(`client-corrections-${sid}-${Date.now()}.json`, JSON.stringify({ site: sid, file: R.fileName, at: new Date().toISOString(), before: plan.map(x => x.e), plan: plan.map(x => ({ id: x.e.id, kind: x.kind, name: x.name, points: x.points || null })) }, null, 1)); } catch (e) {}
+        let ok = 0, fail = 0; const done = [];
+        for (let i = 0; i < plan.length; i++) {
+            const x = plan[i];
+            impStatus(`${x.kind === 'move' ? 'moving' : 'renaming'} ${i + 1}/${plan.length} — "${impEsc(x.e.name)}"…`);
+            const body = buildWriteBody(x.e, siteCfg);
+            if (x.kind === 'move') body.points = x.points; else body.name = x.newName;
+            let st = 0, raw = '';
+            try { const rr = await fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) }); st = rr.status; raw = await rr.text(); } catch (e) { raw = String(e && e.message || e); }
+            if (st === 200) { ok++; done.push({ id: x.e.id, name: x.e.name, before: JSON.parse(JSON.stringify(x.e)) }); }
+            else { fail++; console.warn(`${TAG} 📬 ${x.kind} "${x.e.name}" failed: ${st} ${raw.slice(0, 200)}`); if (st === 403) { impStatus(`ABORTED — server 403 at ${i + 1}/${plan.length}`, '#ff6060'); break; } }
+            await sleep(DELETE_GAP_MS);
+        }
+        imp.lastUpdated = (imp.lastUpdated || []).concat(done);
+        try { await fetchMapObjects(sid, true); } catch (e) {}
+        imp._rootCache = null; impBuildAssetIndex(); impComputeDups(); impRefreshAfterSelChange();
+        R.moves = R.moves.filter(x => !done.some(d => d.id === x.id)); R.renames = R.renames.filter(x => !done.some(d => d.id === x.id));
+        try { impSaveSession('client-corrections'); } catch (e) {}
+        impRenderRespUi(); impSyncUi();
+        impStatus(`📬 site updated: <b>${ok}</b> written${fail ? `, <span style="color:#ff6060">${fail} failed</span>` : ''} — backup downloaded · ↩ Undo last import reverts them`, fail ? '#ffb347' : '#5fff5f');
+    }
+    function impRespQueueDeletes() {
+        const R = imp.resp; if (!R.removeIds.length) { impStatus('No on-site assets to delete from this response', '#ffb347'); return; }
+        try { sumPanelState.selectedIds.clear(); R.removeIds.forEach(id => sumPanelState.selectedIds.add(String(id))); } catch (e) { impStatus('Could not pre-select in SUM', '#ff6060'); return; }
+        impStatus(`🗑 ${R.removeIds.length} asset(s) selected in SUM — the standard Bulk → Delete opens now with its checks and the 5-second slide (sold / inactive per the client).`);
+        try { openBulkDeleteModal(); } catch (e) { console.warn(`${TAG} 📬 bulk delete open:`, e); impStatus('Open SUM → Bulk → Delete to finish (the rows are selected)', '#ffb347'); }
+    }
+    function impRenderRespUi() {
+        const el = document.getElementById('aim-imp-resp'); if (!el) return;
+        const R = imp.resp;
+        if (!imp.points.length) { el.innerHTML = `<div style="font-size:10px;color:#888">after the data file — load the client's answered review here</div>`; return; }
+        const btn = (col, extra) => `background:rgba(${col},0.12);color:rgb(${col});border:1px solid rgba(${col},0.5);border-radius:3px;padding:4px 12px;cursor:pointer;font:inherit;font-size:11px${extra || ''}`;
+        const cnt = impRespCounts();
+        const order = ['review', 'move', 'keep-list', 'keep', 'add', 'add-centroid', 'status', 'rename', 'remove', 'remove-dup', 'none'];
+        if (!R.tab || !cnt[R.tab]) R.tab = order.find(k => cnt[k]) || 'move';
+        const chip = (k) => { const n = cnt[k] || 0; if (!n) return ''; const on = R.tab === k; const col = IMP_RESP_COLOR[k]; return `<button data-impresp-tab="${k}" title="${impEsc(IMP_RESP_LABEL[k])}" style="background:${on ? col + '33' : 'transparent'};border:1px solid ${col}${on ? 'cc' : '55'};color:${col};border-radius:10px;padding:1px 8px;cursor:pointer;font:inherit;font-size:10px;font-weight:${on ? 700 : 400}">${impEsc(IMP_RESP_LABEL[k])} ${n}</button>`; };
+        const rows = (R.rows || []).filter(r => r.action === R.tab);
+        const detail = (r) => {
+            const bits = [];
+            if (r.coords) bits.push(`→ ${r.coords.lat.toFixed(6)}, ${r.coords.lng.toFixed(6)}`);
+            if (r.siteFt != null) bits.push(`${r.siteFt.toLocaleString()} ft from our asset`);
+            if (r.envFt != null) bits.push(`${r.envFt.toLocaleString()} ft from Enverus`);
+            if (r.status) bits.push(r.status.toLowerCase());
+            if (r.lastProd) bits.push(`last prod ${r.lastProd}`);
+            if (r.reason) bits.push(r.reason.toLowerCase());
+            if (r.renames.length) bits.push(r.renames.map(x => `${x.name} [${x.api}]`).join(' / '));
+            if (r.note) bits.push(r.note);
+            if (r.planned) bits.push(r.plannedProducing || r.bopd != null ? 'planned, already producing' : 'planned');
+            if (!r.hasPoint && !r.onSite) bits.push('not in the staged list');
+            else if (r.onSite) bits.push(`on site as "${r.assetName}"`);
+            return bits.join(' · ');
+        };
+        const row = (r, i) => `<div data-impresp-row="${i}" style="display:flex;align-items:center;gap:6px;padding:1px 4px;border-bottom:1px solid rgba(255,255,255,0.05);font-size:10.5px;color:${r.confirm ? '#8a949e' : '#cfd6dc'};cursor:pointer" onmouseover="this.style.background='rgba(255,255,255,0.05)'" onmouseout="this.style.background=''" title="click = zoom to the coordinate"><span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${IMP_RESP_COLOR[r.action]};flex:none"></span><b style="flex:none;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${impEsc(r.name)}</b>${r.confirm ? '<span style="color:#ffb347;flex:none" title="they still need to confirm internally — not applied">⏳</span>' : ''}${r.flags.length ? `<span style="color:#ff5252;flex:none" title="${impEsc(r.flags.join(' · '))}">⚠</span>` : ''}<span style="color:#8a949e;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${impEsc(detail(r))}</span><span data-impresp-info="${i}" title="${impEsc(r.response)}${r.flags.length ? '\n\n⚠ ' + impEsc(r.flags.join('\n⚠ ')) : ''}" style="flex:none;width:14px;height:14px;line-height:12px;text-align:center;border:1px solid rgba(122,223,230,0.5);border-radius:50%;color:#7adfe6;font-size:9px;font-weight:700;cursor:help">i</span></div>`;
+        const skipped = (R.rows || []).filter(r => r.confirm || r.action === 'review' || r.action === 'add-centroid').length;
+        el.innerHTML = `<div style="padding:6px 8px;background:rgba(126,200,255,0.05);border:1px dashed rgba(126,200,255,0.4);border-radius:3px;font-size:11px;color:#cfd6dc">
+            <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:6px">
+                <button id="aim-imp-resp-load" style="${btn('126,200,255')}">📬 Load the client's response (xlsx / csv)</button>
+                <span style="color:#888;font-size:10px">${R.rows ? `${impEsc(R.fileName)} · ${R.rows.length} rows · read ${impEsc(R.at)}` : 'the review sheet they sent back, with their answers in the "Diamondback response" / "Correct coordinates" / "Needs internal confirmation?" columns'}</span>
+                <span style="flex:1"></span>
+                ${R.rows ? `<button id="aim-imp-resp-apply" ${R.applied ? 'disabled' : ''} style="${btn('95,255,95', ';font-weight:600' + (R.applied ? ';opacity:0.45;cursor:default' : ''))}">${R.applied ? '✔ applied to staged' : '✔ Apply to the staged points'}</button>` : ''}
+            </div>
+            ${R.rows ? `<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:4px">${order.map(chip).join('')}</div>
+            <div style="font-size:10px;color:#888;margin-bottom:3px">${impEsc(IMP_RESP_LABEL[R.tab])} · click a row to zoom · ⓘ = their full answer · ⏳ = waiting on their internal confirmation (never applied) · ⚠ = look before trusting${skipped ? ` · <b style="color:#ffb347">${skipped}</b> row${skipped === 1 ? '' : 's'} will not be applied automatically` : ''}</div>
+            <div style="max-height:220px;overflow:auto;border:1px solid rgba(255,255,255,0.06);border-radius:3px;background:rgba(0,0,0,0.15)">${rows.map((r, i) => row(r, i)).join('') || '<div style="padding:6px;color:#888;font-size:10px">none</div>'}</div>
+            ${R.applied ? `<div style="margin-top:8px;padding-top:6px;border-top:1px dashed rgba(126,200,255,0.3)">
+                <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center"><b style="color:#7ec8ff">🏷 Changes to EXISTING assets on the site</b><span style="color:#888;font-size:10px">${R.moves.length} move${R.moves.length === 1 ? '' : 's'} (polygon slid to the corrected coordinate, shape kept) · ${R.renames.length} rename${R.renames.length === 1 ? '' : 's'} (same id, missions unaffected) · ${R.removeIds.length} to delete (sold / inactive per the client)</span><span style="flex:1"></span>
+                    ${(R.moves.length || R.renames.length) ? `<button id="aim-imp-resp-site" style="${btn('255,179,71', ';font-weight:600')}">🏷 Apply moves + renames to the site</button>` : ''}
+                    ${R.removeIds.length ? `<button id="aim-imp-resp-del" style="${btn('255,85,85', ';font-weight:600')}">🗑 Select the ${R.removeIds.length} for Bulk → Delete</button>` : ''}
+                </div>
+                ${R.moves.length ? `<div style="max-height:150px;overflow:auto;margin-top:4px;border:1px solid rgba(255,255,255,0.06);border-radius:3px;background:rgba(0,0,0,0.15)">${R.moves.map((x, i) => `<div data-impresp-move="${i}" style="display:flex;gap:6px;align-items:center;padding:1px 4px;border-bottom:1px solid rgba(255,255,255,0.05);font-size:10.5px;color:#cfd6dc;cursor:pointer" title="click = zoom (both spots pulse)"><span style="color:${x.look ? '#ff5252' : '#ffb347'};flex:none">${x.look ? '⚠' : '↔'}</span><b style="flex:none">${impEsc(x.name)}</b><span style="color:#8a949e;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${Math.round(approxMeters(x.from.lat, x.from.lng, x.to.lat, x.to.lng) / GEN_FT_TO_M).toLocaleString()} ft · ${impEsc(x.why)}${x.look ? ' · held back: Enverus disagrees — check it first' : ''}</span></div>`).join('')}</div>` : ''}
+                ${R.removeNames.length ? `<div style="font-size:10px;color:#ff8a80;margin-top:4px">to delete: ${impEsc(R.removeNames.slice(0, 12).join(' · '))}${R.removeNames.length > 12 ? ` … +${R.removeNames.length - 12}` : ''}</div>` : ''}
+            </div>` : ''}` : ''}
+        </div>`;
+        el.querySelector('#aim-imp-resp-load').onclick = () => { const inp = document.createElement('input'); inp.type = 'file'; inp.accept = '.xlsx,.csv,.txt'; inp.onchange = () => { const f = inp.files && inp.files[0]; if (f) { try { impRespLoad(f); } catch (e) { impStatus(`📬 ${impEsc(e && e.message || e)}`, '#ff6060'); } } }; inp.click(); };
+        const ap = el.querySelector('#aim-imp-resp-apply'); if (ap) ap.onclick = () => { try { impRespApplyStaged(); } catch (e) { console.warn(`${TAG} 📬 apply:`, e); impStatus(`📬 apply failed: ${impEsc(e && e.message || e)}`, '#ff6060'); } };
+        const st = el.querySelector('#aim-imp-resp-site'); if (st) st.onclick = () => { impRespApplySite().catch(e => { console.warn(`${TAG} 📬 site:`, e); impStatus(`📬 site write failed: ${impEsc(e && e.message || e)}`, '#ff6060'); }); };
+        const dl = el.querySelector('#aim-imp-resp-del'); if (dl) dl.onclick = () => impRespQueueDeletes();
+        el.querySelectorAll('[data-impresp-tab]').forEach(b => b.onclick = () => { R.tab = b.getAttribute('data-impresp-tab'); impRenderRespUi(); });
+        el.querySelectorAll('[data-impresp-row]').forEach(d => d.onclick = (ev) => { if (ev.target.closest('[data-impresp-info]')) return; const r = rows[Number(d.getAttribute('data-impresp-row'))]; if (!r) return; const pts = []; if (r.coords) pts.push({ lat: r.coords.lat, lng: r.coords.lng, name: `${r.name} (client)` }); if (r.listCoords) pts.push({ lat: r.listCoords.lat, lng: r.listCoords.lng, name: `${r.name} (list)` }); const p = impRespPointFor(r); if (p && p.env && p.env.found && isFinite(p.env.lat)) pts.push({ lat: p.env.lat, lng: p.env.lng, name: `${r.name} (Enverus)` }); const a = impRespAssetFor(r, p); if (a) pts.push({ lat: a.centroid.lat, lng: a.centroid.lng, name: `${a.name} (on site)` }); if (!pts.length && p) pts.push({ lat: p.lat, lng: p.lng, name: p.name }); if (pts.length) impZoomToPoints(pts, r.name); impStatus(`🔎 ${impEsc(r.name)} — ${impEsc(IMP_RESP_LABEL[r.action])}: ${impEsc(r.response.slice(0, 160))}`); });
+        el.querySelectorAll('[data-impresp-move]').forEach(d => d.onclick = () => { const x = R.moves[Number(d.getAttribute('data-impresp-move'))]; if (!x) return; impZoomToPoints([{ lat: x.from.lat, lng: x.from.lng, name: `${x.name} (now)` }, { lat: x.to.lat, lng: x.to.lng, name: `${x.name} (client)` }], x.name); });
     }
     // ---- 📊 ANALYZE — what would change if this list were applied, before anything is written.
     // Compares the loaded list (selected points or the whole file) with the site: NEW (not on the
@@ -23740,6 +24090,18 @@
         impStatus(`🗑 ${ok} deleted${fail ? `, <span style="color:#ff6060">${fail} failed</span>` : ''} — undo file downloaded (the deleted assets' full records)`, fail ? '#ffb347' : '#5fff5f');
         showToast(fail ? `Undo: ${ok} deleted, ${fail} failed` : `✓ ${ok} imported asset(s) deleted`, fail ? 'rgba(255,96,96,0.55)' : undefined);
     }
+    function impClientNotesBlock(p) {
+        const c = p.client; if (!c) return [];
+        const bits = [];
+        if (c.action === 'move' || c.action === 'add') bits.push(`location ${c.action === 'move' ? 'corrected' : 'supplied'} by the client${c.source ? ` (${c.source})` : ''}`);
+        if (c.action === 'keep' || c.action === 'keep-list') bits.push('location confirmed by the client');
+        if (c.renamedFrom) bits.push(`renamed from "${c.renamedFrom}" at the client's request`);
+        if (c.status) bits.push(`status ${c.status}${c.lastProd ? ` · last production ${c.lastProd}` : ''}${c.reason ? ` · ${c.reason.toLowerCase()}` : ''}`);
+        if (c.recommend) bits.push(`client recommends ${c.recommend}`);
+        if (c.planned) bits.push(c.producing ? 'planned well, already producing' : 'planned well');
+        if (!bits.length) return [];
+        return [`Client response\n${bits.join(' · ')} · ${c.file || 'response'} · ${c.at || ''}`];
+    }
     function impNowStamp() { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; }
     function impRenderNotesCols(host) {
         const el = host.querySelector('#aim-imp-notescols'); if (!el) return;
@@ -23824,6 +24186,7 @@
                 imp.rows = parsed.rows;
                 imp.lastSavedAt = null;
                 imp.pri._guessed = false; imp.pri.summary = null; imp._secAdvanced = false;
+                imp.resp = { rows: null, fileName: null, at: null, applied: false, tab: null, moves: [], renames: [], removeIds: [], removeNames: [] };
                 imp.env._guessed = false; imp.env.summary = null; imp.env.checkedAt = null;
                 try { impRenderResumeUi(); } catch (e) {}
                 imp.siteID = genState.siteID;
@@ -24857,6 +25220,9 @@
             ${impSecOpenHtml('env')}
             <div id="aim-imp-env" style="margin-bottom:4px"></div>
             ${IMP_SEC_CLOSE}
+            ${impSecOpenHtml('resp')}
+            <div id="aim-imp-resp" style="margin-bottom:4px"></div>
+            ${IMP_SEC_CLOSE}
             ${impSecOpenHtml('create')}
             <div id="aim-imp-commitrow" style="display:none;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px">
                 <div id="aim-imp-biggate" style="display:none;flex-basis:100%;padding:6px 8px;background:rgba(255,85,85,0.10);border:1px solid rgba(255,85,85,0.6);border-radius:3px;font-size:11px;color:#ff8a80;line-height:1.5">
@@ -24893,6 +25259,7 @@
         impRenderResumeUi();
         try { impRenderImportsUi(); } catch (e) {}
         try { impRenderAnalyzeUi(); } catch (e) {}
+        try { impRenderRespUi(); } catch (e) {}
         impAutosaveTimer();
         impSyncUi();
     }
@@ -25560,7 +25927,7 @@
         if (p.near) L.push(`Nearby: ${Math.round(p.near.ft)} ft from "${p.near.name}" (#${p.near.id}), not overlapping it`);
         if (p.pri) {
             if (p.pri.off > 0) L.push(`Off pad: ${p.pri.off} ft outside "${p.pri.offOf}"${p.dup ? ' — the client coordinate differs from where the asset already sits; nothing to do unless the asset itself is misplaced' : ' — move the point onto the pad, or leave it if it really is a separate location'}`);
-            if (imp.pri.on) L.push(`Tier: ${p.pri.tier || ('none' + (p.pri.untier === 'zero' ? ' — zero production' : (p.pri.untier === 'env' ? ' — dead per Enverus' : '')))}${p.pri.padName ? ` · pad "${p.pri.padName}"` : ''}${p.pri.padTotal != null ? ` · pad total ${Math.round(p.pri.padTotal).toLocaleString()} BLPD across ${p.pri.padN}` : ''}${p.pri.blpd != null ? ` · this asset ${Math.round(p.pri.blpd).toLocaleString()} BLPD` : ''}${p.pri.before ? ` · was ${p.pri.before}` : ''}`);
+            if (imp.pri.on) L.push(`Tier: ${p.pri.tier || ('none' + (p.pri.untier === 'zero' ? ' — zero production' : (p.pri.untier === 'env' ? ' — dead per Enverus' : (p.pri.untier === 'client' ? ' — client confirmed inactive / planned' : ''))))}${p.pri.padName ? ` · pad "${p.pri.padName}"` : ''}${p.pri.padTotal != null ? ` · pad total ${Math.round(p.pri.padTotal).toLocaleString()} BLPD across ${p.pri.padN}` : ''}${p.pri.blpd != null ? ` · this asset ${Math.round(p.pri.blpd).toLocaleString()} BLPD` : ''}${p.pri.before ? ` · was ${p.pri.before}` : ''}`);
             if (p.pri.flags && p.pri.flags.length) L.push(`Pad flags: ${p.pri.flags.join(' · ')}`);
         }
         if (p.fileDup) L.push(p.fileDup.kind === 'same' ? `Same name in the file: ${p.fileDup.n} rows — this one is created as "${p.name}"` : (p.fileDup.kind === 'battery' ? `Battery renamed "${p.name}" (shares its name with the well ${Math.round(approxMeters(p.lat, p.lng, p.fileDup.other.lat, p.fileDup.other.lng) / GEN_FT_TO_M)} ft away)` : `Shares its name with a battery (renamed "${p.fileDup.other.name}")`));
@@ -26445,6 +26812,7 @@
                 if (p.env && !p.env.noApi) o.env = p.env;
                 if (p.src) o.src = p.src;
                 if (p.shape && p.shape.length >= 3) o.shape = p.shape;
+                if (p.client) o.client = p.client;
                 return (Object.keys(o).length > 1) ? o : null;
             }).filter(Boolean),
             shapes: imp.shapes.map(sh => sh.kind === 'circle' ? { id: sh.id, kind: 'circle', center: sh.center, radiusM: sh.radiusM, name: sh.name || '' } : { id: sh.id, kind: sh.kind, ring: sh.ring, handle: sh.handle, name: sh.name || '' }),
@@ -26452,6 +26820,7 @@
             pri: { on: imp.pri.on, oilCol: imp.pri.oilCol, waterCol: imp.pri.waterCol, blpdCol: imp.pri.blpdCol, priCol: imp.pri.priCol },
             env: { apiCol: imp.env.apiCol, notes: imp.env.notes, checkedAt: imp.env.checkedAt, mismatchFt: imp.env.mismatchFt, missing: imp.env.missing, missingAt: imp.env.missingAt, missingOp: imp.env.missingOp, missingTotal: imp.env.missingTotal },
             undo: { created: imp.lastCreated.slice(), updated: imp.lastUpdated.map(u => ({ id: u.id, name: u.name, before: u.before })) },   // v4.364: undo survives a reload
+            resp: imp.resp.rows ? { rows: imp.resp.rows.map(r => Object.assign({}, r)), fileName: imp.resp.fileName, at: imp.resp.at, applied: imp.resp.applied, moves: imp.resp.moves.map(x => ({ id: x.id, name: x.name, from: x.from, to: x.to, why: x.why, look: x.look })), renames: imp.resp.renames, removeIds: imp.resp.removeIds, removeNames: imp.resp.removeNames } : null,
         };
         const json = JSON.stringify(data);
         const live = imp.points.filter(p => !p.done).length;
@@ -26486,6 +26855,7 @@
         if (d.pri) { Object.assign(imp.pri, { on: !!d.pri.on, oilCol: d.pri.oilCol || null, waterCol: d.pri.waterCol || null, blpdCol: d.pri.blpdCol || null, priCol: d.pri.priCol || null }); imp.pri._guessed = true; }
         if (d.env) { imp.env.apiCol = d.env.apiCol || null; imp.env.notes = d.env.notes !== false; imp.env.checkedAt = d.env.checkedAt || null; if (typeof d.env.mismatchFt === 'number') imp.env.mismatchFt = d.env.mismatchFt; if (Array.isArray(d.env.missing)) { imp.env.missing = d.env.missing; imp.env.missingAt = d.env.missingAt || null; imp.env.missingOp = d.env.missingOp || ''; imp.env.missingTotal = d.env.missingTotal || 0; imp.env.missingSel = new Set(); } imp.env._guessed = true; }
         if (d.undo) { imp.lastCreated = Array.isArray(d.undo.created) ? d.undo.created.slice() : []; imp.lastUpdated = Array.isArray(d.undo.updated) ? d.undo.updated.filter(u => u && u.id != null && u.before) : []; console.log(`${TAG} 📥 resume: undo record ${imp.lastCreated.length} created / ${imp.lastUpdated.length} updated`); }
+        if (d.resp && Array.isArray(d.resp.rows)) { Object.assign(imp.resp, { rows: d.resp.rows, fileName: d.resp.fileName, at: d.resp.at, applied: !!d.resp.applied, moves: d.resp.moves || [], renames: d.resp.renames || [], removeIds: d.resp.removeIds || [], removeNames: d.resp.removeNames || [], tab: null }); }
         else console.log(`${TAG} 📥 resume: no undo record in this session (saved by an older version or before any import)`);
         impRenderMappingUi();
         impBuildPoints();                                            // rebuilds points from rows + mapping (also recomputes dups/flags)
@@ -26501,10 +26871,12 @@
             if (o.env) p.env = o.env;
             if (o.src) p.src = o.src;
             if (Array.isArray(o.shape) && o.shape.length >= 3) p.shape = o.shape;
+            if (o.client) p.client = o.client;
         });
         try { impComputeDups(); } catch (e) {}
         impRefreshAfterSelChange();
         try { impEnvSummarize(); impRenderEnvUi(); } catch (e) {}
+        try { impRenderRespUi(); } catch (e) {}
         imp.dirty = false; imp.lastSavedAt = d.savedAt;
         impRenderResumeUi(); impRenderTypeMapUi(); impSyncUi();
         impStatus(`↻ resumed <b>${impEsc(d.fileName || 'file')}</b> saved ${impEsc(impFmtWhen(d.savedAt))} — ${imp.points.filter(p => !p.done).length} staged · ${moved} moved · ${removed} removed · ${created} already created · ${imp.shapes.length} boundar${imp.shapes.length === 1 ? 'y' : 'ies'}`);
@@ -30716,7 +31088,7 @@
             steps: ['Set how many zones to add, how far inside the pad edge, the hop limit for pads outside every FFZ, the small-battery size and the NFZ / tower clearances. Paste extra lat,lng lines for pads that are not on the site yet.', '▶ Plan safe zones — pink numbered spots on the map, before → after numbers in the panel, the farthest remaining point in red.', 'Click a row to jump, ⧉ copies its coordinates. Place the Safe Zone in Percepto by hand after a satellite check of the ground.', '📋 Copy report for the hand-off; ✕ Clear drops the preview.'],
             test: 'Plan 3 zones on a site with one base, confirm the worst-case number drops, then plan 4 and watch the farthest point move.' },
         imp: { what: 'Bring a client asset list into Percepto. Load a CSV or KML → points stage on the map (nothing written) → narrow with boundaries → map the type → ✓ Create makes real asset squares. Create-only, with dry run, backup manifest and undo.',
-            steps: ['The page is five numbered sections in working order (plus Advanced). Each header shows where it stands; click to open / close, or use the jump chips at the top. The status line under the title shows the latest result.', 'Boundaries first: ⬆ Load boundary KML (several polygons or several files), or draw a ⭕ circle / 🖊 polygon yourself; ✎ Edit reshapes any of them. Only points inside a boundary are selected.', '📂 Load CSV / KML (drag & drop works). Name / lat / lng are guessed; "edit" fixes the mapping.', '↔ Move point fixes a location before import: click a dot to pick it up, click where it belongs (or drag it); Delete while holding removes it from the import. Moved dots get a magenta ring; ↩ reset moved puts them back.', '✏ Shape draws the asset\'s real outline before it is created: click a dot, CTRL+drag a stroke across the asset (draw along the LONG side → a rectangle that long by the narrow side, default 15 ft; a loop → the tightest box). A red buffer ring (7.5 ft, editable) shows around the outline you are holding so you can see the 15 ft you must keep; ALT+click other dots to copy the held outline onto them — copies and dragged edges snap to a 15 ft gap from neighbours (gap editable, 0 = flush; Alt while dragging = no snap). Shift is left alone so Percepto\'s asset names stay visible. Drag inside the box to move it whole, drag an edge to pull it longer or shorter, drag a corner to move that corner; click an edge midpoint to add a corner, right-click a corner to remove it, Delete = back to a square. Colour / fill in the Control Panel.', 'Notes: under the mapping ("edit"), tick every extra column that belongs in the asset notes, rename labels, order them with ▲▼. The client\'s original name is always the first block, and a who / when / file stamp is always the last.', 'Progress is saved per site — automatically a few seconds after any change and every few minutes, or 💾 Save progress. Reopen the page later and ↻ Resume brings back the file, moved / removed points and boundaries.', 'Undo: ↩ Undo last import reverts the last run (creates deleted, updates put back) and survives a reload via ↻ Resume. Independently, 🕘 Imports on this site lists every import found on the assets themselves (the "Imported by …" line) and can delete a run\'s created assets from any machine, any time.', '📊 Analyze (in Create / update): the quarterly compare — run it on a new list before Create to see what would change: new · gone (on the site but not in the list; nothing is deleted) · moved over N ft · tier / type changes · production changes vs our last notes. Click a row to zoom; 📤 Sheets for the review.', '5 · Enverus check: set the Developer API key once, pick the API-number column, Cross-check — every selected well gets its Enverus status / type / trajectory / operator / dates and location; anything not plainly producing lands in Placement › 🛢 Enverus and an "Enverus" block goes into the notes.', '🔍 Find missing wells (same section, after a cross-check): every well the operator has inside your boundaries whose API is not in the file, with status and the nearest mapped asset — tick the ones to add, ➕ Stage, and they become ordinary points (source noted) that go through tiers, flags and Create like the rest. They also appear in the client review as "Well on your pads that is not in the list".', 'Priority tiers (in 3 · Type & priority): pick the oil + water columns (or a single BLPD column, or a ready-made P1/P2/P3 column); every asset on a pad shares the pad total; the tier is written as a type prefix ("P1 - …") and a Priority / Prioritized block in the notes. "name matches → update type + notes" is the quarterly re-run: load the new list, review the Tier report, Create.', 'Type: the file\'s type column maps to Percepto subtypes (new values are created on the site); with no type column one subtype applies to all.', 'Flags: name duplicates, parent/child, nearby — 📤 Copy for Sheets or ⬇ CSV for the account manager.', 'Size → untick Dry run → ✓ Create. ↩ Undo last import deletes exactly what it made.'],
+            steps: ['The page is five numbered sections in working order (plus Advanced). Each header shows where it stands; click to open / close, or use the jump chips at the top. The status line under the title shows the latest result.', 'Boundaries first: ⬆ Load boundary KML (several polygons or several files), or draw a ⭕ circle / 🖊 polygon yourself; ✎ Edit reshapes any of them. Only points inside a boundary are selected.', '📂 Load CSV / KML (drag & drop works). Name / lat / lng are guessed; "edit" fixes the mapping.', '↔ Move point fixes a location before import: click a dot to pick it up, click where it belongs (or drag it); Delete while holding removes it from the import. Moved dots get a magenta ring; ↩ reset moved puts them back.', '✏ Shape draws the asset\'s real outline before it is created: click a dot, CTRL+drag a stroke across the asset (draw along the LONG side → a rectangle that long by the narrow side, default 15 ft; a loop → the tightest box). A red buffer ring (7.5 ft, editable) shows around the outline you are holding so you can see the 15 ft you must keep; ALT+click other dots to copy the held outline onto them — copies and dragged edges snap to a 15 ft gap from neighbours (gap editable, 0 = flush; Alt while dragging = no snap). Shift is left alone so Percepto\'s asset names stay visible. Drag inside the box to move it whole, drag an edge to pull it longer or shorter, drag a corner to move that corner; click an edge midpoint to add a corner, right-click a corner to remove it, Delete = back to a square. Colour / fill in the Control Panel.', 'Notes: under the mapping ("edit"), tick every extra column that belongs in the asset notes, rename labels, order them with ▲▼. The client\'s original name is always the first block, and a who / when / file stamp is always the last.', 'Progress is saved per site — automatically a few seconds after any change and every few minutes, or 💾 Save progress. Reopen the page later and ↻ Resume brings back the file, moved / removed points and boundaries.', 'Undo: ↩ Undo last import reverts the last run (creates deleted, updates put back) and survives a reload via ↻ Resume. Independently, 🕘 Imports on this site lists every import found on the assets themselves (the "Imported by …" line) and can delete a run\'s created assets from any machine, any time.', '6 · Client response: load the review sheet they sent back (xlsx or csv). Every row is classified — move / keep / add coordinates / remove / status / rename — and listed for you to check (⚠ = look, ⏳ = they still have to confirm, never applied). ✔ Apply moves the staged dots, adds the rows that had no coordinates, removes sold ones, records statuses and renames; then 🏷 writes moves + renames to the EXISTING assets (dry run, backup, undo) and 🗑 hands removals to the standard Bulk → Delete.', '📊 Analyze (in Create / update): the quarterly compare — run it on a new list before Create to see what would change: new · gone (on the site but not in the list; nothing is deleted) · moved over N ft · tier / type changes · production changes vs our last notes. Click a row to zoom; 📤 Sheets for the review.', '5 · Enverus check: set the Developer API key once, pick the API-number column, Cross-check — every selected well gets its Enverus status / type / trajectory / operator / dates and location; anything not plainly producing lands in Placement › 🛢 Enverus and an "Enverus" block goes into the notes.', '🔍 Find missing wells (same section, after a cross-check): every well the operator has inside your boundaries whose API is not in the file, with status and the nearest mapped asset — tick the ones to add, ➕ Stage, and they become ordinary points (source noted) that go through tiers, flags and Create like the rest. They also appear in the client review as "Well on your pads that is not in the list".', 'Priority tiers (in 3 · Type & priority): pick the oil + water columns (or a single BLPD column, or a ready-made P1/P2/P3 column); every asset on a pad shares the pad total; the tier is written as a type prefix ("P1 - …") and a Priority / Prioritized block in the notes. "name matches → update type + notes" is the quarterly re-run: load the new list, review the Tier report, Create.', 'Type: the file\'s type column maps to Percepto subtypes (new values are created on the site); with no type column one subtype applies to all.', 'Flags: name duplicates, parent/child, nearby — 📤 Copy for Sheets or ⬇ CSV for the account manager.', 'Size → untick Dry run → ✓ Create. ↩ Undo last import deletes exactly what it made.'],
             test: 'Load the list, add one boundary, confirm the selected count drops, Create with Dry run ON.' },
         rig: { what: 'Temporary no-fly zones for pads with a crane or big rig on them, from Diamondback\'s daily sheet (or an RPIC report). Each well row is matched to its pad, an NFZ = pad ∩ FFZ-inset is staged, and committed create-only. When the end date passes or the row drops off the sheet, the row turns VERIFY — nothing is deleted until a CSM confirms the equipment is gone.', steps: ['📂 Load today\'s CSV (drag & drop). The sheet day comes from the file name.', 'Check the table: Staged rows have a pad (hover the pad for how it matched; ⚠ = name and GPS disagree). Unmatched / off-site rows are listed, never guessed.', 'Untick Dry run in the header → ⬠ Create staged NFZs. A backup JSON downloads first; each NFZ is verified by refetch.', 'Next day: load the new CSV. Re-dated rows show ✎; dropped rows and passed end dates turn VERIFY — click ✓ Gone to delete that NFZ or ↩ Still there to snooze.', '👁 Add RPIC report for a crane a pilot spotted: same lifecycle, plus the mission(s) pulled so the restore is not forgotten.'], test: 'Load Diamondback_Rig_Data_10.16.26.csv on Cobra 01 with Dry run on: four rows match pads, the rest are off-site. Then load 10.15 then 10.16 to watch the diff.' },
         sci: { what: 'Applies the Ortho Scanner review sheet\'s decisions: accepted NFZs and flight-path leg changes stage on the map (green / yellow, removed legs red), preflight runs, then Apply writes them — NFZs create-only, flight paths one POST each with Delete Guard backups.',
