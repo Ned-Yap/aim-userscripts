@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.401
+// @version      4.402
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.401';
+    const SCRIPT_VERSION = '4.402';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -238,7 +238,7 @@
     const RIG_TAG = '[AIM RIG]';
     const RIG_TAG_PREFIX = 'AIM RIG NFZ|';
     const RIG_COLS = ['WELL_NAME', 'SURFACE_LATITUDE', 'SURFACE_LONGITUDE', 'JOB_TYPE_CATEGORY', 'START_DATE', 'END_DATE'];
-    const RIG_DEFAULT_CFG = { nearPadFt: 500, insetFt: 15, graceDays: 1, snoozeDays: 3, padCoverPct: 75, hideNoise: true, exclude: '' };   // v4.385 padCoverPct: below this share of its FFZ the pad polygon is distrusted → NFZ = whole FFZ inset
+    const RIG_DEFAULT_CFG = { nearPadFt: 500, insetFt: 15, graceDays: 1, snoozeDays: 3, padCoverPct: 75, hideNoise: true, cutMode: 'trim', standoffFt: 15, exclude: '' };   // v4.402 cutMode trim|remove   // v4.385 padCoverPct: below this share of its FFZ the pad polygon is distrusted → NFZ = whole FFZ inset
     const RIG_STATUS_LABEL = { upcoming: 'Upcoming', staged: 'Staged', active: 'Active NFZ', ending: 'VERIFY — gone?', cleared: 'Cleared', unmatched: 'Unmatched', offsite: 'Off-site' };
     const RIG_STATUS_COLOR = { upcoming: '#ffb300', staged: '#7adfe6', active: '#ff5555', ending: '#ff9100', cleared: '#8a8f98', unmatched: '#ff6060', offsite: '#666' };
     let rigCfgCache = null, rigLayers = [], rigRowsByKey = null, rigStateSid = null;
@@ -30195,7 +30195,7 @@
             .filter(x => x.mode === 'cut' ? true : (x.g && x.g.points.length >= 3 && !ringSelfIntersects(x.g.points)));
         for (const x of items) { try { x.c.missions = await rigMissionsOnPads(sid, x.pads); } catch (e) { console.warn(`${RIG_TAG} missions lookup failed`, e); x.c.missions = x.c.missions || []; } }
         const geoms = items.filter(x => x.mode === 'nfz'); const cuts = items.filter(x => x.mode === 'cut');
-        const describe = x => x.mode === 'cut' ? `CUT ${x.plan.reduce((n, p) => n + p.cut.length, 0)} arc(s) in ${x.plan.map(p => `"${p.fp.name}"`).join(', ') || 'no path'} for ${x.c.well} (custom FFZ ${x.c.designPct}% standard; pads ${x.pads.map(p => p.name).join(' + ')})` : `NFZ for ${x.c.well}`;
+        const describe = x => x.mode === 'cut' ? `${x.plan.reduce((n, p) => n + (p.trimmed || []).length, 0)} leg(s) TRIMMED to the ${rigCfg().standoffFt || 15} ft line + ${x.plan.reduce((n, p) => n + p.cut.length - (p.trimmed || []).length, 0)} arc(s) REMOVED in ${x.plan.map(p => `"${p.fp.name}"`).join(', ') || 'no path'} for ${x.c.well} (custom FFZ ${x.c.designPct}% standard; pads ${x.pads.map(p => p.name).join(' + ')})` : `NFZ for ${x.c.well}`;
         rigStateSave(sid);
         // v4.398: PREVIEW first — arcs to cut in red, NFZs dashed — then confirm (live only).
         rigPreview(sid, items);
@@ -30276,6 +30276,11 @@
         const st = rigStateLoad(sid);
         Object.values(st.rows).forEach(c => {
             if (!c.padId || c.status === 'cleared') return;
+            if (c.fpBackups && c.fpBackups.length && !c.fpRestored) {   // v4.402: a cut row draws its gaps, not an NFZ
+                try { c.fpBackups.forEach(b => { const live = elvLiveFp(sid, b.id); const liveArcs = (live && live.arcs) || []; (b.body.arcs || []).forEach(a => { const same = liveArcs.some(l => l.point_a && l.point_b && elvSame(l.point_a, a.point_a) && elvSame(l.point_b, a.point_b)); if (!same && a.point_a && a.point_b) rigLayers.push(L.polyline([[a.point_a.lat, a.point_a.lng], [a.point_b.lat, a.point_b.lng]], { color: '#ff2020', weight: 5, opacity: 0.9, dashArray: '8,6', interactive: false }).addTo(map)); }); }); } catch (e) { console.warn(`${RIG_TAG} gap draw`, e); }
+                return;
+            }
+            if (c.design === 'custom' && c.status !== 'active') return;   // staged custom rows preview on 🛡 Protect, no NFZ outline
             const g = rigGeometry(sid, c.padId); if (!g) return;
             const col = RIG_STATUS_COLOR[c.status] || '#ff5555';
             try { const pl = L.polygon(g.points.map(p => [p.lat, p.lng]), { color: col, weight: 3, opacity: 0.95, fillColor: col, fillOpacity: c.status === 'ending' ? 0.45 : 0.25, dashArray: c.status === 'active' ? null : '6,5', interactive: false }).addTo(map); rigLayers.push(pl); } catch (e) { console.warn(`${RIG_TAG} draw failed`, e); }
@@ -30322,9 +30327,39 @@
         if (ffzRing && (touch(a, ffzRing) || touch(b, ffzRing) || pointInPolygon(m.lat, m.lng, ffzRing))) return true;
         return padRings.some(r => pointInPolygon(a.lat, a.lng, r) || pointInPolygon(b.lat, b.lng, r) || pointInPolygon(m.lat, m.lng, r));
     }
+    // v4.402: the protected zone = every affected pad grown by standoffFt (15 ft = the
+    // standard FFZ ring). A leg with one end inside is TRIMMED to the line (altitudes
+    // kept); a leg entirely inside, or crossing with both ends outside, is removed.
+    // cutMode 'remove' = v4.396 behaviour (whole arc out).
+    function rigSegHit(a, b, ring) {   // nearest intersection of segment a→b with the ring, measured from a
+        let best = null;
+        for (let i = 0; i < ring.length; i++) {
+            const c = ring[i], d = ring[(i + 1) % ring.length];
+            const den = (b.lng - a.lng) * (d.lat - c.lat) - (b.lat - a.lat) * (d.lng - c.lng); if (Math.abs(den) < 1e-14) continue;
+            const t = ((c.lng - a.lng) * (d.lat - c.lat) - (c.lat - a.lat) * (d.lng - c.lng)) / den; const u = ((c.lng - a.lng) * (b.lat - a.lat) - (c.lat - a.lat) * (b.lng - a.lng)) / den;
+            if (t >= 0 && t <= 1 && u >= 0 && u <= 1 && (best == null || t < best)) best = t;
+        }
+        return best == null ? null : { lat: a.lat + (b.lat - a.lat) * best, lng: a.lng + (b.lng - a.lng) * best };
+    }
     function rigCutPlan(sid, pads, ffz) {
         const rings = pads.map(rigRingOf); const ffzRing = ffz ? rigRingOf(ffz) : null; const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
-        return ents.filter(e => e.type === 15 && Array.isArray(e.arcs)).map(fp => { const cut = fp.arcs.filter(a => rigArcInside(a, rings, ffzRing)); return { fp, cut, keep: fp.arcs.filter(a => !cut.includes(a)) }; }).filter(x => x.cut.length);
+        const mode = rigCfg().cutMode === 'remove' ? 'remove' : 'trim'; const off = Number(rigCfg().standoffFt) || 15;
+        const zones = rings.map(r => rigInsetRing(r, -off) || r);   // grown outward; concave fallback = the pad itself
+        const inZone = p => zones.some(z => pointInPolygon(p.lat, p.lng, z));
+        return ents.filter(e => e.type === 15 && Array.isArray(e.arcs)).map(fp => {
+            const cut = [], keep = [], trimmed = [];
+            fp.arcs.forEach(a => {
+                const hit = rigArcInside(a, rings, ffzRing); const ai = a.point_a && inZone(a.point_a), bi = a.point_b && inZone(a.point_b);
+                if (!hit && !ai && !bi) { keep.push(a); return; }
+                if (mode === 'trim' && (ai !== bi)) {
+                    const outside = ai ? a.point_b : a.point_a, inside = ai ? a.point_a : a.point_b;
+                    const zone = zones.find(z => pointInPolygon(inside.lat, inside.lng, z)); const hitPt = zone && rigSegHit(outside, inside, zone);
+                    if (hitPt) { const o = Object.assign({}, a, ai ? { point_a: hitPt } : { point_b: hitPt }); keep.push(o); trimmed.push({ from: a, to: o }); cut.push(a); return; }
+                }
+                cut.push(a);
+            });
+            return { fp, cut, keep, trimmed };
+        }).filter(x => x.cut.length);
     }
     async function rigApps(sid) {
         if (rigAppsCache[sid]) return rigAppsCache[sid];
@@ -30371,7 +30406,7 @@
         rigPreviewClear(); const L = getLeafletL(), map = getLeafletMap(); if (!L || !map) return;
         items.forEach(x => {
             try {
-                if (x.mode === 'cut') x.plan.forEach(p => p.cut.forEach(a => { rigPreviewLayers.push(L.polyline([[a.point_a.lat, a.point_a.lng], [a.point_b.lat, a.point_b.lng]], { color: '#ff2020', weight: 7, opacity: 0.95, interactive: false }).addTo(map)); }));
+                if (x.mode === 'cut') x.plan.forEach(p => { p.cut.forEach(a => { rigPreviewLayers.push(L.polyline([[a.point_a.lat, a.point_a.lng], [a.point_b.lat, a.point_b.lng]], { color: '#ff2020', weight: 7, opacity: 0.95, interactive: false }).addTo(map)); }); (p.trimmed || []).forEach(t => { rigPreviewLayers.push(L.polyline([[t.to.point_a.lat, t.to.point_a.lng], [t.to.point_b.lat, t.to.point_b.lng]], { color: '#ffb300', weight: 7, opacity: 0.95, interactive: false }).addTo(map)); }); });
                 else if (x.g) rigPreviewLayers.push(L.polygon(x.g.points.map(p => [p.lat, p.lng]), { color: '#ff5555', weight: 3, dashArray: '6,5', fillColor: '#ff5555', fillOpacity: 0.3, interactive: false }).addTo(map));
             } catch (e) { console.warn(`${RIG_TAG} preview draw`, e); }
         });
@@ -30389,9 +30424,9 @@
             try { await fetchMapObjects(sid, true); } catch (e) {}
             const live = elvLiveFp(sid, x.fp.id); const have = live && Array.isArray(live.arcs) ? live.arcs.length : -1;
             if (have !== x.keep.length) throw new Error(`"${x.fp.name}": expected ${x.keep.length} arcs after cut, server has ${have}`);
-            done.push({ id: x.fp.id, name: x.fp.name, cut: x.cut.length, left: x.keep.length });
+            done.push({ id: x.fp.id, name: x.fp.name, cut: x.cut.length - (x.trimmed || []).length, trimmed: (x.trimmed || []).length, left: x.keep.length });
             c.fpCut = done.slice(); c.fpRestored = false; c.status = 'active'; c.committedAt = c.committedAt || rigToday(); rigStateSave(sid);   // v4.397: persist per path
-            logL(`cut ${x.cut.length} arc(s) from "${x.fp.name}" (${x.keep.length} left, id ${saved && saved.id})`);
+            logL(`"${x.fp.name}": ${(x.trimmed || []).length} leg(s) trimmed to the ${rigCfg().standoffFt || 15} ft line, ${x.cut.length - (x.trimmed || []).length} removed (${x.keep.length} arcs now, id ${saved && saved.id})`);
         }
         c.fpCut = done; c.fpRestored = false;
     }
@@ -30648,9 +30683,11 @@
                 { id: 'graceDays', label: 'Days a row may be missing before "verify"', type: 'number', min: 0, max: 10, step: 1, default: c.graceDays, unit: 'days' },
                 { id: 'snoozeDays', label: '"Still there" snooze', type: 'number', min: 1, max: 30, step: 1, default: c.snoozeDays, unit: 'days' },
                 { id: 'padCoverPct', label: 'Use the whole FFZ when the pad asset covers less than', type: 'number', min: 10, max: 100, step: 5, default: c.padCoverPct, unit: '%' },
+                { id: 'cutMode', label: 'Custom-FFZ pads: trim legs to the standoff line, or remove whole arcs', type: 'select', default: c.cutMode, options: [{ value: 'trim', label: 'Trim to the standoff line (drone may approach, never enter)' }, { value: 'remove', label: 'Remove the whole arc' }] },
+                { id: 'standoffFt', label: 'Standoff line around the pad for trimming', type: 'number', min: 5, max: 100, step: 1, default: c.standoffFt, unit: 'ft' },
             ] });
     }
-    function rigHandleToggle(msg) { const id = msg.toggleId; const v = Number(msg.value !== undefined ? msg.value : msg.enabled); if (!Object.prototype.hasOwnProperty.call(RIG_DEFAULT_CFG, id) || !isFinite(v)) return; rigCfgSet(id, v); }
+    function rigHandleToggle(msg) { const id = msg.toggleId; const raw = msg.value !== undefined ? msg.value : msg.enabled; if (!Object.prototype.hasOwnProperty.call(RIG_DEFAULT_CFG, id)) return; if (id === 'cutMode') { rigCfgSet(id, String(raw) === 'remove' ? 'remove' : 'trim'); return; } const v = Number(raw); if (!isFinite(v)) return; rigCfgSet(id, v); }
 
     const GEN_PAGE_HELP = {
         ffz: { what: 'Auto-builds one DRAFT inspection FFZ per Normal asset that sits near a power line: a single edge box on the shielded side, inner edge the standoff off the asset, altitudes DEM-checked per zone. Nothing is written until Commit.',
