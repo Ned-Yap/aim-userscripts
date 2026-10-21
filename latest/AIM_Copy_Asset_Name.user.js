@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.406
+// @version      4.407
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.406';
+    const SCRIPT_VERSION = '4.407';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -22977,6 +22977,7 @@
         lastUpdated: [],                            // v4.347: [{id, before}] bodies from the last commit's updates — ↩ undo re-POSTs them
         ana: { movedFt: 200, scope: 'selected', result: null, tab: null },   // 📊 Analyze (quarterly compare)
         resp: { rows: null, fileName: null, at: null, applied: false, tab: null, moves: [], renames: [], removeIds: [], removeNames: [] },   // 📬 Client response
+        swap: { pairs: [], pick: [], at: null, lastSwaps: [] },               // 🔁 mislabeled wellheads
         env: { apiCol: null, open: false, notes: true, checkedAt: null, summary: null, running: false, opFilter: '', mismatchFt: 300, scope: 'selected', includeOurs: false,
             missing: null, missingAt: null, missingOp: '', missingSel: new Set(), missStatus: { producing: true, drilled: true, inactive: true, plugged: false }, finding: false },   // v4.366: fill-in   // v4.356: Enverus cross-check · v4.358: client review report
         pri: { on: false, open: false, oilCol: null, waterCol: null, blpdCol: null, priCol: null, clusterFt: 100, padFt: 50, p1Min: 250, p1Max: 1500, summary: null, zeroUntier: true, envUntier: true },   // v4.347: priority tiers · v4.357: zero-production / Enverus-dead wells get no tier
@@ -23350,6 +23351,7 @@
     function impPriDemote(p) {
         const c = imp.pri; p.pri.untier = '';
         if (!p.pri.tier) return;
+        if (p.thirdParty) { p.pri.untier = 'third'; p.pri.tier = ''; return; }        // not ours — an obstacle, never an inspection target
         if (p.client && p.client.producing) return;                                   // the client confirmed it is producing — beats Enverus
         if (p.client && (p.client.inactive || p.client.planned && !p.client.producing)) { p.pri.untier = 'client'; p.pri.tier = ''; return; }   // client says inactive / not yet drilled
         if (c.zeroUntier && !c.priCol && p.pri.blpd === 0) { p.pri.untier = 'zero'; p.pri.tier = ''; return; }
@@ -23361,7 +23363,7 @@
         const q = p.pri;
         const line = q.tier
             ? `${q.tier} · ${c.priCol ? 'from the client\'s priority column' : `pad total ${fmt(q.padTotal)} BLPD across ${q.padN} asset${q.padN === 1 ? '' : 's'}${q.padWith < q.padN ? ` (${q.padWith} with numbers)` : ''}`}${q.blpd != null ? ` · this asset ${fmt(q.blpd)} BLPD` : ''}${q.padName && !/^new pad/.test(q.padName) ? ` · pad ${q.padName}` : ''}`
-            : (q.untier === 'client' ? `not tiered — client confirmed ${p.client && p.client.status ? p.client.status.toLowerCase() : 'inactive'}` : (q.untier === 'zero' ? 'not tiered — zero production (0 BLPD in the client list)' : (q.untier === 'env' ? `not tiered — Enverus reports ${p.env && p.env.status ? p.env.status : 'inactive'}` : `not tiered — ${q.flags[0] || 'no numbers'}`)));
+            : (q.untier === 'third' ? 'not tiered — third-party well (obstacle, not inspected)' : (q.untier === 'client' ? `not tiered — client confirmed ${p.client && p.client.status ? p.client.status.toLowerCase() : 'inactive'}` : (q.untier === 'zero' ? 'not tiered — zero production (0 BLPD in the client list)' : (q.untier === 'env' ? `not tiered — Enverus reports ${p.env && p.env.status ? p.env.status : 'inactive'}` : `not tiered — ${q.flags[0] || 'no numbers'}`))));
         return [`Priority\n${line}`, `Prioritized\n${dateStr}`];
     }
     function impTierPrefix(p, subtype) {
@@ -23578,7 +23580,7 @@
     const IMP_STAMP_RE = /^Imported by (.+?) on (\d{4}-\d{2}-\d{2} \d{2}:\d{2}) from (.+?)(?: · (created|updated) by import)?\s*$/m;
     function impComposeNotes(p, when, how) {
         const r = imp.rows[p.i] || {};
-        const parts = [`Original name\n${p.rawName || p.name}`].concat(p.src === 'enverus' ? [`Source\nAdded from Enverus — not in the client's list (${imp.fileName || 'file'})`] : []).concat(impClientNotesBlock(p)).concat(impPriNotesBlocks(p, String(when).slice(0, 10))).concat(impEnvNotesBlock(p));
+        const parts = [`Original name\n${p.rawName || p.name}`].concat(p.src === 'enverus' ? [`Source\nAdded from Enverus — not in the client's list (${imp.fileName || 'file'})`] : (p.src === 'enverus-3p' ? [`Source\nThird-party well (operator ${p.env && p.env.op ? p.env.op : 'unknown'}) from Enverus — mapped as an obstacle, not one of the client's assets`] : [])).concat(impClientNotesBlock(p)).concat(impPriNotesBlocks(p, String(when).slice(0, 10))).concat(impEnvNotesBlock(p));
         impNotesCols().forEach(c => { const v = String(r[c.col] == null ? '' : r[c.col]).trim(); if (v) parts.push(`${c.label || impCleanLabel(c.col)}\n${v}`); });
         parts.push(`Imported by ${impAuthor() || 'AIM user'} on ${when} from ${imp.fileName || 'file'} · ${how === 'update' ? 'updated' : 'created'} by import`);
         return parts.join('\n\n').slice(0, 2000);
@@ -23598,6 +23600,126 @@
             (m[4] === 'updated' ? groups.get(key).updated : groups.get(key).created).push(e);
         });
         return [...groups.values()].sort((a, b) => b.when.localeCompare(a.when));
+    }
+    // ---- 🔁 MISLABELED WELLHEADS — Enverus cross-reference. For every name-matched point with an
+    // Enverus pin: which EXISTING asset polygon does the pin sit on? If it is a different asset (B)
+    // and B's own pin sits on this asset (A), the two names are swapped on the ground → candidate
+    // pair. One-way cases (A's pin on B, but B's pin elsewhere) are listed for a look, not swapped.
+    // Swapping = three renames through a temporary name (Percepto needs unique names), undo-able. ----
+    function impSwapFind() {
+        const S = imp.swap; if (!imp.assetIndex) impBuildAssetIndex();
+        const pts = imp.points.filter(p => !p.done && p.dup && p.dupId != null && p.env && p.env.found && isFinite(p.env.lat));
+        const byAsset = new Map(); pts.forEach(p => byAsset.set(p.dupId, p));
+        const onM = 18.3;   // 60 ft — "the pin sits on this polygon"
+        const nearest = (lat, lng) => { let best = null, bd = Infinity; (imp.assetIndex || []).forEach(a => { const d = pointToPolygonMeters(lat, lng, a.ring); if (d < bd) { bd = d; best = a; } }); return { a: best, d: bd }; };
+        const found = []; const seen = new Set();
+        pts.forEach(p => {
+            const A = (imp.assetIndex || []).find(a => a.id === p.dupId); if (!A) return;
+            const dOwn = pointToPolygonMeters(p.env.lat, p.env.lng, A.ring);
+            if (dOwn <= onM) return;                                      // its pin is on its own polygon — fine
+            const { a: B, d: dB } = nearest(p.env.lat, p.env.lng);
+            if (!B || B.id === A.id || dB > onM) return;
+            const q = byAsset.get(B.id);                                   // the point whose name is on B
+            let mutual = false, dBack = null;
+            if (q && q.env && q.env.found) { dBack = pointToPolygonMeters(q.env.lat, q.env.lng, A.ring); mutual = dBack <= onM; }
+            const key = [A.id, B.id].sort().join('|'); if (seen.has(key)) return; seen.add(key);
+            found.push({ a: { id: A.id, name: A.name, lat: A.centroid.lat, lng: A.centroid.lng, pin: { lat: p.env.lat, lng: p.env.lng }, pinFt: Math.round(dOwn / GEN_FT_TO_M) }, b: { id: B.id, name: B.name, lat: B.centroid.lat, lng: B.centroid.lng, pin: q && q.env && q.env.found ? { lat: q.env.lat, lng: q.env.lng } : null, pinFt: dBack == null ? null : Math.round(dBack / GEN_FT_TO_M) }, mutual, manual: false, on: mutual, aPinOnBFt: Math.round(dB / GEN_FT_TO_M) });
+        });
+        const manual = S.pairs.filter(x => x.manual);
+        S.pairs = found.concat(manual); S.at = impNowStamp();
+        impRenderSwapUi();
+        impStatus(`🔁 ${found.filter(x => x.mutual).length} mutual swap${found.filter(x => x.mutual).length === 1 ? '' : 's'} (A's pin on B and B's pin on A) · ${found.filter(x => !x.mutual).length} one-way (A's pin sits on B, B's pin elsewhere — look) · from ${pts.length} name matches with an Enverus pin`);
+    }
+    function impSwapAddManual(A, B) {
+        const S = imp.swap; if (!A || !B || A.id === B.id) return;
+        const key = [A.id, B.id].sort().join('|'); if (S.pairs.some(x => [x.a.id, x.b.id].sort().join('|') === key)) { impStatus('That pair is already listed', '#ffb347'); return; }
+        const pinOf = (asset) => { const p = imp.points.find(q => !q.done && q.dupId === asset.id && q.env && q.env.found); return p ? { lat: p.env.lat, lng: p.env.lng } : null; };
+        S.pairs.push({ a: { id: A.id, name: A.name, lat: A.centroid.lat, lng: A.centroid.lng, pin: pinOf(A), pinFt: null }, b: { id: B.id, name: B.name, lat: B.centroid.lat, lng: B.centroid.lng, pin: pinOf(B), pinFt: null }, mutual: false, manual: true, on: true });
+        impRenderSwapUi(); impStatus(`🔁 pair added by hand: ${impEsc(A.name)} ↔ ${impEsc(B.name)} — tick and swap when ready`);
+    }
+    function impAssetAt(map, ll) {
+        if (!imp.assetIndex) impBuildAssetIndex();
+        let hit = (imp.assetIndex || []).find(a => pointInPolygon(ll.lat, ll.lng, a.ring)) || null;
+        if (!hit) { let cp; try { cp = map.latLngToContainerPoint([ll.lat, ll.lng]); } catch (e) { return null; } let bd = Infinity; (imp.assetIndex || []).forEach(a => { try { const d = cp.distanceTo(map.latLngToContainerPoint([a.centroid.lat, a.centroid.lng])); if (d < bd) { bd = d; hit = a; } } catch (e) {} }); if (bd > IMP_PICK_PX * 1.5) hit = null; }
+        return hit;
+    }
+    async function impSwapApply() {
+        const S = imp.swap; const pairs = S.pairs.filter(x => x.on);
+        if (!pairs.length) { impStatus('Tick the pairs to swap first', '#ffb347'); return; }
+        if (liteBlockedWrite('swap asset names')) return;
+        const sid = genState.siteID;
+        const dry = (() => { try { return !!document.getElementById('aim-gen-dryrun').checked; } catch (e) { return true; } })();
+        if (dry) { impStatus(`DRY RUN — would swap the names of <b>${pairs.length}</b> pair${pairs.length === 1 ? '' : 's'} (same ids, missions unaffected): ${impEsc(pairs.map(x => `${x.a.name} ↔ ${x.b.name}`).join(' · '))}. Untick Dry run to write.`); return; }
+        const csrf = getCsrfToken(); if (!csrf) { impStatus('No CSRF token — make one native save anywhere in Percepto first, then retry', '#ff6060'); return; }
+        if (!confirm(`Swap the names of ${pairs.length} pair(s) of existing assets?\n\n${pairs.map(x => `${x.a.name} ↔ ${x.b.name}`).join('\n')}\n\nEach swap is three renames through a temporary name (Percepto needs unique names). Ids stay, so missions are unaffected. ↩ undo swaps reverses them.`)) return;
+        try { await fetchMapObjects(sid, true); } catch (e) {}
+        const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || []; const byId = new Map(ents.map(e => [e.id, e]));
+        let siteCfg = null; try { siteCfg = await fetchSiteConfig(sid); } catch (e) {}
+        if (!siteCfg) { impStatus('Could not read the site config — nothing written', '#ff6060'); return; }
+        const post = async (e, name) => { const body = buildWriteBody(e, siteCfg); body.name = name; const rr = await fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) }); if (rr.status !== 200) throw new Error(`${rr.status} ${(await rr.text()).slice(0, 120)}`); e.name = name; await sleep(DELETE_GAP_MS); };
+        try { downloadJSONFile(`asset-name-swaps-${sid}-${Date.now()}.json`, JSON.stringify({ site: sid, at: new Date().toISOString(), pairs: pairs.map(x => ({ a: x.a, b: x.b })), before: pairs.map(x => [byId.get(x.a.id), byId.get(x.b.id)]) }, null, 1)); } catch (e) {}
+        let ok = 0, fail = 0; const done = [];
+        for (const x of pairs) {
+            const A = byId.get(x.a.id), B = byId.get(x.b.id);
+            if (!A || !B) { fail++; continue; }
+            const nameA = A.name, nameB = B.name, tmp = `${nameA}-SWAP${Date.now() % 100000}`;
+            impStatus(`🔁 swapping ${impEsc(nameA)} ↔ ${impEsc(nameB)}…`);
+            try { await post(A, tmp); await post(B, nameA); await post(A, nameB); ok++; done.push({ aId: A.id, bId: B.id, aWas: nameA, bWas: nameB }); }
+            catch (e) { fail++; console.warn(`${TAG} 🔁 swap failed (${nameA} ↔ ${nameB}):`, e); impStatus(`🔁 swap ${impEsc(nameA)} ↔ ${impEsc(nameB)} failed: ${impEsc(e.message || e)} — the backup file has both originals`, '#ff6060'); break; }
+        }
+        S.lastSwaps = S.lastSwaps.concat(done);
+        S.pairs = S.pairs.filter(x => !done.some(d => (d.aId === x.a.id && d.bId === x.b.id)));
+        try { await fetchMapObjects(sid, true); } catch (e) {}
+        imp._rootCache = null; impBuildAssetIndex(); impComputeDups(); impRefreshAfterSelChange();
+        impMarkDirty(); impRenderSwapUi();
+        impStatus(`🔁 ${ok} pair${ok === 1 ? '' : 's'} swapped${fail ? `, <span style="color:#ff6060">${fail} failed</span>` : ''} — backup downloaded · ↩ undo swaps reverses them`, fail ? '#ffb347' : '#5fff5f');
+    }
+    async function impSwapUndo() {
+        const S = imp.swap; if (!S.lastSwaps.length) return;
+        if (liteBlockedWrite('undo name swaps')) return;
+        const sid = genState.siteID; const csrf = getCsrfToken(); if (!csrf) { impStatus('No CSRF token', '#ff6060'); return; }
+        if (!confirm(`Put the original names back on ${S.lastSwaps.length} swapped pair(s)?`)) return;
+        try { await fetchMapObjects(sid, true); } catch (e) {}
+        const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || []; const byId = new Map(ents.map(e => [e.id, e]));
+        let siteCfg = null; try { siteCfg = await fetchSiteConfig(sid); } catch (e) {} if (!siteCfg) { impStatus('Could not read the site config', '#ff6060'); return; }
+        const post = async (e, name) => { const body = buildWriteBody(e, siteCfg); body.name = name; const rr = await fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) }); if (rr.status !== 200) throw new Error(`${rr.status}`); e.name = name; await sleep(DELETE_GAP_MS); };
+        let ok = 0; const left = [];
+        for (const d of S.lastSwaps) { const A = byId.get(d.aId), B = byId.get(d.bId); if (!A || !B) { left.push(d); continue; } try { const tmp = `${d.aWas}-UNSWAP${Date.now() % 100000}`; await post(A, tmp); await post(B, d.bWas); await post(A, d.aWas); ok++; } catch (e) { left.push(d); console.warn(`${TAG} 🔁 undo failed:`, e); } }
+        S.lastSwaps = left;
+        try { await fetchMapObjects(sid, true); } catch (e) {}
+        imp._rootCache = null; impBuildAssetIndex(); impComputeDups(); impRefreshAfterSelChange(); impRenderSwapUi();
+        impStatus(`↩ ${ok} swap${ok === 1 ? '' : 's'} undone${left.length ? `, <span style="color:#ff6060">${left.length} could not be</span>` : ''}`, left.length ? '#ffb347' : '#5fff5f');
+    }
+    function impRenderSwapUi() {
+        const el = document.getElementById('aim-imp-swap'); if (!el) return;
+        const S = imp.swap;
+        if (!imp.points.length) { el.innerHTML = ''; return; }
+        const hasEnv = imp.points.some(p => !p.done && p.env && p.env.found);
+        const btn = (col, extra) => `background:rgba(${col},0.12);color:rgb(${col});border:1px solid rgba(${col},0.5);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:10.5px${extra || ''}`;
+        const nOn = S.pairs.filter(x => x.on).length;
+        const row = (x, i) => `<div data-impswap-row="${i}" style="display:flex;align-items:center;gap:6px;padding:1px 4px;border-bottom:1px solid rgba(255,255,255,0.05);font-size:10.5px;color:#cfd6dc;cursor:pointer" onmouseover="this.style.background='rgba(255,255,255,0.05)'" onmouseout="this.style.background=''" title="click = zoom (both assets and both Enverus pins pulse)">
+            <input type="checkbox" data-impswap-on="${i}" ${x.on ? 'checked' : ''} style="accent-color:#c39bd3;margin:0;flex:none">
+            <span style="flex:none;color:${x.mutual ? '#5fff5f' : (x.manual ? '#c39bd3' : '#ffb347')}" title="${x.mutual ? 'mutual: each name\'s Enverus pin sits on the other asset' : (x.manual ? 'picked by hand' : 'one-way: A\'s pin sits on B, but B\'s pin is not on A — B may be mislabeled too, or A is simply mapped in the wrong place')}">${x.mutual ? '⇄' : (x.manual ? '✋' : '→')}</span>
+            <b style="flex:none">${impEsc(x.a.name)}</b><span style="color:#888">↔</span><b style="flex:none">${impEsc(x.b.name)}</b>
+            <span style="color:#8a949e;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${x.manual ? 'picked by hand' : `${impEsc(x.a.name)}'s Enverus pin is ${x.aPinOnBFt} ft from ${impEsc(x.b.name)}${x.b.pinFt != null ? ` · ${impEsc(x.b.name)}'s pin is ${x.b.pinFt.toLocaleString()} ft from ${impEsc(x.a.name)}` : ` · ${impEsc(x.b.name)} has no Enverus pin`}`}</span>
+        </div>`;
+        el.innerHTML = `<div style="margin-top:8px;padding:6px 8px;background:rgba(195,155,211,0.05);border:1px dashed rgba(195,155,211,0.4);border-radius:3px;font-size:11px;color:#cfd6dc">
+            <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:4px">
+                <b style="color:#c39bd3">🔁 Mislabeled wellheads</b><span style="color:#888;font-size:10px">names on the wrong wellhead — found by cross-referencing each asset's Enverus pin with the polygon it actually sits on</span>
+                <button data-impswap-find ${hasEnv ? '' : 'disabled'} style="${btn('195,155,211', hasEnv ? '' : ';opacity:0.45;cursor:default')}" title="${hasEnv ? 'Scan every name match that has an Enverus pin' : 'Run the 🛢 cross-check first'}">⟳ Find</button>
+                <button data-impswap-pick style="${btn('195,155,211')}" title="ALT+click two existing assets on the map to add a pair by hand">${imp.mode === 'swap' ? `✋ ON — ALT+click ${S.pick.length ? 'the second asset' : 'the first asset'} · Esc=off` : '✋ Pick two'}</button>
+                <span style="flex:1"></span>
+                ${S.pairs.length ? `<button data-impswap-apply ${nOn ? '' : 'disabled'} style="${btn('95,255,95', ';font-weight:600' + (nOn ? '' : ';opacity:0.45;cursor:default'))}">🔁 Swap names for ${nOn} pair${nOn === 1 ? '' : 's'}</button>` : ''}
+                ${S.lastSwaps.length ? `<button data-impswap-undo style="${btn('255,179,71')}">↩ undo ${S.lastSwaps.length} swap${S.lastSwaps.length === 1 ? '' : 's'}</button>` : ''}
+            </div>
+            ${S.pairs.length ? `<div style="font-size:10px;color:#888;margin-bottom:3px">⇄ mutual (safe to swap) · → one-way (look first) · ✋ picked by hand · tick the ones to swap · ${impEsc(S.at || '')}</div><div style="max-height:170px;overflow:auto;border:1px solid rgba(255,255,255,0.06);border-radius:3px;background:rgba(0,0,0,0.15)">${S.pairs.map(row).join('')}</div>` : (S.at ? '<div style="font-size:10px;color:#5fff5f">✓ no mislabeled pairs found among the name matches with an Enverus pin</div>' : '')}
+        </div>`;
+        const f = el.querySelector('[data-impswap-find]'); if (f) f.onclick = () => { try { impSwapFind(); } catch (e) { console.warn(`${TAG} 🔁`, e); impStatus(`🔁 ${impEsc(e && e.message || e)}`, '#ff6060'); } };
+        el.querySelector('[data-impswap-pick]').onclick = () => { impSetMode(imp.mode === 'swap' ? null : 'swap'); };
+        const ap = el.querySelector('[data-impswap-apply]'); if (ap) ap.onclick = () => impSwapApply().catch(e => impStatus(`🔁 ${impEsc(e && e.message || e)}`, '#ff6060'));
+        const un = el.querySelector('[data-impswap-undo]'); if (un) un.onclick = () => impSwapUndo().catch(e => impStatus(`↩ ${impEsc(e && e.message || e)}`, '#ff6060'));
+        el.querySelectorAll('[data-impswap-on]').forEach(cb => cb.onchange = () => { const x = S.pairs[Number(cb.getAttribute('data-impswap-on'))]; if (x) x.on = cb.checked; impRenderSwapUi(); });
+        el.querySelectorAll('[data-impswap-row]').forEach(d => d.onclick = (ev) => { if (ev.target.closest('[data-impswap-on]')) return; const x = S.pairs[Number(d.getAttribute('data-impswap-row'))]; if (!x) return; const pts = [{ lat: x.a.lat, lng: x.a.lng, name: `${x.a.name} (asset)` }, { lat: x.b.lat, lng: x.b.lng, name: `${x.b.name} (asset)` }]; if (x.a.pin) pts.push({ lat: x.a.pin.lat, lng: x.a.pin.lng, name: `${x.a.name} (Enverus pin)` }); if (x.b.pin) pts.push({ lat: x.b.pin.lat, lng: x.b.pin.lng, name: `${x.b.name} (Enverus pin)` }); impZoomToPoints(pts, `${x.a.name} ↔ ${x.b.name}`); });
     }
     // ---- 📬 CLIENT RESPONSE — the client's answered review comes back as the same sheet with
     // "Diamondback response", "Correct coordinates", "Source", "Needs internal confirmation?" columns.
@@ -24353,7 +24475,7 @@
                     radius: pulse ? 9 : (held ? 7 : (p.sel ? (tierOn ? 5.5 : 4) : 2.2)),
                     color: pulse ? '#ff5fff' : (held ? '#ff5fff' : (p.dup ? '#ff3b3b' : (p.child ? '#b48cff' : (p.near ? '#4fc3f7' : (flagged ? '#ffb347' : (p.orig ? '#ff5fff' : (p.src === 'enverus' ? '#ffd666' : '#ffffff'))))))),
                     weight: pulse ? 3 : (held ? 2.5 : ((p.dup || p.child || p.near || p.orig || flagged) ? 1.5 : 0.6)),
-                    fillColor: held ? '#ff5fff' : ((p.sel && p.env && p.env.found && impEnvBucket(p.env) === 'plugged') ? '#ff5252' : ((p.sel && p.env && p.env.found && impEnvBucket(p.env) === 'inactive') ? '#ffb347' : (tierOn ? (IMP_TIER_COLORS[p.pri.tier] || IMP_TIER_COLORS.none) : (p.sel ? '#5fff5f' : '#ff9d00')))),
+                    fillColor: held ? '#ff5fff' : (p.thirdParty && p.sel ? '#9e9e9e' : ((p.sel && p.env && p.env.found && impEnvBucket(p.env) === 'plugged') ? '#ff5252' : ((p.sel && p.env && p.env.found && impEnvBucket(p.env) === 'inactive') ? '#ffb347' : (tierOn ? (IMP_TIER_COLORS[p.pri.tier] || IMP_TIER_COLORS.none) : (p.sel ? '#5fff5f' : '#ff9d00'))))),
                     fillOpacity: 0.9, opacity: 0.9, interactive: false,
                 };
                 if (imp.renderer) opts.renderer = imp.renderer;
@@ -24897,6 +25019,16 @@
         imp._container = map.getContainer();
         imp._onDown = (ev) => {
             if (!imp.mode || ev.button !== 0) return;
+            if (imp.mode === 'swap') {                                   // 🔁 ALT+click two existing assets
+                if (!ev.altKey) return;
+                let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+                ev.preventDefault(); ev.stopPropagation();
+                const a = impAssetAt(map, ll); if (!a) { impStatus('🔁 no existing asset there', '#ffb347'); return; }
+                imp.swap.pick.push(a);
+                if (imp.swap.pick.length >= 2) { const [A, B] = imp.swap.pick; imp.swap.pick = []; impSwapAddManual(A, B); }
+                else { impStatus(`🔁 first: <b>${impEsc(a.name)}</b> — now ALT+click the asset whose name belongs here`); impRenderSwapUi(); }
+                return;
+            }
             if (imp.mode === 'move') {                                   // v4.345: ↔ works WITHOUT Alt — a click on a dot picks it, a click away drops it, a click on nothing (nothing held) still pans
                 let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
                 if (imp.moveHeld) { ev.preventDefault(); ev.stopPropagation(); impMovePointTo(imp.moveHeld, ll); impFinishMove(imp.moveHeld); return; }
@@ -25147,8 +25279,10 @@
         if (mode && !impMasterEnabled) { showToast('Asset Importer is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
         if (imp.moveHeld && mode !== 'move') { imp.moveHeld = null; imp.moveDrag = false; imp.moveDownPt = null; try { impRenderStaged(); } catch (e) {} }
         if (mode !== 'shape') { imp.shapeHeld = null; imp.stroke = null; imp.shapeEdit = null; impClearStrokeLayer(); }
+        if (mode !== 'swap') imp.swap.pick = [];
         imp.mode = mode || null;
         if (imp.mode === 'shape' && !imp.secOpen.place) { imp.secOpen.place = true; impSaveParams(); }
+        try { impRenderSwapUi(); } catch (e) {}
         if (imp.mode === 'move' && !imp.secOpen.place) { imp.secOpen.place = true; impSaveParams(); }
         if (imp.mode) {
             try { if (nfzDraw.active) setNfzMode(null); } catch (e) {}   // mutually exclusive with the other map tools
@@ -25216,6 +25350,7 @@
                 <button id="aim-imp-resetmoves" style="display:none;background:transparent;color:#ffb347;border:1px solid rgba(255,179,71,0.45);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px" title="Put every moved point back where the file had it">↩ reset moved</button>
             </div>
             <div id="aim-imp-flags" style="margin-bottom:8px"></div>
+            <div id="aim-imp-swap"></div>
             ${IMP_SEC_CLOSE}
             ${impSecOpenHtml('env')}
             <div id="aim-imp-env" style="margin-bottom:4px"></div>
@@ -25260,6 +25395,7 @@
         try { impRenderImportsUi(); } catch (e) {}
         try { impRenderAnalyzeUi(); } catch (e) {}
         try { impRenderRespUi(); } catch (e) {}
+        try { impRenderSwapUi(); } catch (e) {}
         impAutosaveTimer();
         impSyncUi();
     }
@@ -25478,6 +25614,7 @@
         c.running = false; c.checkedAt = when;
         impEnvSummarize();
         try { if (imp.pri.on) { impComputePriority(); impRenderPriUi(); impRenderStaged(); } } catch (e) { console.warn(`${TAG} 🛢 re-tier failed:`, e); }
+        try { impRenderSwapUi(); } catch (e) {}
         impMarkDirty();
         impRenderEnvUi(); impSyncUi();
         const S = c.summary;
@@ -25493,32 +25630,34 @@
         return box && lat >= box.la0 && lat <= box.la1 && lng >= box.lo0 && lng <= box.lo1;
     }
     function impEnvStatusGroup(st) { const b = impEnvBucket({ found: true, status: String(st || '').toUpperCase() }); return b === 'producing' ? 'producing' : (b === 'inactive' ? 'inactive' : (b === 'plugged' ? 'plugged' : 'drilled')); }
+    // One county's wells (one operator, or EVERY operator when op is empty). The 1,000-row cap is
+    // handled by splitting the county's API range in half until every chunk fits.
     async function impEnvFetchOperatorWells(county, state, op, log) {
-        const base = `wells?pagesize=1000&DeletedDate=null&County=${encodeURIComponent(county)}&StateProvince=${encodeURIComponent(state)}&ENVOperator=${encodeURIComponent(op)}&fields=${IMP_ENV_FIELDS}`;
-        let rows = await impEnvGet(base);
-        if (rows.length < 1000) return rows;
-        log(`${county}: over 1,000 wells — splitting by status`);
-        const out = new Map(); rows.forEach(r => out.set(r.API_UWI_Unformatted + '|' + (r.SpudDate || ''), r));
-        const statuses = [...new Set(rows.map(r => r.ENVWellStatus).filter(Boolean))].concat(['PRODUCING', 'INJECTING', 'INACTIVE PRODUCER', 'P & A', 'DRILLED', 'COMPLETED', 'DUC', 'PERMIT EXPIRED', 'TA']);
-        for (const st of [...new Set(statuses)]) {
-            const part = await impEnvGet(`${base}&ENVWellStatus=${encodeURIComponent(st)}`);
-            part.forEach(r => out.set(r.API_UWI_Unformatted + '|' + (r.SpudDate || ''), r));
-            if (part.length >= 1000) {   // still capped → quarter the county's API range
-                const pref = String(part[0].API_UWI_Unformatted || '').slice(0, 5);
-                for (let q = 0; q < 10; q++) {
-                    const lo = `${pref}${q}0000`, hi = `${pref}${q}9999`;
-                    const chunk = await impEnvGet(`${base}&ENVWellStatus=${encodeURIComponent(st)}&API_UWI_Unformatted=btw(${lo},${hi})`);
-                    chunk.forEach(r => out.set(r.API_UWI_Unformatted + '|' + (r.SpudDate || ''), r));
-                }
-            }
-        }
+        const base = `wells?pagesize=1000&DeletedDate=null&County=${encodeURIComponent(county)}&StateProvince=${encodeURIComponent(state)}${op ? `&ENVOperator=${encodeURIComponent(op)}` : ''}&fields=${IMP_ENV_FIELDS}`;
+        const out = new Map();
+        const keep = (rows) => rows.forEach(r => out.set(r.API_UWI_Unformatted + '|' + (r.SpudDate || ''), r));
+        const first = await impEnvGet(base);
+        keep(first);
+        if (first.length < 1000) return [...out.values()];
+        const pref = String((first.find(r => r.API_UWI_Unformatted) || {}).API_UWI_Unformatted || '').replace(/\D/g, '').slice(0, 5);
+        if (pref.length !== 5) return [...out.values()];
+        let calls = 0;
+        const range = async (lo, hi) => {
+            calls++; if (calls > 80) throw new Error(`${county}: too many requests splitting the county — narrow the operator`);
+            log(`${county}: ${op || 'all operators'} wells ${lo}…${hi} (${out.size} so far)`);
+            const rows = await impEnvGet(`${base}&API_UWI_Unformatted=btw(${lo},${hi})`);
+            keep(rows);
+            if (rows.length >= 1000 && hi - lo > 20) { const mid = Math.floor((lo + hi) / 2); await range(lo, mid); await range(mid + 1, hi); }
+        };
+        await range(Number(pref + '00000'), Number(pref + '99999'));
         return [...out.values()];
     }
     async function impEnvFindMissing() {
         const c = imp.env;
         if (c.finding) return;
         const op = (c.missingOp || c.mainOp || '').trim();
-        if (!op) { impStatus('Run the 🛢 cross-check first (it learns the operator and counties), or type the operator name', '#ffb347'); return; }
+        const everyone = c.missingAll === true;                            // 3rd-party wells too — anything that is not plugged is an obstacle we must know about
+        if (!op && !everyone) { impStatus('Run the 🛢 cross-check first (it learns the operator and counties), or type the operator name', '#ffb347'); return; }
         const checked = imp.points.filter(p => !p.done && p.env && p.env.found);
         const counties = new Map();
         checked.forEach(p => { if (p.env.county) counties.set(`${p.env.county}|${p.env.state || 'TX'}`, { county: p.env.county, state: p.env.state || 'TX' }); });
@@ -25541,8 +25680,8 @@
         try {
             await impEnvFetchToken(false);
             for (const { county, state } of counties.values()) {
-                log(`${op} wells in ${county} County, ${state}…`);
-                const rows = await impEnvFetchOperatorWells(county, state, op, log);
+                log(`${everyone ? 'every operator\'s' : op} wells in ${county} County, ${state}…`);
+                const rows = await impEnvFetchOperatorWells(county, state, everyone ? '' : op, log);
                 rows.forEach(r => { const a = String(r.API_UWI_Unformatted || '').replace(/\D/g, '').slice(0, 10); if (!a) return; if (!byApi.has(a)) byApi.set(a, []); byApi.get(a).push(r); });
             }
         } catch (e) {
@@ -25557,13 +25696,13 @@
             // nearest existing asset / pad on the site
             let near = null, bd = Infinity;
             (imp.assetIndex || []).forEach(x => { const d = pointToPolygonMeters(m.lat, m.lng, x.ring); if (d < bd) { bd = d; near = x; } });
-            cands.push(Object.assign({ api: a, inFile, group: impEnvStatusGroup(m.status), nearName: near ? near.name : '', nearFt: isFinite(bd) ? Math.round(bd / GEN_FT_TO_M) : null, inside: isFinite(bd) && bd === 0 }, m));
+            cands.push(Object.assign({ api: a, inFile, ours: !op || !m.op || m.op.toUpperCase() === op.toUpperCase(), group: impEnvStatusGroup(m.status), nearName: near ? near.name : '', nearFt: isFinite(bd) ? Math.round(bd / GEN_FT_TO_M) : null, inside: isFinite(bd) && bd === 0 }, m));
         });
-        c.missing = cands.filter(x => !x.inFile).sort((a, b) => (a.nearFt == null ? 1e9 : a.nearFt) - (b.nearFt == null ? 1e9 : b.nearFt) || a.name.localeCompare(b.name));
+        c.missing = cands.filter(x => !x.inFile).sort((a, b) => (a.ours === b.ours ? 0 : (a.ours ? -1 : 1)) || (a.nearFt == null ? 1e9 : a.nearFt) - (b.nearFt == null ? 1e9 : b.nearFt) || a.name.localeCompare(b.name));
         c.missingTotal = cands.length; c.missingAt = impNowStamp(); c.missingOp = op; c.missingSel = new Set(c.missing.filter(x => c.missStatus[x.group]).map(x => x.api));
         c.finding = false; impMarkDirty(); impRenderEnvUi();
-        const g = (k) => c.missing.filter(x => x.group === k).length;
-        impStatus(`🔍 ${op}: <b>${cands.length}</b> wells inside the area in ${counties.size} count${counties.size === 1 ? 'y' : 'ies'} · <b style="color:#ffb347">${c.missing.length} not in the client's list</b> (${g('producing')} producing · ${g('drilled')} drilled/permitted · ${g('inactive')} inactive · ${g('plugged')} plugged) — review the list below and stage the ones to add`);
+        const g = (k) => c.missing.filter(x => x.group === k).length, third = c.missing.filter(x => !x.ours).length;
+        impStatus(`🔍 ${everyone ? 'all operators' : op}: <b>${cands.length}</b> wells inside the area in ${counties.size} count${counties.size === 1 ? 'y' : 'ies'} · <b style="color:#ffb347">${c.missing.length} not in the client's list</b> (${g('producing')} producing · ${g('drilled')} drilled/permitted · ${g('inactive')} inactive · ${g('plugged')} plugged${third ? ` · <b style="color:#ffd666">${third} third-party</b>` : ''}) — review the list below and stage the ones to add`);
     }
     function impEnvStageMissing() {
         const c = imp.env; if (!c.missing) return;
@@ -25576,11 +25715,11 @@
             if (m.lat) row[m.lat] = String(x.lat);
             if (m.lng) row[m.lng] = String(x.lng);
             if (c.apiCol) row[c.apiCol] = x.api;
-            const typeRaw = m.type ? `${/HORIZ/.test(x.traj) ? 'H' : 'V'} - WELL (Enverus)` : '';
+            const typeRaw = m.type ? (x.ours === false ? `3RD PARTY WELL (${(x.op || 'unknown operator').toUpperCase()})` : `${/HORIZ/.test(x.traj) ? 'H' : 'V'} - WELL (Enverus)`) : '';
             if (m.type) row[m.type] = typeRaw;
             imp.rows.push(row);
             const i = imp.rows.length - 1;
-            const p = { i, name: x.name, rawName: x.name, lat: x.lat, lng: x.lng, typeRaw, notes: '', sel: false, dup: false, dupWhy: '', child: null, near: null, done: false, src: 'enverus', env: Object.assign({ api: x.api, found: true, checkedAt: c.missingAt, distFt: 0 }, x) };
+            const p = { i, name: x.name, rawName: x.name, lat: x.lat, lng: x.lng, typeRaw, notes: '', sel: false, dup: false, dupWhy: '', child: null, near: null, done: false, src: x.ours === false ? 'enverus-3p' : 'enverus', thirdParty: x.ours === false, env: Object.assign({ api: x.api, found: true, checkedAt: c.missingAt, distFt: 0 }, x) };
             imp.points.push(p); x.staged = true;
         });
         imp._rootCache = null;
@@ -25674,6 +25813,7 @@
                     <b style="color:#ffd666">🔍 Wells the list is missing</b>
                     <span style="color:#888;font-size:10px">the operator's wells inside your boundaries whose API is not in the file — a pad with one listed well picks up its siblings</span>
                     <label style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:#cfd6dc">operator <input type="text" data-impenv-op value="${impEsc(c.missingOp || c.mainOp || '')}" placeholder="from the cross-check" style="width:130px;${inCss}"></label>
+                    <label style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:#ffd666;cursor:pointer" title="Every operator's wells inside the area, not just the client's. Anything that is not plugged is an obstacle the drone must know about: third-party wells stage as '3RD PARTY WELL (operator)', untiered, never inspected."><input type="checkbox" data-impenv-all ${c.missingAll ? 'checked' : ''} style="accent-color:#ffd666;margin:0"> every operator (3rd-party wells as obstacles)</label>
                     <button data-impenv-find ${c.finding || !key ? 'disabled' : ''} style="background:rgba(255,214,102,0.15);color:#ffd666;border:1px solid rgba(255,214,102,0.5);border-radius:3px;padding:3px 12px;cursor:pointer;font:inherit;font-size:11px;font-weight:600${c.finding || !key ? ';opacity:0.5;cursor:default' : ''}">${c.finding ? '⏳ searching…' : '🔍 Find missing wells'}</button>
                     <span style="color:#888;font-size:10px">${imp.shapes.length ? `inside the ${imp.shapes.length} boundar${imp.shapes.length === 1 ? 'y' : 'ies'}` : 'no boundary — uses the selected points\' area + ¼ mi'} · needs a cross-check first (counties come from it)</span>
                 </div>
@@ -25697,6 +25837,7 @@
             if (note) note.innerHTML = rows.length ? `${rows.filter(x => x.sev === 'High').length ? `<b style="color:#ff6060">${rows.filter(x => x.sev === 'High').length} high</b>` : '0 high'} · ${rows.filter(x => x.sev === 'Medium').length} medium · ${rows.filter(x => x.sev === 'Low').length} low${!S ? ' · <span style="color:#ffb347">run the cross-check first for the Enverus findings</span>' : ''} · written for a non-technical reader: plain-English finding, what it means, what we need, map links` : (S ? 'no findings in this scope' : 'run the cross-check for the Enverus findings — file hygiene findings show here regardless');
         } catch (e) { console.warn(`${TAG} 📋 review preview failed:`, e); }
         el.querySelector('[data-impenv-op]').onchange = function () { c.missingOp = this.value.trim(); };
+        el.querySelector('[data-impenv-all]').onchange = function () { c.missingAll = this.checked; };
         const fb = el.querySelector('[data-impenv-find]'); if (fb) fb.onclick = () => { c.missingOp = (el.querySelector('[data-impenv-op]') || {}).value || c.missingOp; impEnvFindMissing().catch(e => { console.warn(`${TAG} 🔍`, e); impStatus(`🔍 ${impEsc(e && e.message || e)}`, '#ff6060'); }); };
         impRenderMissingUi(el);
         el.querySelector('[data-impenv-mm]').onchange = function () { const v = parseFloat(this.value); if (isFinite(v) && v >= 0) { c.mismatchFt = v; impMarkDirty(); impRenderEnvUi(); } };
@@ -25724,7 +25865,7 @@
             <input type="checkbox" data-impmiss-sel="${x.api}" ${x.staged ? 'disabled' : (c.missingSel.has(x.api) ? 'checked' : '')} style="accent-color:#ffd666;margin:0;flex:none">
             <span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${gcol[x.group]};flex:none" title="${impEsc(x.status)}"></span>
             <b style="flex:none;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${impEsc(x.name)}</b>
-            <span style="color:#8a949e;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${impEsc(x.status)} · ${impEsc(x.type || '')}${x.traj ? ` · ${impEsc(x.traj.toLowerCase())}` : ''} · API ${x.api}${x.nearFt != null ? ` · ${x.inside ? 'inside' : `${x.nearFt.toLocaleString()} ft from`} ${impEsc(x.nearName)}` : ' · no mapped asset nearby'}${x.staged ? ' · ✓ staged' : ''}</span>
+            <span style="color:#8a949e;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${x.ours === false ? `<b style="color:#ffd666">${impEsc(x.op || '3rd party')}</b> · ` : ''}${impEsc(x.status)} · ${impEsc(x.type || '')}${x.traj ? ` · ${impEsc(x.traj.toLowerCase())}` : ''} · API ${x.api}${x.nearFt != null ? ` · ${x.inside ? 'inside' : `${x.nearFt.toLocaleString()} ft from`} ${impEsc(x.nearName)}` : ' · no mapped asset nearby'}${x.staged ? ' · ✓ staged' : ''}</span>
             <span data-impmiss-info="${x.api}" title="${impEsc(`${x.name} · API ${x.api}\n${x.status} · ${x.type || ''} · ${x.traj || ''} · ${x.op}\nspud ${x.spud || '—'} · first prod ${x.firstProd || '—'}${x.plug ? ` · plugged ${x.plug}` : ''}\n${Number(x.lat).toFixed(6)}, ${Number(x.lng).toFixed(6)} · ${x.county} County\n${x.nearName ? `${x.inside ? 'inside' : x.nearFt + ' ft from'} mapped asset "${x.nearName}"` : 'no mapped asset nearby'}${x.bores > 1 ? `\n${x.bores} wellbores` : ''}`)}" style="flex:none;width:14px;height:14px;line-height:12px;text-align:center;border:1px solid rgba(122,223,230,0.5);border-radius:50%;color:#7adfe6;font-size:9px;font-weight:700;cursor:help">i</span>
         </div>`;
         el.innerHTML = `<div style="padding:6px 8px;background:rgba(255,255,255,0.03);border:1px dashed rgba(255,214,102,0.3);border-radius:3px">
@@ -25813,7 +25954,7 @@
             if (p.dup && p.pri && p.pri.off > 100) add('Low', 'Location differs from where we have it mapped', p, ll(p.lat, p.lng), `${ftTxt(p.pri.off)} from where we have "${p.pri.offOf}" mapped`, `The coordinates in your list are ${ftTxt(p.pri.off)} from where this asset sits on our map today (mapped from your earlier data).`, 'Confirm which location is right.', { distFt: p.pri.off });
         });
         // wells the public records put on the client's pads but the list does not have
-        (c.missing || []).forEach(x => { if (x.group === 'plugged') return; add('Medium', 'Well on your pads that is not in the list', null, '—', `${x.name} · API ${x.api} · ${x.status}${x.type ? ` · ${x.type}` : ''}${x.traj ? ` · ${x.traj.toLowerCase()}` : ''}${x.nearName ? ` · ${x.inside ? 'inside' : `${x.nearFt.toLocaleString()} ft from`} ${x.nearName}` : ''}`, `${RECORDS} list this ${x.op} well inside your inspection area, but it is not in the asset list we received.`, 'Confirm whether it should be inspected (and add it to the list if so).', { name: x.name, api: x.api, lat: x.lat, lng: x.lng }); });
+        (c.missing || []).forEach(x => { if (x.group === 'plugged' || x.ours === false) return; add('Medium', 'Well on your pads that is not in the list', null, '—', `${x.name} · API ${x.api} · ${x.status}${x.type ? ` · ${x.type}` : ''}${x.traj ? ` · ${x.traj.toLowerCase()}` : ''}${x.nearName ? ` · ${x.inside ? 'inside' : `${x.nearFt.toLocaleString()} ft from`} ${x.nearName}` : ''}`, `${RECORDS} list this ${x.op} well inside your inspection area, but it is not in the asset list we received.`, 'Confirm whether it should be inspected (and add it to the list if so).', { name: x.name, api: x.api, lat: x.lat, lng: x.lng }); });
         // file-level hygiene — the whole list, since the client does not see our boundaries
         (imp.invalidRows || []).forEach(x => { const rr = imp.rows[x.i] || {}; const apiRaw = c.apiCol ? String(rr[c.apiCol] == null ? '' : rr[c.apiCol]).replace(/\D/g, '').slice(0, 10) : ''; const planned = /NEW POP|PLANNED|FUTURE|TBD/i.test(x.type || '') || /\d{4}-\d{2}-\d{2}/.test(x.type || ''); add('Low', planned ? 'Planned well — no location yet' : 'No coordinates', null, x.type || '', '—', planned ? 'This looks like an upcoming well (the type carries a future date) with no location yet, so it is not on the map or the inspection list for now.' : 'This row has no latitude / longitude, so it cannot be placed on the map or inspected.', planned ? 'Send the coordinates once the pad is built.' : 'Add the coordinates.', { name: x.name, api: apiRaw }); });
         const seen = new Map();
@@ -26811,6 +26952,7 @@
                 if (p.reviewed) o.rv = true;
                 if (p.env && !p.env.noApi) o.env = p.env;
                 if (p.src) o.src = p.src;
+                if (p.thirdParty) o.tp = true;
                 if (p.shape && p.shape.length >= 3) o.shape = p.shape;
                 if (p.client) o.client = p.client;
                 return (Object.keys(o).length > 1) ? o : null;
@@ -26870,6 +27012,7 @@
             if (o.rv) p.reviewed = true;
             if (o.env) p.env = o.env;
             if (o.src) p.src = o.src;
+            if (o.tp) p.thirdParty = true;
             if (Array.isArray(o.shape) && o.shape.length >= 3) p.shape = o.shape;
             if (o.client) p.client = o.client;
         });
@@ -31088,7 +31231,7 @@
             steps: ['Set how many zones to add, how far inside the pad edge, the hop limit for pads outside every FFZ, the small-battery size and the NFZ / tower clearances. Paste extra lat,lng lines for pads that are not on the site yet.', '▶ Plan safe zones — pink numbered spots on the map, before → after numbers in the panel, the farthest remaining point in red.', 'Click a row to jump, ⧉ copies its coordinates. Place the Safe Zone in Percepto by hand after a satellite check of the ground.', '📋 Copy report for the hand-off; ✕ Clear drops the preview.'],
             test: 'Plan 3 zones on a site with one base, confirm the worst-case number drops, then plan 4 and watch the farthest point move.' },
         imp: { what: 'Bring a client asset list into Percepto. Load a CSV or KML → points stage on the map (nothing written) → narrow with boundaries → map the type → ✓ Create makes real asset squares. Create-only, with dry run, backup manifest and undo.',
-            steps: ['The page is five numbered sections in working order (plus Advanced). Each header shows where it stands; click to open / close, or use the jump chips at the top. The status line under the title shows the latest result.', 'Boundaries first: ⬆ Load boundary KML (several polygons or several files), or draw a ⭕ circle / 🖊 polygon yourself; ✎ Edit reshapes any of them. Only points inside a boundary are selected.', '📂 Load CSV / KML (drag & drop works). Name / lat / lng are guessed; "edit" fixes the mapping.', '↔ Move point fixes a location before import: click a dot to pick it up, click where it belongs (or drag it); Delete while holding removes it from the import. Moved dots get a magenta ring; ↩ reset moved puts them back.', '✏ Shape draws the asset\'s real outline before it is created: click a dot, CTRL+drag a stroke across the asset (draw along the LONG side → a rectangle that long by the narrow side, default 15 ft; a loop → the tightest box). A red buffer ring (7.5 ft, editable) shows around the outline you are holding so you can see the 15 ft you must keep; ALT+click other dots to copy the held outline onto them — copies and dragged edges snap to a 15 ft gap from neighbours (gap editable, 0 = flush; Alt while dragging = no snap). Shift is left alone so Percepto\'s asset names stay visible. Drag inside the box to move it whole, drag an edge to pull it longer or shorter, drag a corner to move that corner; click an edge midpoint to add a corner, right-click a corner to remove it, Delete = back to a square. Colour / fill in the Control Panel.', 'Notes: under the mapping ("edit"), tick every extra column that belongs in the asset notes, rename labels, order them with ▲▼. The client\'s original name is always the first block, and a who / when / file stamp is always the last.', 'Progress is saved per site — automatically a few seconds after any change and every few minutes, or 💾 Save progress. Reopen the page later and ↻ Resume brings back the file, moved / removed points and boundaries.', 'Undo: ↩ Undo last import reverts the last run (creates deleted, updates put back) and survives a reload via ↻ Resume. Independently, 🕘 Imports on this site lists every import found on the assets themselves (the "Imported by …" line) and can delete a run\'s created assets from any machine, any time.', '6 · Client response: load the review sheet they sent back (xlsx or csv). Every row is classified — move / keep / add coordinates / remove / status / rename — and listed for you to check (⚠ = look, ⏳ = they still have to confirm, never applied). ✔ Apply moves the staged dots, adds the rows that had no coordinates, removes sold ones, records statuses and renames; then 🏷 writes moves + renames to the EXISTING assets (dry run, backup, undo) and 🗑 hands removals to the standard Bulk → Delete.', '📊 Analyze (in Create / update): the quarterly compare — run it on a new list before Create to see what would change: new · gone (on the site but not in the list; nothing is deleted) · moved over N ft · tier / type changes · production changes vs our last notes. Click a row to zoom; 📤 Sheets for the review.', '5 · Enverus check: set the Developer API key once, pick the API-number column, Cross-check — every selected well gets its Enverus status / type / trajectory / operator / dates and location; anything not plainly producing lands in Placement › 🛢 Enverus and an "Enverus" block goes into the notes.', '🔍 Find missing wells (same section, after a cross-check): every well the operator has inside your boundaries whose API is not in the file, with status and the nearest mapped asset — tick the ones to add, ➕ Stage, and they become ordinary points (source noted) that go through tiers, flags and Create like the rest. They also appear in the client review as "Well on your pads that is not in the list".', 'Priority tiers (in 3 · Type & priority): pick the oil + water columns (or a single BLPD column, or a ready-made P1/P2/P3 column); every asset on a pad shares the pad total; the tier is written as a type prefix ("P1 - …") and a Priority / Prioritized block in the notes. "name matches → update type + notes" is the quarterly re-run: load the new list, review the Tier report, Create.', 'Type: the file\'s type column maps to Percepto subtypes (new values are created on the site); with no type column one subtype applies to all.', 'Flags: name duplicates, parent/child, nearby — 📤 Copy for Sheets or ⬇ CSV for the account manager.', 'Size → untick Dry run → ✓ Create. ↩ Undo last import deletes exactly what it made.'],
+            steps: ['The page is five numbered sections in working order (plus Advanced). Each header shows where it stands; click to open / close, or use the jump chips at the top. The status line under the title shows the latest result.', 'Boundaries first: ⬆ Load boundary KML (several polygons or several files), or draw a ⭕ circle / 🖊 polygon yourself; ✎ Edit reshapes any of them. Only points inside a boundary are selected.', '📂 Load CSV / KML (drag & drop works). Name / lat / lng are guessed; "edit" fixes the mapping.', '↔ Move point fixes a location before import: click a dot to pick it up, click where it belongs (or drag it); Delete while holding removes it from the import. Moved dots get a magenta ring; ↩ reset moved puts them back.', '✏ Shape draws the asset\'s real outline before it is created: click a dot, CTRL+drag a stroke across the asset (draw along the LONG side → a rectangle that long by the narrow side, default 15 ft; a loop → the tightest box). A red buffer ring (7.5 ft, editable) shows around the outline you are holding so you can see the 15 ft you must keep; ALT+click other dots to copy the held outline onto them — copies and dragged edges snap to a 15 ft gap from neighbours (gap editable, 0 = flush; Alt while dragging = no snap). Shift is left alone so Percepto\'s asset names stay visible. Drag inside the box to move it whole, drag an edge to pull it longer or shorter, drag a corner to move that corner; click an edge midpoint to add a corner, right-click a corner to remove it, Delete = back to a square. Colour / fill in the Control Panel.', 'Notes: under the mapping ("edit"), tick every extra column that belongs in the asset notes, rename labels, order them with ▲▼. The client\'s original name is always the first block, and a who / when / file stamp is always the last.', 'Progress is saved per site — automatically a few seconds after any change and every few minutes, or 💾 Save progress. Reopen the page later and ↻ Resume brings back the file, moved / removed points and boundaries.', 'Undo: ↩ Undo last import reverts the last run (creates deleted, updates put back) and survives a reload via ↻ Resume. Independently, 🕘 Imports on this site lists every import found on the assets themselves (the "Imported by …" line) and can delete a run\'s created assets from any machine, any time.', '🔁 Mislabeled wellheads (in Placement, after a cross-check): ⟳ Find lists assets whose Enverus pin sits on a DIFFERENT asset\'s polygon — ⇄ mutual pairs (each name\'s pin on the other) are safe to swap; → one-way ones need a look; ✋ Pick two adds a pair by hand (ALT+click two assets). Swap = three renames through a temporary name, same ids, undo-able.', '🔍 Find missing wells can include EVERY operator: tick "every operator" and third-party wells stage as "3RD PARTY WELL (operator)" — untiered obstacles the drone must know about, never inspection targets.', '6 · Client response: load the review sheet they sent back (xlsx or csv). Every row is classified — move / keep / add coordinates / remove / status / rename — and listed for you to check (⚠ = look, ⏳ = they still have to confirm, never applied). ✔ Apply moves the staged dots, adds the rows that had no coordinates, removes sold ones, records statuses and renames; then 🏷 writes moves + renames to the EXISTING assets (dry run, backup, undo) and 🗑 hands removals to the standard Bulk → Delete.', '📊 Analyze (in Create / update): the quarterly compare — run it on a new list before Create to see what would change: new · gone (on the site but not in the list; nothing is deleted) · moved over N ft · tier / type changes · production changes vs our last notes. Click a row to zoom; 📤 Sheets for the review.', '5 · Enverus check: set the Developer API key once, pick the API-number column, Cross-check — every selected well gets its Enverus status / type / trajectory / operator / dates and location; anything not plainly producing lands in Placement › 🛢 Enverus and an "Enverus" block goes into the notes.', '🔍 Find missing wells (same section, after a cross-check): every well the operator has inside your boundaries whose API is not in the file, with status and the nearest mapped asset — tick the ones to add, ➕ Stage, and they become ordinary points (source noted) that go through tiers, flags and Create like the rest. They also appear in the client review as "Well on your pads that is not in the list".', 'Priority tiers (in 3 · Type & priority): pick the oil + water columns (or a single BLPD column, or a ready-made P1/P2/P3 column); every asset on a pad shares the pad total; the tier is written as a type prefix ("P1 - …") and a Priority / Prioritized block in the notes. "name matches → update type + notes" is the quarterly re-run: load the new list, review the Tier report, Create.', 'Type: the file\'s type column maps to Percepto subtypes (new values are created on the site); with no type column one subtype applies to all.', 'Flags: name duplicates, parent/child, nearby — 📤 Copy for Sheets or ⬇ CSV for the account manager.', 'Size → untick Dry run → ✓ Create. ↩ Undo last import deletes exactly what it made.'],
             test: 'Load the list, add one boundary, confirm the selected count drops, Create with Dry run ON.' },
         rig: { what: 'Temporary no-fly zones for pads with a crane or big rig on them, from Diamondback\'s daily sheet (or an RPIC report). Each well row is matched to its pad, an NFZ = pad ∩ FFZ-inset is staged, and committed create-only. When the end date passes or the row drops off the sheet, the row turns VERIFY — nothing is deleted until a CSM confirms the equipment is gone.', steps: ['📂 Load today\'s CSV (drag & drop). The sheet day comes from the file name.', 'Check the table: Staged rows have a pad (hover the pad for how it matched; ⚠ = name and GPS disagree). Unmatched / off-site rows are listed, never guessed.', 'Untick Dry run in the header → ⬠ Create staged NFZs. A backup JSON downloads first; each NFZ is verified by refetch.', 'Next day: load the new CSV. Re-dated rows show ✎; dropped rows and passed end dates turn VERIFY — click ✓ Gone to delete that NFZ or ↩ Still there to snooze.', '👁 Add RPIC report for a crane a pilot spotted: same lifecycle, plus the mission(s) pulled so the restore is not forgotten.'], test: 'Load Diamondback_Rig_Data_10.16.26.csv on Cobra 01 with Dry run on: four rows match pads, the rest are off-site. Then load 10.15 then 10.16 to watch the diff.' },
         sci: { what: 'Applies the Ortho Scanner review sheet\'s decisions: accepted NFZs and flight-path leg changes stage on the map (green / yellow, removed legs red), preflight runs, then Apply writes them — NFZs create-only, flight paths one POST each with Delete Guard backups.',
