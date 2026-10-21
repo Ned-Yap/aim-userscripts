@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.395
+// @version      4.396
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.395';
+    const SCRIPT_VERSION = '4.396';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -30190,7 +30190,7 @@
         if (!todo.length) { say('Nothing staged.'); return; }
         const dry = (() => { try { return !!document.getElementById('aim-gen-dryrun').checked; } catch (e) { return true; } })();
         // v4.391: standard FFZ ring → NFZ; custom FFZ (drone flies ON the pad) → cut the arcs inside every pad that FFZ spans.
-        const items = todo.map(([k, c]) => { const d = rigFfzDesign(sid, c.padId); c.design = d.kind; c.designPct = Math.round(d.pct * 100); c.pads = d.pads.map(p => p.name); c.padIds = d.pads.map(p => p.id); if (d.kind === 'custom') return { k, c, mode: 'cut', pads: d.pads, plan: rigCutPlan(sid, d.pads) }; const g = (c.nfzBody && Array.isArray(c.nfzBody.points) && c.nfzBody.points.length >= 3) ? { points: c.nfzBody.points, note: 'banked NFZ body (re-created)' } : rigGeometry(sid, c.padId); return { k, c, mode: 'nfz', pads: d.pads, g }; })
+        const items = todo.map(([k, c]) => { const d = rigFfzDesign(sid, c.padId); c.design = d.kind; c.designPct = Math.round(d.pct * 100); c.pads = d.pads.map(p => p.name); c.padIds = d.pads.map(p => p.id); if (d.kind === 'custom') return { k, c, mode: 'cut', pads: d.pads, plan: rigCutPlan(sid, d.pads, d.ffz) }; const g = (c.nfzBody && Array.isArray(c.nfzBody.points) && c.nfzBody.points.length >= 3) ? { points: c.nfzBody.points, note: 'banked NFZ body (re-created)' } : rigGeometry(sid, c.padId); return { k, c, mode: 'nfz', pads: d.pads, g }; })
             .filter(x => x.mode === 'cut' ? true : (x.g && x.g.points.length >= 3 && !ringSelfIntersects(x.g.points)));
         for (const x of items) { try { x.c.missions = await rigMissionsOnPads(sid, x.pads); } catch (e) { console.warn(`${RIG_TAG} missions lookup failed`, e); x.c.missions = x.c.missions || []; } }
         const geoms = items.filter(x => x.mode === 'nfz'); const cuts = items.filter(x => x.mode === 'cut');
@@ -30222,11 +30222,13 @@
         try { await fetchMapObjects(sid, true); } catch (e) {}
         writes.forEach(w => { if (w.x.c.status === 'active') { rigStamp(w.x.c, 'corrected'); rigIssueCreate(sid, w.x.c, w.x.pads, `Action: NFZ "${w.x.c.nfzName}" created (${w.x.g.note})`); } });
         let cutOk = 0;
+        try {
         for (const x of cuts) {
             if (!x.plan.length) { logL(`${x.c.well}: custom FFZ but no flight-path arc crosses the pad(s) — already disconnected by hand; issue only`); x.c.status = 'active'; x.c.committedAt = rigToday(); x.c.fpCut = []; x.c.manualCut = true; rigStamp(x.c, 'corrected'); rigIssueCreate(sid, x.c, x.pads, 'Action: flight path was ALREADY disconnected by hand (no arc crosses the pad) — the tool has nothing to restore later; put the path back by hand when the equipment leaves. Remove the missions below.'); continue; }
             try { await rigCutCommit(sid, x.c, x.plan, csrf, siteCfg, logL); x.c.status = 'active'; x.c.committedAt = rigToday(); cutOk++; rigStamp(x.c, 'corrected'); rigIssueCreate(sid, x.c, x.pads, `Action: flight-path arcs CUT inside ${x.pads.map(p => p.name).join(' + ')} — ${x.c.fpCut.map(f => `${f.name} −${f.cut}`).join(', ')} (restored exactly on ✓ Gone)`); }
             catch (e) { fail++; console.warn(`${RIG_TAG} cut "${x.c.well}":`, e.message); logL(`${x.c.well}: cut FAILED — ${e.message}`); }
         }
+        } catch (e) { fail++; console.error(`${RIG_TAG} protect phase threw`, e); logL(`protect FAILED — ${e.message}`); showToast(`Protect failed: ${e.message}`, 'rgba(255,96,96,0.6)'); }
         Object.values(rigStateLoad(sid).rows).forEach(c => { try { rigSyncStage(c); } catch (e) {} });
         rigLog(sid, `commit: ${ok} NFZ(s) created, ${cutOk} path cut(s)${fail ? `, ${fail} failed` : ''}`); rigStateSave(sid);
         say(`${ok} NFZ(s) created · ${cutOk} flight path cut(s)${fail ? ` · ${fail} failed (see console)` : ''}. Issues posted to AIM Issues. Percepto shows the changes after a reload.`, fail ? '#ff6060' : '#5fff5f');
@@ -30302,10 +30304,19 @@
         const roots = rigPads(sid).roots.filter(p => rigPolyTouch(rigRingOf(p), fr));
         return { kind: pct >= 0.5 ? 'standard' : 'custom', pct, ffz, pads: roots.length ? roots : [pad] };
     }
-    function rigArcInside(arc, padRings) { const a = arc.point_a, b = arc.point_b; if (!a || !b) return false; const m = { lat: (a.lat + b.lat) / 2, lng: (a.lng + b.lng) / 2 }; return padRings.some(r => pointInPolygon(a.lat, a.lng, r) || pointInPolygon(b.lat, b.lng, r) || pointInPolygon(m.lat, m.lng, r)); }
-    function rigCutPlan(sid, pads) {
-        const rings = pads.map(rigRingOf); const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
-        return ents.filter(e => e.type === 15 && Array.isArray(e.arcs)).map(fp => { const cut = fp.arcs.filter(a => rigArcInside(a, rings)); return { fp, cut, keep: fp.arcs.filter(a => !cut.includes(a)) }; }).filter(x => x.cut.length);
+    // v4.396: an arc is cut when it touches the custom FFZ corridor (endpoint inside it or
+    // within 2 m of its edge — that is how a path "connects" to a zone) or when it lies
+    // inside one of the affected pads. The FDEs disconnect by pulling that endpoint off
+    // the corridor; removing the arc is the same gap, and the backup restores it exactly.
+    function rigArcInside(arc, padRings, ffzRing) {
+        const a = arc.point_a, b = arc.point_b; if (!a || !b) return false; const m = { lat: (a.lat + b.lat) / 2, lng: (a.lng + b.lng) / 2 };
+        const touch = (p, r) => pointInPolygon(p.lat, p.lng, r) || pointToPolygonMeters(p.lat, p.lng, r) <= 2;
+        if (ffzRing && (touch(a, ffzRing) || touch(b, ffzRing) || pointInPolygon(m.lat, m.lng, ffzRing))) return true;
+        return padRings.some(r => pointInPolygon(a.lat, a.lng, r) || pointInPolygon(b.lat, b.lng, r) || pointInPolygon(m.lat, m.lng, r));
+    }
+    function rigCutPlan(sid, pads, ffz) {
+        const rings = pads.map(rigRingOf); const ffzRing = ffz ? rigRingOf(ffz) : null; const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+        return ents.filter(e => e.type === 15 && Array.isArray(e.arcs)).map(fp => { const cut = fp.arcs.filter(a => rigArcInside(a, rings, ffzRing)); return { fp, cut, keep: fp.arcs.filter(a => !cut.includes(a)) }; }).filter(x => x.cut.length);
     }
     async function rigApps(sid) {
         if (rigAppsCache[sid]) return rigAppsCache[sid];
