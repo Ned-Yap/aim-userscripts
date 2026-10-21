@@ -2,6 +2,7 @@
 
 - **New issue type: 🏗 Obstacle (rig / crane).** Third category next to 🚩 Issue and 🛡✕ Unshielded Route: orange 🏗 marker and dashed orange outline while live, own filter chip in the site panel and the fleet panel, own chip in the create form, "Mark Obstacle" / "Mark as Issue" / "Mark Unshielded" convert buttons in the issue modal (one per other type), Slack parent line says *Obstacle (rig / crane)*. Resolved or ignored obstacles dim like a normal issue (equipment gone = background). Per-category approvers work via `"categoryApprovers": { "obstacle": [...] }`.
 - **Rigs & cranes tool (SST v4.404)** files its issues as Obstacles.
+- **v1.45:** the obstacle marker is a drawn orange derrick silhouette (cross-braced tower on a dark base, no disc) instead of the 🏗 emoji, which was unreadable at marker size.
 
 ## 2026-10-21 — 🏗 Rigs & cranes: trim-first cuts, preview + confirm, undo, story, short issue note — Site Setup Tools latest v4.392 → v4.403 (latest only, feature #291)
 

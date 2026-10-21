@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.44
+// @version      1.45
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -68,7 +68,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.44';
+    const SCRIPT_VERSION = '1.45';
 
     // Server model (v1.36): prod and QA are separate databases — the same
     // numeric site ID is two different sites. QA issues live in their own
@@ -4385,7 +4385,25 @@
         if (isObstacle(issue)) {
             const st = iconForStatus(issue.status);
             const live = !(issue.status === 'resolved' || issue.status === 'ignored');
-            return { glyphHtml: live ? '🏗' : st.glyph, color: live ? CATEGORY_META.obstacle.color : st.color };
+            if (!live) return { glyphHtml: st.glyph, color: st.color };
+            // v1.45: the marker IS a drilling derrick silhouette (orange, dark
+            // outline, cross-braced) — no disc, same treatment as the shield.
+            const c = CATEGORY_META.obstacle.color;
+            const glyphHtml = `
+            <svg viewBox="0 0 24 24" style="width:100%;height:100%;display:block;filter:drop-shadow(0 1px 2px rgba(0,0,0,0.9))">
+                <path d="M5 23 H19 L14.6 2.2 H9.4 Z" fill="${c}" stroke="#14171b" stroke-width="1.6" stroke-linejoin="round"/>
+                <rect x="8.6" y="0.6" width="6.8" height="2.6" rx="0.6" fill="${c}" stroke="#14171b" stroke-width="1.2"/>
+                <g stroke="#14171b" stroke-width="1.1" stroke-linecap="round" opacity="0.9">
+                    <line x1="8.4" y1="8.5" x2="15.6" y2="8.5"/>
+                    <line x1="7.3" y1="13.5" x2="16.7" y2="13.5"/>
+                    <line x1="6.2" y1="18.5" x2="17.8" y2="18.5"/>
+                    <line x1="8.4" y1="8.5" x2="16.7" y2="13.5"/><line x1="15.6" y1="8.5" x2="7.3" y2="13.5"/>
+                    <line x1="7.3" y1="13.5" x2="17.8" y2="18.5"/><line x1="16.7" y1="13.5" x2="6.2" y2="18.5"/>
+                    <line x1="9.4" y1="3.2" x2="15.6" y2="8.5"/><line x1="14.6" y1="3.2" x2="8.4" y2="8.5"/>
+                </g>
+                <rect x="3.5" y="21.6" width="17" height="2" rx="0.6" fill="#14171b"/>
+            </svg>`;
+            return { glyphHtml, color: c, shieldMarker: true };
         }
         if (!isUnshielded(issue)) return { glyphHtml: iconForStatus(issue.status).glyph, color: iconForStatus(issue.status).color };
         const c = CATEGORY_META.unshielded.color;
