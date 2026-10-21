@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.42
+// @version      1.43
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -68,7 +68,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.42';
+    const SCRIPT_VERSION = '1.43';
 
     // Server model (v1.36): prod and QA are separate databases — the same
     // numeric site ID is two different sites. QA issues live in their own
@@ -3484,6 +3484,7 @@
             showToast(`Issue created locally (no GitHub token, ${localCount} on this site).`, 3500);
         }
         console.log(`${TAG} created issue ${id} (${shape}, ${polygon.length} vertices) by @${by}`);
+        return issue;
     }
 
     // v0.6: creator-only delete. Removes from currentSiteIssues, drops
@@ -8357,6 +8358,18 @@
             const m = ev.data || {};
             if (m.type === 'VALIDATOR_ISSUES') applyValidatorIssues(m);
             else if (m.type === 'CLEAR_VALIDATOR_ISSUES') clearValidatorIssues(m.siteID);
+            else if (m.type === 'ISSUE_CREATE') {
+                // v1.43: a REAL (persisted, synced, Slack-posted) issue created by
+                // another script — first use: 🏗 Rigs & cranes (Site Setup Tools).
+                // Gate: this site, the frame that owns the map, a visible tab —
+                // BroadcastChannel reaches every tab, so only one may create it.
+                if (String(m.siteID) !== String(siteID) || !getLeafletMap() || document.hidden) return;
+                if (!Array.isArray(m.polygon) || m.polygon.length < 3) return;
+                try {
+                    const issue = createIssue({ shape: m.shape || 'polygon', latlngsObjs: m.polygon.map(([lat, lng]) => ({ lat, lng })), note: String(m.note || ''), priority: m.priority || 'HIGH', notify: Array.isArray(m.notify) ? m.notify : [], category: m.category });
+                    if (issue) { issue.source = m.source || 'external'; saveIssuesToStorage(siteID, currentSiteIssues); try { validatorChannel.postMessage({ type: 'ISSUE_CREATED', ref: m.ref, id: issue.id }); } catch (e) {} }
+                } catch (e) { console.warn(`${TAG} ISSUE_CREATE failed`, e); }
+            }
         };
     }
 
