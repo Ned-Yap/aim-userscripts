@@ -1,3 +1,11 @@
+## 2026-10-21 — 🏗 Rigs & cranes: trim-first cuts, preview + confirm, undo, story, short issue note — Site Setup Tools latest v4.392 → v4.403 (latest only, feature #291)
+
+- **Trim, don't delete (v4.402).** On a custom-FFZ pad each connecting leg is shortened to end on the 15 ft standoff line around the pad (altitudes kept); legs entirely inside or crossing the pad are removed. Control Panel: trim | remove, standoff ft. Cut rows draw their gaps as red dashes, never an NFZ outline.
+- **Preview + confirm (v4.398).** 🛡 Protect first paints what it will do (red = removed, orange = trimmed leg, dashed = NFZ), lists it with the missions, and asks before any write. **↩ Undo gone (v4.401)** re-stages a row cleared by mistake. ✓ Gone names its action (restore paths / remove NFZ / close).
+- **Story (v4.392).** History narrates each obstruction: sheet dates, match, what was done and when, missions pulled, why it ended, restore, close. Inert rows (off-site / unmatched) have no stage and are hidden by default (v4.393).
+- **Issue (v4.403).** Five short lines: job + well, pads, what was done, missions to remove with step counts, sheet dates. Confirmed live: AIM Issues 1.43 creates it and Slack pings Payden + Chris. 🚩✗ on a row = click to request again (v4.399).
+- Fixes: cut rule = arcs touching the FFZ corridor (v4.396); `logL` crash that wrote a cut and lost its record (v4.397, cuts now persist per path); button labels generic (v4.394, v4.400).
+
 ## 2026-10-21 — 🏗 Rigs & cranes: custom-FFZ arc cut, stages, issues, report — Site Setup Tools latest v4.391 + AIM Issues latest v1.43 (latest only, feature #291)
 
 - **FFZ design check.** A standard FFZ is a ring ~15 ft outside the pad; when most of the FFZ edge is NOT 15 ft off the pad (a custom corridor that puts the drone ON the pad) an NFZ cannot protect it, so the tool **cuts the flight-path arcs inside every pad that FFZ spans** (one POST per path, backup JSON + exact restore on ✓ Gone, verified by arc count). Standard pads still get the NFZ.
