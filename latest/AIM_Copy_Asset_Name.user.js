@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.397
+// @version      4.398
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.397';
+    const SCRIPT_VERSION = '4.398';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -30197,7 +30197,12 @@
         const geoms = items.filter(x => x.mode === 'nfz'); const cuts = items.filter(x => x.mode === 'cut');
         const describe = x => x.mode === 'cut' ? `CUT ${x.plan.reduce((n, p) => n + p.cut.length, 0)} arc(s) in ${x.plan.map(p => `"${p.fp.name}"`).join(', ') || 'no path'} for ${x.c.well} (custom FFZ ${x.c.designPct}% standard; pads ${x.pads.map(p => p.name).join(' + ')})` : `NFZ for ${x.c.well}`;
         rigStateSave(sid);
-        if (dry) { say(`DRY RUN — ${items.map(describe).join(' · ')}. Missions on those pads: ${items.map(x => (x.c.missions || []).map(m => `${m.name} steps ${m.steps}`).join('; ') || 'none').join(' | ')}. Untick Dry run in the header to write.`, '#ffb300'); rigRenderPanel(sid); return; }
+        // v4.398: PREVIEW first — arcs to cut in red, NFZs dashed — then confirm (live only).
+        rigPreview(sid, items);
+        const plan = `${items.map(describe).join('\n')}\nMissions on those pads: ${items.map(x => (x.c.missions || []).map(m => `${m.name} steps ${m.steps}`).join('; ') || 'none').join(' | ')}`;
+        if (dry) { say(`DRY RUN — ${plan.replace(/\n/g, ' · ')}. Red on the map = arcs that would be cut. Untick Dry run in the header to write.`, '#ffb300'); rigRenderPanel(sid); return; }
+        say(`PREVIEW — ${plan.replace(/\n/g, ' · ')}`, '#ffb300');
+        if (!confirm(`About to WRITE to site ${sid}:\n\n${plan}\n\nRed arcs on the map are the ones that will be cut (backed up first, restored exactly on ✓ Gone). Continue?`)) { say('Cancelled — nothing written.', '#ffb300'); return; }
         const csrf = getCsrfToken(); if (!csrf) { showToast('No CSRF token — make one native save anywhere in Percepto first, then retry', 'rgba(255,96,96,0.55)'); return; }
         let siteCfg = null; try { siteCfg = await fetchSiteConfig(sid); } catch (e) {}
         try { await fetchMapObjects(sid, true); } catch (e) {}
@@ -30233,7 +30238,7 @@
         Object.values(rigStateLoad(sid).rows).forEach(c => { try { rigSyncStage(c); } catch (e) {} });
         rigLog(sid, `commit: ${ok} NFZ(s) created, ${cutOk} path cut(s)${fail ? `, ${fail} failed` : ''}`); rigStateSave(sid);
         say(`${ok} NFZ(s) created · ${cutOk} flight path cut(s)${fail ? ` · ${fail} failed (see console)` : ''}. Issues posted to AIM Issues. Percepto shows the changes after a reload.`, fail ? '#ff6060' : '#5fff5f');
-        rigRenderPanel(sid); rigDraw(sid);
+        rigPreviewClear(); rigRenderPanel(sid); rigDraw(sid);
     }
     async function rigConfirmGone(sid, key) {
         if (liteBlockedWrite('delete a rig NFZ')) return;
@@ -30358,6 +30363,18 @@
         // v4.394: AIM Issues must answer with ISSUE_CREATED — if it doesn't, say so loudly.
         setTimeout(() => { if (c.issueStatus === 'pending') { c.issueStatus = 'no answer'; rigLog(sid, `⚠ AIM Issues did not create the issue for ${c.well} — is AIM Issues ≥ 1.43 installed and running on this site?`); showToast(`⚠ Issue NOT created for ${c.well} — AIM Issues ≥ 1.43 must be running on this site`, 'rgba(255,96,96,0.7)'); rigStateSave(sid); rigRenderPanel(sid); } }, 4000);
     }
+    let rigPreviewLayers = [];
+    function rigPreviewClear() { const map = getLeafletMap(); rigPreviewLayers.forEach(l => { try { l.remove ? l.remove() : (map && map.removeLayer(l)); } catch (e) {} }); rigPreviewLayers = []; }
+    function rigPreview(sid, items) {
+        rigPreviewClear(); const L = getLeafletL(), map = getLeafletMap(); if (!L || !map) return;
+        items.forEach(x => {
+            try {
+                if (x.mode === 'cut') x.plan.forEach(p => p.cut.forEach(a => { rigPreviewLayers.push(L.polyline([[a.point_a.lat, a.point_a.lng], [a.point_b.lat, a.point_b.lng]], { color: '#ff2020', weight: 7, opacity: 0.95, interactive: false }).addTo(map)); }));
+                else if (x.g) rigPreviewLayers.push(L.polygon(x.g.points.map(p => [p.lat, p.lng]), { color: '#ff5555', weight: 3, dashArray: '6,5', fillColor: '#ff5555', fillOpacity: 0.3, interactive: false }).addTo(map));
+            } catch (e) { console.warn(`${RIG_TAG} preview draw`, e); }
+        });
+        setTimeout(rigPreviewClear, 90000);
+    }
     async function rigCutCommit(sid, c, plan, csrf, siteCfg, logL) {
         c.fpBackups = plan.map(x => ({ id: x.fp.id, name: x.fp.name || `#${x.fp.id}`, body: buildWriteBody(x.fp, siteCfg), arcs: x.fp.arcs.length, cut: x.cut.length }));
         try { downloadJSONFile(`rig-fp-backup-${sid}-${c.well.replace(/\W+/g, '_')}-${Date.now()}.json`, JSON.stringify({ site: sid, well: c.well, at: new Date().toISOString(), flightPaths: c.fpBackups.map(b => b.body) }, null, 1)); } catch (e) {}
@@ -30467,7 +30484,7 @@
                 : (c.status === 'staged' || c.status === 'upcoming' || c.status === 'unmatched' || c.status === 'offsite') ? `<button data-rig-act="drop" data-k="${esc(k)}" style="background:none;border:1px solid #555;color:#999;border-radius:3px;padding:1px 6px;cursor:pointer">Ignore</button>` : '';
             const stg = c.stage || '';
             return `<tr data-rig-row="${esc(k)}" style="border-bottom:1px solid #222;cursor:pointer">
-                <td style="padding:3px 6px;color:${col};font-weight:700;white-space:nowrap" title="${esc(c.status === 'unmatched' || c.status === 'offsite' ? (c.how || '') : (c.endedWhy || ''))}">${esc(RIG_STATUS_LABEL[c.status] || c.status)}${c.endedWhy ? ` <span style="color:#888;font-weight:400">(${esc(c.endedWhy)})</span>` : ''}</td>
+                <td style="padding:3px 6px;color:${col};font-weight:700;white-space:nowrap" title="${esc(c.status === 'unmatched' || c.status === 'offsite' ? (c.how || '') : (c.endedWhy || ''))}">${esc(c.status === 'active' ? (c.fpCut ? 'Active — arcs cut' : c.manualCut ? 'Active — cut by hand' : 'Active NFZ') : (RIG_STATUS_LABEL[c.status] || c.status))}${c.endedWhy ? ` <span style="color:#888;font-weight:400">(${esc(c.endedWhy)})</span>` : ''}</td>
                 <td style="padding:3px 6px;white-space:nowrap">${stg ? `<span data-rig-act="missions" data-k="${esc(k)}" title="${esc(c.stamps && c.stamps[stg] ? `${RIG_STAGE_LABEL[stg]} since ${c.stamps[stg].at}` : RIG_STAGE_LABEL[stg])} — click for missions / stage history" style="color:${RIG_STAGE_COLOR[stg]};border:1px solid ${RIG_STAGE_COLOR[stg]};border-radius:3px;padding:0 5px;cursor:pointer">${esc(RIG_STAGE_LABEL[stg])}${(c.missions || []).length ? ` <span style="color:#777">${(c.missions || []).filter(m => m.pulled).length}/${c.missions.length}</span>` : ''}</span>` : '<span style="color:#444">—</span>'}</td>
                 <td style="padding:3px 6px;color:#e6e6e6">${esc(c.well)}${c.source === 'rpic' ? ' <span style="color:#7adfe6" title="RPIC report">👁</span>' : ''}</td>
                 <td style="padding:3px 6px;color:#9aa">${esc(c.job)}</td>
@@ -30682,7 +30699,7 @@
         try { setFpSnap(false); } catch (e) {}
         try { if (genVertEdit.active) exitGenVertEdit(false); } catch (e) {}
         try { clearDraftShielding(); } catch (e) {}
-        try { rigClearLayers(); } catch (e) {}
+        try { rigClearLayers(); rigPreviewClear(); } catch (e) {}
         genUndoStack = [];
         // Tear down Advanced Draw but DON'T clear its localStorage (so an in-progress
         // corridor survives close/reload — restored when the mode is re-armed).
