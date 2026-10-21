@@ -2,7 +2,7 @@
 // @name         AIM Copy Asset Name
 // @name:en      AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.322
+// @version      4.404
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -15,6 +15,7 @@
 // @match        https://qa.percepto.app/static/dist/react-pages/*
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_deleteValue
 // @grant        GM_xmlhttpRequest
 // @grant        GM_openInTab
 // @require      https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/vendor/polygon-clipping-0.15.7.umd.js
@@ -27,6 +28,7 @@
 // @connect      services1.arcgis.com
 // @connect      tfr.faa.gov
 // @connect      energy.usgs.gov
+// @connect      api.enverus.com
 // @run-at       document-end
 // ==/UserScript==
 
@@ -89,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.322';
+    const SCRIPT_VERSION = '4.404';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -142,6 +144,7 @@
         bandSoftFt: 40, bandHardFt: 200,        // alt-band height (max−min): soft warn / hard flag
         gmTowerFt: 60,                          // "Tower" general-markers must stay this far from FFZ/FP
         fpFfzAngleDeg: 15,                      // FP→FFZ boundary crossing angle hard min (ideal 45°)
+        hazardFt: 0,                            // 🚧 hazard standoff; 0 = per-feature value from the hazards file (50)
     };
     const SOP_ENABLE_DEFAULTS = {
         ffzAsset: true, fpAsset: true, ffzFfz: true,
@@ -149,9 +152,49 @@
         bandHeight: true, altInverted: true, fpDegenerate: true, gmTower: true,
         fpFfzAngle: true,
         gmTowerRings: true,   // ⭕ live standoff circles on Tower GMs (radius = gmTowerFt)
+        hazard: true, hazardFfz: true,   // 🚧 FP (+ FFZ) vs the Map Styler hazard layer (#288)
     };
     let sopValidatorChannel = null;
     let sopMasterEnabled = true;
+    // ---- 🚧 Hazard layer data (v4.323, #288) — shared by Map Styler over AIM_HAZARDS ----
+    // Map Styler owns the fetch (PAT + data repo hazards/<site>.geojson) and
+    // broadcasts the parsed features; the SOP check 13 reads them here. One
+    // fetch per site, both scripts see the same file.
+    const HAZARD_CHANNEL_NAME = 'AIM_HAZARDS';
+    const HAZARD_WAIT_MS = 8000;
+    let hazardChannel = null;
+    let hazardData = null;        // last HAZARDS_DATA message {siteKey, generated, stale, standoffFt, features:[{id, cls, kind, ours, name, operator, status, standoffFt, newSince, source, ring:[[lat,lng]…]}]}
+    let hazardWaiters = [];
+    function hazardSiteKey(sid) { return IS_QA ? `qa-${sid}` : String(sid); }
+    function ensureHazardChannel() {
+        if (hazardChannel) return hazardChannel;
+        try {
+            hazardChannel = new BroadcastChannel(HAZARD_CHANNEL_NAME);
+            hazardChannel.onmessage = (ev) => {
+                const m = (ev && ev.data) || {};
+                if (m.type !== 'HAZARDS_DATA' || !m.siteKey) return;
+                hazardData = m;
+                const ws = hazardWaiters; hazardWaiters = [];
+                ws.forEach(w => { try { w(m); } catch (e) {} });
+            };
+        } catch (e) { console.warn(`${TAG} hazard channel unavailable:`, e); }
+        return hazardChannel;
+    }
+    // Resolves with the hazard data for the site, or null after HAZARD_WAIT_MS.
+    function hazardFeaturesFor(sid) {
+        const key = hazardSiteKey(sid);
+        if (hazardData && hazardData.siteKey === key) return Promise.resolve(hazardData);
+        const ch = ensureHazardChannel();
+        if (!ch) return Promise.resolve(null);
+        return new Promise(resolve => {
+            let done = false;
+            const finish = (v) => { if (done) return; done = true; resolve(v && v.siteKey === key ? v : null); };
+            hazardWaiters.push(finish);
+            setTimeout(() => finish(hazardData), HAZARD_WAIT_MS);
+            try { ch.postMessage({ type: 'HAZARDS_REQUEST', siteKey: key, siteId: String(sid), source: SOP_SCRIPT_ID }); }
+            catch (e) { console.warn(`${TAG} hazard request failed:`, e); finish(null); }
+        });
+    }
     function loadSopThresholds() {
         const out = Object.assign({}, SOP_THRESH_DEFAULTS);
         try {
@@ -188,13 +231,42 @@
     // Declared HERE (not in the importer section) because registerWithControlPanel
     // runs at init and references them — a later const would TDZ-throw.
     const IMP_SCRIPT_ID = 'aim-asset-importer';
+    // v4.382: 🏗 Rigs & cranes declarations hoisted here — the CP message handler
+    // compares scriptIds on EVERY message and some frames return early before the
+    // module body below runs (TDZ → 'Cannot access RIG_SCRIPT_ID before initialization').
+    const RIG_SCRIPT_ID = 'aim-rig-nfz';
+    const RIG_TAG = '[AIM RIG]';
+    const RIG_TAG_PREFIX = 'AIM RIG NFZ|';
+    const RIG_COLS = ['WELL_NAME', 'SURFACE_LATITUDE', 'SURFACE_LONGITUDE', 'JOB_TYPE_CATEGORY', 'START_DATE', 'END_DATE'];
+    const RIG_DEFAULT_CFG = { nearPadFt: 500, insetFt: 15, graceDays: 1, snoozeDays: 3, padCoverPct: 75, hideNoise: true, cutMode: 'trim', standoffFt: 15, exclude: '' };   // v4.402 cutMode trim|remove   // v4.385 padCoverPct: below this share of its FFZ the pad polygon is distrusted → NFZ = whole FFZ inset
+    const RIG_STATUS_LABEL = { upcoming: 'Upcoming', staged: 'Staged', active: 'Active NFZ', ending: 'VERIFY — gone?', cleared: 'Cleared', unmatched: 'Unmatched', offsite: 'Off-site' };
+    const RIG_STATUS_COLOR = { upcoming: '#ffb300', staged: '#7adfe6', active: '#ff5555', ending: '#ff9100', cleared: '#8a8f98', unmatched: '#ff6060', offsite: '#666' };
+    let rigCfgCache = null, rigLayers = [], rigRowsByKey = null, rigStateSid = null;
     let impMasterEnabled = true;
+    // v4.325: 🔍 Scan Import (#289) — CP card ids + init-referenced lets (TDZ rule).
+    const SCI_SCRIPT_ID = 'aim-scan-import';
+    let sciMasterEnabled = true;
+    let sciAglFt = 90;      // AGL floor at every new / moved FP vertex (blocker)
+    let sciEdgeFt = 3;      // how close an FP end must be to an FFZ edge to count as "on" it
+    // v4.327: 🛗 Elevators (feature #290) — CP defaults; per-crossing copies live in elv.items[].p
+    const ELV_SCRIPT_ID = 'aim-elevators';
+    let elvMasterEnabled = true;
+    let elvCfg = { floorAgl: 200, height: 20, halfFt: 100, elevFt: 100, overlapFt: 10, gm: true, tailFt: 20, minElevFt: 30 };
     let impDupFt = 50;              // duplicate-guard proximity, CP-editable
     // ---- 📌 GM Stamper (#271) — CP card id + init-referenced state (same TDZ reason).
     const GMT_SCRIPT_ID = 'aim-gm-stamper';
     let gmtMasterEnabled = true;
     let gmtAltGate = false;         // CP toggle: require ALT+click to place (plain click stays free for Percepto)
-    let impSizeFt = 30;             // created-asset square side ft, CP-editable
+    let impSizeFt = 55;             // created-asset square side ft, CP-editable (55 ft = field default since v4.330)
+    let impShapeColor = '#c39bd3';  // v4.367: ✏ Shape — drawn asset polygons (Percepto asset purple), CP-editable
+    let impShapeOpacity = 0.25;     // v4.367: fill opacity
+    let impShapeFill = true;        // v4.367: filled or outline only
+    let impBufColor = '#ff2d2d';    // v4.373: red buffer ring around outlines while shaping (7.5 ft each side = 15 ft between assets)
+    let impBufOpacity = 0.3;        // v4.373: buffer band fill opacity (v4.378: band, not a full fill)
+    // v4.369: 🛟 Safe Zone Planner (#302) — CP card id + init-referenced state (TDZ rule).
+    const SZP_SCRIPT_ID = 'aim-safe-zone-planner';
+    let szpMasterEnabled = true;
+    let szpCfg = { count: 3, insetFt: 15, hopFt: 150, satAcres: 1.5, nfzFt: 30, towerFt: 100, wellsFirst: true, facilities: false, assets: true };   // v4.370: spots live on pad edges
     let impDeleteGuardSeen = 0;     // ts of the last Delete Guard REGISTER seen on the control channel
     const AIR_THRESH_KEY = 'aim-airspace-thresholds';
     const AIR_ENABLE_KEY = 'aim-airspace-enabled';
@@ -2178,6 +2250,97 @@
             }
         }
 
+        // 13. 🚧 Hazard layer (v4.323, #288) — flight-path segments (and FFZ
+        //     rings) vs the Map Styler's hazard features: third-party pads,
+        //     upcoming work of ANY operator (permits / rigs / frac / drilling /
+        //     infill), buildings. Plugged wells, expired permits and our own
+        //     producing pads never flag. Measures SEGMENT → ring, never vertex.
+        //     Data comes over AIM_HAZARDS from Map Styler (one fetch, shared) —
+        //     a HAZARDS_REQUEST is posted when nothing is cached yet.
+        if (sopEnabled.hazard) {
+            const hz = await hazardFeaturesFor(siteID);
+            if (!hz) {
+                console.warn(`${TAG} SOP: hazard layer data unavailable for site ${siteID} — check 13 skipped (Map Styler ≥34.154 not running, no PAT, or no hazards/${hazardSiteKey(siteID)}.geojson yet)`);
+            } else {
+                const fileTh = Number(hz.standoffFt) || 50;
+                const thFor = (f) => (sopThresholds.hazardFt > 0 ? sopThresholds.hazardFt : (Number(f.standoffFt) || fileTh));
+                const feats = (hz.features || []).filter(f => f && Array.isArray(f.ring) && f.ring.length >= 3 && (f.cls === 'work' || f.cls === 'likely' || f.cls === 'possible' || f.cls === 'live' || f.cls === 'building'));
+                const segSegM = (p1, p2, q1, q2) => segmentsCross(p1, p2, q1, q2) ? 0
+                    : Math.min(pointToSegMeters(p1.lat, p1.lng, q1, q2), pointToSegMeters(p2.lat, p2.lng, q1, q2),
+                               pointToSegMeters(q1.lat, q1.lng, p1, p2), pointToSegMeters(q2.lat, q2.lng, p1, p2));
+                const ringPts = (ring) => ring.map(p => ({ lat: p[0], lng: p[1] }));
+                // segment → ring: 0 when it crosses an edge or an endpoint lies inside
+                const segToRingM = (a, b, pts) => {
+                    if (pointInPolygon(a.lat, a.lng, pts) || pointInPolygon(b.lat, b.lng, pts)) return 0;
+                    let best = Infinity;
+                    for (let i = 0; i < pts.length; i++) {
+                        const q1 = pts[i], q2 = pts[(i + 1) % pts.length];
+                        const d = segSegM(a, b, q1, q2);
+                        if (d < best) { best = d; if (best === 0) break; }
+                    }
+                    return best;
+                };
+                // ring ↔ ring: 0 when any edge crosses or any vertex sits inside the other
+                const ringToRingM = (ptsA, ptsB) => {
+                    for (const p of ptsA) if (pointInPolygon(p.lat, p.lng, ptsB)) return 0;
+                    for (const p of ptsB) if (pointInPolygon(p.lat, p.lng, ptsA)) return 0;
+                    let best = Infinity;
+                    for (let i = 0; i < ptsA.length; i++) {
+                        const a = ptsA[i], b = ptsA[(i + 1) % ptsA.length];
+                        for (let j = 0; j < ptsB.length; j++) {
+                            const d = segSegM(a, b, ptsB[j], ptsB[(j + 1) % ptsB.length]);
+                            if (d < best) { best = d; if (best === 0) return 0; }
+                        }
+                    }
+                    return best;
+                };
+                const kindLabel = (f) => ({ work: 'WORK NOW', likely: 'LIKELY WORK', possible: 'POSSIBLE WORK (stale signal)', building: 'building / property' }[f.cls] || 'third-party pad')
+                    + (f.kind && f.kind !== 'pad' && f.cls !== 'building' ? ` (${f.kind})` : '');
+                let flagged = 0;
+                for (let hi = 0; hi < feats.length; hi++) {
+                    const f = feats[hi];
+                    const th = thFor(f);
+                    const margM = th / M_TO_FT + 2;
+                    const ring = f.ring;
+                    const pts = ringPts(ring);
+                    const hb = bboxOfRing(pts);
+                    // bbox prefilter: expand the hazard bbox by the standoff and keep
+                    // only arcs / FFZs whose own bbox touches it.
+                    const near = (bb) => bb && !(bb.maxLat < hb.minLat - margM / 111320 || bb.minLat > hb.maxLat + margM / 111320
+                        || bb.maxLng < hb.minLng - margM / (111320 * Math.cos(hb.minLat * Math.PI / 180)) || bb.minLng > hb.maxLng + margM / (111320 * Math.cos(hb.minLat * Math.PI / 180)));
+                    let best = Infinity, bestRef = '', hits = [];
+                    for (const rec of allArcs) {
+                        if (!near(arcBox(rec.arc))) continue;
+                        const d = segToRingM(rec.arc.point_a, rec.arc.point_b, pts);
+                        const ft = Math.round(d * M_TO_FT);
+                        if (ft <= th) { hits.push(`${segRef(rec)} ${ft === 0 ? 'CROSSES' : ft + ' ft'}`); if (d < best) { best = d; bestRef = segRef(rec); } }
+                    }
+                    if (sopEnabled.hazardFfz) {
+                        for (const ffz of ffzs) {
+                            if (!near(ffzBox.get(ffz))) continue;
+                            const r = getRing(ffz); if (!r) continue;
+                            const d = ringToRingM(pts, r);
+                            const ft = Math.round(d * M_TO_FT);
+                            if (ft <= th) { hits.push(`FFZ "${nameOf(ffz)}" ${ft === 0 ? 'OVERLAPS' : ft + ' ft'}`); if (d < best) { best = d; bestRef = `FFZ "${nameOf(ffz)}"`; } }
+                        }
+                    }
+                    if (hits.length) {
+                        flagged++;
+                        const ft = Math.round(best * M_TO_FT);
+                        const who = [f.operator ? `${f.operator}${f.ours ? ' — OURS' : ''}` : (f.source === 'msbf' ? 'building footprint' : (f.source === 'cv' ? 'Ortho Scanner' : '')), f.status].filter(Boolean).join(', ');
+                        // tiers (v4.324): work / likely = high; possible = warn only; pads / buildings by distance
+                        out.push({ check: 'Hazard standoff', severity: f.cls === 'possible' ? 'warn' : (f.cls === 'work' || f.cls === 'likely' || ft === 0 ? 'high' : sev(ft, th)),
+                            distFt: ft, threshFt: th,
+                            note: `violation: ${kindLabel(f)} "${f.name || f.id}"${who ? ` (${who})` : ''} — ${ft === 0 ? `${bestRef} crosses it` : `${bestRef} ${ft} ft away`}; standoff ${th} ft${f.newSince ? ` — NEW/CHANGED ${String(f.newSince).slice(0, 10)}` : ''}${hits.length > 1 ? ` · ${hits.length} hits: ${hits.slice(0, 4).join('; ')}${hits.length > 4 ? '…' : ''}` : ''}`,
+                            polygon: ring.map(p => [p[0], p[1]]) });
+                    }
+                    await yieldMaybe(hi, feats.length);
+                }
+                console.log(`${TAG} SOP: hazard check — ${feats.length} hazard feature(s)${hz.stale ? ' (STALE file)' : ''}, ${flagged} flagged`);
+                if (hz.stale) showToast(`⚠ Hazards file is STALE (generated ${String(hz.generated || '?').slice(0, 10)}) — Hazard Layer → Refresh now`, 'rgba(255,96,96,0.55)');
+            }
+        }
+
         // 12. FP → FFZ connection angle — an FP connects to an FFZ where its
         //     segment endpoint lands ON an FFZ edge (mid-edge; never a corner).
         //     The angle between that approaching segment and the edge it meets
@@ -2259,6 +2422,7 @@
     // validator issues per message, so an independent sender would clobber the
     // SOP/Airspace/TFR batches. It posts here instead and we re-post the union.
     // IFRAME-gated — both AI contexts hear the broadcast; one union post is enough.
+    if (CONTEXT === 'IFRAME') ensureHazardChannel();   // v4.323: cache HAZARDS_DATA as Map Styler broadcasts it
     (function setupSiteDiffIssueBridge() {
         if (CONTEXT !== 'IFRAME') return;
         let ch = null;
@@ -6495,7 +6659,7 @@
             return false;
         }
     }
-    async function createAssetSquare(sid, lat, lng, sizeFt, name, subtype, subtypeIsNew) {
+    async function createAssetSquare(sid, lat, lng, sizeFt, name, subtype, subtypeIsNew, notes, customPoints) {
         if (liteBlockedWrite('create asset')) return { ok: false, error: 'Read-only in Lite mode.' };
         try {
             const csrf = getCsrfToken();
@@ -6517,8 +6681,8 @@
             b.type = 3;
             b.name = name;
             b.site_id = sid;
-            b.points = assetSquarePoints(lat, lng, sizeFt);
-            b.description = '';
+            b.points = (Array.isArray(customPoints) && customPoints.length >= 3) ? customPoints.map(v => ({ lat: v.lat, lng: v.lng })) : assetSquarePoints(lat, lng, sizeFt);   // v4.367: ✏ drawn outline wins over the square
+            b.description = notes ? String(notes).slice(0, 2000) : '';   // v4.330: importer Notes column → asset notes
             b.restrictions = {};
             b.arcs = [];
             b.validated = false;
@@ -6780,6 +6944,20 @@
                 showAssetCreateModal(clickLatLng.lat, clickLatLng.lng);
             };
             footer.appendChild(addBtn);
+        }
+        // v4.327: 🛗 Elevator here (feature #290) — flight paths only, needs the
+        // exact right-click point; stages a manual crossing in the Elevators panel.
+        if (entity.type === 15 && !LITE && clickLatLng && typeof clickLatLng.lat === 'number' && isSiteSetupRoute()) {
+            const elvBtn = document.createElement('button');
+            elvBtn.textContent = '🛗';
+            elvBtn.title = 'Elevator here — stage an Elevator 1 / Bridge / Elevator 2 climb-over on this flight path at the right-clicked point (bridge ±' + elvCfg.halfFt + ' ft along the path; edit in the Elevators panel)';
+            elvBtn.style.cssText = 'flex:0 0 auto;background:transparent;color:#ff9a3d;border:1px solid rgba(255,154,61,0.4);border-radius:3px;padding:5px 8px;cursor:pointer;font:inherit;font-size:12px';
+            elvBtn.onclick = (ev) => {
+                ev.stopPropagation();
+                closeInspector();
+                elvManualAt(entity, { lat: clickLatLng.lat, lng: clickLatLng.lng }).catch(e => { console.error(`${TAG} 🛗 manual stage failed:`, e); showToast(`Elevator stage failed: ${e.message || e}`, 'rgba(255,96,96,0.55)'); });
+            };
+            footer.appendChild(elvBtn);
         }
 
         const jsonBtn = document.createElement('button');
@@ -12760,7 +12938,7 @@
         catch (e) { return; }
         controlChannel.onmessage = (ev) => {
             const msg = ev.data || {};
-            if (msg.type === 'REQUEST_REGISTRATIONS') registerWithControlPanel();
+            if (msg.type === 'REQUEST_REGISTRATIONS') { registerWithControlPanel(); try { rigRegisterCP(); } catch (e) {} }
             else if (msg.type === 'TOKEN_VALUE') {
                 // PAT broadcast — caches in memory for shared elevation
                 // cache pulls/pushes. Same pattern Map Styler + MBT use.
@@ -12851,6 +13029,7 @@
                 // beacon, but it re-REGISTERs on REQUEST_REGISTRATIONS.
                 impDeleteGuardSeen = Date.now();
             }
+            else if (msg.type === 'SET_TOGGLE' && msg.scriptId === RIG_SCRIPT_ID) { rigHandleToggle(msg); }
             else if (msg.type === 'SET_TOGGLE' && msg.scriptId === IMP_SCRIPT_ID) {
                 handleImporterToggle(msg);
             }
@@ -12863,6 +13042,56 @@
                 if (msg.actionId === 'imp-open') {
                     if (!impMasterEnabled) { showToast('Asset Importer is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
                     impOpenFromAction();
+                }
+            }
+            else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SCI_SCRIPT_ID) {
+                const v = msg.value !== undefined ? msg.value : msg.enabled;
+                if (msg.toggleId === 'sci-master') { const b = !!v; if (b !== sciMasterEnabled) sciMasterEnabled = b; }
+                else if (msg.toggleId === 'sci-agl-ft') { const n = Number(v); if (isFinite(n) && n >= 0 && n !== sciAglFt) sciAglFt = n; }
+                else if (msg.toggleId === 'sci-edge-ft') { const n = Number(v); if (isFinite(n) && n > 0 && n !== sciEdgeFt) sciEdgeFt = n; }
+            }
+            else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === SCI_SCRIPT_ID && CONTEXT === 'IFRAME') {
+                if (msg.tabId ? msg.tabId !== aimTabId() : document.hidden) return;   // tab-local (see importer above)
+                if (typeof document.hasFocus === 'function' && !document.hasFocus()) return;
+                if (msg.actionId === 'sci-open') {
+                    if (!sciMasterEnabled) { showToast('Scan Import is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
+                    sciOpenFromAction();
+                }
+            }
+            else if (msg.type === 'SET_TOGGLE' && msg.scriptId === ELV_SCRIPT_ID) {
+                const v = msg.value !== undefined ? msg.value : msg.enabled;
+                if (msg.toggleId === 'elv-master') { const b = !!v; if (b !== elvMasterEnabled) elvMasterEnabled = b; }
+                else if (msg.toggleId === 'elv-gm') { const b = !!v; if (b !== elvCfg.gm) elvCfg.gm = b; }
+                else {
+                    const k = { 'elv-floor': 'floorAgl', 'elv-height': 'height', 'elv-half': 'halfFt', 'elv-elev': 'elevFt', 'elv-overlap': 'overlapFt', 'elv-tail': 'tailFt', 'elv-minelev': 'minElevFt' }[msg.toggleId];
+                    if (k) { const n = Number(v); if (isFinite(n) && n >= 0 && n !== elvCfg[k]) elvCfg[k] = n; }
+                }
+            }
+            else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === ELV_SCRIPT_ID && CONTEXT === 'IFRAME') {
+                if (msg.tabId ? msg.tabId !== aimTabId() : document.hidden) return;   // tab-local (see importer above)
+                if (typeof document.hasFocus === 'function' && !document.hasFocus()) return;
+                if (msg.actionId === 'elv-scan') {
+                    if (!elvMasterEnabled) { showToast('Elevators are disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
+                    elvOpenFromAction(true);
+                }
+            }
+            else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SZP_SCRIPT_ID) {
+                const v = msg.value !== undefined ? msg.value : msg.enabled;
+                if (msg.toggleId === 'szp-master') { const b = !!v; if (b !== szpMasterEnabled) szpMasterEnabled = b; }
+                else if (msg.toggleId === 'szp-assets' || msg.toggleId === 'szp-wells' || msg.toggleId === 'szp-fac') {
+                    const k = { 'szp-assets': 'assets', 'szp-wells': 'wellsFirst', 'szp-fac': 'facilities' }[msg.toggleId]; const b = !!v; if (b !== szpCfg[k]) { szpCfg[k] = b; szpSaveCfg(); }
+                }
+                else {
+                    const k = { 'szp-count': 'count', 'szp-inset': 'insetFt', 'szp-hop': 'hopFt', 'szp-sat': 'satAcres', 'szp-nfz': 'nfzFt', 'szp-tower': 'towerFt' }[msg.toggleId];
+                    if (k) { const n = Number(v); if (isFinite(n) && n >= 0 && n !== szpCfg[k]) { szpCfg[k] = n; szpSaveCfg(); } }
+                }
+            }
+            else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === SZP_SCRIPT_ID && CONTEXT === 'IFRAME') {
+                if (msg.tabId ? msg.tabId !== aimTabId() : document.hidden) return;   // tab-local (see importer above)
+                if (typeof document.hasFocus === 'function' && !document.hasFocus()) return;
+                if (msg.actionId === 'szp-open') {
+                    if (!szpMasterEnabled) { showToast('Safe Zone Planner is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
+                    szpOpenFromAction();
                 }
             }
             else if (msg.type === 'SET_TOGGLE' && msg.scriptId === GMT_SCRIPT_ID) {
@@ -12943,10 +13172,22 @@
             try { if (imp.points.length) { impComputeDups(); impRenderStaged(); impSyncUi(); } } catch (e) {}
             return;
         }
+        if (id === 'imp-shape-color' && typeof msg.value === 'string') { if (msg.value === impShapeColor) return; impShapeColor = msg.value; try { impRenderAssetShapes(); } catch (e) {} return; }
+        if (id === 'imp-shape-opacity' && typeof msg.value === 'number') { if (msg.value === impShapeOpacity) return; impShapeOpacity = Math.max(0, Math.min(1, msg.value)); try { impRenderAssetShapes(); } catch (e) {} return; }
+        if (id === 'imp-buf-color' && typeof msg.value === 'string') { if (msg.value === impBufColor) return; impBufColor = msg.value; try { impRenderAssetShapes(); } catch (e) {} return; }
+        if (id === 'imp-buf-opacity' && typeof msg.value === 'number') { if (msg.value === impBufOpacity) return; impBufOpacity = Math.max(0, Math.min(1, msg.value)); try { impRenderAssetShapes(); } catch (e) {} return; }
+        if (id === 'imp-shape-fill') { const v = !!(msg.value !== undefined ? msg.value : msg.enabled); if (v === impShapeFill) return; impShapeFill = v; try { impRenderAssetShapes(); } catch (e) {} return; }
+        if (id === 'imp-autosave-min' && typeof msg.value === 'number') {
+            if (msg.value === impAutosaveMin || msg.value < 0) return;
+            impAutosaveMin = msg.value;
+            try { impAutosaveTimer(); } catch (e) {}
+            return;
+        }
         if (id === 'imp-size-ft' && typeof msg.value === 'number') {
             if (msg.value === impSizeFt || msg.value < 5 || msg.value > 2000) return;
             impSizeFt = msg.value;
             try { const el = document.getElementById('aim-imp-size'); if (el) el.value = impSizeFt; } catch (e) {}
+            try { if (imp.points.length) { impComputeDups(); impRenderStaged(); impSyncUi(); } } catch (e) {}   // v4.332: parent/child uses the square footprint
         }
     }
     function handleGmtToggle(msg) {
@@ -13044,6 +13285,9 @@
                 { id: 'gmTowerRings', label: '⭕ Tower GM standoff rings on map', type: 'boolean', default: SOP_ENABLE_DEFAULTS.gmTowerRings },
                 { id: 'fpFfzAngle', label: 'Check · FP→FFZ connection angle', type: 'boolean', default: SOP_ENABLE_DEFAULTS.fpFfzAngle },
                 { id: 'fpFfzAngleDeg', label: 'FP→FFZ min angle to the edge (ideal 45°)', type: 'number', min: 0, max: 90, step: 1, default: SOP_THRESH_DEFAULTS.fpFfzAngleDeg, unit: '°' },
+                { id: 'hazard', label: 'Check · 🚧 Hazard layer — FP vs 3rd-party pads / upcoming work / buildings', type: 'boolean', default: SOP_ENABLE_DEFAULTS.hazard },
+                { id: 'hazardFfz', label: 'Hazard · also check FFZ rings', type: 'boolean', default: SOP_ENABLE_DEFAULTS.hazardFfz },
+                { id: 'hazardFt', label: 'Hazard standoff (0 = per-feature value from the file)', type: 'number', min: 0, max: 500, step: 5, default: SOP_THRESH_DEFAULTS.hazardFt, unit: 'ft' },
                 { id: 'sop-draw', label: '🚩 Draw issues (run validators)', type: 'button', action: 'sop-draw' },
                 { id: 'sop-clear', label: 'Clear validator issues', type: 'button', action: 'sop-clear' },
             ],
@@ -13187,6 +13431,62 @@
             ],
             hotkeys: [],
         });
+        // v4.325: 🔍 Scan Import — own card (feature #289). Applies the Ortho
+        // Scanner's reviewed decisions (NFZ creates + FP leg edits) to the site.
+        controlChannel.postMessage({
+            type: 'REGISTER', scriptId: SCI_SCRIPT_ID, name: 'Scan Import',
+            description: 'Apply the Ortho Scanner review sheet to this site: load the decisions JSON + scan bundle, every accepted NFZ and flight-path leg change stages on the map, preflight (NFZ inside its FFZ, no self-intersections, FP ends on an FFZ edge, no leg enters an FFZ, altitude bands overlap, AGL floor at new vertices), then create-only NFZ writes and one-flight-path-per-request edits with Delete Guard backups and verify-by-refetch. Re-runs skip what is already there.',
+            version: SCRIPT_VERSION, group: 'Scan Import', scope: 'site-setup', priority: 37,
+            toggles: [
+                { id: 'sci-master', label: 'Enable Scan Import', type: 'boolean', default: true, master: true },
+                { id: 'sci-agl-ft', label: 'AGL floor at new / moved flight-path vertices (blocks below)', type: 'number', min: 0, max: 400, step: 5, default: 90, unit: 'ft' },
+                { id: 'sci-edge-ft', label: 'FP end counts as ON an FFZ edge within', type: 'number', min: 1, max: 30, step: 1, default: 3, unit: 'ft' },
+                { id: 'sci-open', label: '🔍 Open Scan Import', type: 'button', action: 'sci-open' },
+            ],
+            hotkeys: [],
+        });
+        // v4.327: 🛗 Elevators — own card (feature #290). Climb-over staircases
+        // (Elevator 1 / Bridge / Elevator 2) spliced into flight paths at
+        // transmission-line crossings; defaults here, per-crossing edits in the panel.
+        controlChannel.postMessage({
+            type: 'REGISTER', scriptId: ELV_SCRIPT_ID, name: 'Elevators',
+            description: 'Climb over transmission lines: scan every flight path against the red transmission KML lines (or right-click a flight path → 🛗 for a manual point) and splice in an Elevator 1 / Bridge / Elevator 2 staircase — bridge = the path within the half-width of ANY line (parallel circuits merge), floor above the highest ground under it, elevators = the next stretch of path with floors 10 ft under the neighbour ceiling and ceilings 10 ft over the bridge floor, all in MSL from DEM. Stage → edit per crossing → preflight → one POST per flight path with JSON + Delete Guard backups and verify, then one pole GM per crossing. ↩ Undo restores.',
+            version: SCRIPT_VERSION, group: 'Elevators', scope: 'site-setup', priority: 38,
+            toggles: [
+                { id: 'elv-master', label: 'Enable Elevators', type: 'boolean', default: true, master: true },
+                { id: 'elv-floor', label: 'Bridge floor above the highest ground under it', type: 'number', min: 100, max: 400, step: 5, default: 200, unit: 'ft' },
+                { id: 'elv-height', label: 'Bridge band height', type: 'number', min: 5, max: 100, step: 5, default: 20, unit: 'ft' },
+                { id: 'elv-half', label: 'Bridge half-width (perpendicular distance from the line)', type: 'number', min: 25, max: 500, step: 5, default: 100, unit: 'ft' },
+                { id: 'elv-elev', label: 'Elevator length along the path (climb-rate limit unknown — 100 ft is the field value)', type: 'number', min: 50, max: 500, step: 5, default: 100, unit: 'ft' },
+                { id: 'elv-overlap', label: 'Band overlap at every joint', type: 'number', min: 7, max: 50, step: 1, default: 10, unit: 'ft' },
+                { id: 'elv-gm', label: 'Create a pole GM beside every bridge ("Elevator NN - 200ft")', type: 'boolean', default: true },
+                { id: 'elv-tail', label: 'Pad inside the bridge zone: bridge still runs this far past the line, the rest to the pad edge is the elevator', type: 'number', min: 0, max: 200, step: 5, default: 20, unit: 'ft' },
+                { id: 'elv-minelev', label: 'Minimum room for that elevator (less blocks the crossing)', type: 'number', min: 10, max: 200, step: 5, default: 30, unit: 'ft' },
+                { id: 'elv-scan', label: '🛗 Scan transmission crossings', type: 'button', action: 'elv-scan' },
+            ],
+            hotkeys: [],
+        });
+        // v4.369: 🛟 Safe Zone Planner — own card (feature #302). Read-only
+        // k-center over the flight envelope; see the module header.
+        controlChannel.postMessage({
+            type: 'REGISTER', scriptId: SZP_SCRIPT_ID, name: 'Safe Zone Planner',
+            description: 'Where the next safe zones should go. Spots are always ON A PAD, just inside its edge — wells and small satellites first, big facilities only if allowed — scored by flight distance (along the paths / FFZs, not straight-line) from every point of the site, every asset included, built or not. Picks the set that shortens the LONGEST flight to a safe zone, then the average; existing safe zones (or the bases) stay fixed. Read-only: draws + lists the spots, you place the Safe Zone in Percepto. Lives in ⊕ Generate → 🛟 Safe Zone Planner.',
+            version: SCRIPT_VERSION, group: 'Safe Zone Planner', scope: 'site-setup', priority: 39,
+            toggles: [
+                { id: 'szp-master', label: 'Enable Safe Zone Planner', type: 'boolean', default: true, master: true },
+                { id: 'szp-count', label: 'New safe zones to place', type: 'number', min: 1, max: 8, step: 1, default: 3 },
+                { id: 'szp-inset', label: 'Spot sits this far inside the pad edge', type: 'number', min: 0, max: 200, step: 5, default: 15, unit: 'ft' },
+                { id: 'szp-hop', label: 'A pad spot outside every FFZ counts as reachable within this of a flight path / FFZ', type: 'number', min: 0, max: 2000, step: 10, default: 150, unit: 'ft' },
+                { id: 'szp-sat', label: 'A battery pad up to this size is a small satellite (bigger = facility)', type: 'number', min: 0.1, max: 20, step: 0.1, default: 1.5, unit: 'acres' },
+                { id: 'szp-nfz', label: 'Keep spots this far from any NFZ', type: 'number', min: 0, max: 500, step: 5, default: 30, unit: 'ft' },
+                { id: 'szp-tower', label: 'Keep spots this far from tower / pole markers', type: 'number', min: 0, max: 1000, step: 5, default: 100, unit: 'ft' },
+                { id: 'szp-wells', label: 'Wells + small satellites first (other small pads only when too few)', type: 'boolean', default: true },
+                { id: 'szp-fac', label: 'Allow big facilities (large batteries, equipment pads) as safe-zone pads', type: 'boolean', default: false },
+                { id: 'szp-assets', label: 'Count every asset (unbuilt pads hop straight to the nearest path)', type: 'boolean', default: true },
+                { id: 'szp-open', label: '🛟 Open Safe Zone Planner', type: 'button', action: 'szp-open' },
+            ],
+            hotkeys: [],
+        });
         // v4.247: 📥 Asset Importer — own card (feature #249). CSV/KML region
         // list → staged map points → circle/lasso subset → bulk-create as
         // assets; inverse 🗑 delete mode rides Delete Guard.
@@ -13196,8 +13496,15 @@
             version: SCRIPT_VERSION, group: 'Asset Importer', scope: 'site-setup', priority: 35,
             toggles: [
                 { id: 'imp-master', label: 'Enable Asset Importer', type: 'boolean', default: true, master: true },
-                { id: 'imp-dup-ft', label: 'Duplicate guard radius (staged point near an existing asset)', type: 'number', min: 0, max: 1000, step: 5, default: 50, unit: 'ft' },
-                { id: 'imp-size-ft', label: 'Created-asset square size', type: 'number', min: 5, max: 2000, step: 5, default: 30, unit: 'ft' },
+                { id: 'imp-dup-ft', label: 'Nearby flag radius (staged point within N ft of an existing asset, not overlapping it — informational)', type: 'number', min: 0, max: 1000, step: 5, default: 50, unit: 'ft' },
+                { id: 'imp-size-ft', label: 'Created-asset square size', type: 'number', min: 5, max: 2000, step: 5, default: 55, unit: 'ft' },
+                { id: 'imp-autosave-min', label: 'Autosave import progress every N minutes (0 = only on change / close)', type: 'number', min: 0, max: 60, step: 1, default: 3, unit: 'min' },
+                { id: 'imp-shape-hdr', label: '✏ Shape — drawn asset outlines (before Create)', type: 'header' },
+                { id: 'imp-shape-color', label: 'Outline colour', type: 'color', default: '#c39bd3' },
+                { id: 'imp-shape-opacity', label: 'Fill opacity (0 = outline only)', type: 'number', min: 0, max: 1, step: 0.05, default: 0.25 },
+                { id: 'imp-shape-fill', label: 'Fill the shapes', type: 'boolean', default: true },
+                { id: 'imp-buf-color', label: 'Buffer ring colour (shown while ✏ Shape is on)', type: 'color', default: '#ff2d2d' },
+                { id: 'imp-buf-opacity', label: 'Buffer band fill opacity', type: 'number', min: 0, max: 1, step: 0.05, default: 0.3 },
                 { id: 'imp-open', label: '📥 Open Asset Importer', type: 'button', action: 'imp-open' },
             ],
             hotkeys: [],
@@ -13219,6 +13526,7 @@
     }
     setupControlPanel();
     registerWithControlPanel();
+    try { rigRegisterCP(); } catch (e) { console.warn(`${RIG_TAG} CP register failed`, e); }
     // AGL hover tooltip: map + native tooltips live in the iframe; give the
     // map time to mount, then watch. (siteAltModeCache/elev helpers are
     // consts defined later in the IIFE — fine, the timeout fires long after.)
@@ -20793,8 +21101,9 @@
             if (bt) { const on = nfzDraw.active && nfzDraw.mode === 'trace'; bt.style.background = on ? 'rgba(255,85,85,0.32)' : 'rgba(255,85,85,0.12)'; bt.textContent = on ? '⬠ NFZ Trace ON — ALT+click starts · click adds · Ctrl=snap to asset edge · dbl-click/Enter=finish · Esc=undo/off' : '⬠ NFZ Trace'; }
             const bs = document.getElementById('aim-gen-nfzstamp');
             if (bs) { const on = nfzDraw.active && nfzDraw.mode === 'stamp'; bs.style.background = on ? 'rgba(255,85,85,0.32)' : 'rgba(255,85,85,0.12)'; bs.textContent = on ? '⚡ NFZ Stamp ON — ALT+click inside an asset · Esc=off' : '⚡ NFZ Stamp'; }
+            if (nfzDraw.active && genState.page && genState.page !== 'nfz') genShowPage('nfz');
             const c = document.getElementById('aim-nfz-controls');
-            if (c) c.style.display = (nfzDraw.active || nfzDraw.drafts.length) ? 'block' : 'none';
+            if (c) c.style.display = (nfzDraw.active || nfzDraw.drafts.length || genState.page === 'nfz') ? 'block' : 'none';
             const cnt = document.getElementById('aim-nfz-count');
             if (cnt) cnt.textContent = String(nfzDraw.drafts.length);
         } catch (e) {}
@@ -20886,6 +21195,1751 @@
     }
 
     // ============================================================
+    // 🔍 SCAN IMPORT (feature #289, v4.325) — apply the Ortho Scanner's
+    // reviewed decisions to the site. Inputs: the review sheet's decisions
+    // JSON (decisions / edited_geometry / edited_routes) + the scan bundle
+    // (nfz_proposed rings, fp_conflicts proposals). Stages every action,
+    // draws it (NFZ green · FP new leg yellow, old leg dashed · removed leg
+    // dashed red), runs preflight, then applies: NFZs = one create-only
+    // POST each (NFZ Stamp rails, verify by refetch, GM undo list); FP
+    // edits = one FP per request, full entity banked to Delete Guard's 72 h
+    // ring + JSON download first, verify by refetch, stop on first failure.
+    // Re-runs are idempotent (present NFZs / already-applied legs skipped).
+    // RULES: NFZs live inside their FFZ · flight paths NEVER enter an FFZ,
+    // their end vertices sit ON an FFZ edge · never two FPs in one request.
+    // ============================================================
+    const SCI_UNDO_KEY = (sid) => `aim_sci_undo:${envSiteKey(sid)}`;   // GM: {at, runId, ids:[]} — NFZs created by the last run
+    const SCI_MATCH_M = 0.6;                                             // endpoint match tolerance (pixel round-trip in the sheet ≈ 0.3 m)
+    const SCI_SEP_FT = 15;                                               // SOP NFZ↔FFZ / NFZ↔NFZ separation (warn only)
+    const SCI_GAP_MS = 150;
+    const SCI_GUARD_KEY = 'aim-delete-history-v1';                       // Delete Guard's ring (same origin, same shape)
+    let sci = {
+        siteID: null, dec: null, scan: null, decName: null, scanName: null,
+        plan: null, layers: [], running: false, stop: false, report: null, siteCfg: null,
+    };
+    function sciLog(m, color) {
+        try { const el = document.getElementById('aim-sci-result'); if (el) el.innerHTML = `<span style="color:${color || '#9ad'}">${m}</span>`; } catch (e) {}
+        console.log(`${TAG} 🔍 ${String(m).replace(/<[^>]*>/g, '')}`);
+    }
+    function sciEsc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+    const sciLL = (c) => ({ lat: Number(c[1]), lng: Number(c[0]) });            // GeoJSON [lng,lat] → {lat,lng}
+    const sciSame = (p, q) => approxMeters(p.lat, p.lng, q.lat, q.lng) <= SCI_MATCH_M;
+    const sciVk = (p) => `${p.lat.toFixed(7)},${p.lng.toFixed(7)}`;
+    function sciRingFromLL(list) {
+        const r = (list || []).filter(c => Array.isArray(c) && c.length >= 2 && isFinite(c[0]) && isFinite(c[1])).map(sciLL);
+        if (r.length > 1 && sciSame(r[0], r[r.length - 1])) r.pop();            // GeoJSON closing vertex
+        return r;
+    }
+    function sciBbox(ring) {
+        let s = Infinity, w = Infinity, n = -Infinity, e = -Infinity;
+        ring.forEach(p => { if (p.lat < s) s = p.lat; if (p.lat > n) n = p.lat; if (p.lng < w) w = p.lng; if (p.lng > e) e = p.lng; });
+        return { s, w, n, e };
+    }
+    const sciBboxTouch = (a, b, padDeg) => !(a.e + padDeg < b.w || b.e + padDeg < a.w || a.n + padDeg < b.s || b.n + padDeg < a.s);
+    // min distance (m) from a point to a ring's edges
+    function sciDistToRingM(p, ring) { const np = nearestPointOnRing(p, ring); return np ? np.d : Infinity; }
+    // interior samples of a segment lie inside the polygon? (a leg crossing or ending inside an FFZ)
+    function sciSegEntersRing(a, b, ring, tolM) {
+        const inside = (p) => pointInPolygon(p.lat, p.lng, ring) && sciDistToRingM(p, ring) > tolM;
+        for (let i = 1; i < 40; i++) {
+            const t = i / 40;
+            if (inside({ lat: a.lat + (b.lat - a.lat) * t, lng: a.lng + (b.lng - a.lng) * t })) return true;
+        }
+        return false;
+    }
+    function sciRingAreaM2(ring) { try { return Math.abs(polygonAreaM2(ring)); } catch (e) { return 0; } }
+
+    // ---- file loading ----
+    function sciAcceptJson(name, obj) {
+        if (!obj || typeof obj !== 'object') { sciLog(`${sciEsc(name)}: not a JSON object`, '#ff6060'); return; }
+        if (obj.decisions && typeof obj.decisions === 'object') { sci.dec = obj; sci.decName = name; }
+        else if (obj.nfz_proposed || obj.fp_conflicts || /^aim-ortho-scan/.test(String(obj.schema || ''))) { sci.scan = obj; sci.scanName = name; }
+        else { sciLog(`${sciEsc(name)}: neither a decisions file nor a scan bundle`, '#ff6060'); return; }
+        sci.plan = null; sci.report = null; sciClearLayers();
+        sciRenderFiles();
+        if (sci.dec && sci.scan) sciBuildPlan().catch(e => { console.error(`${TAG} 🔍 stage failed:`, e); sciLog(`Stage failed: ${sciEsc(e.message || e)}`, '#ff6060'); });
+    }
+    function sciLoadFiles(files) {
+        Array.from(files || []).forEach(f => {
+            const rd = new FileReader();
+            rd.onload = () => { try { sciAcceptJson(f.name, JSON.parse(String(rd.result || ''))); } catch (e) { sciLog(`${sciEsc(f.name)}: ${sciEsc(e.message)}`, '#ff6060'); } };
+            rd.onerror = () => sciLog(`${sciEsc(f.name)}: read failed`, '#ff6060');
+            rd.readAsText(f);
+        });
+    }
+    function sciRenderFiles() {
+        const el = document.getElementById('aim-sci-files'); if (!el) return;
+        const d = sci.dec, s = sci.scan;
+        const nDec = d ? Object.keys(d.decisions || {}).length : 0;
+        el.innerHTML =
+            `<div>📝 decisions: ${d ? `<b style="color:#fff">${sciEsc(sci.decName)}</b> · run ${sciEsc(d.run_id)} · ${sciEsc(d.site_id)} · reviewer ${sciEsc(d.reviewer || '—')} · ${nDec} decisions · ${Object.keys(d.edited_geometry || {}).length} edited shapes · ${Object.keys(d.edited_routes || {}).length} edited routes · exported ${sciEsc(String(d.exported || '').slice(0, 10))}` : '<span style="color:#ffb347">not loaded</span>'}</div>`
+            + `<div>📦 scan: ${s ? `<b style="color:#fff">${sciEsc(sci.scanName)}</b> · run ${sciEsc(s.run_id)} · ${((s.nfz_proposed || {}).features || []).length} NFZ proposals · ${((s.fp_conflicts || {}).features || []).length} leg conflicts` : '<span style="color:#ffb347">not loaded</span>'}</div>`
+            + (d && s && d.run_id && s.run_id && d.run_id !== s.run_id ? `<div style="color:#ff6060">⚠ run ids differ (${sciEsc(d.run_id)} vs ${sciEsc(s.run_id)}) — decisions were graded on a different scan</div>` : '');
+    }
+
+    // ---- staging ----
+    async function sciBuildPlan() {
+        const sid = sci.siteID;
+        if (!sid || String(sid) !== String(getCurrentSiteID())) { sciLog('Site changed — reopen the generator', '#ff6060'); return; }
+        sciLog('Reading the site…');
+        try { await fetchMapObjects(sid, true); } catch (e) { sciLog(`Site read failed: ${sciEsc(e.message || e)}`, '#ff6060'); return; }
+        try { sci.siteCfg = await fetchSiteConfig(sid, true); } catch (e) { sci.siteCfg = null; }
+        const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+        const ffzs = ents.filter(e => e.type === 16 && entityCoords(e) && entityCoords(e).length >= 3);
+        const fps = ents.filter(e => e.type === 15 && Array.isArray(e.arcs));
+        const nfzs = ents.filter(e => e.type === 4 && entityCoords(e));
+        const byId = new Map(ents.map(e => [String(e.id), e]));
+        const ffzByName = new Map(ffzs.map(e => [genCleanName(e.name).toLowerCase(), e]));
+        const fpByName = new Map(fps.map(e => [genCleanName(e.name).toLowerCase(), e]));
+        const resolve = (id, name, type, nameMap) => {
+            const e = byId.get(String(id));
+            if (e && e.type === type) return { e, how: 'id' };
+            const n = nameMap.get(genCleanName(name || '').toLowerCase());
+            if (n) return { e: n, how: 'name' };
+            return null;
+        };
+        // vertex → set of FP ids (shared-end detection) · FFZ bboxes
+        const vertFps = new Map();
+        fps.forEach(f => f.arcs.forEach(a => { if (a && a.point_a && a.point_b) [a.point_a, a.point_b].forEach(p => { const k = sciVk(p); if (!vertFps.has(k)) vertFps.set(k, new Set()); vertFps.get(k).add(f.id); }); }));
+        const ffzInfo = ffzs.map(f => ({ e: f, ring: entityCoords(f), bbox: sciBbox(entityCoords(f)) }));
+        const PAD = 0.002; // ~200 m in degrees
+        const edgeTolM = sciEdgeFt * GEN_FT_TO_M;
+        const plan = { siteID: sid, runId: sci.dec.run_id, nfz: [], fp: [], fpWrites: [], resolved: { id: 0, name: 0, none: 0 }, warnings: [], blockers: 0 };
+        const dec = sci.dec.decisions || {}, eg = sci.dec.edited_geometry || {}, er = sci.dec.edited_routes || {};
+        // ---- NFZs ----
+        const propByItem = new Map((((sci.scan.nfz_proposed || {}).features) || []).map(f => [String((f.properties || {}).item_id), f]));
+        const nfzKeys = new Set([...propByItem.keys()].map(k => `nfz:${k}`)); Object.keys(dec).forEach(k => { if (k.startsWith('nfz:')) nfzKeys.add(k); });
+        const usedNames = new Set(nfzs.map(e => genCleanName(e.name).toLowerCase()));
+        const newNameSeq = new Map();
+        for (const key of [...nfzKeys].sort()) {
+            const d = dec[key] || null, item = key.slice(4), f = propByItem.get(item), p = (f && f.properties) || {};
+            const it = { key, status: null, reason: '', name: p.name || '', ring: null, ffz: null, warn: [], fail: [] };
+            plan.nfz.push(it);
+            if (!d || !d.decision) { it.status = 'nodecision'; continue; }
+            if (d.decision === 'delete') { it.status = 'denied'; continue; }
+            if (d.decision !== 'accept') { it.status = 'skip'; it.reason = `decision "${d.decision}"`; continue; }
+            const g = eg[key];
+            const ring = g && Array.isArray(g.ring_ll) ? sciRingFromLL(g.ring_ll) : (f && f.geometry && f.geometry.type === 'Polygon' ? sciRingFromLL(f.geometry.coordinates[0]) : []);
+            const ffzId = (g && g.ffz_id) || p.ffz_id || d.ffz || item.split(':')[0];
+            const r = resolve(ffzId, p.ffz_name, 16, ffzByName);
+            if (!r) { plan.resolved.none++; it.status = 'skip'; it.reason = `FFZ ${ffzId} not on this site`; continue; }
+            plan.resolved[r.how]++;
+            it.ffz = r.e; it.ring = ring;
+            if (!it.name) { const base = genCleanName(`NFZ ${r.e.name || ffzId}`); const n = (newNameSeq.get(base) || 0) + 1; newNameSeq.set(base, n); it.name = `${base} new${n}`; }
+            it.name = genCleanName(it.name) || 'NFZ';
+            // idempotency: same name or same geometry already on the site
+            const present = nfzs.find(e => genCleanName(e.name).toLowerCase() === it.name.toLowerCase()
+                || (ring.length >= 3 && entityCoords(e).length === ring.length && ring.every(v => entityCoords(e).some(q => sciSame(v, q)))));
+            if (present) { it.status = 'present'; it.reason = `#${present.id} "${present.name}"`; continue; }
+            if (usedNames.has(it.name.toLowerCase())) { let i = 2, n2; do { n2 = `${it.name}_${i++}`; } while (usedNames.has(n2.toLowerCase())); it.name = n2; }
+            usedNames.add(it.name.toLowerCase());
+            it.status = 'create';
+            // preflight (blockers)
+            if (ring.length < 3 || sciRingAreaM2(ring) < 0.5) it.fail.push('ring has < 3 vertices / zero area');
+            else if (ringSelfIntersects(ring)) it.fail.push('self-intersecting ring');
+            const fr = entityCoords(r.e);
+            if (ring.length >= 3) {
+                const out = ring.filter(v => !pointInPolygon(v.lat, v.lng, fr)).length;
+                if (out) it.fail.push(`${out} vertex${out > 1 ? 'es' : ''} outside FFZ "${r.e.name}"`);
+                else {
+                    let cross = false;
+                    for (let i = 0; i < ring.length && !cross; i++) for (let j = 0; j < fr.length; j++) if (segIntersect(ring[i], ring[(i + 1) % ring.length], fr[j], fr[(j + 1) % fr.length])) { cross = true; break; }
+                    if (cross) it.fail.push(`ring crosses the FFZ edge`);
+                }
+                const minEdge = Math.min(...ring.map(v => sciDistToRingM(v, fr)));
+                if (minEdge < SCI_SEP_FT * GEN_FT_TO_M) it.warn.push(`${Math.round(minEdge / GEN_FT_TO_M)} ft from the FFZ edge (SOP ${SCI_SEP_FT})`);
+            }
+        }
+        // NFZ↔NFZ separation (staged vs staged + existing) — warn only
+        const staged = plan.nfz.filter(i => i.status === 'create' && i.ring && i.ring.length >= 3).map(i => ({ it: i, bbox: sciBbox(i.ring) }));
+        const others = nfzs.map(e => ({ ring: entityCoords(e), bbox: sciBbox(entityCoords(e)), name: e.name }));
+        const sepM = SCI_SEP_FT * GEN_FT_TO_M;
+        staged.forEach((a, ai) => {
+            const near = (b, label) => {
+                if (!sciBboxTouch(a.bbox, b.bbox, 0.0003)) return;
+                const d = Math.min(...a.it.ring.map(v => sciDistToRingM(v, b.ring)), ...b.ring.map(v => sciDistToRingM(v, a.it.ring)));
+                if (d < sepM) a.it.warn.push(`${Math.round(d / GEN_FT_TO_M)} ft from ${label}`);
+            };
+            staged.forEach((b, bi) => { if (bi !== ai) near({ ring: b.it.ring, bbox: b.bbox }, `staged "${b.it.name}"`); });
+            others.forEach(o => near(o, `existing "${o.name}"`));
+        });
+        // ---- FP legs ----
+        const confByItem = new Map((((sci.scan.fp_conflicts || {}).features) || []).map(f => [String((f.properties || {}).item_id), f]));
+        const perFp = new Map();   // fp id → {e, legs:[]}
+        for (const key of Object.keys(dec).sort()) {
+            if (!key.startsWith('fp:')) continue;
+            const d = dec[key] || {}, item = key.slice(3), f = confByItem.get(item), p = (f && f.properties) || {};
+            const it = { key, status: null, reason: '', fpName: p.fp_name || '', fp: null, action: null, oldLeg: null, newPoly: null, warn: [], fail: [] };
+            plan.fp.push(it);
+            if (!d.decision) { it.status = 'nodecision'; continue; }
+            if (d.decision === 'delete') { it.status = 'denied'; continue; }
+            if (!f) { it.status = 'skip'; it.reason = 'no matching conflict in the scan'; continue; }
+            const r = resolve(p.fp_id || item.split(':')[0], p.fp_name, 15, fpByName);
+            if (!r) { plan.resolved.none++; it.status = 'skip'; it.reason = `flight path ${p.fp_id} not on this site`; continue; }
+            plan.resolved[r.how]++;
+            it.fp = r.e; it.fpName = r.e.name;
+            const g = (f.geometry && f.geometry.type === 'LineString') ? f.geometry.coordinates.map(sciLL) : null;
+            if (!g || g.length < 2) { it.status = 'skip'; it.reason = 'conflict has no leg geometry'; continue; }
+            const A = g[0], B = g[g.length - 1];
+            const arcs = r.e.arcs.filter(a => a && a.point_a && a.point_b);
+            const arcIdx = arcs.findIndex(a => (sciSame(a.point_a, A) && sciSame(a.point_b, B)) || (sciSame(a.point_a, B) && sciSame(a.point_b, A)));
+            // decide the action
+            let action = null, newPoly = null;
+            if (d.decision === 'fix') {
+                const route = er[item] && Array.isArray(er[item].route_ll) ? er[item].route_ll.map(sciLL) : null;
+                if (!route || route.length < 2) { it.status = 'skip'; it.reason = 'fix without an edited route'; continue; }
+                action = 'fix'; newPoly = route;
+            } else if (p.proposal === 'remove') action = 'remove';
+            else if (p.proposal === 'reroute') {
+                const kind = p.reroute_kind || (Array.isArray(p.slide_ll) ? 'slide' : Array.isArray(p.detour_vertex_ll) ? 'vertex' : null);
+                if (kind === 'slide' && Array.isArray(p.slide_ll)) { action = 'slide'; newPoly = p.slide_ll.map(sciLL); }
+                else if (kind === 'vertex' && Array.isArray(p.detour_vertex_ll)) { action = 'vertex'; newPoly = [A, sciLL(p.detour_vertex_ll), B]; }
+                else { it.status = 'skip'; it.reason = 'reroute proposal without geometry'; continue; }
+            } else { it.status = 'skip'; it.reason = `proposal "${p.proposal || '?'}" — manual`; continue; }
+            if (newPoly) {
+                // snap the sheet's rounded ends onto the live arc ends; keep a moved end as-is
+                if (sciSame(newPoly[0], A)) newPoly[0] = { lat: A.lat, lng: A.lng };
+                if (sciSame(newPoly[newPoly.length - 1], B)) newPoly[newPoly.length - 1] = { lat: B.lat, lng: B.lng };
+                if (sciSame(newPoly[0], B) && sciSame(newPoly[newPoly.length - 1], A)) newPoly.reverse();   // sheet drew it backwards
+                newPoly = newPoly.filter((v, i, arr) => i === 0 || !sciSame(v, arr[i - 1]));
+                if (newPoly.length < 2) { it.status = 'skip'; it.reason = 'edited route collapsed to one point'; continue; }
+            }
+            it.action = action; it.oldLeg = [A, B]; it.newPoly = newPoly;
+            if (arcIdx < 0) {
+                // already applied? (target arcs present) — else stale/phantom
+                const applied = action === 'remove' ? false
+                    : newPoly.slice(0, -1).every((v, i) => arcs.some(a => (sciSame(a.point_a, v) && sciSame(a.point_b, newPoly[i + 1])) || (sciSame(a.point_b, v) && sciSame(a.point_a, newPoly[i + 1]))));
+                if (applied) { it.status = 'applied'; continue; }
+                const chain = (r.e.coords || []).some((c, i, arr) => i < arr.length - 1 && ((sciSame(c, A) && sciSame(arr[i + 1], B)) || (sciSame(c, B) && sciSame(arr[i + 1], A))));
+                it.status = 'skip'; it.reason = chain ? 'phantom leg — the scan read a coords pair that is not an arc (branching path)' : 'leg not on the live flight path (site changed since the scan)';
+                continue;
+            }
+            it.arcIdx = arcIdx; it.arc = arcs[arcIdx];
+            if (sciSame(it.arc.point_a, B)) { it.oldLeg = [B, A]; if (newPoly) newPoly.reverse(); }   // arc runs B→A: keep the arc's direction
+            it.status = 'stage';
+            if (!perFp.has(r.e.id)) perFp.set(r.e.id, { e: r.e, legs: [] });
+            perFp.get(r.e.id).legs.push(it);
+        }
+        // ---- per-FP edited arcs + preflight ----
+        const bandOf = (a) => ({ min_alt: a.min_alt, max_alt: a.max_alt, min_emergency_alt: (typeof a.min_emergency_alt === 'number' ? a.min_emergency_alt : 12), wait_until_approved: !!a.wait_until_approved });
+        const newVerts = [];   // {fpId, p, minAlt, leg}
+        for (const [fpId, grp] of perFp) {
+            const live = grp.e.arcs.filter(a => a && a.point_a && a.point_b);
+            let arcs = live.map(a => Object.assign({}, a, { _live: true }));
+            const w = { fp: grp.e, legs: grp.legs, arcs: null, kind: 'update', fail: [], warn: [] };
+            for (const leg of grp.legs) {
+                const i = arcs.findIndex(a => a._live && a.id === leg.arc.id);
+                if (i < 0) { leg.fail.push('arc vanished while staging'); continue; }
+                const base = arcs[i];
+                if (leg.action === 'remove') { arcs.splice(i, 1); continue; }
+                const poly = leg.newPoly;
+                // moved ends must not be shared with another FP
+                [[poly[0], leg.oldLeg[0]], [poly[poly.length - 1], leg.oldLeg[1]]].forEach(([nv, ov]) => {
+                    if (sciSame(nv, ov)) return;
+                    const users = vertFps.get(sciVk(ov));
+                    if (users && [...users].some(id => id !== grp.e.id)) leg.fail.push(`moves an end shared with another flight path (${[...users].filter(id => id !== grp.e.id).join(', ')})`);
+                    // other arcs of THIS fp that use the old end follow it
+                    arcs.forEach((a, j) => { if (j === i) return; if (sciSame(a.point_a, ov)) a.point_a = { lat: nv.lat, lng: nv.lng }; if (sciSame(a.point_b, ov)) a.point_b = { lat: nv.lat, lng: nv.lng }; });
+                    newVerts.push({ fpId, p: nv, minAlt: base.min_alt, leg });
+                });
+                const made = [];
+                for (let k = 0; k < poly.length - 1; k++) {
+                    const pa = poly[k], pb = poly[k + 1];
+                    if (k > 0) newVerts.push({ fpId, p: pa, minAlt: base.min_alt, leg });
+                    made.push(Object.assign({ point_a: { lat: pa.lat, lng: pa.lng }, point_b: { lat: pb.lat, lng: pb.lng }, points: [{ lat: pa.lat, lng: pa.lng }, { lat: pb.lat, lng: pb.lng }], distance: approxMeters(pa.lat, pa.lng, pb.lat, pb.lng) }, bandOf(base), { _new: true, _leg: leg }));
+                }
+                arcs.splice(i, 1, ...made);
+            }
+            // components (interior removal would split the path — refused)
+            const adj = new Map(); const addE = (x, y) => { if (!adj.has(x)) adj.set(x, new Set()); adj.get(x).add(y); };
+            arcs.forEach(a => { const ka = sciVk(a.point_a), kb = sciVk(a.point_b); addE(ka, kb); addE(kb, ka); });
+            const seen = new Set(); let comps = 0;
+            for (const v0 of adj.keys()) { if (seen.has(v0)) continue; comps++; const st = [v0]; while (st.length) { const x = st.pop(); if (seen.has(x)) continue; seen.add(x); adj.get(x).forEach(y => st.push(y)); } }
+            if (!arcs.length) w.kind = 'delete';
+            else if (comps > 1) w.fail.push(`removing that leg splits the path into ${comps} pieces — not supported (mark it not-removable in the review sheet)`);
+            if (w.kind === 'update') {
+                // strictly-positive band overlap on every connected pair
+                const byV = new Map(); arcs.forEach((a, i) => [sciVk(a.point_a), sciVk(a.point_b)].forEach(k => { if (!byV.has(k)) byV.set(k, []); byV.get(k).push(i); }));
+                const bad = new Set();
+                byV.forEach(list => { for (let x = 0; x < list.length; x++) for (let y = x + 1; y < list.length; y++) { const P = arcs[list[x]], Q = arcs[list[y]]; if (!(P.max_alt > Q.min_alt && Q.max_alt > P.min_alt)) bad.add(`${list[x] + 1}&${list[y] + 1}`); } });
+                if (bad.size) w.fail.push(`connected arcs without a positive altitude overlap: ${[...bad].slice(0, 6).join(', ')}`);
+                // end vertices (degree 1) ON an FFZ edge · no changed leg enters an FFZ
+                const degree = new Map(); arcs.forEach(a => [sciVk(a.point_a), sciVk(a.point_b)].forEach(k => degree.set(k, (degree.get(k) || 0) + 1)));
+                const ends = []; arcs.forEach(a => [a.point_a, a.point_b].forEach(p => { if (degree.get(sciVk(p)) === 1 && !ends.some(q => sciSame(q, p))) ends.push(p); }));
+                let contact = 0;
+                ends.forEach(p => {
+                    const onEdge = ffzInfo.some(f => sciBboxTouch(f.bbox, { s: p.lat, n: p.lat, w: p.lng, e: p.lng }, PAD) && sciDistToRingM(p, f.ring) <= edgeTolM);
+                    if (onEdge) contact++;
+                    else if (arcs.some(a => a._new && (sciSame(a.point_a, p) || sciSame(a.point_b, p)))) w.fail.push(`end ${p.lat.toFixed(5)},${p.lng.toFixed(5)} is not on an FFZ edge (tol ${sciEdgeFt} ft)`);
+                    else w.warn.push(`existing end ${p.lat.toFixed(5)},${p.lng.toFixed(5)} is off every FFZ edge (pre-existing)`);
+                });
+                if (!contact) w.fail.push('path would touch no FFZ (server rule: must connect to a free zone)');
+                arcs.filter(a => a._new).forEach(a => {
+                    const bb = sciBbox([a.point_a, a.point_b]);
+                    ffzInfo.forEach(f => { if (sciBboxTouch(f.bbox, bb, 0) && sciSegEntersRing(a.point_a, a.point_b, f.ring, edgeTolM)) a._leg.fail.push(`new leg enters FFZ "${f.e.name}"`); });
+                });
+            } else {
+                // whole-path delete: does any FFZ lose its last flight path?
+                const ends = []; live.forEach(a => [a.point_a, a.point_b].forEach(p => ends.push(p)));
+                ffzInfo.forEach(f => {
+                    if (!ends.some(p => sciDistToRingM(p, f.ring) <= edgeTolM)) return;
+                    const other = fps.some(o => o.id !== grp.e.id && o.arcs.some(a => a && a.point_a && a.point_b && (sciDistToRingM(a.point_a, f.ring) <= edgeTolM || sciDistToRingM(a.point_b, f.ring) <= edgeTolM)));
+                    if (!other) w.warn.push(`FFZ "${f.e.name}" keeps no flight path after this delete`);
+                });
+            }
+            w.arcs = arcs;
+            plan.fpWrites.push(w);
+        }
+        // AGL floor at every new / moved vertex (DEM) — blocker
+        if (newVerts.length) {
+            sciLog(`Checking ground at ${newVerts.length} new vertices…`);
+            const msl = !!(sci.siteCfg && sci.siteCfg.mountain_terrain);
+            try { await bulkFetchElevations(newVerts.map(v => v.p)); } catch (e) {}
+            for (const v of newVerts) {
+                const ground = getElevationFromCache(v.p.lat, v.p.lng);
+                const aglM = msl ? (ground == null ? null : v.minAlt - ground) : v.minAlt;
+                if (aglM == null) v.leg.warn.push(`no DEM at ${v.p.lat.toFixed(5)},${v.p.lng.toFixed(5)} — AGL unchecked`);
+                else if (aglM / GEN_FT_TO_M < sciAglFt - 0.5) v.leg.fail.push(`${Math.round(aglM / GEN_FT_TO_M)} ft AGL at ${v.p.lat.toFixed(5)},${v.p.lng.toFixed(5)} (floor ${sciAglFt})`);
+            }
+        }
+        // legs that failed poison their FP write; FP-level failures poison every leg
+        plan.fpWrites.forEach(w => { if (w.legs.some(l => l.fail.length)) w.fail.push('a staged leg failed preflight'); if (w.fail.length) w.legs.forEach(l => { if (!l.fail.length) l.fail.push('blocked by this flight path'); }); });
+        plan.blockers = plan.nfz.filter(i => i.status === 'create' && i.fail.length).length + plan.fpWrites.filter(w => w.fail.length).length;
+        sci.plan = plan;
+        sciDraw(); sciRenderPlan();
+    }
+
+    // ---- map drawing ----
+    function sciClearLayers() { const map = getLeafletMap(); sci.layers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} }); sci.layers = []; }
+    function sciDraw() {
+        sciClearLayers();
+        const L = getLeafletL(), map = getLeafletMap(), plan = sci.plan;
+        if (!L || !map || !plan) return;
+        const add = (l) => { try { l.addTo(map); sci.layers.push(l); } catch (e) {} };
+        plan.nfz.forEach(i => {
+            if (i.status !== 'create' || !i.ring || i.ring.length < 3) return;
+            const col = i.fail.length ? '#ff5555' : '#5fff5f';
+            add(L.polygon(i.ring.map(p => [p.lat, p.lng]), { color: col, weight: 2, opacity: 0.95, fillColor: col, fillOpacity: 0.22, interactive: false, dashArray: i.fail.length ? '6 4' : null }));
+        });
+        plan.fpWrites.forEach(w => {
+            w.legs.forEach(l => {
+                const bad = l.fail.length || w.fail.length;
+                if (l.action === 'remove' || w.kind === 'delete') add(L.polyline(l.oldLeg.map(p => [p.lat, p.lng]), { color: '#ff5555', weight: 4, opacity: 0.9, dashArray: '8 6', interactive: false }));
+                else {
+                    add(L.polyline(l.oldLeg.map(p => [p.lat, p.lng]), { color: '#ffe14d', weight: 2, opacity: 0.6, dashArray: '6 6', interactive: false }));
+                    add(L.polyline(l.newPoly.map(p => [p.lat, p.lng]), { color: bad ? '#ff5555' : '#ffe14d', weight: 4, opacity: 0.95, interactive: false }));
+                }
+            });
+        });
+    }
+    function sciPanTo(ll) { try { const map = getLeafletMap(); if (map && ll) map.setView([ll.lat, ll.lng], Math.max(map.getZoom(), 18)); } catch (e) {} }
+
+    // ---- panel ----
+    function sciRenderPanelBody() {
+        const host = document.getElementById('aim-sci-controls'); if (!host) return;
+        const btnCss = (col) => `background:rgba(${col},0.12);color:rgb(${col});border:1px solid rgba(${col},0.5);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px`;
+        host.innerHTML = `
+            <div style="font-size:11px;color:#7adfe6;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">🔍 Scan Import — apply the Ortho Scanner review</div>
+            <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:6px">
+                <button id="aim-sci-load" style="${btnCss('122,223,230')}">📂 Load decisions + scan JSON</button>
+                <span style="color:#888;font-size:10px">both files, together or one at a time · or drop them here</span>
+                <button id="aim-sci-restage" style="${btnCss('160,160,160')}" title="Re-read the site and stage again">↻ Re-stage</button>
+            </div>
+            <div id="aim-sci-files" style="font-size:11px;color:#9ad;margin-bottom:6px;line-height:1.5"></div>
+            <div id="aim-sci-plan" style="font-size:11px;color:#cfd6dc;margin-bottom:6px"></div>
+            <div id="aim-sci-applyrow" style="display:none;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:6px">
+                <button id="aim-sci-apply-nfz" style="${btnCss('95,255,95')};font-weight:600">✓ Apply NFZs</button>
+                <button id="aim-sci-apply-fp" style="${btnCss('255,225,77')};font-weight:600">✓ Apply FP edits</button>
+                <button id="aim-sci-stop" style="${btnCss('255,85,85')};display:none">■ Stop</button>
+                <button id="aim-sci-report" style="${btnCss('160,160,160')};display:none">⬇ Report JSON</button>
+                <button id="aim-sci-undo" style="${btnCss('255,179,71')}" title="Delete exactly the NFZs the last Scan Import run created on this site (Delete Guard banks each)">↩ Undo NFZs</button>
+                <span style="color:#888;font-size:10px">Dry run uses the Commit checkbox below · FP restores: Control Panel → Delete Guard</span>
+            </div>
+            <div id="aim-sci-result" style="font-size:11px;color:#9ad;line-height:1.5">Load the review sheet's decisions JSON and the scan bundle — everything stages on the map, nothing is written until Apply.</div>`;
+        const pick = () => { const inp = document.createElement('input'); inp.type = 'file'; inp.accept = '.json,application/json'; inp.multiple = true; inp.onchange = () => sciLoadFiles(inp.files); inp.click(); };
+        host.querySelector('#aim-sci-load').onclick = pick;
+        host.querySelector('#aim-sci-restage').onclick = () => { if (sci.dec && sci.scan) sciBuildPlan().catch(e => sciLog(`Stage failed: ${sciEsc(e.message || e)}`, '#ff6060')); else sciLog('Load both files first', '#ffb347'); };
+        host.querySelector('#aim-sci-apply-nfz').onclick = () => sciApplyNfz().catch(e => { console.error(`${TAG} 🔍 apply NFZ:`, e); sciLog(`Apply NFZs failed: ${sciEsc(e.message || e)}`, '#ff6060'); });
+        host.querySelector('#aim-sci-apply-fp').onclick = () => sciApplyFp().catch(e => { console.error(`${TAG} 🔍 apply FP:`, e); sciLog(`Apply FP edits failed: ${sciEsc(e.message || e)}`, '#ff6060'); });
+        host.querySelector('#aim-sci-stop').onclick = () => { sci.stop = true; sciLog('Stopping after the current write…', '#ffb347'); };
+        host.querySelector('#aim-sci-report').onclick = () => { if (sci.report) downloadJSONFile(`scan-import-${sci.siteID}-${Date.now()}.json`, JSON.stringify(sci.report, null, 1)); };
+        host.querySelector('#aim-sci-undo').onclick = () => sciUndoNfz().catch(e => sciLog(`Undo failed: ${sciEsc(e.message || e)}`, '#ff6060'));
+        host.ondragover = (ev) => { ev.preventDefault(); host.style.outline = '1px solid #7adfe6'; };
+        host.ondragleave = () => { host.style.outline = ''; };
+        host.ondrop = (ev) => { ev.preventDefault(); host.style.outline = ''; sciLoadFiles(ev.dataTransfer && ev.dataTransfer.files); };
+        host.onclick = (ev) => { const row = ev.target.closest && ev.target.closest('[data-sci-pan]'); if (!row) return; const [lat, lng] = row.getAttribute('data-sci-pan').split(',').map(Number); if (isFinite(lat)) sciPanTo({ lat, lng }); };
+        sciRenderFiles(); sciRenderPlan();
+    }
+    function sciRenderPlan() {
+        const el = document.getElementById('aim-sci-plan'), row = document.getElementById('aim-sci-applyrow'); if (!el) return;
+        const plan = sci.plan;
+        if (!plan) { el.innerHTML = ''; if (row) row.style.display = 'none'; return; }
+        const n = (st) => plan.nfz.filter(i => i.status === st).length;
+        const f = (st) => plan.fp.filter(i => i.status === st).length;
+        const act = (a) => plan.fp.filter(i => i.status === 'stage' && i.action === a).length;
+        const deletes = plan.fpWrites.filter(w => w.kind === 'delete').length;
+        const nfzBad = plan.nfz.filter(i => i.status === 'create' && i.fail.length), fpBad = plan.fpWrites.filter(w => w.fail.length);
+        const nfzWarn = plan.nfz.filter(i => i.status === 'create' && !i.fail.length && i.warn.length).length;
+        const chip = (label, v, col) => `<span style="display:inline-block;margin:1px 6px 1px 0;padding:1px 6px;border-radius:3px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.12)"><b style="color:${col || '#fff'}">${v}</b> ${label}</span>`;
+        const cen = (ring) => { const c = ringCentroid(ring); return `${c.lat},${c.lng}`; };
+        const list = (items, color) => items.length ? `<div style="max-height:140px;overflow-y:auto;margin:3px 0 4px;padding:3px 6px;border:1px solid rgba(255,255,255,0.1);border-radius:3px">${items.map(x => `<div data-sci-pan="${x.pan || ''}" style="cursor:${x.pan ? 'pointer' : 'default'};color:${color};font-size:10px;line-height:1.4">${x.html}</div>`).join('')}</div>` : '';
+        const skipped = plan.fp.filter(i => i.status === 'skip');
+        el.innerHTML =
+            `<div style="margin-bottom:3px"><span style="color:#7adfe6">NFZs</span> ${chip('to create', n('create'), '#5fff5f')}${chip('already present', n('present'), '#9ad')}${chip('denied', n('denied'), '#888')}${chip('no decision', n('nodecision'), '#ffb347')}${chip('skipped', n('skip'), '#ffb347')}</div>`
+            + `<div style="margin-bottom:3px"><span style="color:#ffe14d">Legs</span> ${chip('slide', act('slide'), '#ffe14d')}${chip('detour', act('vertex'), '#ffe14d')}${chip('fixed route', act('fix'), '#ffe14d')}${chip('remove', act('remove'), '#ff8a80')}${chip('→ whole-path deletes', deletes, '#ff5555')}${chip('already applied', f('applied'), '#9ad')}${chip('denied', f('denied'), '#888')}${chip('no decision', f('nodecision'), '#ffb347')}${chip('skipped', skipped.length, '#ffb347')} · ${plan.fpWrites.length} flight path write${plan.fpWrites.length === 1 ? '' : 's'}</div>`
+            + `<div style="color:#888;font-size:10px;margin-bottom:3px">targets resolved by id ${plan.resolved.id} · by name ${plan.resolved.name} · unresolved ${plan.resolved.none}</div>`
+            + `<div style="margin-top:4px;color:${plan.blockers ? '#ff6060' : '#5fff5f'};font-weight:600">Preflight: ${plan.blockers ? `${nfzBad.length} NFZ + ${fpBad.length} flight path BLOCKED — fix or they stay out (the rest can apply)` : 'all staged items pass'}${nfzWarn ? ` · <span style="color:#ffb347;font-weight:400">${nfzWarn} NFZ warnings (SOP separation — the SOP validator will flag them)</span>` : ''}</div>`
+            + list(nfzBad.map(i => ({ pan: cen(i.ring), html: `✕ ${sciEsc(i.name)}: ${sciEsc(i.fail.join(' · '))}` })), '#ff8a80')
+            + list(fpBad.map(w => ({ pan: `${w.legs[0].oldLeg[0].lat},${w.legs[0].oldLeg[0].lng}`, html: `✕ FP "${sciEsc(w.fp.name)}": ${sciEsc([...w.fail, ...w.legs.flatMap(l => l.fail.filter(x => x !== 'blocked by this flight path').map(x => `${l.key} ${x}`))].join(' · '))}` })), '#ff8a80')
+            + list(plan.fpWrites.filter(w => !w.fail.length && w.warn.length).map(w => ({ pan: `${w.legs[0].oldLeg[0].lat},${w.legs[0].oldLeg[0].lng}`, html: `⚠ FP "${sciEsc(w.fp.name)}": ${sciEsc(w.warn.join(' · '))}` })), '#ffb347')
+            + list(skipped.map(i => ({ pan: i.oldLeg ? `${i.oldLeg[0].lat},${i.oldLeg[0].lng}` : '', html: `– ${sciEsc(i.key)} ${sciEsc(i.fpName)}: ${sciEsc(i.reason)}` })), '#9a9a9a')
+            + list(plan.nfz.filter(i => i.status === 'skip' || i.status === 'nodecision').map(i => ({ pan: i.ring && i.ring.length ? cen(i.ring) : '', html: `– ${sciEsc(i.key)}: ${sciEsc(i.status === 'nodecision' ? 'no decision' : i.reason)}` })), '#9a9a9a');
+        if (row) {
+            row.style.display = 'flex';
+            const bn = row.querySelector('#aim-sci-apply-nfz'), bf = row.querySelector('#aim-sci-apply-fp');
+            const okN = plan.nfz.filter(i => i.status === 'create' && !i.fail.length).length, okF = plan.fpWrites.filter(w => !w.fail.length).length;
+            bn.textContent = `✓ Apply NFZs (${okN})`; bn.disabled = !okN || sci.running; bn.style.opacity = bn.disabled ? 0.45 : 1;
+            bf.textContent = `✓ Apply FP edits (${okF})`; bf.disabled = !okF || sci.running; bf.style.opacity = bf.disabled ? 0.45 : 1;
+            row.querySelector('#aim-sci-report').style.display = sci.report ? '' : 'none';
+            row.querySelector('#aim-sci-stop').style.display = sci.running ? '' : 'none';
+        }
+    }
+    function sciShowPanel() {
+        const c = document.getElementById('aim-sci-controls'); if (!c) return;
+        genShowPage('sci');
+        c.style.display = 'block';
+        const b = document.getElementById('aim-gen-scan'); if (b) b.style.background = 'rgba(122,223,230,0.32)';
+    }
+    function sciTeardown() { sciClearLayers(); }
+    function sciOpenFromAction() {
+        if (LITE) { showToast('Scan Import needs Full mode (CSM access)', 'rgba(255,180,0,0.6)'); return; }
+        const sid = getCurrentSiteID();
+        if (!sid) { showToast('No site loaded', 'rgba(255,96,96,0.55)'); return; }
+        const go = () => { try { if (!document.getElementById(GEN_MODAL_ID)) openSiteGenerator(sid); sciShowPanel(); } catch (e) { console.warn(`${TAG} 🔍 open failed:`, e); } };
+        const bucket = mapObjectsBySite[sid];
+        if (!bucket || !bucket.entities) fetchMapObjects(sid, true).then(go); else go();
+    }
+
+    // ---- apply ----
+    function sciDry() { try { return !!document.getElementById('aim-gen-dryrun').checked; } catch (e) { return true; } }
+    function sciReport() {
+        if (!sci.report || sci.report.siteID !== sci.siteID) sci.report = { siteID: sci.siteID, origin: location.origin, runId: sci.plan && sci.plan.runId, at: new Date().toISOString(), nfz: { created: [], present: [], failed: [], blocked: [], skipped: [] }, fp: { changed: [], deleted: [], applied: [], failed: [], blocked: [], skipped: [] } };
+        return sci.report;
+    }
+    async function sciPostMapObject(body, csrf) {
+        const r = await fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) });
+        const txt = await r.text(); let json = null; try { json = JSON.parse(txt); } catch (e) {}
+        if (r.status === 403) throw Object.assign(new Error('403 — write permission lost, ABORTING'), { fatal: true });
+        if (r.status !== 200 || !json || !json.map_objects) throw new Error(`server ${r.status} ${(txt || '').slice(0, 160)}`);
+        return json.map_objects;
+    }
+    async function sciApplyNfz() {
+        const plan = sci.plan; if (!plan || sci.running) return;
+        if (liteBlockedWrite('create NFZs (scan import)')) return;
+        const sid = sci.siteID;
+        if (String(sid) !== String(getCurrentSiteID())) { sciLog('Site changed — reopen the generator', '#ff6060'); return; }
+        const todo = plan.nfz.filter(i => i.status === 'create' && !i.fail.length);
+        if (!todo.length) { sciLog('No NFZs to create', '#ffb347'); return; }
+        const rep = sciReport();
+        plan.nfz.filter(i => i.status === 'create' && i.fail.length).forEach(i => rep.nfz.blocked.push({ key: i.key, name: i.name, why: i.fail }));
+        plan.nfz.filter(i => i.status === 'present').forEach(i => rep.nfz.present.push({ key: i.key, name: i.name, existing: i.reason }));
+        plan.nfz.filter(i => i.status === 'skip' || i.status === 'nodecision').forEach(i => rep.nfz.skipped.push({ key: i.key, why: i.status === 'nodecision' ? 'no decision' : i.reason }));
+        if (sciDry()) { sciLog(`DRY RUN — would create ${todo.length} NFZ(s). Untick Dry run (Commit section) to write.`, '#ffe14d'); return; }
+        const csrf = getCsrfToken();
+        if (!csrf) { sciLog('No CSRF token — make one native save anywhere in Percepto first, then retry', '#ff6060'); return; }
+        const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+        const tmplNfz = ents.find(e => e.type === 4 && entityCoords(e));
+        let tmplBody = null; if (tmplNfz) { try { tmplBody = buildWriteBody(tmplNfz, sci.siteCfg); } catch (e) {} }
+        const bodies = todo.map(it => {
+            let b;
+            if (tmplBody) { b = JSON.parse(JSON.stringify(tmplBody)); delete b.id; }
+            else b = { type: 4, description: '', custom: {}, params: {}, asset_waypoints: null, constantly_present_asset_name: false, general_marker_type: '', marker_height: 0, is_unshielded: false, restrictions: [] };
+            b.type = 4; b.name = it.name; b.description = `AIM Scan Import ${plan.runId || ''}`.trim();
+            b.site_id = sid; b.points = it.ring.map(p => ({ lat: p.lat, lng: p.lng })); b.validated = false; b.arcs = [];
+            b.mountain_terrain_site = !!(sci.siteCfg && sci.siteCfg.mountain_terrain);
+            return { it, body: b };
+        });
+        const backup = { site: sid, runId: plan.runId, at: new Date().toISOString(), nfzs: bodies.map(w => w.body) };
+        try { localStorage.setItem(`aim_sci_nfz_backup:${sid}`, JSON.stringify(backup)); } catch (e) {}
+        try { downloadJSONFile(`scan-import-nfz-${sid}-${Date.now()}.json`, JSON.stringify(backup, null, 1)); } catch (e) { sciLog('backup download failed (localStorage stash still written)', '#ffb347'); }
+        sci.running = true; sci.stop = false; sciRenderPlan();
+        const created = []; let fail = 0;
+        try {
+            for (let i = 0; i < bodies.length; i++) {
+                if (sci.stop) { sciLog(`Stopped after ${i} write(s)`, '#ffb347'); break; }
+                const w = bodies[i];
+                try {
+                    const saved = await sciPostMapObject(w.body, csrf);
+                    if (saved.id == null) throw new Error('no id in response');
+                    created.push({ it: w.it, id: saved.id });
+                    sciLog(`NFZ ${i + 1}/${bodies.length} "${sciEsc(w.body.name)}" → #${saved.id}`);
+                } catch (e) {
+                    fail++; console.warn(`${TAG} 🔍 nfz create "${w.body.name}":`, e.message);
+                    rep.nfz.failed.push({ key: w.it.key, name: w.it.name, why: e.message });
+                    w.it.fail.push(`write failed: ${e.message}`);
+                    if (e.fatal) break;
+                }
+                await new Promise(r => setTimeout(r, SCI_GAP_MS));
+            }
+        } finally { sci.running = false; }
+        try { await fetchMapObjects(sid, true); } catch (e) {}
+        const after = new Set((((mapObjectsBySite[sid] || {}).entities) || []).map(e => e.id));
+        let verified = 0;
+        created.forEach(c => {
+            if (after.has(c.id)) { verified++; c.it.status = 'present'; c.it.reason = `#${c.id} (created by this run)`; rep.nfz.created.push({ key: c.it.key, id: c.id, name: c.it.name }); }
+            else { rep.nfz.failed.push({ key: c.it.key, name: c.it.name, id: c.id, why: 'not present on refetch' }); c.it.fail.push('not present on refetch'); }
+        });
+        // undo list (GM) + solid placeholders until reload (NFZ Stamp pattern)
+        try { elevGmSet(SCI_UNDO_KEY(sid), JSON.stringify({ at: new Date().toISOString(), runId: plan.runId, ids: created.filter(c => after.has(c.id)).map(c => c.id) })); } catch (e) {}
+        try { nfzDraw.committedSite = String(sid); created.filter(c => after.has(c.id)).forEach(c => nfzDraw.committed.push({ id: c.id, name: c.it.name, points: c.it.ring })); nfzRenderCommitted(); } catch (e) {}
+        sciDraw(); sciRenderPlan();
+        sciLog(`NFZs: ${verified} created + verified${fail ? `, <b style="color:#ff6060">${fail} FAILED</b>` : ''} · ${rep.nfz.present.length} already present · ↩ Undo removes exactly this run · refresh to see them natively`, fail ? '#ffb347' : '#5fff5f');
+        showToast(fail ? `Scan Import: ${verified} NFZs ok, ${fail} failed` : `✓ ${verified} NFZ(s) created`, fail ? 'rgba(255,96,96,0.55)' : undefined);
+    }
+    // bank a full read-shape entity into Delete Guard's 72 h ring (same origin + shape; the guard's panel restores it)
+    function sciBankToGuard(entity, sid) {
+        try {
+            let hist = []; try { hist = JSON.parse(localStorage.getItem(SCI_GUARD_KEY) || '[]'); } catch (e) { hist = []; }
+            if (!Array.isArray(hist)) hist = [];
+            hist.unshift({ ts: Date.now(), iso: new Date().toISOString(), kind: 'entity', siteId: sid, entity: JSON.parse(JSON.stringify(entity)), source: 'scan-import' });
+            for (let attempt = 0; attempt < 10; attempt++) {
+                try { localStorage.setItem(SCI_GUARD_KEY, JSON.stringify(hist)); return true; }
+                catch (e) { if (hist.length <= 1) throw e; hist = hist.slice(0, hist.length - 1); }
+            }
+        } catch (e) { console.warn(`${TAG} 🔍 Delete Guard bank failed:`, e); }
+        return false;
+    }
+    async function sciApplyFp() {
+        const plan = sci.plan; if (!plan || sci.running) return;
+        if (liteBlockedWrite('edit flight paths (scan import)')) return;
+        const sid = sci.siteID;
+        if (String(sid) !== String(getCurrentSiteID())) { sciLog('Site changed — reopen the generator', '#ff6060'); return; }
+        const todo = plan.fpWrites.filter(w => !w.fail.length && !w.done);
+        if (!todo.length) { sciLog('No flight path edits to apply', '#ffb347'); return; }
+        const rep = sciReport();
+        plan.fpWrites.filter(w => w.fail.length).forEach(w => rep.fp.blocked.push({ fpId: w.fp.id, name: w.fp.name, legs: w.legs.map(l => l.key), why: [...w.fail, ...w.legs.flatMap(l => l.fail)] }));
+        plan.fp.filter(i => i.status === 'applied').forEach(i => rep.fp.applied.push({ key: i.key, fp: i.fpName }));
+        plan.fp.filter(i => i.status === 'skip' || i.status === 'nodecision').forEach(i => rep.fp.skipped.push({ key: i.key, fp: i.fpName, why: i.status === 'nodecision' ? 'no decision' : i.reason }));
+        const deletes = todo.filter(w => w.kind === 'delete').length;
+        if (sciDry()) { sciLog(`DRY RUN — would update ${todo.length - deletes} flight path(s) and delete ${deletes}. Untick Dry run (Commit section) to write.`, '#ffe14d'); return; }
+        const csrf = getCsrfToken();
+        if (!csrf) { sciLog('No CSRF token — make one native save anywhere in Percepto first, then retry', '#ff6060'); return; }
+        if (deletes && !confirm(`${deletes} flight path(s) will be DELETED (their only leg was removed). Each is banked to Delete Guard first. Continue?`)) return;
+        if (!sci.siteCfg) { try { sci.siteCfg = await fetchSiteConfig(sid, true); } catch (e) { sciLog('Site config fetch failed — refusing to write (mountain_terrain flag unknown)', '#ff6060'); return; } }
+        // one backup of every touched FP before ANY write (+ each into the guard ring)
+        const backup = { site: sid, runId: plan.runId, at: new Date().toISOString(), flightPaths: todo.map(w => w.fp) };
+        try { localStorage.setItem(`aim_sci_fp_backup:${sid}`, JSON.stringify(backup)); } catch (e) {}
+        if (!downloadJSONFile(`scan-import-fp-backup-${sid}-${Date.now()}.json`, JSON.stringify(backup, null, 1))) { sciLog('Backup download failed — refusing to write', '#ff6060'); return; }
+        sci.running = true; sci.stop = false; sciRenderPlan();
+        let ok = 0, fail = 0;
+        try {
+            for (let i = 0; i < todo.length; i++) {
+                if (sci.stop) { sciLog(`Stopped after ${i} write(s)`, '#ffb347'); break; }
+                const w = todo[i];
+                const label = `FP ${i + 1}/${todo.length} "${sciEsc(w.fp.name)}" (#${w.fp.id})`;
+                try {
+                    if (!sciBankToGuard(w.fp, sid)) throw new Error('Delete Guard bank failed — not writing');
+                    if (w.kind === 'delete') {
+                        const r = await fetch(`/map_objects/${w.fp.id}/`, { method: 'DELETE', credentials: 'same-origin', headers: { 'X-CSRFToken': csrf } });
+                        if (r.status === 403) throw Object.assign(new Error('403 — write permission lost, ABORTING'), { fatal: true });
+                        if (!r.ok && r.status !== 404) throw new Error(`DELETE server ${r.status}`);
+                        try { await fetchMapObjects(sid, true); } catch (e) {}
+                        if ((((mapObjectsBySite[sid] || {}).entities) || []).some(e => e.id === w.fp.id)) throw new Error('still present after delete');
+                        w.done = true; ok++; rep.fp.deleted.push({ fpId: w.fp.id, name: w.fp.name, legs: w.legs.map(l => l.key) });
+                        sciLog(`${label} deleted + verified`);
+                    } else {
+                        const body = buildWriteBody(w.fp, sci.siteCfg);
+                        body.arcs = w.arcs.map(a => {
+                            const o = Object.assign({}, a); delete o._live; delete o._new; delete o._leg;
+                            if (a._new) { delete o.id; delete o.mapobject; }
+                            o.points = [{ lat: o.point_a.lat, lng: o.point_a.lng }, { lat: o.point_b.lat, lng: o.point_b.lng }];
+                            o.min_alt = fpArcAltMeters(o.min_alt); o.max_alt = fpArcAltMeters(o.max_alt);
+                            return o;
+                        });
+                        const pts = []; body.arcs.forEach(a => [a.point_a, a.point_b].forEach(p => { if (!pts.some(q => sciSame(q, p))) pts.push({ lat: p.lat, lng: p.lng }); }));
+                        body.points = pts;
+                        const saved = await sciPostMapObject(body, csrf);
+                        try { await fetchMapObjects(sid, true); } catch (e) {}
+                        const live = (((mapObjectsBySite[sid] || {}).entities) || []).find(e => e.id === w.fp.id);
+                        if (!live || !Array.isArray(live.arcs)) throw new Error('flight path missing after save');
+                        const want = body.arcs, have = live.arcs.filter(a => a && a.point_a && a.point_b);
+                        if (have.length !== want.length) throw new Error(`arc count ${have.length} ≠ expected ${want.length} after save`);
+                        const missing = want.filter(a => !have.some(h => (sciSame(h.point_a, a.point_a) && sciSame(h.point_b, a.point_b)) || (sciSame(h.point_a, a.point_b) && sciSame(h.point_b, a.point_a))));
+                        if (missing.length) {
+                            // v4.326: say WHAT moved — expected endpoints vs the nearest live arc, in ft
+                            const nearest = (p) => { let b = Infinity; have.forEach(h => [h.point_a, h.point_b].forEach(q => { b = Math.min(b, approxMeters(p.lat, p.lng, q.lat, q.lng)); })); return b; };
+                            const detail = missing.map(a => `sent ${a.point_a.lat.toFixed(6)},${a.point_a.lng.toFixed(6)} → ${a.point_b.lat.toFixed(6)},${a.point_b.lng.toFixed(6)} · nearest live vertex ${(nearest(a.point_a) / GEN_FT_TO_M).toFixed(1)} ft / ${(nearest(a.point_b) / GEN_FT_TO_M).toFixed(1)} ft away`);
+                            console.warn(`${TAG} 🔍 verify mismatch on FP #${w.fp.id} "${w.fp.name}":\n  ${detail.join('\n  ')}\n  server echo arcs: ${JSON.stringify((saved.arcs || []).map(x => [x.point_a, x.point_b]))}\n  live arcs: ${JSON.stringify(have.map(x => [x.point_a, x.point_b]))}`);
+                            throw new Error(`${missing.length} arc(s) not found after save — ${detail[0]} (details in console)`);
+                        }
+                        w.done = true; ok++; rep.fp.changed.push({ fpId: w.fp.id, name: w.fp.name, legs: w.legs.map(l => `${l.key} ${l.action}`), arcsBefore: w.fp.arcs.length, arcsAfter: have.length, savedId: saved.id });
+                        sciLog(`${label} saved + verified (${w.fp.arcs.length} → ${have.length} arcs)`);
+                    }
+                    w.legs.forEach(l => { l.status = 'applied'; });
+                } catch (e) {
+                    fail++; console.warn(`${TAG} 🔍 ${label.replace(/<[^>]*>/g, '')}:`, e.message);
+                    rep.fp.failed.push({ fpId: w.fp.id, name: w.fp.name, legs: w.legs.map(l => l.key), why: e.message });
+                    w.fail.push(`write failed: ${e.message}`);
+                    sciLog(`${label} FAILED: ${sciEsc(e.message)} — stopped (nothing after it was written)`, '#ff6060');
+                    break;   // stop on the FIRST failure
+                }
+                await new Promise(r => setTimeout(r, SCI_GAP_MS));
+            }
+        } finally { sci.running = false; }
+        sciDraw(); sciRenderPlan();
+        const left = plan.fpWrites.filter(w => !w.fail.length && !w.done).length;
+        sciLog(`Flight paths: ${ok} written + verified${fail ? `, <b style="color:#ff6060">1 FAILED</b>` : ''}${left ? ` · ${left} not attempted` : ''} · backups: JSON download + Delete Guard ring (72 h) · refresh to see them natively`, fail ? '#ffb347' : '#5fff5f');
+        showToast(fail ? `Scan Import: ${ok} FP ok, stopped on a failure` : `✓ ${ok} flight path(s) updated`, fail ? 'rgba(255,96,96,0.55)' : undefined);
+    }
+    async function sciUndoNfz() {
+        if (liteBlockedWrite('delete NFZs (scan import undo)')) return;
+        const sid = sci.siteID || getCurrentSiteID();
+        let rec = null; try { rec = JSON.parse(elevGmGet(SCI_UNDO_KEY(sid), '') || 'null'); } catch (e) {}
+        if (!rec || !Array.isArray(rec.ids) || !rec.ids.length) { sciLog('Nothing to undo on this site (only the most recent Scan Import run)', '#ffb347'); return; }
+        const csrf = getCsrfToken();
+        if (!csrf) { sciLog('No CSRF token', '#ff6060'); return; }
+        if (!confirm(`Delete the ${rec.ids.length} NFZ(s) created by the Scan Import run of ${rec.at}? (Delete Guard banks each when installed)`)) return;
+        let ok = 0, fail = 0; const left = [];
+        for (const id of rec.ids) {
+            try {
+                const r = await fetch(`/map_objects/${id}/`, { method: 'DELETE', credentials: 'same-origin', headers: { 'X-CSRFToken': csrf } });
+                if (r.ok || r.status === 404) ok++; else { fail++; left.push(id); console.warn(`${TAG} 🔍 undo #${id}: server ${r.status}`); }
+            } catch (e) { fail++; left.push(id); console.warn(`${TAG} 🔍 undo #${id}:`, e.message); }
+            await new Promise(r => setTimeout(r, SCI_GAP_MS));
+        }
+        try { elevGmSet(SCI_UNDO_KEY(sid), left.length ? JSON.stringify(Object.assign({}, rec, { ids: left })) : ''); } catch (e) {}
+        try { nfzDraw.committed = nfzDraw.committed.filter(c => !rec.ids.includes(c.id) || left.includes(c.id)); nfzRenderCommitted(); } catch (e) {}
+        try { await fetchMapObjects(sid, true); } catch (e) {}
+        if (sci.dec && sci.scan) sciBuildPlan().catch(() => {});
+        sciLog(`↩ Undo: ${ok} NFZ(s) deleted${fail ? `, ${fail} FAILED (kept in the undo list)` : ''}`, fail ? '#ffb347' : '#5fff5f');
+    }
+    // ============================================================
+    // 🛗 ELEVATORS (feature #290, v4.327) — splice an Elevator 1 → Bridge →
+    // Elevator 2 altitude staircase into a flight path where it crosses a
+    // red transmission KML line (auto scan) or at a right-clicked FP point
+    // (manual). Bridge = the path within elvCfg.halfFt (PERPENDICULAR) of
+    // ANY transmission line — parallel circuits merge into one bridge;
+    // elevators = the next elvCfg.elevFt of path beyond each bridge end.
+    // Bands are MSL metres from DEM samples (25 ft): bridge floor = the
+    // highest ground under it + floorAgl, elevator floor = neighbour
+    // ceiling − overlap (neighbour = the untouched arc beyond, or the FFZ
+    // the path ends on), elevator ceiling = bridge floor + overlap.
+    // Stage → draw → per-crossing edit → preflight (strictly-positive band
+    // overlap at every shared vertex) → Commit: one POST per FP (untouched
+    // arcs keep ids, new arcs id-less), JSON + Delete Guard backups first,
+    // verify by refetch, stop on first failure → one pole GM per crossing
+    // ("Elevator NN - 200ft", unique, 15 ft off the path). ↩ Undo re-POSTs
+    // the backed-up FPs and deletes the GMs. Design: ShortKeys/AIM_Elevator_Design.md
+    // RULES: FPs only · a branch vertex inside the window skips the
+    // crossing · never two FPs in one request · arc ids regenerate on
+    // every save, so a path saved after staging must be re-staged.
+    // ============================================================
+    const ELV_MATCH_M = 0.6;                 // two points this close are the same vertex
+    const ELV_SNAP_M = 2.0;                  // a cut point this close to a vertex snaps onto it (no sub-2 m arcs; the band just starts at the vertex)
+    const ELV_SAMPLE_M = 25 * GEN_FT_TO_M;    // DEM sample spacing along the window
+    const ELV_STEP_M = 1;                     // walk step when measuring the bridge extent
+    const ELV_SCAN_CAP_M = 1609;              // a bridge never extends further than this from its crossing
+    const ELV_GM_OFFSET_FT = 15;              // GM sits this far beside the path (never ON it)
+    const ELV_GAP_MS = 150;
+    const ELV_LAST_KEY = (sid) => `aim_elv_last:${envSiteKey(sid)}`;   // localStorage: last commit {at, sid, fps:[orig entity], gms:[{id,name}]}
+    let elv = { siteID: null, items: [], layers: [], writes: [], running: false, siteCfg: null, seq: 1 };
+    function elvLog(m, color) {
+        try { const el = document.getElementById('aim-elv-result'); if (el) el.innerHTML = `<span style="color:${color || '#9ad'}">${m}</span>`; } catch (e) {}
+        console.log(`${TAG} 🛗 ${String(m).replace(/<[^>]*>/g, '')}`);
+    }
+    const elvEsc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    const elvFt = (m) => Math.round(m * M_TO_FT);
+    const elvVk = (p) => `${Number(p.lat).toFixed(6)},${Number(p.lng).toFixed(6)}`;   // 6 dp = the site-wide shared-vertex model (~0.1 m)
+    const elvSame = (p, q) => approxMeters(p.lat, p.lng, q.lat, q.lng) <= ELV_MATCH_M;
+    // nearest point on segment a→b to p (lat/lng), with the distance in metres
+    function elvProj(p, a, b) {
+        const cosLat = Math.cos(p.lat * Math.PI / 180);
+        const ax = (a.lng - p.lng) * 111320 * cosLat, ay = (a.lat - p.lat) * 110540;
+        const bx = (b.lng - p.lng) * 111320 * cosLat, by = (b.lat - p.lat) * 110540;
+        const dx = bx - ax, dy = by - ay, len2 = dx * dx + dy * dy;
+        let t = len2 ? -(ax * dx + ay * dy) / len2 : 0;
+        t = Math.max(0, Math.min(1, t));
+        const cx = ax + t * dx, cy = ay + t * dy;
+        return { d: Math.sqrt(cx * cx + cy * cy), lat: a.lat + (b.lat - a.lat) * t, lng: a.lng + (b.lng - a.lng) * t, t };
+    }
+    function elvLiveEntities(sid) { return (((mapObjectsBySite[sid] || {}).entities) || []); }
+    // HARD RAIL (2026-10-13): this tool rewrites FLIGHT PATHS only. A pad FFZ was altered during the
+    // one day it also wrote FFZs; that code is gone and this check makes sure it stays gone.
+    async function elvPostFp(body, csrf) {
+        if (!body || body.type !== 15) throw new Error(`refusing to POST a type-${body && body.type} entity — Elevators only writes flight paths`);
+        return sciPostMapObject(body, csrf);
+    }
+    function elvLiveFp(sid, fpId) { return elvLiveEntities(sid).find(e => e && e.id === fpId && e.type === 15) || null; }
+    function elvFfzInfo(sid) {
+        return elvLiveEntities(sid).filter(e => e && e.type === 16 && entityCoords(e) && entityCoords(e).length >= 3)
+            .map(f => ({ e: f, ring: entityCoords(f), bbox: sciBbox(entityCoords(f)) }));
+    }
+    // ---- transmission lines (Map Styler's KML features over AIM_KML_DATA) ----
+    async function elvTransSegs(sid) {
+        const have = () => String(powerLinesKml.siteID) === String(sid) && powerLinesKml.trans.length > 0;
+        if (!have()) {
+            try { requestPowerLinesKml(String(sid)); } catch (e) { console.warn(`${TAG} 🛗 KML request failed:`, e); }
+            for (let i = 0; i < 15 && !have(); i++) await new Promise(r => setTimeout(r, 200));
+        }
+        const segs = [];
+        if (!have()) return segs;
+        // hidden lines count too — a hide is a personal view filter, the wire is still there
+        powerLinesKml.trans.forEach((f, fi) => {
+            if (!f || f.type !== 'line' || !Array.isArray(f.coords)) return;
+            for (let i = 0; i < f.coords.length - 1; i++) {
+                const a = f.coords[i], b = f.coords[i + 1];
+                if (a && b && isFinite(a.lat) && isFinite(a.lng) && isFinite(b.lat) && isFinite(b.lng)) segs.push({ a, b, fi });
+            }
+        });
+        return segs;
+    }
+    // ---- chain: the maximal degree-2 run of arcs through arcIdx (stops at path ends and branch vertices) ----
+    function elvChain(fp, arcIdx) {
+        const arcs = fp.arcs.filter(a => a && a.point_a && a.point_b);
+        const byV = new Map();
+        arcs.forEach((a, i) => [a.point_a, a.point_b].forEach(p => { const k = elvVk(p); if (!byV.has(k)) byV.set(k, []); byV.get(k).push(i); }));
+        const a0 = arcs[arcIdx];
+        const legs = [{ i: arcIdx, a: a0.point_a, b: a0.point_b }];
+        const used = new Set([arcIdx]);
+        const extend = (dir) => {   // returns the degree of the vertex the walk stopped at (1 = end, ≥3 = branch, 2 = loop closed)
+            for (let guard = 0; guard < arcs.length + 1; guard++) {
+                const edge = dir > 0 ? legs[legs.length - 1] : legs[0];
+                const v = dir > 0 ? edge.b : edge.a;
+                const at = byV.get(elvVk(v)) || [];
+                if (at.length !== 2) return at.length;
+                const ni = at.find(i => !used.has(i));
+                if (ni == null) return 2;
+                const na = arcs[ni]; used.add(ni);
+                // forward: the leg starts at v; backward: the leg ENDS at v (an arc stored the other
+                // way round must be flipped — getting this wrong wrote hairpin elevators, 2026-10-13)
+                const aIsV = elvVk(na.point_a) === elvVk(v);
+                const leg = dir > 0
+                    ? { i: ni, a: aIsV ? na.point_a : na.point_b, b: aIsV ? na.point_b : na.point_a }
+                    : { i: ni, a: aIsV ? na.point_b : na.point_a, b: aIsV ? na.point_a : na.point_b };
+                if (dir > 0) legs.push(leg); else legs.unshift(leg);
+            }
+            return 2;
+        };
+        const endDeg = extend(1), startDeg = extend(-1);
+        const pts = [legs[0].a].concat(legs.map(l => l.b));
+        const cum = [0];
+        for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + approxMeters(pts[i - 1].lat, pts[i - 1].lng, pts[i].lat, pts[i].lng));
+        return { arcs, legs, pts, cum, len: cum[cum.length - 1], startDeg, endDeg, ids: legs.map(l => arcs[l.i].id) };
+    }
+    // point at arc-length s along the chain (exact vertex when s sits on one)
+    function elvAt(ch, s) {
+        s = Math.max(0, Math.min(ch.len, s));
+        let i = 0;
+        while (i < ch.cum.length - 2 && ch.cum[i + 1] < s) i++;
+        if (Math.abs(ch.cum[i] - s) < 1e-3) return { lat: ch.pts[i].lat, lng: ch.pts[i].lng, leg: i };
+        if (Math.abs(ch.cum[i + 1] - s) < 1e-3) return { lat: ch.pts[i + 1].lat, lng: ch.pts[i + 1].lng, leg: i };
+        const L = ch.cum[i + 1] - ch.cum[i], t = L > 0 ? (s - ch.cum[i]) / L : 0;
+        const p = ch.pts[i], q = ch.pts[i + 1];
+        return { lat: p.lat + (q.lat - p.lat) * t, lng: p.lng + (q.lng - p.lng) * t, leg: i };
+    }
+    function elvSnapS(ch, s) {
+        for (let i = 0; i < ch.cum.length; i++) if (Math.abs(ch.cum[i] - s) <= ELV_SNAP_M) return ch.cum[i];
+        return Math.max(0, Math.min(ch.len, s));
+    }
+    // GM point: bridge midpoint, ELV_GM_OFFSET_FT to the left of the path direction
+    function elvGmPoint(ch, s) {
+        const p = elvAt(ch, s), q = elvAt(ch, Math.min(ch.len, s + 2)), r = elvAt(ch, Math.max(0, s - 2));
+        const latM = 110540, lngM = 111320 * Math.cos(p.lat * Math.PI / 180);
+        let dx = (q.lng - r.lng) * lngM, dy = (q.lat - r.lat) * latM;
+        const L = Math.hypot(dx, dy) || 1; dx /= L; dy /= L;
+        const off = ELV_GM_OFFSET_FT * GEN_FT_TO_M;
+        return { lat: p.lat + (dx * off) / latM, lng: p.lng + (-dy * off) / lngM };
+    }
+    // ---- crossings: every FP arc × transmission segment intersection ----
+    function elvFindCrossings(fps, segs) {
+        const out = [];
+        const segBb = segs.map(sg => sciBbox([sg.a, sg.b]));
+        fps.forEach(fp => {
+            const arcs = fp.arcs.filter(a => a && a.point_a && a.point_b);
+            arcs.forEach((a, ai) => {
+                const bb = sciBbox([a.point_a, a.point_b]);
+                segs.forEach((sg, si) => {
+                    if (!sciBboxTouch(bb, segBb[si], 0)) return;
+                    if (!segmentsCross(a.point_a, a.point_b, sg.a, sg.b)) return;
+                    out.push({ fp, arcIdx: ai, X: segIntersectPoint(a.point_a, a.point_b, sg.a, sg.b), line: sg.fi });
+                });
+            });
+        });
+        return out;
+    }
+    function elvNewItem(fp, arcIdx, X, src, line) {
+        return { id: elv.seq++, fp, fpId: fp.id, fpName: fp.name, arcIdx, X, src, line: (line == null ? null : line), p: Object.assign({}, elvCfg), status: 'stage', fail: [], warn: [], geo: null, bands: null, gm: null };
+    }
+    // re-find the item's arc on the LIVE entity (arc ids regenerate on every save)
+    function elvRelocate(it, sid) {
+        const live = elvLiveFp(sid, it.fpId);
+        if (!live) { it.fail.push('flight path no longer on the site'); return false; }
+        it.fp = live; it.fpName = live.name;
+        const arcs = live.arcs.filter(a => a && a.point_a && a.point_b);
+        let best = { d: Infinity, i: -1, pt: null };
+        arcs.forEach((a, i) => { const pr = elvProj(it.X, a.point_a, a.point_b); if (pr.d < best.d) best = { d: pr.d, i, pt: pr }; });
+        if (best.i < 0 || best.d > 1.5) { it.fail.push(`crossing point is ${best.d === Infinity ? 'off' : `${elvFt(best.d)} ft off`} the live path — re-scan`); return false; }
+        it.arcIdx = best.i;
+        if (it.src === 'manual') it.X = { lat: best.pt.lat, lng: best.pt.lng };
+        return true;
+    }
+    // ---- stage one crossing: geometry (cut points), DEM, bands, checks ----
+    async function elvStageItem(it, sid, segs, ffzInfo) {
+        it.fail = []; it.warn = []; it.geo = null; it.bands = null; it.gm = null;
+        if (it.status === 'done') return;
+        it.status = 'stage';
+        if (!elvRelocate(it, sid)) return;
+        const ch = elvChain(it.fp, it.arcIdx);
+        const legPos = ch.legs.findIndex(l => l.i === it.arcIdx);
+        const A = ch.pts[legPos];
+        const sX = ch.cum[legPos] + approxMeters(A.lat, A.lng, it.X.lat, it.X.lng);
+        const halfM = it.p.halfFt * GEN_FT_TO_M, elevM = it.p.elevFt * GEN_FT_TO_M, ovM = it.p.overlapFt * GEN_FT_TO_M;
+        // transmission segments near this chain (bbox prefilter)
+        const cbb = sciBbox(ch.pts);
+        const near = it.src === 'line' ? segs.filter(sg => sciBboxTouch(cbb, sciBbox([sg.a, sg.b]), 0.004)) : [];
+        const dLine = (p) => { let b = Infinity; for (const sg of near) { const d = pointToSegMeters(p.lat, p.lng, sg.a, sg.b); if (d < b) b = d; } return b; };
+        // bridge end on one side: walk out until the path has been ≥ half-width from EVERY line for two elevator lengths
+        const walk = (dir) => {
+            if (it.src !== 'line') { const s = sX + dir * halfM; return { s, clamped: s < 0 || s > ch.len }; }
+            let s = sX, lastIn = sX;
+            for (let guard = 0; guard < ELV_SCAN_CAP_M; guard++) {
+                s += dir * ELV_STEP_M;
+                if (s < 0 || s > ch.len) { const endS = dir > 0 ? ch.len : 0; return Math.abs(endS - lastIn) <= 1.5 * ELV_STEP_M ? { s: lastIn, clamped: true } : { s: lastIn, clamped: false }; }
+                if (dLine(elvAt(ch, s)) < halfM) lastIn = s;
+                else if (Math.abs(s - lastIn) >= 2 * elevM) return { s: lastIn, clamped: false };
+            }
+            it.warn.push(`bridge capped at ${elvFt(ELV_SCAN_CAP_M)} ft ${dir > 0 ? 'ahead of' : 'behind'} the crossing — the path runs along the line`);
+            return { s: lastIn, clamped: false };
+        };
+        const bL = walk(-1), bR = walk(1);
+        // another flight path sharing this vertex (SpiderWeb hubs / junctions) — its arc band is the neighbour
+        const otherFpAt = (p) => {
+            const k = elvVk(p);
+            for (const e of elvLiveEntities(sid)) {
+                if (!e || e.type !== 15 || e.id === it.fpId || !Array.isArray(e.arcs)) continue;
+                const a = e.arcs.find(a => a && a.point_a && a.point_b && (elvVk(a.point_a) === k || elvVk(a.point_b) === k));
+                if (a && typeof a.min_alt === 'number' && typeof a.max_alt === 'number') return { e, a };
+            }
+            return null;
+        };
+        const ffzAt = (p) => {
+            let best = null;
+            ffzInfo.forEach(f => {
+                if (!sciBboxTouch(f.bbox, { s: p.lat, n: p.lat, w: p.lng, e: p.lng }, 0.002)) return;
+                const d = sciDistToRingM(p, f.ring);
+                if (pointInPolygon(p.lat, p.lng, f.ring) || d <= sciEdgeFt * GEN_FT_TO_M) { if (!best || d < best.d) best = { f, d }; }
+            });
+            return best;
+        };
+        // A path end inside the bridge zone: on a pad edge → the bridge keeps a
+        // short tail past the (last) line crossing and the rest of the room to
+        // the pad edge is the elevator — it only has to descend from the bridge
+        // floor to the pad's ceiling, so a few tens of ft are plenty. The pad is
+        // never touched (Percepto refuses FFZs that touch, so a split pad would
+        // need a seam + connector FP). A branch or a dangling end → blocked.
+        const tailM = it.p.tailFt * GEN_FT_TO_M, minElevM = it.p.minElevFt * GEN_FT_TO_M;
+        const direct = { start: false, end: false };
+        const short = { start: null, end: null };    // {ffz, roomM, dM} when the bridge was cut short for a pad
+        [[bL, true], [bR, false]].forEach(([b, atStart]) => {
+            if (!b.clamped) return;
+            const deg = atStart ? ch.startDeg : ch.endDeg, side = atStart ? 'behind' : 'ahead of';
+            if (deg >= 3) { it.fail.push(`a branch vertex sits inside the bridge zone ${side} the crossing — split the path there first`); return; }
+            const endP = atStart ? ch.pts[0] : ch.pts[ch.pts.length - 1];
+            const hit = ffzAt(endP), other = hit ? null : otherFpAt(endP);
+            if (!hit && !other) {
+                const dl = near.length ? elvFt(dLine(endP)) : null;
+                it.fail.push(`dangling end ${side} the crossing — the path stops within ${it.p.halfFt} ft of the line on no FFZ edge and no other flight path; connect or abandon it [chain ${elvFt(ch.len)} ft / ${ch.legs.length} arc(s), crossing at ${elvFt(sX)} ft along it, end vertex ${endP.lat.toFixed(6)},${endP.lng.toFixed(6)}${dl != null ? ` is ${dl} ft from the line` : ''}, degree ${deg}]`);
+                console.warn(`${TAG} 🛗 dangling diag #${it.id} FP #${it.fpId} "${it.fpName}": chain ids ${JSON.stringify(ch.ids)} pts ${JSON.stringify(ch.pts.map(p => [p.lat, p.lng]))} startDeg ${ch.startDeg} endDeg ${ch.endDeg} sX ${sX.toFixed(1)} len ${ch.len.toFixed(1)}`);
+                return;
+            }
+            const nbName = hit ? `FFZ "${hit.f.e.name}"` : `flight path "${other.e.name}"`;
+            // last line crossing on this side (merged bridges can cross several lines)
+            let lastX = sX;
+            if (near.length) { const endS = atStart ? 0 : ch.len; for (let s2 = endS; atStart ? s2 < sX : s2 > sX; s2 += atStart ? ELV_STEP_M : -ELV_STEP_M) { if (dLine(elvAt(ch, s2)) < 2) { lastX = s2; break; } } }
+            const D = atStart ? lastX : ch.len - lastX;            // room between the last line and the pad edge
+            const room = D - tailM;
+            if (room < minElevM) { it.fail.push(`only ${elvFt(D)} ft between the line and ${nbName} ${side} the crossing — under the ${it.p.tailFt} ft bridge tail + ${it.p.minElevFt} ft minimum elevator; abandon or reroute the path`); return; }
+            b.s = atStart ? lastX - tailM : lastX + tailM;
+            b.clamped = false;
+            short[atStart ? 'start' : 'end'] = { ffz: nbName, roomM: room, dM: D };
+            it.warn.push(`${atStart ? 'Elevator 1' : 'Elevator 2'}: ${nbName} is only ${elvFt(D)} ft from the line — bridge cut to ${it.p.tailFt} ft past the line, elevator ${elvFt(Math.min(elevM, room))} ft to ${hit ? 'the pad edge' : 'the junction'}`);
+        });
+        if (it.fail.length) return;
+        const b1 = elvSnapS(ch, bL.s), b2 = elvSnapS(ch, bR.s);
+        const clampStart = b1 - elevM < 0, clampEnd = b2 + elevM > ch.len;
+        const e1 = clampStart ? 0 : elvSnapS(ch, b1 - elevM), e2 = clampEnd ? ch.len : elvSnapS(ch, b2 + elevM);
+        if (clampStart && ch.startDeg >= 3) it.fail.push('a branch vertex sits inside Elevator 1 — split the path there first');
+        if (clampEnd && ch.endDeg >= 3) it.fail.push('a branch vertex sits inside Elevator 2 — split the path there first');
+        if (it.fail.length) return;
+        if (b1 - e1 < 3 || e2 - b2 < 3) { it.fail.push(`${b1 - e1 < 3 ? 'Elevator 1' : 'Elevator 2'} would be under 10 ft long — the path ends right at the bridge`); return; }
+        // neighbour band = the untouched arc beyond the window, or the FFZ the path ends on
+        const bandAt = (s) => { const i = Math.max(0, Math.min(ch.legs.length - 1, elvAt(ch, s).leg)); const a = ch.arcs[ch.legs[i].i]; return { min: a.min_alt, max: a.max_alt }; };
+        const neighbour = (atStart) => {
+            const nm = atStart ? 'Elevator 1' : 'Elevator 2';
+            if (!(atStart ? clampStart : clampEnd)) { const b = bandAt(atStart ? e1 - 0.01 : e2 + 0.01); return { min: b.min, max: b.max, label: `the next arc (${elvFt(b.min)}–${elvFt(b.max)} ft MSL)` }; }
+            const p = atStart ? ch.pts[0] : ch.pts[ch.pts.length - 1];
+            const hit = ffzAt(p);
+            const r = hit && hit.f.e.restrictions;
+            if (r && typeof r.minAlt === 'number' && typeof r.maxAlt === 'number') return { min: r.minAlt, max: r.maxAlt, label: `FFZ "${hit.f.e.name}" (${elvFt(r.minAlt)}–${elvFt(r.maxAlt)} ft MSL)` };
+            const other = otherFpAt(p);
+            if (other) return { min: other.a.min_alt, max: other.a.max_alt, label: `flight path "${other.e.name}" at the junction (${elvFt(other.a.min_alt)}–${elvFt(other.a.max_alt)} ft MSL)` };
+            const b = bandAt(atStart ? 0 : ch.len);
+            it.warn.push(`${nm}: the path end is on no FFZ edge and no other flight path — floor taken from the arc's own band (${elvFt(b.min)}–${elvFt(b.max)} ft MSL)`);
+            return { min: b.min, max: b.max, label: 'the arc\'s own band (nothing at the path end)' };
+        };
+        // DEM along the window
+        const sampleS = [];
+        for (let s = e1; s < e2; s += ELV_SAMPLE_M) sampleS.push(s);
+        sampleS.push(e2, b1, b2);
+        const samples = sampleS.map(s => Object.assign(elvAt(ch, s), { s }));
+        try { await bulkFetchElevations(samples); } catch (e) { console.warn(`${TAG} 🛗 DEM fetch failed:`, e); }
+        const g = samples.map(p => ({ s: p.s, g: getElevationFromCache(p.lat, p.lng) }));
+        if (g.some(x => typeof x.g !== 'number')) { it.fail.push('DEM sample unavailable (elevation service) — try again'); return; }
+        const gIn = (lo, hi) => g.filter(x => x.s >= lo - 0.01 && x.s <= hi + 0.01).map(x => x.g);
+        const mx = (arr) => Math.max(...arr), mn = (arr) => Math.min(...arr);
+        const gB = gIn(b1, b2), gE1 = gIn(e1, b1), gE2 = gIn(b2, e2);
+        const R = fpArcAltMeters;
+        const bridge = { min: R(mx(gB) + it.p.floorAgl * GEN_FT_TO_M) };
+        bridge.max = R(bridge.min + it.p.height * GEN_FT_TO_M);
+        // already bridged? (the crossed arc's floor is at/above the target floor)
+        const crossed = ch.arcs[it.arcIdx];
+        if (it.src === 'line' && typeof crossed.min_alt === 'number' && crossed.min_alt >= bridge.min - 0.5) {
+            it.status = 'present';
+            it.geo = { ch, sX, e1, b1, b2, e2, direct, short, gz: { E1: { max: mx(gE1), min: mn(gE1) }, B: { max: mx(gB), min: mn(gB) }, E2: { max: mx(gE2), min: mn(gE2) } }, gmLL: elvGmPoint(ch, (b1 + b2) / 2) };
+            it.warn.push(`already bridged — the crossed arc flies ${elvFt(crossed.min_alt)}–${elvFt(crossed.max_alt)} ft MSL (${elvFt(crossed.min_alt - mx(gB))} ft over the highest ground)`);
+            return;
+        }
+        const n1 = neighbour(true), n2 = neighbour(false);
+        const E1 = { min: R(n1.max - ovM), max: R(bridge.min + ovM), nb: n1 };
+        const E2 = { min: R(n2.max - ovM), max: R(bridge.min + ovM), nb: n2 };
+        [[E1, 'Elevator 1', gE1], [E2, 'Elevator 2', gE2]].forEach(([E, nm, gg]) => {
+            if (!(E.max > E.min)) it.fail.push(`${nm} band inverted (${elvFt(E.min)}–${elvFt(E.max)} ft MSL) — the bridge floor is below ${E.nb.label}`);
+            else {
+                if (!(E.max > E.nb.min && E.nb.max > E.min)) it.fail.push(`${nm} has no positive overlap with ${E.nb.label}`);
+                if (!(bridge.max > E.min && E.max > bridge.min)) it.fail.push(`${nm} has no positive overlap with the bridge`);
+            }
+            const spread = (mx(gg) - mn(gg)) * M_TO_FT;
+            if (spread > it.p.overlapFt) it.warn.push(`${nm}: ground changes ${Math.round(spread)} ft along it (more than the ${it.p.overlapFt} ft overlap) — consider a second band`);
+            const floorAgl = (E.min - mx(gg)) * M_TO_FT;
+            if (floorAgl < sciAglFt) it.warn.push(`${nm} floor is ${Math.round(floorAgl)} ft over its highest ground (below ${sciAglFt} ft AGL)`);
+            const lenM = nm === 'Elevator 1' ? b1 - e1 : e2 - b2;
+            if (lenM < elevM - 0.5) it.warn.push(`${nm} is only ${elvFt(lenM)} ft long (the path ends) — ${elvFt(Math.abs(E.nb.max - bridge.min))} ft of climb over it${lenM < 50 * GEN_FT_TO_M ? ', steep' : ''}`);
+        });
+        it.bands = { E1, bridge, E2 };
+        it.geo = { ch, sX, e1, b1, b2, e2, direct, short, gz: { E1: { max: mx(gE1), min: mn(gE1) }, B: { max: mx(gB), min: mn(gB) }, E2: { max: mx(gE2), min: mn(gE2) } }, gmLL: elvGmPoint(ch, (b1 + b2) / 2) };
+        if (it.p.gm) it.gm = { name: `Elevator # - ${it.p.floorAgl}ft`, ll: it.geo.gmLL };
+    }
+    // ---- per-FP arc rebuild + preflight ----
+    function elvBuildWrites(sid) {
+        const byFp = new Map();
+        elv.items.filter(i => i.status === 'stage' && !i.fail.length && i.geo && i.bands).forEach(i => { if (!byFp.has(i.fpId)) byFp.set(i.fpId, []); byFp.get(i.fpId).push(i); });
+        const writes = [];
+        byFp.forEach((items, fpId) => {
+            const live = elvLiveFp(sid, fpId);
+            const w = { fpId, fp: live, items, arcs: null, fail: [], done: false };
+            if (!live) { w.fail.push('flight path no longer on the site'); writes.push(w); return; }
+            const liveArcs = live.arcs.filter(a => a && a.point_a && a.point_b);
+            const liveIds = new Set(liveArcs.map(a => a.id));
+            // one group per degree-2 run, whichever way each crossing happened to walk it: the key is the
+            // sorted id set, the first item's chain is canonical and a reversed chain's window is mirrored
+            const chains = new Map();
+            items.forEach(it => {
+                const key = it.geo.ch.ids.slice().sort((a, b) => a - b).join(',');
+                if (!chains.has(key)) chains.set(key, { ch: it.geo.ch, items: [] });
+                const grp = chains.get(key), ch = grp.ch, g = it.geo;
+                if (ch === g.ch || ch.ids.join(',') === g.ch.ids.join(',')) it._gx = g;
+                else if (ch.ids.slice().reverse().join(',') === g.ch.ids.join(',')) it._gx = Object.assign({}, g, { sX: ch.len - g.sX, e1: ch.len - g.e2, b1: ch.len - g.b2, b2: ch.len - g.b1, e2: ch.len - g.e1, mirrored: true });
+                else { it.fail.push('crossing sits on a differently-walked chain — re-stage'); it._gx = null; }
+                grp.items.push(it);
+            });
+            let out = liveArcs.map(a => Object.assign({}, a, { _live: true }));
+            chains.forEach(({ ch, items: cItems }) => {
+                if (!ch.ids.every(id => liveIds.has(id))) { cItems.forEach(it => it.fail.push('the path was saved after staging (arc ids changed) — re-stage')); return; }
+                cItems = cItems.filter(it => it._gx);
+                cItems.sort((x, y) => x._gx.sX - y._gx.sX);
+                const kept = [];
+                cItems.forEach(it => {
+                    const last = kept[kept.length - 1];
+                    if (last && it._gx.e1 < last._gx.e2 - ELV_MATCH_M) {
+                        // inside the earlier crossing's bridge = the same merged bridge (parallel circuits) — not a second set
+                        if (it._gx.sX >= last._gx.b1 && it._gx.sX <= last._gx.b2) { it.status = 'merged'; it.warn.push(`covered by crossing #${last.id}'s bridge (parallel line) — one staircase serves both`); }
+                        else it.fail.push(`its window overlaps crossing #${last.id} on the same path — raise the half-width so they merge, or commit one at a time`);
+                        return;
+                    }
+                    kept.push(it);
+                });
+                if (!kept.length) return;
+                // exact positions: vertices first, then cut points; anything within 1 mm of an earlier value
+                // collapses onto it (so a cut on a vertex IS the vertex and elvAt returns its exact coordinates —
+                // rounding here wrote endpoints 0.2 mm off the original vertex, which Percepto reports as
+                // "Disconnected endpoint", 2026-10-13)
+                const S = [];
+                ch.cum.slice().concat(kept.flatMap(it => [it._gx.e1, it._gx.b1, it._gx.b2, it._gx.e2])).sort((a, b) => a - b)
+                    .forEach(v => { if (!S.length || v - S[S.length - 1] > 1e-3) S.push(v); });
+                const zoneFor = (mid) => {
+                    for (const it of kept) {
+                        const gg = it._gx, m = gg.mirrored;   // on a mirrored window E1/E2 swap sides
+                        if (mid > gg.e1 && mid < gg.b1) return { b: m ? it.bands.E2 : it.bands.E1, it, zone: m ? 'E2' : 'E1' };
+                        if (mid > gg.b1 && mid < gg.b2) return { b: it.bands.bridge, it, zone: 'bridge' };
+                        if (mid > gg.b2 && mid < gg.e2) return { b: m ? it.bands.E1 : it.bands.E2, it, zone: m ? 'E1' : 'E2' };
+                    }
+                    return null;
+                };
+                const newArcs = [];
+                for (let i = 0; i < S.length - 1; i++) {
+                    const s0 = S[i], s1 = S[i + 1];
+                    if (s1 - s0 < 1e-3) continue;
+                    const mid = (s0 + s1) / 2, legI = elvAt(ch, mid).leg, base = ch.arcs[ch.legs[legI].i];
+                    const z = zoneFor(mid);
+                    const wholeLeg = Math.abs(s0 - ch.cum[legI]) < 2e-3 && Math.abs(s1 - ch.cum[legI + 1]) < 2e-3;
+                    if (!z && wholeLeg) { newArcs.push(Object.assign({}, base, { _live: true })); continue; }   // untouched leg keeps its id
+                    const pa = elvAt(ch, s0), pb = elvAt(ch, s1);
+                    newArcs.push(Object.assign({
+                        point_a: { lat: pa.lat, lng: pa.lng }, point_b: { lat: pb.lat, lng: pb.lng },
+                        points: [{ lat: pa.lat, lng: pa.lng }, { lat: pb.lat, lng: pb.lng }],
+                        distance: approxMeters(pa.lat, pa.lng, pb.lat, pb.lng),
+                        min_emergency_alt: (typeof base.min_emergency_alt === 'number' ? base.min_emergency_alt : 12),
+                        wait_until_approved: !!base.wait_until_approved,
+                        min_alt: z ? z.b.min : base.min_alt, max_alt: z ? z.b.max : base.max_alt,
+                    }, { _new: true, _zone: z ? z.zone : 'split', _item: z ? z.it.id : null }));
+                }
+                const firstPos = out.findIndex(a => a._live && ch.ids.includes(a.id));
+                out = out.filter(a => !(a._live && ch.ids.includes(a.id)));
+                out.splice(firstPos < 0 ? out.length : firstPos, 0, ...newArcs);
+            });
+            if (!items.some(it => !it.fail.length)) { w.fail.push('no crossing on this path passed'); writes.push(w); return; }
+            // strictly-positive band overlap at every shared vertex (server rule)
+            const byV = new Map();
+            out.forEach((a, i) => [elvVk(a.point_a), elvVk(a.point_b)].forEach(k => { if (!byV.has(k)) byV.set(k, []); byV.get(k).push(i); }));
+            const bad = [];
+            byV.forEach(list => { for (let x = 0; x < list.length; x++) for (let y = x + 1; y < list.length; y++) { const P = out[list[x]], Q = out[list[y]]; if (!(P.max_alt > Q.min_alt && Q.max_alt > P.min_alt)) bad.push(`#${list[x] + 1}↔#${list[y] + 1} (${elvFt(P.min_alt)}–${elvFt(P.max_alt)} vs ${elvFt(Q.min_alt)}–${elvFt(Q.max_alt)} ft MSL)`); } });
+            if (bad.length) w.fail.push(`connected arcs without a positive altitude overlap: ${bad.slice(0, 4).join(', ')}`);
+            // geometry sanity: no duplicate arcs, no arc that doubles straight back along its neighbour (the 2026-10-13 hairpin)
+            const seenArc = new Set(); let dup = 0, hairpin = 0;
+            out.forEach(a => { const k = [elvVk(a.point_a), elvVk(a.point_b)].sort().join('|'); if (seenArc.has(k)) dup++; seenArc.add(k); });
+            byV.forEach(list => { for (let x = 0; x < list.length; x++) for (let y = x + 1; y < list.length; y++) {
+                const P = out[list[x]], Q = out[list[y]]; if (!(P._new || Q._new)) continue;
+                const vP = elvVk(P.point_a) === elvVk(Q.point_a) || elvVk(P.point_a) === elvVk(Q.point_b) ? P.point_a : P.point_b;   // shared vertex
+                const oP = vP === P.point_a ? P.point_b : P.point_a, oQ = elvVk(Q.point_a) === elvVk(vP) ? Q.point_b : Q.point_a;
+                const cosLat = Math.cos(vP.lat * Math.PI / 180);
+                const ux = (oP.lng - vP.lng) * cosLat, uy = oP.lat - vP.lat, wx = (oQ.lng - vP.lng) * cosLat, wy = oQ.lat - vP.lat;
+                const c = (ux * wx + uy * wy) / ((Math.hypot(ux, uy) * Math.hypot(wx, wy)) || 1);
+                if (c > 0.999) hairpin++;   // the two arcs leave the vertex in the SAME direction = one folds back over the other
+            } });
+            let loose = 0, looseAt = '';
+            byV.forEach((list, k) => {
+                const ref = out[list[0]], rp = elvVk(ref.point_a) === k ? ref.point_a : ref.point_b;
+                for (let x = 1; x < list.length; x++) { const q = out[list[x]], qp = elvVk(q.point_a) === k ? q.point_a : q.point_b; if (qp.lat !== rp.lat || qp.lng !== rp.lng) { loose++; if (!looseAt) looseAt = `${rp.lat},${rp.lng} vs ${qp.lat},${qp.lng}`; } }
+            });
+            if (loose) w.fail.push(`${loose} shared vertex(es) whose arcs carry different coordinates (${looseAt}) — Percepto would show "Disconnected endpoint"; refusing to write (tool bug, re-stage and report)`);
+            if (dup) w.fail.push(`${dup} duplicate arc(s) in the rebuilt path — refusing to write (tool bug, re-stage and report)`);
+            if (hairpin) w.fail.push(`${hairpin} hairpin(s) in the rebuilt path (an arc folds back over its neighbour) — refusing to write (tool bug, re-stage and report)`);
+            if (!out.some(a => a._new)) w.fail.push('nothing changes on this path');
+            w.arcs = out;
+            writes.push(w);
+        });
+        elv.writes = writes;
+        return writes;
+    }
+    // ---- staging drivers ----
+    async function elvEnsureSite() {
+        const sid = getCurrentSiteID();
+        if (!sid) { showToast('No site loaded', 'rgba(255,96,96,0.55)'); return null; }
+        if (elv.siteID !== String(sid)) { elvClearLayers(); elv = { siteID: String(sid), items: [], layers: [], writes: [], running: false, siteCfg: null, seq: 1 }; }
+        if (!elvLiveEntities(sid).length) { try { await fetchMapObjects(sid, true); } catch (e) { console.warn(`${TAG} 🛗 entity fetch failed:`, e); } }
+        if (!elvLiveEntities(sid).length) { elvLog('Could not load the site entities', '#ff6060'); return null; }
+        return String(sid);
+    }
+    async function elvStageAll(sid) {
+        const segs = await elvTransSegs(sid);
+        const ffzInfo = elvFfzInfo(sid);
+        for (const it of elv.items) {
+            try { await elvStageItem(it, sid, segs, ffzInfo); }
+            catch (e) { console.error(`${TAG} 🛗 stage #${it.id} failed:`, e); it.fail.push(`stage failed: ${e.message || e}`); }
+        }
+        elvBuildWrites(sid);
+        elvDraw(); elvRenderList();
+    }
+    async function elvScan() {
+        if (elv.running) return;
+        const sid = await elvEnsureSite(); if (!sid) return;
+        elvLog('Scanning flight paths against the transmission KML lines…');
+        try { await fetchMapObjects(sid, true); } catch (e) { console.warn(`${TAG} 🛗 refetch failed:`, e); }
+        const segs = await elvTransSegs(sid);
+        if (!segs.length) { elvLog('No transmission KML lines for this site — Map Styler must be running with the site KMLs loaded (red lines on the map)', '#ff6060'); elvRenderList(); return; }
+        const fps = elvLiveEntities(sid).filter(e => e && e.type === 15 && Array.isArray(e.arcs));
+        const found = elvFindCrossings(fps, segs);
+        let added = 0;
+        found.forEach(c => {
+            if (elv.items.some(it => it.fpId === c.fp.id && elvSame(it.X, c.X))) return;
+            elv.items.push(elvNewItem(c.fp, c.arcIdx, c.X, 'line', c.line));
+            added++;
+        });
+        elvLog(`${found.length} crossing${found.length === 1 ? '' : 's'} on ${new Set(found.map(c => c.fp.id)).size} flight path(s) · ${added} new staged${elv.items.length - added ? ` · ${elv.items.length - added} already staged` : ''}`);
+        await elvStageAll(sid);
+        elvSummary();
+    }
+    async function elvRestage() {
+        if (elv.running) return;
+        const sid = await elvEnsureSite(); if (!sid) return;
+        try { await fetchMapObjects(sid, true); } catch (e) { console.warn(`${TAG} 🛗 refetch failed:`, e); }
+        elv.items.forEach(it => { if (it.status !== 'done') it.status = 'stage'; });
+        await elvStageAll(sid);
+        elvSummary();
+    }
+    async function elvManualAt(entity, ll) {
+        const sid = await elvEnsureSite(); if (!sid) return;
+        const live = elvLiveFp(sid, entity.id) || entity;
+        const arcs = (live.arcs || []).filter(a => a && a.point_a && a.point_b);
+        let best = { d: Infinity, i: -1, pt: null };
+        arcs.forEach((a, i) => { const pr = elvProj(ll, a.point_a, a.point_b); if (pr.d < best.d) best = { d: pr.d, i, pt: pr }; });
+        if (best.i < 0) { showToast('That flight path has no arcs', 'rgba(255,96,96,0.55)'); return; }
+        try { if (!document.getElementById(GEN_MODAL_ID)) openSiteGenerator(sid); } catch (e) { console.warn(`${TAG} 🛗 open failed:`, e); }
+        elvShowPanel();
+        const X = { lat: best.pt.lat, lng: best.pt.lng };
+        if (elv.items.some(it => it.fpId === live.id && elvSame(it.X, X))) { elvLog('That point is already staged', '#ffb347'); return; }
+        elv.items.push(elvNewItem(live, best.i, X, 'manual', null));
+        elvLog(`Manual crossing staged on "${elvEsc(live.name)}" (${elvFt(best.d)} ft from your click) — bridge = ±${elvCfg.halfFt} ft along the path`);
+        await elvStageAll(sid);
+        elvSummary();
+    }
+    function elvSummary() {
+        const n = (st) => elv.items.filter(i => i.status === st).length;
+        const ok = elv.items.filter(i => i.status === 'stage' && !i.fail.length).length;
+        const bad = elv.items.filter(i => i.status === 'stage' && i.fail.length).length;
+        const wBad = (elv.writes || []).filter(w => w.fail.length).length;
+        if (!elv.items.length) { elvLog('No crossings staged. 🔍 Scan finds every flight path × red transmission line; right-click a flight path → 🛗 for a manual one.'); return; }
+        elvLog(`${ok} ready · ${bad} blocked · ${n('present')} already bridged · ${n('merged')} merged into a neighbour · ${n('done')} committed${wBad ? ` · <b style="color:#ff6060">${wBad} flight path write(s) blocked by preflight</b>` : ''} — review each card, then ✓ Commit (dry run honoured)`, bad || wBad ? '#ffb347' : '#5fff5f');
+    }
+    // ---- drawing ----
+    function elvClearLayers() { const map = getLeafletMap(); elv.layers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} }); elv.layers = []; }
+    function elvBandText(E, gz) {
+        return `${elvFt(E.min)}–${elvFt(E.max)} ft MSL · ${elvFt(E.min - gz.max)}–${elvFt(E.max - gz.min)} ft AGL`;
+    }
+    function elvDraw() {
+        elvClearLayers();
+        const L = getLeafletL(), map = getLeafletMap();
+        if (!L || !map) return;
+        const add = (l) => { try { l.addTo(map); elv.layers.push(l); } catch (e) {} };
+        const seg = (ch, s0, s1, opts, tip) => {
+            const pts = [elvAt(ch, s0)];
+            ch.cum.forEach((c, i) => { if (c > s0 + 1e-6 && c < s1 - 1e-6) pts.push(ch.pts[i]); });
+            pts.push(elvAt(ch, s1));
+            const pl = L.polyline(pts.map(p => [p.lat, p.lng]), opts);
+            if (tip) { try { pl.bindTooltip(tip, { sticky: true }); } catch (e) {} }
+            add(pl);
+        };
+        elv.items.forEach(it => {
+            if (!it.geo) { add(L.circleMarker([it.X.lat, it.X.lng], { radius: 8, color: '#ff5555', weight: 2, fillColor: '#ff5555', fillOpacity: 0.25, interactive: false })); return; }
+            const g = it.geo, bad = it.fail.length > 0, muted = it.status === 'present' || it.status === 'done' || it.status === 'merged';
+            if (it.status === 'merged') { add(L.circleMarker([it.X.lat, it.X.lng], { radius: 5, color: '#ff2a2a', weight: 2, fillColor: '#ff2a2a', fillOpacity: 0.2, interactive: false })); return; }
+            const col = (c) => bad ? '#ff5555' : muted ? '#8a8f94' : c;
+            const dash = bad ? '6 5' : muted ? '2 6' : null;
+            const tipHead = `<b>#${it.id} ${elvEsc(it.fpName)}</b> · ${it.status === 'done' ? 'committed' : it.status === 'present' ? 'already bridged' : bad ? 'blocked' : 'staged'}<br>`;
+            const bands = it.bands;
+            seg(g.ch, g.e1, g.b1, { color: col('#ffe14d'), weight: 5, opacity: 0.95, dashArray: dash }, tipHead + (bands ? `Elevator 1 (${elvFt(g.b1 - g.e1)} ft) — ${elvBandText(bands.E1, g.gz.E1)}` : 'Elevator 1'));
+            seg(g.ch, g.b1, g.b2, { color: col('#ff9a3d'), weight: 6, opacity: 0.95, dashArray: dash }, tipHead + (bands ? `Bridge (${elvFt(g.b2 - g.b1)} ft) — ${elvBandText(bands.bridge, g.gz.B)}${g.short && g.short.start ? ' · cut short for the pad behind' : ''}${g.short && g.short.end ? ' · cut short for the pad ahead' : ''}` : 'Bridge'));
+            seg(g.ch, g.b2, g.e2, { color: col('#ffe14d'), weight: 5, opacity: 0.95, dashArray: dash }, tipHead + (bands ? `Elevator 2 (${elvFt(g.e2 - g.b2)} ft) — ${elvBandText(bands.E2, g.gz.E2)}` : 'Elevator 2'));
+            [g.e1, g.b1, g.b2, g.e2].forEach(s => { const p = elvAt(g.ch, s); add(L.circleMarker([p.lat, p.lng], { radius: 4, color: '#ffffff', weight: 1, fillColor: col('#ffe14d'), fillOpacity: 1, interactive: false })); });
+            add(L.circleMarker([it.X.lat, it.X.lng], { radius: 5, color: '#ff2a2a', weight: 2, fillColor: '#ff2a2a', fillOpacity: 0.2, interactive: false }));
+            if (it.gm && it.status === 'stage' && !bad) add(L.circleMarker([g.gmLL.lat, g.gmLL.lng], { radius: 6, color: '#c084fc', weight: 2, fillColor: '#c084fc', fillOpacity: 0.6, interactive: false }));
+        });
+    }
+    function elvPanTo(ll) { try { const map = getLeafletMap(); if (map && ll) map.setView([ll.lat, ll.lng], Math.max(map.getZoom(), 18)); } catch (e) {} }
+    // ---- panel ----
+    function elvRenderPanelBody() {
+        const host = document.getElementById('aim-elv-controls'); if (!host) return;
+        const btnCss = (col) => `background:rgba(${col},0.12);color:rgb(${col});border:1px solid rgba(${col},0.5);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px`;
+        host.innerHTML = `
+            <div style="font-size:11px;color:#ff9a3d;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">🛗 Elevators — climb over transmission lines</div>
+            <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:6px">
+                <button id="aim-elv-scan" style="${btnCss('255,154,61')}" title="Find every flight path that crosses a red transmission KML line and stage an elevator set at each crossing">🔍 Scan crossings</button>
+                <button id="aim-elv-restage" style="${btnCss('160,160,160')}" title="Re-read the site and rebuild every staged crossing with the current numbers">↻ Re-stage</button>
+                <button id="aim-elv-commit" style="${btnCss('95,255,95')};font-weight:600" title="Write the staged elevators: one POST per flight path (JSON + Delete Guard backups first, verify after, stop on the first failure), then one pole GM per crossing. Honours Dry run.">✓ Commit</button>
+                <button id="aim-elv-undo" style="${btnCss('255,179,71')}" title="Re-POST the flight paths exactly as they were before the last commit on this site and delete the GMs it created">↩ Undo last run</button>
+                <button id="aim-elv-clear" style="${btnCss('255,90,90')}" title="Drop every staged crossing (local only — nothing on the server is touched)">✕ Clear</button>
+                <span style="color:#888;font-size:10px">defaults: bridge ${elvCfg.floorAgl} + ${elvCfg.height} ft AGL · ±${elvCfg.halfFt} ft of the line · elevators ${elvCfg.elevFt} ft · ${elvCfg.overlapFt} ft overlaps (Control Panel → Elevators) · right-click a flight path → 🛗 for a manual crossing</span>
+            </div>
+            <div id="aim-elv-list" style="font-size:11px;color:#cfd6dc;margin-bottom:6px"></div>
+            <div id="aim-elv-result" style="font-size:11px;color:#9ad;line-height:1.5"></div>`;
+        host.querySelector('#aim-elv-scan').onclick = () => elvScan().catch(e => { console.error(`${TAG} 🛗 scan failed:`, e); elvLog(`Scan failed: ${elvEsc(e.message || e)}`, '#ff6060'); });
+        host.querySelector('#aim-elv-restage').onclick = () => elvRestage().catch(e => { console.error(`${TAG} 🛗 re-stage failed:`, e); elvLog(`Re-stage failed: ${elvEsc(e.message || e)}`, '#ff6060'); });
+        host.querySelector('#aim-elv-commit').onclick = () => elvCommit().catch(e => { console.error(`${TAG} 🛗 commit failed:`, e); elvLog(`Commit failed: ${elvEsc(e.message || e)}`, '#ff6060'); elv.running = false; elvRenderList(); });
+        host.querySelector('#aim-elv-undo').onclick = () => elvUndoLast().catch(e => { console.error(`${TAG} 🛗 undo failed:`, e); elvLog(`Undo failed: ${elvEsc(e.message || e)}`, '#ff6060'); elv.running = false; });
+        host.querySelector('#aim-elv-clear').onclick = () => { if (elv.running) return; elv.items = []; elv.writes = []; elvClearLayers(); elvRenderList(); elvSummary(); };
+        host.addEventListener('change', (ev) => {
+            const inp = ev.target.closest('[data-elv-id][data-elv-field]'); if (!inp || elv.running) return;
+            const it = elv.items.find(i => String(i.id) === inp.dataset.elvId); if (!it) return;
+            const f = inp.dataset.elvField;
+            if (f === 'gm') it.p[f] = !!inp.checked;
+            else { const n = Number(inp.value); if (!isFinite(n) || n < 0) return; it.p[f] = n; }
+            if (it.status === 'done') return;
+            it.status = 'stage';
+            (async () => {
+                const sid = await elvEnsureSite(); if (!sid) return;
+                await elvStageAll(sid);
+                elvSummary();
+            })().catch(e => { console.error(`${TAG} 🛗 restage failed:`, e); elvLog(`Re-stage failed: ${elvEsc(e.message || e)}`, '#ff6060'); });
+        });
+        host.addEventListener('click', (ev) => {
+            const rm = ev.target.closest('[data-elv-remove]');
+            if (rm) { if (elv.running) return; elv.items = elv.items.filter(i => String(i.id) !== rm.dataset.elvRemove); elvBuildWrites(elv.siteID); elvDraw(); elvRenderList(); elvSummary(); return; }
+            const pan = ev.target.closest('[data-elv-pan]');
+            if (pan) { const [lat, lng] = pan.dataset.elvPan.split(',').map(Number); if (isFinite(lat) && isFinite(lng)) elvPanTo({ lat, lng }); }
+        });
+        elvRenderList();
+    }
+    function elvRenderList() {
+        const el = document.getElementById('aim-elv-list'); if (!el) return;
+        if (!elv.items.length) { el.innerHTML = ''; return; }
+        const num = (it, f, step, title) => `<label style="display:inline-flex;align-items:center;gap:3px" title="${elvEsc(title)}">${f === 'floorAgl' ? 'Floor' : f === 'height' ? 'Height' : f === 'halfFt' ? '± line' : f === 'elevFt' ? 'Elevator' : f === 'tailFt' ? 'Tail' : 'Overlap'} <input type="number" data-elv-id="${it.id}" data-elv-field="${f}" value="${it.p[f]}" min="0" step="${step}" ${it.status === 'done' ? 'disabled' : ''} style="width:52px;background:#1a1d23;border:1px solid rgba(255,154,61,0.35);color:#fff;border-radius:2px;padding:1px 3px;font:inherit;font-size:11px"> ft</label>`;
+        const wFail = (it) => { const w = (elv.writes || []).find(x => x.fpId === it.fpId); return w && w.fail.length && !it.fail.length ? w.fail : []; };
+        el.innerHTML = elv.items.map(it => {
+            const g = it.geo, b = it.bands;
+            const stCol = it.status === 'done' ? '#9ad' : it.status === 'present' || it.status === 'merged' ? '#8a8f94' : it.fail.length ? '#ff6060' : '#5fff5f';
+            const stTxt = it.status === 'done' ? '✓ committed' : it.status === 'present' ? '– already bridged' : it.status === 'merged' ? '– merged' : it.fail.length ? '✕ blocked' : wFail(it).length ? '✕ path blocked' : '● staged';
+            const lens = g ? `E1 ${elvFt(g.b1 - g.e1)} ft · bridge ${elvFt(g.b2 - g.b1)} ft${g.short && (g.short.start || g.short.end) ? ' (cut for the pad)' : ''} · E2 ${elvFt(g.e2 - g.b2)} ft` : '';
+            const bandRow = (g && b) ? `<div style="color:#9ad;font-size:10px;line-height:1.5">
+                    <span style="color:#ffe14d">E1</span> ${elvBandText(b.E1, g.gz.E1)} &nbsp;·&nbsp; <span style="color:#ff9a3d">Bridge</span> ${elvBandText(b.bridge, g.gz.B)} (<b>${elvFt(b.bridge.max - g.gz.B.min)} ft</b> over its lowest ground) &nbsp;·&nbsp; <span style="color:#ffe14d">E2</span> ${elvBandText(b.E2, g.gz.E2)}
+                    ${it.gm ? `<br><span style="color:#c084fc">GM</span> pole "${elvEsc(it.gm.name.replace('#', 'NN'))}" ${ELV_GM_OFFSET_FT} ft beside the bridge midpoint` : ''}</div>` : '';
+            const notes = [...it.fail.map(x => `<div style="color:#ff8a80">✕ ${elvEsc(x)}</div>`), ...wFail(it).map(x => `<div style="color:#ff8a80">✕ path: ${elvEsc(x)}</div>`), ...it.warn.map(x => `<div style="color:#ffb347">⚠ ${elvEsc(x)}</div>`)].join('');
+            return `<div style="margin:4px 0;padding:5px 7px;border:1px solid rgba(255,154,61,0.25);border-radius:3px;background:rgba(255,154,61,0.04)">
+                <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                    <span data-elv-pan="${it.X.lat},${it.X.lng}" style="cursor:pointer;color:#fff;font-weight:600" title="Pan the map here">#${it.id} ${elvEsc(it.fpName)}</span>
+                    <span style="color:#888;font-size:10px">${it.src === 'line' ? `transmission line${it.line != null ? ` ${it.line + 1}` : ''}` : 'manual point'} · ${lens}</span>
+                    <span style="color:${stCol};font-weight:600;margin-left:auto">${stTxt}</span>
+                    <button data-elv-remove="${it.id}" title="Drop this crossing from the stage" style="background:none;border:1px solid rgba(255,255,255,0.2);color:#bbb;border-radius:3px;padding:0 6px;cursor:pointer;font:inherit;font-size:11px" ${elv.running ? 'disabled' : ''}>✕</button>
+                </div>
+                <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:4px 0;font-size:11px;color:#cfd6dc">
+                    ${num(it, 'floorAgl', 5, 'Bridge floor above the highest ground under the bridge')} ${num(it, 'height', 5, 'Bridge band height')} ${num(it, 'halfFt', 5, it.src === 'line' ? 'Bridge half-width — perpendicular distance from the line' : 'Bridge half-length along the path from the clicked point')} ${num(it, 'elevFt', 5, 'Elevator length along the path beyond each bridge end')} ${num(it, 'overlapFt', 1, 'Band overlap at every joint')}
+                    <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer"><input type="checkbox" data-elv-id="${it.id}" data-elv-field="gm" ${it.p.gm ? 'checked' : ''} ${it.status === 'done' ? 'disabled' : ''} style="accent-color:#c084fc"> GM</label>
+                    ${g && g.short && (g.short.start || g.short.end) ? num(it, 'tailFt', 5, 'Pad inside the bridge zone: the bridge still runs this far past the line, the rest to the pad edge is the elevator') : ''}
+                </div>
+                ${bandRow}${notes}
+            </div>`;
+        }).join('');
+    }
+    function elvShowPanel() {
+        const c = document.getElementById('aim-elv-controls'); if (!c) return;
+        genShowPage('elv');
+        c.style.display = 'block';
+        const b = document.getElementById('aim-gen-elev'); if (b) b.style.background = 'rgba(255,154,61,0.32)';
+        if (!document.getElementById('aim-elv-list')) elvRenderPanelBody();
+    }
+    function elvOpenFromAction(scan) {
+        if (LITE) { showToast('Elevators need Full mode (CSM access)', 'rgba(255,180,0,0.6)'); return; }
+        const sid = getCurrentSiteID();
+        if (!sid) { showToast('No site loaded', 'rgba(255,96,96,0.55)'); return; }
+        const go = () => {
+            try { if (!document.getElementById(GEN_MODAL_ID)) openSiteGenerator(sid); elvShowPanel(); } catch (e) { console.warn(`${TAG} 🛗 open failed:`, e); return; }
+            if (scan) elvScan().catch(e => { console.error(`${TAG} 🛗 scan failed:`, e); elvLog(`Scan failed: ${elvEsc(e.message || e)}`, '#ff6060'); });
+        };
+        const bucket = mapObjectsBySite[sid];
+        if (!bucket || !bucket.entities) fetchMapObjects(sid, true).then(go).catch(e => { console.warn(`${TAG} 🛗 entity fetch failed:`, e); go(); }); else go();
+    }
+    // ---- commit ----
+    async function elvCreateGm(it, sid) {
+        const b = it.bands, g = it.geo;
+        const t = gmtNormalizeTemplate({ id: 'elv', label: 'Elevator', name: it.gm.name, type: 'pole', heightFt: 0, start: 1, pad: 2 });
+        const description = `Elevator over a transmission line — FP "${it.fpName}": bridge ${elvFt(b.bridge.min)}–${elvFt(b.bridge.max)} ft MSL (${elvFt(b.bridge.min - g.gz.B.max)} ft over the highest ground), elevators ${elvFt(g.b1 - g.e1)} / ${elvFt(g.e2 - g.b2)} ft, climb to ${elvFt(b.E1.max)} ft MSL · auto-placed by Site Setup Tools 🛗`;
+        const res = await gmtCreateGm(t, it.gm.ll, sid, '', { type: 'pole', heightFt: 0, description });
+        return res ? { id: res.id, name: res.name, siteID: sid } : null;
+    }
+    async function elvCommit() {
+        if (elv.running) return;
+        if (liteBlockedWrite('commit elevators')) return;
+        const sid = await elvEnsureSite(); if (!sid) return;
+        try { await fetchMapObjects(sid, true); } catch (e) { console.warn(`${TAG} 🛗 refetch failed:`, e); }
+        const writes = elvBuildWrites(sid);
+        elvRenderList();
+        const todo = writes.filter(w => !w.fail.length && !w.done);
+        if (!todo.length) { elvLog('Nothing to commit — stage a crossing first (or every staged one is blocked)', '#ffb347'); return; }
+        const gmN = todo.reduce((n, w) => n + w.items.filter(it => !it.fail.length && it.gm).length, 0);
+        if (sciDry()) { elvLog(`DRY RUN — would rewrite ${todo.length} flight path(s) (${todo.reduce((n, w) => n + w.arcs.filter(a => a._new).length, 0)} new arcs) and create ${gmN} GM(s). Untick Dry run (Commit section) to write.`, '#ffe14d'); return; }
+        const csrf = getCsrfToken();
+        if (!csrf) { elvLog('No CSRF token — make one native save anywhere in Percepto first, then retry', '#ff6060'); return; }
+        if (!elv.siteCfg) { try { elv.siteCfg = await fetchSiteConfig(sid, true); } catch (e) { elvLog('Site config fetch failed — refusing to write (mountain_terrain flag unknown)', '#ff6060'); return; } }
+        if (!confirm(`Rewrite ${todo.length} flight path(s) with elevator arcs and create ${gmN} GM(s) on site ${sid}?\n\nEach path is backed up (JSON download + Delete Guard ring) before it is written. No FFZ is touched.`)) return;
+        const rec = { at: new Date().toISOString(), sid, origin: location.origin, fps: todo.map(w => JSON.parse(JSON.stringify(w.fp))), gms: [] };
+        try { localStorage.setItem(ELV_LAST_KEY(sid), JSON.stringify(rec)); } catch (e) { console.warn(`${TAG} 🛗 last-run stash failed:`, e); }
+        if (!downloadJSONFile(`elevators-backup-${sid}-${Date.now()}.json`, JSON.stringify({ site: sid, at: rec.at, flightPaths: rec.fps }, null, 1))) { elvLog('Backup download failed — refusing to write', '#ff6060'); return; }
+        elv.running = true; elvRenderList();
+        let ok = 0, fail = 0, gmOk = 0, gmFail = 0, failText = '';
+        try {
+            // ---- flight paths, one POST each ----
+            for (let i = 0; i < todo.length; i++) {
+                const w = todo[i];
+                const label = `FP ${i + 1}/${todo.length} "${elvEsc(w.fp.name)}" (#${w.fp.id})`;
+                try {
+                    if (!sciBankToGuard(w.fp, sid)) throw new Error('Delete Guard bank failed — not writing');
+                    const body = buildWriteBody(w.fp, elv.siteCfg);
+                    body.arcs = w.arcs.map(a => {
+                        const o = Object.assign({}, a); delete o._live; delete o._new; delete o._zone; delete o._item;
+                        if (a._new) { delete o.id; delete o.mapobject; }
+                        o.points = [{ lat: o.point_a.lat, lng: o.point_a.lng }, { lat: o.point_b.lat, lng: o.point_b.lng }];
+                        o.min_alt = fpArcAltMeters(o.min_alt); o.max_alt = fpArcAltMeters(o.max_alt);
+                        return o;
+                    });
+                    const pts = []; body.arcs.forEach(a => [a.point_a, a.point_b].forEach(p => { if (!pts.some(q => elvSame(q, p))) pts.push({ lat: p.lat, lng: p.lng }); }));
+                    body.points = pts;
+                    const saved = await elvPostFp(body, csrf);
+                    try { await fetchMapObjects(sid, true); } catch (e) {}
+                    const live = elvLiveFp(sid, w.fp.id);
+                    if (!live || !Array.isArray(live.arcs)) throw new Error('flight path missing after save');
+                    const have = live.arcs.filter(a => a && a.point_a && a.point_b), want = body.arcs;
+                    if (have.length !== want.length) throw new Error(`arc count ${have.length} ≠ expected ${want.length} after save`);
+                    const missing = want.filter(a => !have.some(h => (elvSame(h.point_a, a.point_a) && elvSame(h.point_b, a.point_b)) || (elvSame(h.point_a, a.point_b) && elvSame(h.point_b, a.point_a))));
+                    if (missing.length) throw new Error(`${missing.length} arc(s) not found after save (see console)`);
+                    const bandOff = want.filter(a => { const h = have.find(h => (elvSame(h.point_a, a.point_a) && elvSame(h.point_b, a.point_b)) || (elvSame(h.point_a, a.point_b) && elvSame(h.point_b, a.point_a))); return h && (Math.abs(h.min_alt - a.min_alt) > 0.6 || Math.abs(h.max_alt - a.max_alt) > 0.6); });
+                    if (bandOff.length) console.warn(`${TAG} 🛗 ${bandOff.length} arc band(s) differ from what was sent on FP #${w.fp.id}:`, bandOff.map(a => [a.min_alt, a.max_alt]));
+                    w.done = true; ok++;
+                    elvLog(`${label} saved + verified (${w.fp.arcs.length} → ${have.length} arcs, id ${saved.id})`);
+                    for (const it of w.items) {
+                        if (it.fail.length) continue;
+                        it.status = 'done';
+                        if (!it.gm) continue;
+                        try {
+                            const gm = await elvCreateGm(it, sid);
+                            if (gm) { gmOk++; rec.gms.push(gm); it.gm.created = gm; } else gmFail++;
+                        } catch (e) { gmFail++; console.warn(`${TAG} 🛗 GM for crossing #${it.id} failed:`, e); }
+                        await new Promise(r => setTimeout(r, ELV_GAP_MS));
+                    }
+                    try { localStorage.setItem(ELV_LAST_KEY(sid), JSON.stringify(rec)); } catch (e) {}
+                } catch (e) {
+                    fail++; console.warn(`${TAG} 🛗 ${label.replace(/<[^>]*>/g, '')}:`, e.message);
+                    w.fail.push(`write failed: ${e.message}`);
+                    w.items.forEach(it => it.warn.push(`write failed: ${e.message}`));
+                    failText = `${label} FAILED: ${elvEsc(e.message)} — stopped (nothing after it was written)`;
+                    break;   // stop on the FIRST failure
+                }
+                await new Promise(r => setTimeout(r, ELV_GAP_MS));
+            }
+        } finally { elv.running = false; }
+        elvDraw(); elvRenderList();
+        const left = todo.filter(w => !w.fail.length && !w.done).length;
+        elvLog(`${failText ? `<b style="color:#ff6060">${failText}</b><br>` : ''}Elevators: ${ok} flight path(s) written + verified${fail ? `, <b style="color:#ff6060">1 FAILED</b>` : ''}${left ? ` · ${left} not attempted` : ''} · ${gmOk} GM(s) created${gmFail ? `, <b style="color:#ff6060">${gmFail} GM(s) failed</b>` : ''} · backups: JSON download + Delete Guard ring · ↩ Undo last run restores · refresh to see them natively`, fail || gmFail ? '#ffb347' : '#5fff5f');
+        showToast(fail ? `Elevators: ${ok} FP ok, stopped on a failure` : `✓ ${ok} flight path(s) elevated, ${gmOk} GM(s)`, fail ? 'rgba(255,96,96,0.55)' : undefined);
+    }
+    async function elvUndoLast() {
+        if (elv.running) return;
+        if (liteBlockedWrite('undo elevators')) return;
+        const sid = elv.siteID || getCurrentSiteID();
+        let rec = null; try { rec = JSON.parse(localStorage.getItem(ELV_LAST_KEY(sid)) || 'null'); } catch (e) {}
+        if (!rec || !Array.isArray(rec.fps) || !rec.fps.length) { elvLog('Nothing to undo on this site (only the most recent Elevators commit is kept)', '#ffb347'); return; }
+        const csrf = getCsrfToken();
+        if (!csrf) { elvLog('No CSRF token', '#ff6060'); return; }
+        if (!confirm(`Restore ${rec.fps.length} flight path(s) to how they were before the Elevators commit of ${rec.at} and delete ${rec.gms.length} GM(s)? (Delete Guard banks each change; no FFZ is touched)`)) return;
+        if (!elv.siteCfg) { try { elv.siteCfg = await fetchSiteConfig(sid, true); } catch (e) { elvLog('Site config fetch failed — refusing to write', '#ff6060'); return; } }
+        elv.running = true;
+        let fpOk = 0, fpFail = 0, gmOk = 0, gmFail = 0;
+        try {
+            for (const gm of rec.gms) {
+                if (await gmtDeletePlaced({ id: gm.id, name: gm.name, siteID: sid }, csrf)) gmOk++; else gmFail++;
+                await new Promise(r => setTimeout(r, ELV_GAP_MS));
+            }
+            for (const orig of rec.fps) {
+                const label = `FP "${elvEsc(orig.name)}" (#${orig.id})`;
+                try {
+                    const cur = elvLiveFp(sid, orig.id);
+                    if (cur) sciBankToGuard(cur, sid);
+                    const body = buildWriteBody(orig, elv.siteCfg);
+                    body.arcs = (orig.arcs || []).filter(a => a && a.point_a && a.point_b).map(a => { const o = Object.assign({}, a); o.points = [{ lat: o.point_a.lat, lng: o.point_a.lng }, { lat: o.point_b.lat, lng: o.point_b.lng }]; o.min_alt = fpArcAltMeters(o.min_alt); o.max_alt = fpArcAltMeters(o.max_alt); return o; });
+                    const pts = []; body.arcs.forEach(a => [a.point_a, a.point_b].forEach(p => { if (!pts.some(q => elvSame(q, p))) pts.push({ lat: p.lat, lng: p.lng }); }));
+                    body.points = pts;
+                    await elvPostFp(body, csrf);
+                    try { await fetchMapObjects(sid, true); } catch (e) {}
+                    const live = elvLiveFp(sid, orig.id);
+                    const have = live ? live.arcs.filter(a => a && a.point_a && a.point_b).length : -1;
+                    if (have !== body.arcs.length) throw new Error(`arc count ${have} ≠ expected ${body.arcs.length} after restore`);
+                    fpOk++; elvLog(`${label} restored (${have} arcs)`);
+                } catch (e) { fpFail++; console.warn(`${TAG} 🛗 undo ${label.replace(/<[^>]*>/g, '')}:`, e.message); elvLog(`${label} restore FAILED: ${elvEsc(e.message)} — stopped`, '#ff6060'); break; }
+                await new Promise(r => setTimeout(r, ELV_GAP_MS));
+            }
+        } finally { elv.running = false; }
+        if (!fpFail) { try { localStorage.removeItem(ELV_LAST_KEY(sid)); } catch (e) {} }
+        elv.items.forEach(it => { if (it.status === 'done') it.status = 'stage'; });
+        elvLog(`Undo: ${fpOk} flight path(s) restored${fpFail ? `, <b style="color:#ff6060">1 FAILED</b> (backup JSON still has the originals)` : ''} · ${gmOk} GM(s) deleted${gmFail ? `, ${gmFail} failed` : ''} · ↻ Re-stage to rebuild`, fpFail || gmFail ? '#ffb347' : '#5fff5f');
+        showToast(fpFail ? 'Elevators undo stopped on a failure' : `↩ ${fpOk} flight path(s) restored`, fpFail ? 'rgba(255,96,96,0.55)' : undefined);
+    }
+
+    // ============================================================
+    // 🛟 SAFE ZONE PLANNER (v4.369 → v4.370, feature #302) — where to put
+    // the next N safe zones so the LONGEST flight any point on the site
+    // faces to reach one is as short as it can be (then the average).
+    // Distance is measured ALONG the flight envelope — flight paths, with
+    // every free-fly zone as an open crossing — never as the crow flies.
+    // Existing safe zones (type 98; else the bases, where the zones live
+    // today) stay fixed. EVERY asset joins the sample set, built into the
+    // setup or not: an asset with no envelope near it attaches by a
+    // straight hop to the nearest envelope point, so unbuilt pads still
+    // pull the answer their way (the hop is listed as "approximated").
+    // Extra lat/lng lines can be pasted for assets that are not on the
+    // site yet.
+    // RULE (user, 2026-10-19): a safe zone HAS to be ON A PAD, on the edge
+    // of the pad (just inside), preferably on wells and small satellites,
+    // not big facilities. So the candidate spots are points INSET inside
+    // every edge of every ROOT asset polygon (nested children are
+    // equipment, not pads), tiered well → small battery / sat → other →
+    // facility; a spot is reachable when it sits inside an FFZ or within
+    // the hop distance of a flight path / FFZ. READ-ONLY: it draws + lists
+    // the spots; the Safe Zone itself is placed in Percepto by hand (no
+    // known type-98 body shape).
+    // Solver = k-center: greedy seed + 1-swap local search, one Dijkstra
+    // per candidate, cooperative yields so the tab stays live.
+    // Offline twin: ShortKeys/AIM_Safe_Zone_Solve.py (same algorithm).
+    // ============================================================
+    let szp = { siteID: null, result: null, layers: [], running: false, cancel: false };
+    const SZP_CFG_KEY = 'aim-szp-cfg';
+    const SZP_COLOR = '255,158,181';
+    function szpEsc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+    function szpLog(m, color) { const el = document.getElementById('aim-szp-result'); if (el) { el.innerHTML = m; el.style.color = color || '#9ad'; } }
+    function szpLoadCfg() {
+        try { const raw = elevGmGet(SZP_CFG_KEY, null); if (raw) { const o = typeof raw === 'string' ? JSON.parse(raw) : raw; if (o && typeof o === 'object') { delete o.standoffFt; Object.assign(szpCfg, o); } } }
+        catch (e) { console.warn(`${TAG} 🛟 cfg load failed:`, e); }
+    }
+    function szpSaveCfg() { try { elevGmSet(SZP_CFG_KEY, JSON.stringify(szpCfg)); } catch (e) { console.warn(`${TAG} 🛟 cfg save failed:`, e); } }
+    const szpMi = (m) => (m / 1609.344).toFixed(2) + ' mi';
+    const szpFt = (m) => Math.round(m * M_TO_FT).toLocaleString() + ' ft';
+    // "lat, lng [name]" / "name, lat, lng" / "lat lng" per line → [{lat,lng,name}]
+    function szpParseExtra(text) {
+        const out = [];
+        String(text || '').split(/\r?\n/).forEach((line, i) => {
+            const m = line.match(/(-?\d{1,3}\.\d+)[,\s;]+(-?\d{1,3}\.\d+)/);
+            if (!m) return;
+            const lat = Number(m[1]), lng = Number(m[2]);
+            if (!isFinite(lat) || !isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) return;
+            const name = line.replace(m[0], '').replace(/^[\s,;]+|[\s,;]+$/g, '') || `Extra point ${i + 1}`;
+            out.push({ lat, lng, name });
+        });
+        return out;
+    }
+    // Pad class from the ROOT asset's subtype + name + size. [tier, label]:
+    // 1 well · 2 sat / small battery · 3 other small pad · 4 facility.
+    function szpPadTier(e, acres, satAcres) {
+        const t = String((e.custom && e.custom.poi_type_str) || '').toLowerCase(), n = String(e.name || '').toLowerCase();
+        if (/^[vh]\s*-/.test(t) || t.includes('well') || n.includes('well')) return [1, 'well'];
+        if (/\bsat\b/.test(n) || t.includes('satellite')) return [2, 'sat'];
+        if (t.includes('battery') || n.includes('battery')) return acres <= satAcres ? [2, 'small battery'] : [4, 'facility'];
+        if (!t || t === 'unknown' || t === 'general') return acres <= satAcres * 2 ? [3, 'other'] : [4, 'facility'];
+        return [4, 'facility'];
+    }
+    // Binary min-heap of (dist, node) — the Dijkstra frontier.
+    function szpHeap() {
+        const d = [], n = [];
+        const swap = (a, b) => { const td = d[a]; d[a] = d[b]; d[b] = td; const tn = n[a]; n[a] = n[b]; n[b] = tn; };
+        return {
+            size() { return d.length; },
+            push(dist, node) { d.push(dist); n.push(node); let i = d.length - 1; while (i > 0) { const p = (i - 1) >> 1; if (d[p] <= d[i]) break; swap(p, i); i = p; } },
+            pop() {
+                const rd = d[0], rn = n[0]; const ld = d.pop(), ln = n.pop();
+                if (d.length) { d[0] = ld; n[0] = ln; let i = 0; for (;;) { const l = 2 * i + 1, r = l + 1; let m = i; if (l < d.length && d[l] < d[m]) m = l; if (r < d.length && d[r] < d[m]) m = r; if (m === i) break; swap(m, i); i = m; } }
+                return [rd, rn];
+            },
+        };
+    }
+    function szpDijkstra(adj, N, srcs) {
+        const dist = new Float32Array(N).fill(Infinity);
+        const h = szpHeap();
+        srcs.forEach(([s, w]) => { if (w < dist[s]) { dist[s] = w; h.push(dist[s], s); } });
+        while (h.size()) {
+            const [dd, u] = h.pop();
+            if (dd > dist[u]) continue;
+            const a = adj[u];
+            // push the float32-ROUNDED value back, or the pop-time "dd > dist[u]" stale check skips real nodes
+            for (let k = 0; k < a.length; k += 2) { const v = a[k], nd = dd + a[k + 1]; if (nd < dist[v]) { dist[v] = nd; h.push(dist[v], v); } }
+        }
+        return dist;
+    }
+    // ---- the solver. ents = /map_objects/ list, cfg = szpCfg, extra = [{lat,lng,name}], progress(msg) ----
+    async function szpSolve(ents, cfg, extra, siteID, progress) {
+        const yieldNow = () => new Promise(r => setTimeout(r, 0));
+        const all = []; ents.forEach(e => (entityCoords(e) || []).forEach(c => { if (c && typeof c.lat === 'number') all.push(c); }));
+        if (!all.length) throw new Error('site has no geometry');
+        const lat0 = all.reduce((s, c) => s + c.lat, 0) / all.length, lng0 = all.reduce((s, c) => s + c.lng, 0) / all.length;
+        const proj = genProjector(lat0, lng0);
+        const XY = (c) => { const p = proj.fwd(c); return [p.x, p.y]; };
+        const ring = (e) => (entityCoords(e) || []).map(XY);
+        const dist2 = (ax, ay, bx, by) => Math.hypot(ax - bx, ay - by);
+        const segD = (px, py, a, b) => { const dx = b[0] - a[0], dy = b[1] - a[1], L = dx * dx + dy * dy; const t = L === 0 ? 0 : Math.max(0, Math.min(1, ((px - a[0]) * dx + (py - a[1]) * dy) / L)); return Math.hypot(px - (a[0] + t * dx), py - (a[1] + t * dy)); };
+        const pip = (px, py, poly) => { let ins = false; for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) { const yi = poly[i][1], yj = poly[j][1]; if ((yi > py) !== (yj > py) && px < (poly[j][0] - poly[i][0]) * (py - yi) / (yj - yi) + poly[i][0]) ins = !ins; } return ins; };
+        const bbox = (poly) => { let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity; poly.forEach(p => { if (p[0] < x0) x0 = p[0]; if (p[0] > x1) x1 = p[0]; if (p[1] < y0) y0 = p[1]; if (p[1] > y1) y1 = p[1]; }); return [x0, y0, x1, y1]; };
+        const polyD = (px, py, poly) => { if (pip(px, py, poly)) return 0; let m = Infinity; for (let i = 0; i < poly.length; i++) { const d = segD(px, py, poly[i], poly[(i + 1) % poly.length]); if (d < m) m = d; } return m; };
+        const signedArea = (poly) => poly.reduce((s, p, i) => { const q = poly[(i + 1) % poly.length]; return s + p[0] * q[1] - q[0] * p[1]; }, 0) / 2;
+        const polys = (type) => ents.filter(e => e.type === type && (entityCoords(e) || []).length >= 3).map(e => { const r = ring(e); return { name: e.name || `#${e.id}`, r, bb: bbox(r) }; });
+        const assets = polys(3), ffzs = polys(16), nfzs = polys(4);
+        const fps = ents.filter(e => e.type === 15 && Array.isArray(e.arcs) && e.arcs.length);
+        const towers = ents.filter(e => e.type === 19 && /^(tower|pole)$/i.test(e.general_marker_type || '') && gmPoint(e)).map(e => XY(gmPoint(e)));
+        const K = Math.max(1, Math.min(8, Math.round(cfg.count)));
+        // ---- nodes + edges ----
+        const nx = [], ny = [], kind = [], ref = [], adj = [], idx = new Map();
+        const add = (x, y, k, r) => { const key = `${Math.round(x * 2)},${Math.round(y * 2)}`; let i = idx.get(key); if (i !== undefined) return i; i = nx.length; idx.set(key, i); nx.push(x); ny.push(y); kind.push(k); ref.push(r); adj.push([]); return i; };
+        const edge = (i, j, w) => { if (i === j) return; adj[i].push(j, w); adj[j].push(i, w); };
+        const STEP = 40;
+        fps.forEach(fp => fp.arcs.forEach(a => {
+            if (!a.point_a || !a.point_b) return;
+            const A = XY(a.point_a), B = XY(a.point_b), L = dist2(A[0], A[1], B[0], B[1]), n = Math.max(1, Math.ceil(L / STEP));
+            let prev = add(A[0], A[1], 'fpv', fp.name);
+            for (let k = 1; k <= n; k++) { const t = k / n; const cur = add(A[0] + (B[0] - A[0]) * t, A[1] + (B[1] - A[1]) * t, k === n ? 'fpv' : 'fps', fp.name); edge(prev, cur, L / n); prev = cur; }
+        }));
+        ffzs.forEach(f => {
+            f.r.forEach(p => add(p[0], p[1], 'ffzv', f.name));
+            const cx = f.r.reduce((s, p) => s + p[0], 0) / f.r.length, cy = f.r.reduce((s, p) => s + p[1], 0) / f.r.length;
+            if (pip(cx, cy, f.r)) add(cx, cy, 'ffzc', f.name);
+            const area = (f.bb[2] - f.bb[0]) * (f.bb[3] - f.bb[1]);
+            const step = Math.max(60, Math.sqrt(area / 150));        // ≤ ~150 grid nodes per zone, even a giant band FFZ
+            for (let gx = f.bb[0]; gx <= f.bb[2]; gx += step) for (let gy = f.bb[1]; gy <= f.bb[3]; gy += step) if (pip(gx, gy, f.r)) add(gx, gy, 'ffzg', f.name);
+        });
+        const ENV = nx.length;
+        if (!ENV) throw new Error('no flight paths or free-fly zones on this site');
+        // ---- pad-edge candidates: every ROOT asset polygon, points INSET inside each edge (+ the centroid for a pad too small to inset) ----
+        const ACRE = 4046.86, insetM = cfg.insetFt / M_TO_FT, EDGE_STEP = 20;
+        const padMeta = new Map();                                        // node → { name, tier, label }
+        const tierCount = {};
+        ents.filter(e => e.type === 3 && !e.parent_asset_name && (entityCoords(e) || []).length >= 3).forEach(e => {
+            const poly = ring(e), name = e.name || `#${e.id}`, sa = signedArea(poly), sign = sa > 0 ? 1 : -1;
+            const [tier, label] = szpPadTier(e, Math.abs(sa) / ACRE, cfg.satAcres);
+            const pts = [];
+            for (let i = 0; i < poly.length; i++) {
+                const a = poly[i], b = poly[(i + 1) % poly.length], L = dist2(a[0], a[1], b[0], b[1]); if (L < 1) continue;
+                const ux = (b[0] - a[0]) / L, uy = (b[1] - a[1]) / L, nxn = -uy * sign, nyn = ux * sign, n = Math.max(1, Math.floor(L / EDGE_STEP));
+                for (let k = 0; k <= n; k++) { const t = Math.min(1, Math.max(0, (k * EDGE_STEP + EDGE_STEP / 2) / L)); const px = a[0] + (b[0] - a[0]) * t + nxn * insetM, py = a[1] + (b[1] - a[1]) * t + nyn * insetM; if (pip(px, py, poly)) pts.push([px, py]); }
+            }
+            if (!pts.length) pts.push([poly.reduce((s, p) => s + p[0], 0) / poly.length, poly.reduce((s, p) => s + p[1], 0) / poly.length]);
+            pts.forEach(p => { const i = add(p[0], p[1], 'pad', name); if (!padMeta.has(i)) { padMeta.set(i, { name, tier, label }); tierCount[label] = (tierCount[label] || 0) + 1; } });
+        });
+        const NET = nx.length;
+        // every node on/inside a zone (≤2 m) connects straight-line to the others in it (full clique up to 60 members, else 16 nearest)
+        const inFfz = new Uint8Array(NET);
+        ffzs.forEach(f => {
+            const mem = [];
+            for (let i = 0; i < NET; i++) if (nx[i] >= f.bb[0] - 3 && nx[i] <= f.bb[2] + 3 && ny[i] >= f.bb[1] - 3 && ny[i] <= f.bb[3] + 3 && polyD(nx[i], ny[i], f.r) <= 2) { mem.push(i); inFfz[i] = 1; }
+            if (mem.length <= 60) { for (let a = 0; a < mem.length; a++) for (let b = a + 1; b < mem.length; b++) edge(mem[a], mem[b], dist2(nx[mem[a]], ny[mem[a]], nx[mem[b]], ny[mem[b]])); }
+            else mem.forEach(i => { const near = mem.filter(j => j !== i).map(j => [dist2(nx[i], ny[i], nx[j], ny[j]), j]).sort((p, q) => p[0] - q[0]).slice(0, 16); near.forEach(([w, j]) => { if (i < j) edge(i, j, w); }); });
+        });
+        // cell index over ENVELOPE nodes (paths + zones, not pad spots) → nearest-node lookup for hops
+        const CELL = 250, cells = new Map();
+        for (let i = 0; i < ENV; i++) { const k = `${Math.floor(nx[i] / CELL)},${Math.floor(ny[i] / CELL)}`; let a = cells.get(k); if (!a) { a = []; cells.set(k, a); } a.push(i); }
+        const nearestNet = (x, y) => {
+            const cx = Math.floor(x / CELL), cy = Math.floor(y / CELL); let best = -1, bd = Infinity;
+            for (let r = 0; r < 80; r++) {
+                for (let dx = -r; dx <= r; dx++) for (let dy = -r; dy <= r; dy++) { if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue; const a = cells.get(`${cx + dx},${cy + dy}`); if (!a) continue; a.forEach(i => { const d = dist2(x, y, nx[i], ny[i]); if (d < bd) { bd = d; best = i; } }); }
+                if (best >= 0 && bd <= r * CELL) break;            // ring r+1 starts r·CELL away — nothing out there can beat this
+            }
+            if (best < 0) for (let i = 0; i < ENV; i++) { const d = dist2(x, y, nx[i], ny[i]); if (d < bd) { bd = d; best = i; } }
+            return [best, bd];
+        };
+        // a pad spot outside every FFZ reaches the envelope by one straight hop, if the hop is short enough
+        const hopM = cfg.hopFt / M_TO_FT, padHop = new Map();
+        for (let i = ENV; i < NET; i++) { if (kind[i] !== 'pad' || inFfz[i]) continue; const [j, g] = nearestNet(nx[i], ny[i]); if (j >= 0 && g <= hopM) { edge(i, j, g); padHop.set(i, g); } }
+        const attachGaps = new Map();                                      // asset name → longest hop to the envelope (m)
+        const attach = (x, y, k, name) => { const i = add(x, y, k, name); if (i >= NET && !adj[i].length) { const [j, g] = nearestNet(x, y); if (j >= 0) { edge(i, j, g); attachGaps.set(name, Math.max(attachGaps.get(name) || 0, g)); } } };
+        if (cfg.assets) assets.forEach(a => { const cx = a.r.reduce((s, p) => s + p[0], 0) / a.r.length, cy = a.r.reduce((s, p) => s + p[1], 0) / a.r.length; attach(cx, cy, 'asset', a.name); a.r.slice(0, 12).forEach(p => attach(p[0], p[1], 'asset', a.name)); });
+        (extra || []).forEach(p => { const q = XY(p); attach(q[0], q[1], 'extra', p.name); });
+        const N = nx.length;
+        progress(`Envelope: ${ENV.toLocaleString()} points (${fps.length} flight paths, ${ffzs.length} FFZs) · ${(NET - ENV).toLocaleString()} pad-edge spots · ${(N - NET).toLocaleString()} asset / extra points attached`);
+        await yieldNow();
+        // ---- fixed safe zones: type 98, else the bases ----
+        let fixedSrc = 'type-98 safe zones';
+        let fixed = ents.filter(e => e.type === 98 && gmPoint(e)).map(e => ({ name: e.name || 'safe zone', ll: gmPoint(e) }));
+        if (!fixed.length) { const rb = resolveBases(siteID, ents); fixed = rb.bases.map(e => ({ name: `${e.name} (assumed at the base)`, ll: gmPoint(e) })); fixedSrc = fixed.length ? 'no type-98 on the site — assumed one at each base' : 'none found (no safe zones, no bases) — planning from scratch'; }
+        const srcs = fixed.map(f => { const q = XY(f.ll); const [j, g] = nearestNet(q[0], q[1]); return [j, g]; }).filter(s => s[0] >= 0);
+        const d0 = srcs.length ? szpDijkstra(adj, N, srcs) : new Float32Array(N).fill(Infinity);
+        const S = []; for (let i = 0; i < N; i++) if (kind[i] !== 'pad' && (!srcs.length || d0[i] < Infinity)) S.push(i);
+        const unreachable = []; if (srcs.length) for (let i = 0; i < ENV; i++) if (d0[i] === Infinity) unreachable.push(i);
+        if (!S.length) throw new Error('nothing reachable from the existing safe zones');
+        // ---- candidates: reachable pad-edge spots clear of NFZs / towers, wells + small sats first ----
+        const nfzM = cfg.nfzFt / M_TO_FT, towM = cfg.towerFt / M_TO_FT;
+        const clearPad = (x, y) => {
+            for (const z of nfzs) if (x >= z.bb[0] - nfzM && x <= z.bb[2] + nfzM && y >= z.bb[1] - nfzM && y <= z.bb[3] + nfzM && polyD(x, y, z.r) < nfzM) return false;
+            for (const t of towers) if (dist2(x, y, t[0], t[1]) < towM) return false;
+            return true;
+        };
+        const pool = []; for (let i = ENV; i < NET; i++) if (kind[i] === 'pad' && (!srcs.length || d0[i] < Infinity) && clearPad(nx[i], ny[i])) pool.push(i);
+        const poolCount = {}; pool.forEach(i => { const l = padMeta.get(i).label; poolCount[l] = (poolCount[l] || 0) + 1; });
+        let cands = pool.filter(i => padMeta.get(i).tier <= (cfg.wellsFirst ? 2 : 3));
+        if (cfg.wellsFirst && cands.length < Math.max(10, 3 * K)) cands = pool.filter(i => padMeta.get(i).tier <= 3);
+        if (cfg.facilities || !cands.length) cands = pool;
+        if (!cands.length) throw new Error('no pad-edge spot is reachable from the flight envelope and clear of NFZs / towers — raise the hop distance, lower the NFZ clearance, or allow facilities');
+        const candsAll = cands.length;
+        const CAP = 600;
+        if (cands.length > CAP) { const stride = cands.length / CAP; const sub = []; for (let t = 0; t < CAP; t++) sub.push(cands[Math.floor(t * stride)]); cands = sub; }
+        const D = new Map();
+        for (let n = 0; n < cands.length; n++) {
+            if (szp.cancel) throw new Error('cancelled');
+            D.set(cands[n], szpDijkstra(adj, N, [[cands[n], 0]]));
+            if (n % 20 === 0) { progress(`Scoring pad-edge spots ${n}/${cands.length}…`); await yieldNow(); }
+        }
+        const objective = (picks) => { let mx = 0, tot = 0; const cols = picks.map(c => D.get(c)); for (let s = 0; s < S.length; s++) { const j = S[s]; let m = d0[j]; for (let k = 0; k < cols.length; k++) { const v = cols[k][j]; if (v < m) m = v; } if (m > mx) mx = m; tot += m; } return [mx, tot / S.length]; };
+        const better = (a, b) => a[0] < b[0] - 0.01 || (Math.abs(a[0] - b[0]) <= 0.01 && a[1] < b[1] - 0.01);
+        let picks = [];
+        for (let r = 0; r < K; r++) {
+            let best = null;
+            for (const c of cands) { if (picks.includes(c)) continue; const o = objective(picks.concat(c)); if (!best || better(o, best[0])) best = [o, c]; }
+            if (!best) break;
+            picks.push(best[1]); progress(`Placing zone ${r + 1} of ${K}…`); await yieldNow();
+        }
+        let cur = objective(picks), improved = true, sweeps = 0;
+        while (improved && sweeps++ < 12) {
+            improved = false;
+            for (let i = 0; i < picks.length; i++) for (const c of cands) { if (picks.includes(c)) continue; const t = picks.slice(); t[i] = c; const o = objective(t); if (better(o, cur)) { cur = o; picks = t; improved = true; } }
+            progress(`Refining (pass ${sweeps})…`); await yieldNow();
+        }
+        const base = objective([]);
+        const cols = picks.map(c => D.get(c));
+        const fin = new Float32Array(N); for (let j = 0; j < N; j++) { let m = d0[j]; for (let k = 0; k < cols.length; k++) if (cols[k][j] < m) m = cols[k][j]; fin[j] = m; }
+        const owns = new Int32Array(picks.length + 1);
+        S.forEach(j => { let bi = 0, bv = d0[j]; for (let k = 0; k < cols.length; k++) if (cols[k][j] < bv) { bv = cols[k][j]; bi = k + 1; } owns[bi]++; });
+        let worst = -1; S.forEach(j => { if (worst < 0 || fin[j] > fin[worst]) worst = j; });
+        const LL = (i) => proj.inv({ x: nx[i], y: ny[i] });
+        const unreachRefs = new Map(); unreachable.forEach(i => unreachRefs.set(ref[i], (unreachRefs.get(ref[i]) || 0) + 1));
+        return {
+            siteID, fixed, fixedSrc, candidates: cands.length, candidatesAll: candsAll, poolCount, tierCount, samples: S.length, envelope: ENV, padSpots: NET - ENV, attached: N - NET,
+            before: { max: base[0], mean: base[1] }, after: { max: cur[0], mean: cur[1] },
+            picks: picks.map((c, k) => { const m = padMeta.get(c); const ll = LL(c); return { n: k + 1, lat: ll.lat, lng: ll.lng, pad: m.name, tier: m.label, inFfz: !!inFfz[c], hopM: padHop.get(c) || 0, owns: owns[k + 1] }; }),
+            fixedOwns: owns[0],
+            worst: worst >= 0 ? { ...LL(worst), m: fin[worst], ref: ref[worst], kind: kind[worst] } : null,
+            farAssets: [...attachGaps.entries()].filter(([, g]) => g > 150).sort((a, b) => b[1] - a[1]).map(([name, g]) => ({ name, gapM: g })),
+            unreachable: [...unreachRefs.entries()].sort((a, b) => b[1] - a[1]).map(([name, n]) => ({ name, n })),
+            hist: [0, 1, 2, 3, 4, 5].map(k => [S.filter(j => Math.floor(d0[j] / 1609.344) === k).length, S.filter(j => Math.floor(fin[j] / 1609.344) === k).length]),
+        };
+    }
+    // ---- map preview ----
+    function szpClearLayers() { const map = getLeafletMap(); szp.layers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} }); szp.layers = []; }
+    function szpDraw() {
+        szpClearLayers();
+        const L = getLeafletL(), map = getLeafletMap(), r = szp.result; if (!L || !map || !r) return;
+        const add = (l) => { try { l.addTo(map); szp.layers.push(l); } catch (e) { console.warn(`${TAG} 🛟 layer add failed:`, e); } };
+        r.fixed.forEach(f => { const m = L.circleMarker([f.ll.lat, f.ll.lng], { radius: 8, color: '#ffd54f', weight: 3, fillOpacity: 0.15, interactive: false }); m.bindTooltip(`fixed: ${szpEsc(f.name)}`, { permanent: false, direction: 'top' }); add(m); });
+        r.picks.forEach(p => { const m = L.circleMarker([p.lat, p.lng], { radius: 11, color: `rgb(${SZP_COLOR})`, weight: 3, fillColor: `rgb(${SZP_COLOR})`, fillOpacity: 0.35, interactive: false }); m.bindTooltip(`🛟 Safe zone ${p.n} · ${szpEsc(p.pad)}`, { permanent: true, direction: 'top', offset: [0, -10] }); add(m); });
+        if (r.worst) { const m = L.circleMarker([r.worst.lat, r.worst.lng], { radius: 9, color: '#ff5555', weight: 2, dashArray: '4 3', fillOpacity: 0, interactive: false }); m.bindTooltip(`farthest point after planning: ${szpMi(r.worst.m)} · ${szpEsc(r.worst.ref)}`, { direction: 'top' }); add(m); }
+    }
+    function szpPanTo(ll) { try { const map = getLeafletMap(); if (map && ll) { map.setView([ll.lat, ll.lng], Math.max(map.getZoom(), 17)); airPulseAt(ll.lat, ll.lng); } } catch (e) { console.warn(`${TAG} 🛟 pan failed:`, e); } }
+    const szpWhere = (p) => p.inFfz ? 'inside an FFZ' : `${szpFt(p.hopM)} hop from the nearest flight path / FFZ`;
+    // ---- report ----
+    function szpReportText() {
+        const r = szp.result; if (!r) return '';
+        const L = [];
+        L.push(`Safe Zone Planner — site ${r.siteID} — ${new Date().toLocaleString()}`);
+        L.push(`Fixed: ${r.fixedSrc}${r.fixed.length ? ' — ' + r.fixed.map(f => `${f.name} (${f.ll.lat.toFixed(6)}, ${f.ll.lng.toFixed(6)})`).join('; ') : ''}`);
+        L.push(`Flight distance to the nearest safe zone — worst: ${szpMi(r.before.max)} → ${szpMi(r.after.max)} · average: ${szpMi(r.before.mean)} → ${szpMi(r.after.mean)}`);
+        L.push('');
+        r.picks.forEach(p => L.push(`Safe zone ${p.n}: ${p.lat.toFixed(6)}, ${p.lng.toFixed(6)} — on the edge of pad "${p.pad}" (${p.tier}), ${szpCfg.insetFt} ft inside · ${szpWhere(p)} · covers ${p.owns.toLocaleString()} points`));
+        if (r.worst) L.push(`Farthest point after planning: ${szpMi(r.worst.m)} at ${r.worst.lat.toFixed(6)}, ${r.worst.lng.toFixed(6)} (${r.worst.ref})`);
+        if (r.farAssets.length) { L.push(''); L.push(`Assets with no envelope within 500 ft (distance approximated by a straight hop):`); r.farAssets.forEach(a => L.push(`  ${a.name} — ${szpFt(a.gapM)} to the nearest flight path / FFZ`)); }
+        if (r.unreachable.length) { L.push(''); L.push(`Not reachable from the existing safe zones (excluded):`); r.unreachable.forEach(u => L.push(`  ${u.name}`)); }
+        L.push(''); L.push(`Settings: ${r.picks.length} new zone(s) · spots ${szpCfg.insetFt} ft inside the pad edge · pads ${szpCfg.wellsFirst ? 'wells + small sats first' : 'any non-facility'}${szpCfg.facilities ? ' + facilities allowed' : ''} · small battery ≤ ${szpCfg.satAcres} acres · hop ≤ ${szpCfg.hopFt} ft · NFZ clearance ${szpCfg.nfzFt} ft · tower clearance ${szpCfg.towerFt} ft · assets ${szpCfg.assets ? 'included' : 'excluded'} · ${r.candidates} of ${r.candidatesAll} eligible spots scored over ${r.samples.toLocaleString()} sample points · pad pool: ${Object.entries(r.poolCount).map(([k, v]) => `${v} ${k}`).join(', ')}`);
+        return L.join('\n');
+    }
+    // ---- panel ----
+    function szpRenderPanelBody() {
+        const host = document.getElementById('aim-szp-controls'); if (!host) return;
+        const btnCss = (col) => `background:rgba(${col},0.12);color:rgb(${col});border:1px solid rgba(${col},0.5);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px`;
+        const num = (id, label, val, min, max, step, unit, title) => `<label title="${szpEsc(title || '')}" style="display:inline-flex;align-items:center;gap:5px;font-size:11px;color:#cfd6dc">${label} <input type="number" id="${id}" value="${val}" min="${min}" max="${max}" step="${step}" style="width:58px;background:#1a1d23;border:1px solid rgba(${SZP_COLOR},0.45);color:#fff;padding:3px 6px;border-radius:3px;font:inherit;font-size:11px;text-align:right"><span style="color:#888;font-size:10px">${unit}</span></label>`;
+        const chk = (id, label, on, title) => `<label title="${szpEsc(title || '')}" style="display:inline-flex;align-items:center;gap:5px;font-size:11px;color:#cfd6dc;cursor:pointer"><input type="checkbox" id="${id}" ${on ? 'checked' : ''} style="accent-color:rgb(${SZP_COLOR})"> ${label}</label>`;
+        host.innerHTML = `
+            <div style="font-size:11px;color:rgb(${SZP_COLOR});margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">🛟 Safe Zone Planner — where the next safe zones should go</div>
+            <div style="font-size:10px;color:#9ad;margin-bottom:6px;line-height:1.5">Spots are always <b>on a pad, just inside its edge</b> — wells and small satellites first, big facilities only if you allow them. A spot counts as reachable when it sits inside an FFZ or within the hop distance of a flight path / FFZ.</div>
+            <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:6px">
+                ${num('aim-szp-count', 'New zones', szpCfg.count, 1, 8, 1, '', 'How many safe zones to add')}
+                ${num('aim-szp-inset', 'Inside the edge', szpCfg.insetFt, 0, 200, 5, 'ft', 'How far inside the pad edge each spot sits')}
+                ${num('aim-szp-hop', 'Max hop', szpCfg.hopFt, 0, 2000, 10, 'ft', 'A pad spot outside every FFZ must be within this of a flight path / FFZ to count as reachable')}
+                ${num('aim-szp-sat', 'Small battery ≤', szpCfg.satAcres, 0.1, 20, 0.1, 'acres', 'A battery pad up to this size counts as a small satellite; bigger = facility')}
+                ${num('aim-szp-nfz', 'NFZ clearance', szpCfg.nfzFt, 0, 500, 5, 'ft', 'Spots keep this far from any no-fly zone')}
+                ${num('aim-szp-tower', 'Tower clearance', szpCfg.towerFt, 0, 1000, 5, 'ft', 'Spots keep this far from tower / pole markers')}
+            </div>
+            <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:6px">
+                ${chk('aim-szp-wells', 'wells + small sats first', szpCfg.wellsFirst, 'Only well pads and small satellites are candidates (other small pads join when there are too few)')}
+                ${chk('aim-szp-fac', 'allow big facilities', szpCfg.facilities, 'Let batteries over the size limit and equipment pads be candidates too')}
+                ${chk('aim-szp-assets', 'count every asset', szpCfg.assets, 'Every asset polygon joins the sample set; one with no path / FFZ near it hops straight to the nearest leg')}
+            </div>
+            <details style="margin-bottom:6px"><summary style="font-size:11px;color:#9ad;cursor:pointer">Extra points not on the site yet (one per line: <code>lat, lng [name]</code>)</summary>
+                <textarea id="aim-szp-extra" rows="3" placeholder="32.4123, -101.7012 New pad A" style="width:100%;box-sizing:border-box;margin-top:4px;background:#1a1d23;border:1px solid rgba(${SZP_COLOR},0.35);color:#fff;padding:4px 6px;border-radius:3px;font:inherit;font-size:11px"></textarea></details>
+            <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:6px">
+                <button id="aim-szp-plan" style="${btnCss(SZP_COLOR)};font-weight:600" title="Score every eligible pad-edge spot and pick the set that shortens the longest flight to a safe zone">▶ Plan safe zones</button>
+                <button id="aim-szp-clear" style="${btnCss('255,90,90')}" title="Drop the preview (nothing on the server is touched — this tool never writes)">✕ Clear</button>
+                <button id="aim-szp-copy" style="${btnCss('160,160,160')}" title="Copy the plan as text (coordinates, before/after, caveats)">📋 Copy report</button>
+                <span style="color:#888;font-size:10px">read-only · distance follows the flight paths and FFZs · existing safe zones (or the bases) stay fixed · click a row to jump</span>
+            </div>
+            <div id="aim-szp-result" style="font-size:11px;color:#9ad;line-height:1.5;margin-bottom:6px">Pick how many zones to add, then ▶ Plan. Large sites take a few seconds.</div>
+            <div id="aim-szp-list" style="font-size:11px;color:#cfd6dc"></div>`;
+        const readCfg = () => {
+            const g = (id, d) => { const n = Number((document.getElementById(id) || {}).value); return isFinite(n) && n >= 0 ? n : d; };
+            szpCfg.count = g('aim-szp-count', szpCfg.count); szpCfg.insetFt = g('aim-szp-inset', szpCfg.insetFt); szpCfg.hopFt = g('aim-szp-hop', szpCfg.hopFt); szpCfg.satAcres = g('aim-szp-sat', szpCfg.satAcres) || szpCfg.satAcres; szpCfg.nfzFt = g('aim-szp-nfz', szpCfg.nfzFt); szpCfg.towerFt = g('aim-szp-tower', szpCfg.towerFt);
+            const b = (id) => { const cb = document.getElementById(id); return cb ? !!cb.checked : null; };
+            const w = b('aim-szp-wells'); if (w !== null) szpCfg.wellsFirst = w;
+            const f = b('aim-szp-fac'); if (f !== null) szpCfg.facilities = f;
+            const a = b('aim-szp-assets'); if (a !== null) szpCfg.assets = a;
+            szpSaveCfg();
+        };
+        host.querySelectorAll('input').forEach(el => el.addEventListener('change', readCfg));
+        host.querySelector('#aim-szp-plan').onclick = () => { readCfg(); szpPlan().catch(e => { console.error(`${TAG} 🛟 plan failed:`, e); szpLog(`Plan failed: ${szpEsc(e.message || e)}`, '#ff6060'); szp.running = false; }); };
+        host.querySelector('#aim-szp-clear').onclick = () => { if (szp.running) { szp.cancel = true; szpLog('Cancelling…', '#ffb347'); return; } szpClearLayers(); szp.result = null; szpRenderList(); szpLog('Cleared.'); };
+        host.querySelector('#aim-szp-copy').onclick = () => { const t = szpReportText(); if (!t) { showToast('Nothing planned yet', 'rgba(255,180,0,0.6)'); return; } navigator.clipboard.writeText(t).then(() => showToast('Safe zone plan copied'), () => showToast('Copy failed', 'rgba(255,96,96,0.55)')); };
+        host.querySelector('#aim-szp-list').onclick = (ev) => {
+            const cp = ev.target.closest && ev.target.closest('[data-szp-copy]');
+            if (cp) { ev.stopPropagation(); navigator.clipboard.writeText(cp.getAttribute('data-szp-copy')).then(() => showToast('Coordinates copied'), () => showToast('Copy failed', 'rgba(255,96,96,0.55)')); return; }
+            const row = ev.target.closest && ev.target.closest('[data-szp-pan]'); if (!row) return;
+            const [lat, lng] = row.getAttribute('data-szp-pan').split(',').map(Number); if (isFinite(lat)) szpPanTo({ lat, lng });
+        };
+        szpRenderList();
+    }
+    function szpRenderList() {
+        const el = document.getElementById('aim-szp-list'); if (!el) return;
+        const r = szp.result; if (!r) { el.innerHTML = ''; return; }
+        const row = (lat, lng, html) => `<div data-szp-pan="${lat},${lng}" title="Click to jump to it on the map" style="display:flex;gap:8px;align-items:center;padding:4px 6px;margin:2px 0;border:1px solid rgba(${SZP_COLOR},0.25);border-radius:3px;cursor:pointer" onmouseover="this.style.background='rgba(${SZP_COLOR},0.10)'" onmouseout="this.style.background=''">${html}</div>`;
+        const coord = (lat, lng) => `<code style="color:#fff">${lat.toFixed(6)}, ${lng.toFixed(6)}</code> <span data-szp-copy="${lat.toFixed(6)}, ${lng.toFixed(6)}" title="Copy coordinates" style="color:#9ad;cursor:copy">⧉</span>`;
+        const tierCol = { well: '#5fff5f', sat: '#7adfe6', 'small battery': '#7adfe6', other: '#cfd6dc', facility: '#ffb347' };
+        const h = [];
+        h.push(`<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:6px;margin-bottom:6px">
+            <div style="background:rgba(255,255,255,0.04);border-radius:3px;padding:5px 8px"><div style="color:#888;font-size:10px">LONGEST FLIGHT TO A SAFE ZONE</div><div style="font-size:14px;font-weight:700;color:#fff">${szpMi(r.before.max)} → <span style="color:#5fff5f">${szpMi(r.after.max)}</span></div><div style="color:#888;font-size:10px">${szpFt(r.before.max)} → ${szpFt(r.after.max)}</div></div>
+            <div style="background:rgba(255,255,255,0.04);border-radius:3px;padding:5px 8px"><div style="color:#888;font-size:10px">AVERAGE</div><div style="font-size:14px;font-weight:700;color:#fff">${szpMi(r.before.mean)} → <span style="color:#5fff5f">${szpMi(r.after.mean)}</span></div><div style="color:#888;font-size:10px">${szpFt(r.before.mean)} → ${szpFt(r.after.mean)}</div></div>
+        </div>`);
+        h.push(`<div style="color:#888;font-size:10px;margin-bottom:4px">Fixed: ${szpEsc(r.fixedSrc)}${r.fixed.length ? ` · ${r.fixed.map(f => szpEsc(f.name)).join(', ')} · cover ${r.fixedOwns.toLocaleString()} points` : ''}</div>`);
+        r.picks.forEach(p => h.push(row(p.lat, p.lng, `<span style="display:inline-grid;place-items:center;width:22px;height:22px;border-radius:50%;background:rgb(${SZP_COLOR});color:#111;font-weight:700;flex:none">${p.n}</span><span style="min-width:0"><div>${coord(p.lat, p.lng)} <span style="color:#888">on the edge of</span> <span style="color:#9ad">${szpEsc(p.pad)}</span> <span style="color:${tierCol[p.tier] || '#cfd6dc'};font-size:10px">${szpEsc(p.tier)}</span></div><div style="color:#888;font-size:10px">${szpCfg.insetFt} ft inside the pad edge · ${szpWhere(p)} · nearest zone for ${p.owns.toLocaleString()} points</div></span>`)));
+        if (r.worst) h.push(row(r.worst.lat, r.worst.lng, `<span style="color:#ff5555;flex:none">◌</span><span><div>Farthest point after planning: <b style="color:#ff8a80">${szpMi(r.worst.m)}</b> <span style="color:#9ad">${szpEsc(r.worst.ref)}</span></div><div style="color:#888;font-size:10px">add one more zone if this is too far · ${coord(r.worst.lat, r.worst.lng)}</div></span>`));
+        if (r.farAssets.length) h.push(`<div style="color:#ffb347;font-size:10px;margin-top:6px">⚠ ${r.farAssets.length} asset${r.farAssets.length === 1 ? '' : 's'} with no flight path / FFZ within 500 ft — distance approximated by a straight hop: ${r.farAssets.slice(0, 8).map(a => `${szpEsc(a.name)} (${szpFt(a.gapM)})`).join(', ')}${r.farAssets.length > 8 ? ` … +${r.farAssets.length - 8}` : ''}</div>`);
+        if (r.unreachable.length) h.push(`<div style="color:#888;font-size:10px;margin-top:4px">Not reachable from the existing safe zones, excluded: ${r.unreachable.slice(0, 10).map(u => szpEsc(u.name)).join(', ')}${r.unreachable.length > 10 ? ` … +${r.unreachable.length - 10}` : ''}</div>`);
+        h.push(`<div style="color:#666;font-size:10px;margin-top:6px">pad pool: ${Object.entries(r.poolCount).map(([k, v]) => `${v.toLocaleString()} ${szpEsc(k)}`).join(' · ') || 'none'} edge spots reachable · ${r.candidates} of ${r.candidatesAll} eligible scored over ${r.samples.toLocaleString()} sample points · place each Safe Zone in Percepto by hand at the coordinates above, after a satellite check that the ground is flat and clear.</div>`);
+        el.innerHTML = h.join('');
+    }
+    async function szpPlan() {
+        if (szp.running) { showToast('Planner already running', 'rgba(255,180,0,0.6)'); return; }
+        const sid = getCurrentSiteID(); if (!sid) { szpLog('No site loaded.', '#ff6060'); return; }
+        let ents = ((mapObjectsBySite[sid] || {}).entities) || [];
+        if (!ents.length) { szpLog('Loading site entities…'); await fetchMapObjects(sid, true); ents = ((mapObjectsBySite[sid] || {}).entities) || []; }
+        if (!ents.length) { szpLog('No entities on this site.', '#ff6060'); return; }
+        const extra = szpParseExtra((document.getElementById('aim-szp-extra') || {}).value);
+        szp.running = true; szp.cancel = false; szp.siteID = String(sid);
+        console.log(`${TAG} 🛟 planning ${szpCfg.count} safe zone(s) on site ${sid} — ${ents.length} entities, ${extra.length} extra point(s)`, szpCfg);
+        const t0 = Date.now();
+        try {
+            szp.result = await szpSolve(ents, szpCfg, extra, sid, (m) => szpLog(szpEsc(m)));
+            szp.result.extra = extra.length;
+            szpDraw(); szpRenderList();
+            szpLog(`Done in ${((Date.now() - t0) / 1000).toFixed(1)} s — ${szp.result.picks.length} spot${szp.result.picks.length === 1 ? '' : 's'} drawn in pink on the map.`, '#5fff5f');
+            console.log(`${TAG} 🛟 plan ready:`, szp.result);
+        } catch (e) {
+            if (/cancelled/.test(String(e.message))) szpLog('Cancelled.', '#ffb347'); else throw e;
+        } finally { szp.running = false; szp.cancel = false; }
+    }
+    function szpShowPanel() {
+        const c = document.getElementById('aim-szp-controls'); if (!c) return;
+        genShowPage('szp');
+        c.style.display = 'block';
+        if (!document.getElementById('aim-szp-list')) szpRenderPanelBody();
+    }
+    function szpOpenFromAction() {
+        if (LITE) { showToast('Safe Zone Planner needs Full mode (CSM access)', 'rgba(255,180,0,0.6)'); return; }
+        const sid = getCurrentSiteID();
+        if (!sid) { showToast('No site loaded', 'rgba(255,96,96,0.55)'); return; }
+        const go = () => { try { if (!document.getElementById(GEN_MODAL_ID)) openSiteGenerator(sid); szpShowPanel(); } catch (e) { console.warn(`${TAG} 🛟 open failed:`, e); } };
+        const bucket = mapObjectsBySite[sid];
+        if (!bucket || !bucket.entities) fetchMapObjects(sid, true).then(go).catch(e => { console.warn(`${TAG} 🛟 entity fetch failed:`, e); go(); }); else go();
+    }
+    function szpTeardown() { szp.cancel = true; szpClearLayers(); }
+    szpLoadCfg();
+
+    // ============================================================
     // 📥 ASSET IMPORTER (#249) — CSV/KML region list → staged preview points
     // on the map → spatial selection (⭕ circle / 🖊 freehand lasso / ☝ pick)
     // → bulk-CREATE the selected subset as real type-3 assets via the
@@ -20897,6 +22951,9 @@
     // (re-creates from our own pre-delete bank; NEW ids). Staged points are
     // NEVER written until Commit; parse + selection are fully local.
     // ============================================================
+    let impAutosaveMin = 3;                          // v4.346: CP 'imp-autosave-min' — periodic session save (0 = change/close only)
+    const IMP_SESSION_META = 'aim_imp_session_meta:';   // GM: per env-site small summary (banner)
+    const IMP_SESSION_DATA = 'aim_imp_session_data:';   // GM: per env-site full snapshot (rows + overrides + boundaries)
     const IMP_PARAMS_KEY = 'aim_imp_params';        // GM: {radiusVal, radiusUnit, includeDups}
     const IMP_MAPPINGS_KEY = 'aim_imp_mappings';    // GM: {headerSig: {name,lat,lng,type}} — vendor CSV remembers its mapping
     const IMP_TYPEMAP_KEY = 'aim_imp_typemap';      // GM: {csvTypeValueLower: percepto subtype} — global dictionary
@@ -20907,12 +22964,24 @@
         siteID: null,
         fileName: null, headers: [], rows: [],
         mapping: null,                              // {name, lat, lng, type|null} — header names
-        points: [],                                 // [{i, name, lat, lng, typeRaw, sel, dup, dupWhy, done}]
-        invalid: 0,
+        points: [],                                 // [{i, name, lat, lng, typeRaw, notes, sel, dup, dupWhy, child, near, done}]  — v4.332: dup = NAME match only; child = {name,id,full} square overlaps an existing asset; near = {name,id,ft} within radius, no overlap
+        invalid: 0, invalidRows: [],                 // v4.358: rows without usable coordinates (names for the client review)
         typeMap: {},                                // loaded from GM at wire time
         target: 'staged',                           // 'staged' | 'assets' (🗑 delete mode)
-        mode: null,                                 // null | 'circle' | 'lasso' | 'pick'
-        radiusVal: 0.5, radiusUnit: 'mi', includeDups: false,
+        mode: null,                                 // null | 'circle' | 'lasso' | 'pick' | 'edit' | 'move'
+        moveHeld: null, moveDrag: false, moveDownPt: null,   // v4.344: ↔ Move point — the staged point being carried
+        shapeHeld: null, stroke: null, strokeLayer: null, assetShapeLayers: [], heldLayers: [], shapeEdit: null, shapeW: 15, snapFt: 10, bufFt: 7.5, gapFt: 15,   // v4.367: ✏ Shape · v4.373: W = the NARROW side (15 ft), buffer 7.5 ft each side, snap keeps a 15 ft gap
+        radiusVal: 3, radiusUnit: 'mi', includeDups: false,   // v4.343: 3 mi = the usual base reach circle
+        keepShield: true,                           // v4.343: keep "- unsh" / "shielded" modifiers in subtypes (off = strip them)
+        dupMode: 'update',                          // v4.347: name matches an existing asset → 'skip' | 'update' (type + notes only) | 'copy' (create "-N")
+        lastUpdated: [],                            // v4.347: [{id, before}] bodies from the last commit's updates — ↩ undo re-POSTs them
+        ana: { movedFt: 200, scope: 'selected', result: null, tab: null },   // 📊 Analyze (quarterly compare)
+        env: { apiCol: null, open: false, notes: true, checkedAt: null, summary: null, running: false, opFilter: '', mismatchFt: 300, scope: 'selected', includeOurs: false,
+            missing: null, missingAt: null, missingOp: '', missingSel: new Set(), missStatus: { producing: true, drilled: true, inactive: true, plugged: false }, finding: false },   // v4.366: fill-in   // v4.356: Enverus cross-check · v4.358: client review report
+        pri: { on: false, open: false, oilCol: null, waterCol: null, blpdCol: null, priCol: null, clusterFt: 100, padFt: 50, p1Min: 250, p1Max: 1500, summary: null, zeroUntier: true, envUntier: true },   // v4.347: priority tiers · v4.357: zero-production / Enverus-dead wells get no tier
+        advOpen: false,                             // v4.331: ▸ Advanced (subset tools + delete mode) expanded — GM-remembered
+        secOpen: { bounds: true, data: true, type: false, place: false, env: false, create: true, adv: false },   // v4.352: collapsible sections — GM-remembered
+        mapOpen: false,                             // v4.331: column-mapping row expanded (auto-collapses once applied)
         // LIVE selection model (v4.250): selected = manual override ?? inside-any-shape.
         // Shapes are movable, so membership RECOMPUTES (impRecomputeSel) instead of
         // being stamped once. Manual picks (selManual / assetManual) are sticky —
@@ -20930,7 +22999,7 @@
         lastDelete: null,                           // {siteID, when, entities:[full bodies]} — ↩ Undo batch source
         assetIndex: null,                           // cached [{id,name,clean,ring,bbox,centroid}] for dup-guard + delete select
     };
-    function impSaveParams() { try { GM_setValue(IMP_PARAMS_KEY, JSON.stringify({ radiusVal: imp.radiusVal, radiusUnit: imp.radiusUnit, includeDups: imp.includeDups })); } catch (e) {} }
+    function impSaveParams() { try { GM_setValue(IMP_PARAMS_KEY, JSON.stringify({ radiusVal: imp.radiusVal, radiusUnit: imp.radiusUnit, includeDups: imp.includeDups, advOpen: imp.advOpen, keepShield: imp.keepShield, dupMode: imp.dupMode, secOpen: imp.secOpen, shapeW: imp.shapeW, snapFt: imp.snapFt, bufFt: imp.bufFt, gapFt: imp.gapFt, anaMovedFt: imp.ana.movedFt, pri: { clusterFt: imp.pri.clusterFt, padFt: imp.pri.padFt, p1Min: imp.pri.p1Min, p1Max: imp.pri.p1Max, open: imp.pri.open, setOpen: imp.pri.setOpen, zeroUntier: imp.pri.zeroUntier, envUntier: imp.pri.envUntier } })); } catch (e) {} }
     function impLoadParams() {
         try {
             const raw = GM_getValue(IMP_PARAMS_KEY, ''); if (!raw) return;
@@ -20938,7 +23007,451 @@
             if (typeof o.radiusVal === 'number' && o.radiusVal > 0) imp.radiusVal = o.radiusVal;
             if (o.radiusUnit === 'mi' || o.radiusUnit === 'ft') imp.radiusUnit = o.radiusUnit;
             if (typeof o.includeDups === 'boolean') imp.includeDups = o.includeDups;
+            if (typeof o.advOpen === 'boolean') imp.advOpen = o.advOpen;
+            if (typeof o.keepShield === 'boolean') imp.keepShield = o.keepShield;
+            if (o.dupMode === 'skip' || o.dupMode === 'update' || o.dupMode === 'copy') imp.dupMode = o.dupMode;
+            else if (typeof o.includeDups === 'boolean' && o.includeDups) imp.dupMode = 'copy';
+            if (o.pri && typeof o.pri === 'object') ['clusterFt', 'padFt', 'p1Min', 'p1Max'].forEach(k => { if (typeof o.pri[k] === 'number' && o.pri[k] >= 0) imp.pri[k] = o.pri[k]; });
+            if (o.pri && typeof o.pri.open === 'boolean') imp.pri.open = o.pri.open;
+            if (o.pri && typeof o.pri.setOpen === 'boolean') imp.pri.setOpen = o.pri.setOpen;
+            if (o.pri && typeof o.pri.zeroUntier === 'boolean') imp.pri.zeroUntier = o.pri.zeroUntier;
+            if (o.pri && typeof o.pri.envUntier === 'boolean') imp.pri.envUntier = o.pri.envUntier;
+            if (o.secOpen && typeof o.secOpen === 'object') Object.keys(imp.secOpen).forEach(k => { if (typeof o.secOpen[k] === 'boolean') imp.secOpen[k] = o.secOpen[k]; });
+            if (typeof o.shapeW === 'number' && o.shapeW >= 5) imp.shapeW = (o.shapeW === 30 && o.bufFt === undefined) ? 15 : o.shapeW;   // v4.373: old default 30 → 15 once
+            if (typeof o.snapFt === 'number' && o.snapFt >= 0) imp.snapFt = o.snapFt;
+            if (typeof o.bufFt === 'number' && o.bufFt >= 0) imp.bufFt = o.bufFt;
+            if (typeof o.anaMovedFt === 'number' && o.anaMovedFt >= 0) imp.ana.movedFt = o.anaMovedFt;
+            if (typeof o.gapFt === 'number' && o.gapFt >= 0) imp.gapFt = o.gapFt;
         } catch (e) {}
+    }
+    // v4.352: section chrome — numbered, collapsible, one-line live summary in the header
+    const IMP_SECTIONS = [
+        { id: 'bounds', num: '1', title: 'Boundaries', color: '186,140,255' },
+        { id: 'data', num: '2', title: 'Data file', color: '122,223,230' },
+        { id: 'type', num: '3', title: 'Type & priority', color: '255,179,71' },
+        { id: 'place', num: '4', title: 'Placement & flags', color: '255,95,255' },
+        { id: 'env', num: '5', title: 'Enverus check', color: '255,214,102' },
+        { id: 'create', num: '6', title: 'Create / update', color: '95,255,95' },
+        { id: 'adv', num: '', title: 'Advanced', color: '160,160,160' },
+    ];
+    function impSecOpenHtml(id) {
+        const d = IMP_SECTIONS.find(x => x.id === id);
+        return `<div class="aim-imp-sec" data-impsec="${id}" style="margin-bottom:6px;border-left:3px solid rgba(${d.color},0.55);border-radius:3px;background:rgba(255,255,255,0.015)">
+            <button data-impsechdr="${id}" style="display:flex;align-items:center;gap:8px;width:100%;text-align:left;background:rgba(${d.color},0.07);border:none;border-radius:0 3px 3px 0;color:#e6e6e6;cursor:pointer;font:inherit;font-size:12px;padding:6px 10px">
+                <span data-impsecchev style="color:rgb(${d.color});width:10px;flex:none">▸</span>
+                ${d.num ? `<span style="display:inline-block;min-width:18px;height:18px;line-height:18px;text-align:center;border-radius:50%;background:rgba(${d.color},0.25);color:rgb(${d.color});font-size:10px;font-weight:700;flex:none">${d.num}</span>` : ''}
+                <b style="color:rgb(${d.color});flex:none">${d.title}</b>
+                <span data-impsecsum="${id}" style="color:#8a949e;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0"></span>
+            </button>
+            <div data-impsecbody="${id}" style="display:none;padding:8px 10px 4px">`;
+    }
+    const IMP_SEC_CLOSE = `</div></div>`;
+    function impSetSection(id, open, scroll) {
+        imp.secOpen[id] = !!open; impSaveParams(); impApplySections();
+        if (scroll) { try { const el = document.querySelector(`[data-impsec="${id}"]`); if (el) el.scrollIntoView({ block: 'start', behavior: 'smooth' }); } catch (e) {} }
+    }
+    function impApplySections() {
+        const advForced = !!imp.mode || imp.target === 'assets';
+        IMP_SECTIONS.forEach(d => {
+            const open = d.id === 'adv' ? (imp.secOpen.adv || advForced) : imp.secOpen[d.id];
+            const body = document.querySelector(`[data-impsecbody="${d.id}"]`), hdr = document.querySelector(`[data-impsechdr="${d.id}"]`);
+            if (body) body.style.display = open ? '' : 'none';
+            if (hdr) { const ch = hdr.querySelector('[data-impsecchev]'); if (ch) ch.textContent = open ? '▾' : '▸'; }
+            const chip = document.querySelector(`[data-impsecjump="${d.id}"]`);
+            if (chip) chip.style.background = open ? `rgba(${d.color},0.25)` : 'transparent';
+        });
+        impSecSummaries();
+    }
+    function impSecSummaries() {
+        const live = imp.points.filter(p => !p.done);
+        const selN = imp.target === 'assets' ? imp.assetSel.size : live.filter(p => p.sel).length;
+        const set = (id, html) => { const el = document.querySelector(`[data-impsecsum="${id}"]`); if (el) el.innerHTML = html; };
+        set('bounds', !imp.shapes.length ? (live.length ? `none — all ${live.length} points selected` : 'none yet — load KMLs or draw, then load the data file') : `${imp.shapes.length} boundar${imp.shapes.length === 1 ? 'y' : 'ies'} · <b style="color:#cfd6dc">${selN}</b> of ${live.length} inside`);
+        const m = imp.mapping || {};
+        set('data', !imp.fileName ? 'no file loaded' : `${impEsc(imp.fileName)} · ${imp.rows.length} rows · ${live.length} staged${imp.invalid ? ` · <span style="color:#ffb347">${imp.invalid} without coordinates</span>` : ''}${imp.mapping && impNotesCols().length ? ` · notes ${impNotesCols().length} col${impNotesCols().length === 1 ? '' : 's'}` : ''}${imp.points.some(p => p.fileDup && p.fileDup.kind === 'battery') ? ` · ${imp.points.filter(p => p.fileDup && p.fileDup.kind === 'battery').length} batteries renamed "… BATTERY"` : ''}${imp.points.some(p => /-DUP\d*$/.test(p.name)) ? ` · <span style="color:#ff9d00">${imp.points.filter(p => /-DUP\d*$/.test(p.name)).length} rows suffixed -DUP</span>` : ''}${imp.dirty ? ' · <span style="color:#ffb347">unsaved</span>' : (imp.lastSavedAt ? ' · 💾 saved' : '')}`);
+        const S = imp.pri.summary;
+        set('type', !imp.points.length ? 'after the data file' : `${m.type ? `type = ${impEsc(m.type)}` : `no type column → "${impEsc(impApplyShield(imp.typeMap['__all__'] || ''))}"`}${imp.pri.on ? (S ? ` · tiers ON: <span style="color:#ff7b00">P1 ${S.cnt.P1}</span> · <span style="color:#ffe14d">P2 ${S.cnt.P2}</span> · <span style="color:#9ad">P3 ${S.cnt.P3}</span>${S.cnt.none ? ` · <span style="color:#ff6060">${S.cnt.none} untiered</span>` : ''}${S.flagged ? ` · <span style="color:#ffb347">${S.flagged} flagged</span>` : ''}` : ' · tiers ON') : ' · tiers off'}`);
+        const moved = live.filter(p => p.orig).length, removed = imp.points.filter(p => p.removed).length, fl = live.filter(p => p.dup || p.child || p.near).length, off = live.filter(p => p.sel && p.pri && p.pri.off > 0).length;
+        const flSel = live.filter(p => p.sel && (p.dup || p.child || p.near || (p.pri && p.pri.off > 0) || (p.fileDup && p.fileDup.kind === 'same'))), flRev = flSel.filter(p => p.reviewed).length;
+        set('place', !imp.points.length ? 'after the data file' : `${imp.mode === 'move' ? '<b style="color:#ff5fff">↔ Move ON</b> · ' : ''}${moved} moved · ${removed} removed · ${flSel.length} flagged point${flSel.length === 1 ? '' : 's'}${flSel.length ? ` (<b style="color:#5fff5f">${flRev}</b> reviewed)` : ''}${off ? ` · <span style="color:#ffb347">📍 ${off} off their pad</span>` : ''}`);
+        const dupsIn = live.filter(p => p.sel && p.dup).length, upd = imp.dupMode === 'update' ? dupsIn : 0, tot = live.filter(p => p.sel && (!p.dup || imp.dupMode !== 'skip')).length;
+        let dry = true; try { dry = !!document.getElementById('aim-gen-dryrun').checked; } catch (e) {}
+        set('create', !imp.points.length ? 'after the data file' : `${tot - upd ? `create ${tot - upd}` : ''}${(tot - upd) && upd ? ' + ' : ''}${upd ? `update ${upd}` : ''}${!tot ? 'nothing selected' : ''} · ${impSizeFt} ft · ${dry ? '<span style="color:#5fff5f">dry run</span>' : '<b style="color:#ff6060">LIVE</b>'}${tot > IMP_BIG_BATCH ? ' · <span style="color:#ff6060">over the 1000 gate</span>' : ''}`);
+        const E = imp.env.summary;
+        set('env', !imp.points.length ? 'after the data file' : (imp.env.running ? '⏳ checking…' : (!E ? `${impEnvKey() ? 'ready' : '<span style="color:#ff6060">key not set</span>'} · ${imp.env.apiCol ? `API = ${impEsc(imp.env.apiCol)}` : '<span style="color:#ffb347">pick the API column</span>'} · not run yet` : `<span style="color:#5fff5f">${E.producing} producing</span> · <span style="color:#ffb347">${E.inactive} inactive</span> · <span style="color:#ff6060">${E.plugged} plugged</span>${E.notFound ? ` · ${E.notFound} not found` : ''} · checked ${impEsc(imp.env.checkedAt || '')}`)));
+        set('adv', `${imp.target === 'assets' ? '<b style="color:#ff8a80">🗑 delete mode ON</b> · ' : ''}pick single points · select all / clear · delete existing assets`);
+    }
+    // v4.343: shielding modifiers on a subtype ("v - pumping rod - unsh",
+    // "Tank Battery Shielded") — stripped when the user doesn't care about
+    // shielded vs unshielded. Trailing tokens only; the base type is untouched.
+    const IMP_SHIELD_RE = /\s*[-–—:(]?\s*\b(un)?(sh|shld|shielded)\b\)?\.?\s*$/i;
+    function impStripShield(v) {
+        let t = String(v || '').trim();
+        for (let i = 0; i < 2; i++) { const n = t.replace(IMP_SHIELD_RE, '').trim(); if (n === t || !n) break; t = n; }
+        return t.replace(/[\s\-–—:]+$/, '').trim() || String(v || '').trim();
+    }
+    function impApplyShield(v) { return imp.keepShield ? v : impStripShield(v); }
+
+    // ---- v4.347 PRIORITY TIERS (client rule, confirmed with the account manager 2026-10-16) ----
+    // BLPD = oil + water per PAD (all assets on the pad summed). P3 < p1Min ·
+    // P1 p1Min..p1Max · P2 > p1Max. P1 is the MIDDLE band on purpose: the
+    // biggest producers have people on them, mid producers don't. The tier
+    // is written as a TYPE prefix ("P1 - v - pumping rod") — never the name
+    // (the name is the identity we match on next quarter) — plus a Priority /
+    // Prioritized block in the notes. Pad = the nested parent/child tree +
+    // anything within padFt of the pad polygon; brand-new points cluster by
+    // clusterFt. A pad with no numbers gets NO prefix and is flagged.
+    const IMP_TIER_RE = /^P([1-3])\s*[-–—:]\s*/i;
+    const IMP_TIER_COLORS = { P1: '#ff7b00', P2: '#ffe14d', P3: '#4fc3f7', none: '#ff5252' };   // v4.352: map fill per tier (P1 orange = top priority, P2 yellow, P3 blue, untiered red)
+    function impTierStrip(sub) { return String(sub || '').replace(IMP_TIER_RE, '').trim(); }
+    function impTierOf(sub) { const m = String(sub || '').match(IMP_TIER_RE); return m ? `P${m[1]}` : ''; }
+    function impNum(v) { if (v == null) return null; const t = String(v).replace(/[,$\s]/g, ''); if (!t) return null; const n = parseFloat(t); return isFinite(n) ? n : null; }
+    function impGuessPriCols(headers) {
+        const lower = headers.map(h => String(h).toLowerCase());
+        const pick = (rx, not) => { const i = lower.findIndex(h => rx.test(h) && !(not && not.test(h))); return i >= 0 ? headers[i] : null; };
+        const oil = pick(/\boil\b|oil_/, /api|well_origin/), water = pick(/\bwater\b|water_|\bwtr\b/, null);
+        const blpd = (oil && water) ? null : pick(/blpd|fluid|total.*prod|production.*(total|vol)|\bprod\b/, /method|name|type/);
+        let pri = null;
+        headers.forEach(h => {
+            if (pri) return;
+            const vals = imp.rows.map(r => String(r[h] == null ? '' : r[h]).trim()).filter(Boolean);
+            if (vals.length >= 3 && vals.filter(v => /^P?[1-3]$/i.test(v)).length >= vals.length * 0.8 && /pri|tier|rank/i.test(h)) pri = h;
+        });
+        return { oilCol: oil, waterCol: water, blpdCol: blpd, priCol: pri };
+    }
+    function impPriBlpd(p) {
+        const r = imp.rows[p.i] || {}; const c = imp.pri;
+        if (c.priCol) return null;
+        if (c.blpdCol) return impNum(r[c.blpdCol]);
+        const o = c.oilCol ? impNum(r[c.oilCol]) : null, w = c.waterCol ? impNum(r[c.waterCol]) : null;
+        if (o == null && w == null) return null;
+        return (o || 0) + (w || 0);
+    }
+    function impTierFromTotal(t) { const c = imp.pri; if (t == null) return ''; return t < c.p1Min ? 'P3' : (t <= c.p1Max ? 'P1' : 'P2'); }
+    function impRootOfAsset(id) {
+        const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+        if (!imp._rootCache || imp._rootCache.n !== ents.length) {
+            const byName = new Map(), byId = new Map();
+            ents.filter(e => e && e.type === 3).forEach(e => { byName.set(String(e.name || '').trim(), e); byId.set(e.id, e); });
+            const cache = new Map();
+            byId.forEach((e, eid) => {
+                let cur = e, hops = 0, root = e;
+                while (cur && hops++ < 20) { const pn = typeof cur.parent_asset_name === 'string' ? cur.parent_asset_name.trim() : ''; if (!pn) break; const par = byName.get(pn); if (!par || par.id === cur.id) break; root = par; cur = par; }
+                cache.set(eid, { id: root.id, name: root.name || '' });
+            });
+            imp._rootCache = { n: ents.length, map: cache };
+        }
+        return imp._rootCache.map.get(id) || { id, name: '' };
+    }
+    function impComputePriority() {
+        const c = imp.pri;
+        const live = imp.points.filter(p => !p.done);
+        live.forEach(p => { p.pri = null; });
+        if (!c.on || !live.length) { c.summary = null; return; }
+        const direct = !!c.priCol;
+        // 1. per-point numbers / direct tiers
+        live.forEach(p => {
+            const r = imp.rows[p.i] || {};
+            const d = direct ? String(r[c.priCol] == null ? '' : r[c.priCol]).trim().toUpperCase().replace(/^(\d)$/, 'P$1') : '';
+            p.pri = { blpd: direct ? null : impPriBlpd(p), direct: /^P[1-3]$/.test(d) ? d : '', tier: '', padKey: null, padName: '', padTotal: null, padN: 0, padWith: 0, flags: [], before: p.dup ? impTierOf(p.dupSubtype) : '', off: 0, offOf: '' };
+            // v4.351: PLACEMENT — a name match whose point is not inside its own
+            // asset polygon, or a point near (not on) a pad polygon, needs a ↔ Move
+            // before it is created/updated. Distance in ft to the polygon it belongs to.
+            try {
+                if (p.dup && p.dupId != null) {
+                    const a = (imp.assetIndex || []).find(x => x.id === p.dupId);
+                    if (a) { const dm = pointToPolygonMeters(p.lat, p.lng, a.ring); if (dm > 0 && isFinite(dm)) { p.pri.off = Math.round(dm / GEN_FT_TO_M); p.pri.offOf = a.name; } }
+                } else if (!p.child && p.near && p.near.ft > 0) { p.pri.off = p.near.ft; p.pri.offOf = p.near.name; }
+            } catch (e) {}
+        });
+        // 2. pad membership — existing pad root (dup / inside / within padFt) first
+        const rootFor = (p) => {
+            let id = null;
+            if (p.dup && p.dupId != null) id = p.dupId;
+            else if (p.child && p.child.id != null) id = p.child.id;
+            else if (p.near && p.near.id != null && p.near.ft <= c.padFt) id = p.near.id;
+            return id == null ? null : impRootOfAsset(id);
+        };
+        // 3. cluster every live point within clusterFt (union-find, lat-sorted sweep)
+        const n = live.length, parent = new Array(n).fill(0).map((_, i) => i);
+        const find = (i) => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
+        const union = (a, b) => { a = find(a); b = find(b); if (a !== b) parent[a] = b; };
+        const order = live.map((p, i) => i).sort((a, b) => live[a].lat - live[b].lat);
+        const dLat = (c.clusterFt * GEN_FT_TO_M / 111320) * 1.02;
+        for (let a = 0; a < n; a++) {
+            const ia = order[a], pa = live[ia];
+            for (let b = a + 1; b < n; b++) {
+                const ib = order[b], pb = live[ib];
+                if (pb.lat - pa.lat > dLat) break;
+                if (approxMeters(pa.lat, pa.lng, pb.lat, pb.lng) <= c.clusterFt * GEN_FT_TO_M) union(ia, ib);
+            }
+        }
+        const comps = new Map();
+        live.forEach((p, i) => { const k = find(i); if (!comps.has(k)) comps.set(k, []); comps.get(k).push(p); });
+        // 4. pad key per component: an existing root if any member sits on one (several roots = flag), else the cluster
+        const pads = new Map();
+        let ci = 0;
+        // v4.350: a distance cluster that touches SEVERAL existing pads is split
+        // by polygon — each point goes with the pad it sits on / nearest to,
+        // un-rooted points follow their nearest rooted neighbour — instead of
+        // being flagged. Only a point that can't be resolved stays flagged.
+        const groups = [];
+        comps.forEach((members) => {
+            const rootOf = new Map(); const roots = new Map();
+            members.forEach(p => { const r = rootFor(p); if (r) { rootOf.set(p, r); roots.set(r.id, r); } });
+            if (roots.size <= 1) { groups.push({ members, root: roots.size ? [...roots.values()][0] : null, split: 0 }); return; }
+            const rooted = members.filter(p => rootOf.has(p));
+            const byRoot = new Map();
+            members.forEach(p => {
+                let r = rootOf.get(p);
+                if (!r) { let best = null, bd = Infinity; rooted.forEach(q => { const d = approxMeters(p.lat, p.lng, q.lat, q.lng); if (d < bd) { bd = d; best = q; } }); r = best ? rootOf.get(best) : null; }
+                const k = r ? r.id : '_none';
+                if (!byRoot.has(k)) byRoot.set(k, { root: r, members: [] });
+                byRoot.get(k).members.push(p);
+            });
+            byRoot.forEach(g => groups.push({ members: g.members, root: g.root, split: roots.size }));
+        });
+        groups.forEach(({ members, root, split }) => {
+            ci++;
+            const roots = new Map(); if (root) roots.set(root.id, root);
+            const key = root ? `a:${root.id}` : `c:${ci}`;
+            const padName = root ? (root.name || `asset ${root.id}`) : `new pad ${ci}`;
+            const with_ = members.filter(p => direct ? p.pri.direct : p.pri.blpd != null);
+            const total = direct ? null : with_.reduce((a, p) => a + p.pri.blpd, 0);
+            let tier = direct ? '' : (with_.length ? impTierFromTotal(total) : '');
+            const flags = [];
+            if (!with_.length) flags.push(direct ? 'no priority value for this pad' : 'no production numbers for this pad');
+            else if (!direct && with_.length < members.length) flags.push(`${members.length - with_.length} of ${members.length} assets without numbers`);
+            // (a cluster that touched several pads was split by polygon above — no flag unless a point stayed un-rooted)
+            if (split > 1 && !root) flags.push(`${members.length} point${members.length === 1 ? '' : 's'} between ${split} existing pads — not on any polygon, check which pad they belong to`);
+            // v4.355: only NEW points off a pad flag the pad here — a name match whose
+            // client coordinate is off its own polygon is informational (the existing
+            // asset stays put) and lives in Placement → 📍 Off pad instead.
+            const off = members.filter(p => p.pri.off > 0 && !p.dup);
+            if (off.length) flags.push(`📍 ${off.length} new point${off.length === 1 ? ' sits' : 's sit'} OUTSIDE the pad polygon — ↔ Move onto it or confirm separate: ${off.slice(0, 3).map(p => `${p.name} (${p.pri.off} ft off ${p.pri.offOf})`).join(', ')}${off.length > 3 ? ` +${off.length - 3}` : ''}`);
+            if (direct) { const set = new Set(with_.map(p => p.pri.direct)); if (set.size > 1) flags.push(`assets on one pad carry different priorities (${[...set].join(', ')})`); if (set.size === 1) tier = [...set][0]; }
+            members.forEach(p => { p.pri.padKey = key; p.pri.padName = padName; p.pri.padTotal = total; p.pri.padN = members.length; p.pri.padWith = with_.length; p.pri.tier = direct ? (p.pri.direct || tier) : tier; p.pri.flags = flags.slice(); impPriDemote(p); });
+            if (pads.has(key)) { const ex = pads.get(key); ex.members = ex.members.concat(members); ex.flags = [...new Set(ex.flags.concat(flags))]; }
+            else pads.set(key, { key, name: padName, members, total, tier, flags });
+        });
+        // a root reached from two distance-clusters: recompute that pad's total/tier over the merged members
+        pads.forEach(pad => {
+            if (!/^a:/.test(pad.key)) return;
+            const with_ = pad.members.filter(p => direct ? p.pri.direct : p.pri.blpd != null);
+            const total = direct ? null : with_.reduce((a, p) => a + p.pri.blpd, 0);
+            const tier = direct ? pad.tier : (with_.length ? impTierFromTotal(total) : '');
+            pad.total = total; pad.tier = tier;
+            pad.members.forEach(p => { p.pri.padTotal = total; p.pri.padN = pad.members.length; p.pri.padWith = with_.length; if (!direct) p.pri.tier = tier; p.pri.flags = pad.flags.slice(); impPriDemote(p); });
+        });
+        c.pads = pads;
+        impSummarizePriority();
+    }
+    // v4.348: the summary / flags / report follow the SELECTION (boundaries) —
+    // pad totals above still sum every asset on the pad, even one the boundary
+    // cuts off, so a pad on the edge keeps its true number.
+    function impSummarizePriority() {
+        const c = imp.pri;
+        if (!c.on || !c.pads) { c.summary = null; return; }
+        const sel = imp.points.filter(p => !p.done && p.sel && p.pri);
+        const cnt = { P1: 0, P2: 0, P3: 0, none: 0 }, chg = { same: 0, changed: 0, added: 0, new: 0, untier: 0 };
+        sel.forEach(p => {
+            cnt[p.pri.tier || 'none']++;
+            if (!p.dup) chg.new++; else if (!p.pri.tier) chg.untier++; else if (p.pri.before === p.pri.tier) chg.same++; else if (!p.pri.before) chg.added++; else chg.changed++;
+        });
+        const padsList = [...c.pads.values()].map(x => ({ ...x, members: x.members.filter(p => p.sel && !p.done) })).filter(x => x.members.length);
+        c.summary = { pads: padsList.length, flagged: padsList.filter(x => x.flags.length).length, cnt, chg, padsList, selN: sel.length, off: sel.filter(p => p.pri.off > 0 && !p.dup).length, offInfo: sel.filter(p => p.pri.off > 0 && p.dup).length, zero: sel.filter(p => p.pri.untier === 'zero').length, envDead: sel.filter(p => p.pri.untier === 'env').length };
+    }
+    function impRenderPriSummary() {
+        const c = imp.pri; if (!c.on) return;
+        impSummarizePriority();
+        const S = c.summary, hdr = document.getElementById('aim-imp-pri-hdr'), sum = document.getElementById('aim-imp-pri-summary');
+        if (hdr) hdr.textContent = `${c.open ? '▾' : '▸'} Priority tiers — ON${S ? ` · P1 ${S.cnt.P1} · P2 ${S.cnt.P2} · P3 ${S.cnt.P3}${S.cnt.none ? ` · ${S.cnt.none} untiered` : ''}${(S.chg.changed + S.chg.added) ? ` · ${S.chg.changed + S.chg.added} tier change${(S.chg.changed + S.chg.added) === 1 ? '' : 's'}` : ''} · ${S.selN} selected` : ''}`;
+        if (sum) sum.innerHTML = impPriSummaryHtml();
+    }
+    // v4.350: the Generate panel floats over the map — work out which part of
+    // the map is actually visible (map rect minus the panel box) and fit the
+    // target into THAT, so a zoom never lands under the panel.
+    function impVisiblePadding(map) {
+        try {
+            const mr = map.getContainer().getBoundingClientRect();
+            const box = document.querySelector(`#${GEN_MODAL_ID} > div`);
+            const pad = { l: 0, t: 0, r: 0, b: 0 };
+            if (box) {
+                const br = box.getBoundingClientRect();
+                const ix0 = Math.max(mr.left, br.left), ix1 = Math.min(mr.right, br.right), iy0 = Math.max(mr.top, br.top), iy1 = Math.min(mr.bottom, br.bottom);
+                if (ix1 > ix0 && iy1 > iy0) {                                   // panel overlaps the map — cut off the smaller side it occupies
+                    const cutL = ix1 - mr.left, cutR = mr.right - ix0, cutT = iy1 - mr.top, cutB = mr.bottom - iy0;
+                    const opts = [['l', cutL, mr.width], ['r', cutR, mr.width], ['t', cutT, mr.height], ['b', cutB, mr.height]].filter(([, v, lim]) => v > 0 && v < lim * 0.85).sort((a, b) => a[1] - b[1]);
+                    if (opts.length) pad[opts[0][0]] = Math.ceil(opts[0][1]);
+                }
+            }
+            return pad;
+        } catch (e) { return { l: 0, t: 0, r: 0, b: 0 }; }
+    }
+    function impClearPulse() {
+        clearInterval(imp._pulseIv); imp._pulseIv = null; clearTimeout(imp._pulseT); imp._pulseT = null;
+        const map = getLeafletMap();
+        (imp._pulseLayers || []).forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        imp._pulseLayers = []; imp.pulse = null;
+    }
+    function impPulsePoints(pts, label) {
+        const L = getLeafletL(), map = getLeafletMap(); if (!L || !map) return;
+        impClearPulse();
+        imp.pulse = new Set(pts);
+        if (!imp._pulseSvg) { try { imp._pulseSvg = L.svg({ pane: 'markerPane' }); } catch (e) { imp._pulseSvg = null; } }
+        imp._pulseLayers = pts.map(p => {
+            try {
+                const m = L.circleMarker([p.lat, p.lng], { radius: 8, color: '#ff5fff', weight: 3, fill: true, fillColor: '#ff5fff', fillOpacity: 0.15, opacity: 1, interactive: false, renderer: imp._pulseSvg || undefined });
+                m.addTo(map);
+                try { m.bindTooltip(`${impEsc(p.name)}${(p.pri && p.pri.tier) ? ` · ${p.pri.tier}` : ''}`, { permanent: true, direction: 'top', offset: [0, -10], opacity: 0.95, className: 'aim-imp-pulse-tip' }).openTooltip(); } catch (e) {}
+                return m;
+            } catch (e) { return null; }
+        }).filter(Boolean);
+        if (!document.getElementById('aim-imp-pulse-css')) {
+            const st = document.createElement('style'); st.id = 'aim-imp-pulse-css';
+            st.textContent = '.aim-imp-pulse-tip{background:#1f2228!important;color:#ff9dff!important;border:1px solid #ff5fff!important;border-radius:3px!important;font:600 11px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif!important;padding:2px 6px!important;box-shadow:0 2px 8px rgba(0,0,0,0.6)!important;white-space:nowrap}.aim-imp-pulse-tip::before{border-top-color:#ff5fff!important}';
+            document.head.appendChild(st);
+        }
+        const t0 = Date.now();
+        imp._pulseIv = setInterval(() => {
+            const k = ((Date.now() - t0) % 900) / 900;                        // 0..1 every 0.9 s
+            const r = 6 + 14 * k, op = 1 - k;
+            imp._pulseLayers.forEach(m => { try { m.setRadius(r); m.setStyle({ opacity: op, fillOpacity: 0.25 * (1 - k) }); } catch (e) {} });
+        }, 50);
+        imp._pulseT = setTimeout(impClearPulse, 8000);
+    }
+    function impZoomToPad(key) {
+        const c = imp.pri; const pad = c.pads && c.pads.get(key); if (!pad) return;
+        const map = getLeafletMap(); if (!map) return;
+        const pts = pad.members.filter(p => !p.done);
+        if (!pts.length) return;
+        impZoomToPoints(pts, pad.name);
+        impStatus(`🔎 ${impEsc(pad.name)} — ${pts.length} point${pts.length === 1 ? '' : 's'} (pulsing, named on the map)${pad.flags.length ? ` · ⚠ ${impEsc(pad.flags.join(' · '))}` : ''}`);
+    }
+    function L_bounds(ll) { const d = 0.00005; return [[ll[0] - d, ll[1] - d], [ll[0] + d, ll[1] + d]]; }
+    function impPriSummaryHtml() {
+        const c = imp.pri, S = c.summary;
+        const tierPill = (t, n, col) => `<span style="display:inline-block;padding:1px 8px;border-radius:10px;background:${col}22;border:1px solid ${col}88;color:${col};font-weight:600">${t} ${n}</span>`;
+        if (!S || !S.selN) return '<span style="color:#888">no selected points — load the data file / check the boundaries</span>';
+        const flagged = S.padsList.filter(x => x.flags.length);
+        const showN = c.showAllFlags ? flagged.length : 8;
+        const flagList = flagged.length ? `<div style="margin-top:4px;font-size:10px;color:#ffb347;line-height:1.5;flex-basis:100%"><div style="color:#888;margin-bottom:2px">click a pad to zoom to it (its points pulse) · flagged points wear an orange ring on the map</div>${flagged.slice(0, showN).map(x => `<div data-impri-pad="${impEsc(x.key)}" title="zoom to this pad" style="cursor:pointer;padding:1px 4px;border-radius:3px;margin-left:-4px" onmouseover="this.style.background='rgba(255,179,71,0.12)'" onmouseout="this.style.background=''">⚠ <b>${impEsc(x.name)}</b> (${x.members.length}): ${impEsc(x.flags.join(' · '))} — ${impEsc(x.members.slice(0, 4).map(p => p.name).join(', '))}${x.members.length > 4 ? ' …' : ''}</div>`).join('')}${flagged.length > 8 ? `<button data-impri-showall="1" style="margin-top:3px;background:none;border:1px solid rgba(255,179,71,0.4);color:#ffb347;border-radius:3px;padding:1px 8px;cursor:pointer;font:inherit;font-size:10px">${c.showAllFlags ? '▴ show fewer' : `▾ show all ${flagged.length} flagged`}</button>` : ''}</div>` : '';
+        const flagNote = `<div style="flex-basis:100%;color:#888;font-size:10px">flagged here = no production numbers · a point between pads on no polygon · a NEW point off its pad${S.offInfo ? ` · <span style="color:#9ad">${S.offInfo} name match${S.offInfo === 1 ? '' : 'es'} with a stale client coordinate are informational → Placement › 📍 Off pad</span>` : ''}</div>`;
+        return `${flagNote}${tierPill('● P1', S.cnt.P1, IMP_TIER_COLORS.P1)} ${tierPill('● P2', S.cnt.P2, IMP_TIER_COLORS.P2)} ${tierPill('● P3', S.cnt.P3, IMP_TIER_COLORS.P3)} ${S.cnt.none ? tierPill('● untiered', S.cnt.none, IMP_TIER_COLORS.none) : ''}${(S.zero || S.envDead) ? `<span style="color:#888;font-size:10px">(${S.zero ? `${S.zero} zero production` : ''}${S.zero && S.envDead ? ' · ' : ''}${S.envDead ? `${S.envDead} dead per Enverus` : ''})</span>` : ''} <span style="color:#888;font-size:10px" title="Selected dots on the map are filled with these colours while tiers are on">= dot colours on the map</span> ${S.off ? tierPill('📍 new off pad', S.off, '#ffb347') : ''} <span style="color:#888">· <b style="color:#cfd6dc">${S.selN}</b> selected on ${S.pads} pad${S.pads === 1 ? '' : 's'}${S.flagged ? ` · <b style="color:#ffb347">${S.flagged} flagged</b>` : ''} · vs site: ${S.chg.same} same · <b style="color:${S.chg.changed ? '#ffe14d' : '#888'}">${S.chg.changed} changed</b> · ${S.chg.added} newly tiered · ${S.chg.new} new asset${S.chg.new === 1 ? '' : 's'}${S.chg.untier ? ` · <b style="color:#ff6060">${S.chg.untier} lose their tier</b>` : ''}</span>${flagList}`;
+    }
+    // v4.357: a well with ZERO production (0 oil + 0 water in the client's own
+    // numbers) or one Enverus reports inactive / TA / plugged / expired gets NO
+    // tier — the pad keeps its total and tier for its live assets. On a re-run
+    // this strips an earlier "P3 - " off the type (impTierStrip in impTierPrefix).
+    function impPriDemote(p) {
+        const c = imp.pri; p.pri.untier = '';
+        if (!p.pri.tier) return;
+        if (c.zeroUntier && !c.priCol && p.pri.blpd === 0) { p.pri.untier = 'zero'; p.pri.tier = ''; return; }
+        if (c.envUntier && p.env && p.env.found) { const b = impEnvBucket(p.env); if (b === 'inactive' || b === 'plugged') { p.pri.untier = 'env'; p.pri.tier = ''; } }
+    }
+    function impPriNotesBlocks(p, dateStr) {
+        const c = imp.pri; if (!c.on || !p.pri) return [];
+        const fmt = (n) => n == null ? '—' : Math.round(n).toLocaleString();
+        const q = p.pri;
+        const line = q.tier
+            ? `${q.tier} · ${c.priCol ? 'from the client\'s priority column' : `pad total ${fmt(q.padTotal)} BLPD across ${q.padN} asset${q.padN === 1 ? '' : 's'}${q.padWith < q.padN ? ` (${q.padWith} with numbers)` : ''}`}${q.blpd != null ? ` · this asset ${fmt(q.blpd)} BLPD` : ''}${q.padName && !/^new pad/.test(q.padName) ? ` · pad ${q.padName}` : ''}`
+            : (q.untier === 'zero' ? 'not tiered — zero production (0 BLPD in the client list)' : (q.untier === 'env' ? `not tiered — Enverus reports ${p.env && p.env.status ? p.env.status : 'inactive'}` : `not tiered — ${q.flags[0] || 'no numbers'}`));
+        return [`Priority\n${line}`, `Prioritized\n${dateStr}`];
+    }
+    function impTierPrefix(p, subtype) {
+        const base = impTierStrip(subtype);
+        if (!imp.pri.on || !p.pri || !p.pri.tier) return base;
+        return `${p.pri.tier} - ${base}`;
+    }
+    function impRenderPriUi() {
+        const el = document.getElementById('aim-imp-pri'); if (!el) return;
+        if (!imp.headers.length) { el.innerHTML = ''; return; }
+        const c = imp.pri;
+        if (c.oilCol === null && c.waterCol === null && c.blpdCol === null && c.priCol === null && !c._guessed) { Object.assign(c, impGuessPriCols(imp.headers)); c._guessed = true; }
+        const inCss = 'background:#1a1d23;border:1px solid rgba(255,179,71,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px';
+        const sel = (key, label, title) => `<label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc" title="${impEsc(title)}">${label} <select data-impri="${key}" style="max-width:150px;${inCss}"><option value="">— none —</option>${imp.headers.map(h => `<option value="${impEsc(h)}"${c[key] === h ? ' selected' : ''}>${impEsc(h)}</option>`).join('')}</select></label>`;
+        const num = (key, label, step) => `<label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc">${label} <input type="number" data-imprin="${key}" value="${c[key]}" min="0" step="${step}" style="width:64px;${inCss};text-align:right"></label>`;
+        if (c.on) impSummarizePriority();
+        const S = c.summary;
+        const summary = c.on ? impPriSummaryHtml() : '';
+        const setOpen = c.setOpen === undefined ? !c.on : !!c.setOpen;   // v4.354: settings fold away once tiers are on
+        el.innerHTML = `<button id="aim-imp-pri-hdr" style="background:none;border:none;color:${c.on ? '#ffb347' : '#7a8794'};cursor:pointer;font:inherit;font-size:11px;padding:2px 0;margin-bottom:4px;text-align:left;font-weight:${c.on ? 600 : 400}">${c.open ? '▾' : '▸'} Priority tiers — ${c.on ? 'ON' : 'off'}</button>
+            <div id="aim-imp-pri-body" style="display:${c.open ? '' : 'none'};padding:6px 8px;background:rgba(255,179,71,0.05);border:1px dashed rgba(255,179,71,0.4);border-radius:3px;font-size:11px;color:#cfd6dc">
+                <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin-bottom:6px"><input type="checkbox" data-impri-on ${c.on ? 'checked' : ''} style="accent-color:#ffb347"> <b style="color:#ffb347">Tier every asset by pad production</b> <span style="color:#888;font-size:10px">— written as a TYPE prefix ("P1 - v - pumping rod") + a Priority / Prioritized block in the notes; the name never changes, so next quarter's list updates the same assets</span></label>
+                <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:4px"><button data-impri-settings-toggle style="background:none;border:1px solid rgba(255,179,71,0.4);color:#ffb347;border-radius:3px;padding:1px 8px;cursor:pointer;font:inherit;font-size:10px">${setOpen ? '▾' : '▸'} settings — columns · thresholds · pad grouping</button><span style="color:#888;font-size:10px" title="Counts, flags and the report cover the SELECTED points (inside your boundaries); a pad's total always sums every asset on that pad.">selected points only ⓘ</span><span style="flex:1"></span>
+                    ${c.on ? `<button data-impri-rep="sheets" title="Every staged asset: tier, tier before (from the site), change, pad, pad BLPD, asset BLPD, assets on pad, flags — paste into Google Sheets" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">📤 Tier report for Sheets</button><button data-impri-rep="csv" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">⬇ CSV</button>` : ''}
+                </div>
+                <div id="aim-imp-pri-summary" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">${summary}</div>
+                <div data-impri-settings style="display:${setOpen ? '' : 'none'};margin-top:6px;padding-top:6px;border-top:1px dashed rgba(255,179,71,0.3)">
+                <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:6px">
+                    ${sel('oilCol', 'Oil', 'oil production column (summed with Water)')} ${sel('waterCol', 'Water', 'water production column (summed with Oil)')} <span style="color:#888">or</span> ${sel('blpdCol', 'BLPD', 'a single total-fluid column (used instead of Oil + Water)')} <span style="color:#888">or</span> ${sel('priCol', 'Ready-made priority', 'a column that already holds P1 / P2 / P3 — wins outright, no math')}
+                </div>
+                <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:6px">
+                    <span style="color:#888;font-size:10px">Tiers (BLPD = oil + water per pad):</span>
+                    <span style="color:#9ad">P3 &lt;</span> ${num('p1Min', '', 10)} <span style="color:#ff7b00">≤ P1 ≤</span> ${num('p1Max', '', 50)} <span style="color:#ffe14d">&lt; P2</span>
+                    <span style="color:#888;font-size:10px" title="P1 is the MIDDLE band on purpose: the biggest producers already have people on site who see big leaks; mid producers don't, so they are the priority.">ⓘ why P1 is the middle band</span>
+                </div>
+                <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:6px">
+                    <span style="color:#888;font-size:10px">Pad grouping:</span> ${num('clusterFt', 'points within', 10)} <span style="color:#888;font-size:10px">ft of each other = one pad (new points)</span> · ${num('padFt', 'within', 5)} <span style="color:#888;font-size:10px">ft of an existing pad polygon joins that pad (nested parent/child tree)</span>
+                    <button data-impri-run style="background:rgba(255,179,71,0.15);color:#ffb347;border:1px solid rgba(255,179,71,0.5);border-radius:3px;padding:2px 10px;cursor:pointer;font:inherit;font-size:10px">⟳ Recompute</button>
+                </div>
+                <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:4px;font-size:10px;color:#cfd6dc">
+                    <span style="color:#888">No tier for:</span>
+                    <label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" data-impri-zero ${c.zeroUntier ? 'checked' : ''} style="accent-color:#ffb347"> wells with ZERO production (0 oil + 0 water)</label>
+                    <label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" data-impri-envdead ${c.envUntier ? 'checked' : ''} style="accent-color:#ffb347"> wells Enverus reports inactive / TA / plugged (after a 🛢 cross-check)</label>
+                    <span style="color:#888">— the pad keeps its total and tier for its live assets; on a re-run an earlier "P3 - " is removed from the type</span>
+                </div>
+                </div>
+            </div>`;
+        const sumEl = el.querySelector('#aim-imp-pri-summary');
+        if (sumEl) sumEl.onclick = (ev) => {
+            const sa = ev.target.closest('button[data-impri-showall]');
+            if (sa) { c.showAllFlags = !c.showAllFlags; impRenderPriSummary(); return; }
+            const pr = ev.target.closest('[data-impri-pad]');
+            if (pr) impZoomToPad(pr.getAttribute('data-impri-pad'));
+        };
+        if (c.on) impRenderPriSummary();
+        const rerun = () => { impComputePriority(); impRenderPriUi(); impRenderStaged(); impSyncUi(); impMarkDirty(); impStoreMapping(imp.headers, { name: imp.mapping.name, lat: imp.mapping.lat, lng: imp.mapping.lng, type: imp.mapping.type, notesCols: impNotesCols(), pri: { on: c.on, oilCol: c.oilCol, waterCol: c.waterCol, blpdCol: c.blpdCol, priCol: c.priCol } }); };
+        el.querySelector('#aim-imp-pri-hdr').onclick = () => { c.open = !c.open; impSaveParams(); impRenderPriUi(); };
+        const stg = el.querySelector('[data-impri-settings-toggle]'); if (stg) stg.onclick = () => { c.setOpen = !setOpen; impSaveParams(); impRenderPriUi(); };
+        el.querySelector('input[data-impri-on]').onchange = function () { c.on = this.checked; rerun(); };
+        el.querySelectorAll('select[data-impri]').forEach(x => x.onchange = () => { c[x.getAttribute('data-impri')] = x.value || null; if (x.getAttribute('data-impri') === 'blpdCol' && x.value) { c.oilCol = null; c.waterCol = null; } if ((x.getAttribute('data-impri') === 'oilCol' || x.getAttribute('data-impri') === 'waterCol') && x.value) c.blpdCol = null; rerun(); });
+        el.querySelectorAll('input[data-imprin]').forEach(x => x.onchange = () => { const v = parseFloat(x.value); if (isFinite(v) && v >= 0) { c[x.getAttribute('data-imprin')] = v; impSaveParams(); rerun(); } });
+        const run = el.querySelector('button[data-impri-run]'); if (run) run.onclick = rerun;
+        const zc = el.querySelector('input[data-impri-zero]'); if (zc) zc.onchange = () => { c.zeroUntier = zc.checked; impSaveParams(); rerun(); };
+        const ec = el.querySelector('input[data-impri-envdead]'); if (ec) ec.onchange = () => { c.envUntier = ec.checked; impSaveParams(); rerun(); };
+        el.querySelectorAll('button[data-impri-rep]').forEach(b => b.onclick = () => { try { impExportTiers(b.getAttribute('data-impri-rep')); } catch (e) { console.warn(`${TAG} 📥 tier report failed:`, e); impStatus(`Tier report failed: ${impEsc(e && e.message || e)}`, '#ff6060'); } });
+    }
+    function impExportTable(rows, cols, how, fileBase, label) {
+        const site = getCurrentSiteName() || `Site ${genState.siteID}`;
+        if (how === 'csv') {
+            const q = (v) => { const t = String(v == null ? '' : v); return /[",\n\r]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
+            const csv = [cols.map(c => q(c.label)).join(',')].concat(rows.map(r => cols.map(c => q(c.val(r))).join(','))).join('\r\n');
+            const blob = new Blob(['﻿' + csv], { type: 'text/csv' });
+            const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `${fileBase}-${String(site).replace(/[^A-Za-z0-9_-]+/g, '_')}-${new Date().toISOString().slice(0, 10)}.csv`;
+            document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+            impStatus(`⬇ ${rows.length} ${label} row(s) downloaded as CSV`);
+            return;
+        }
+        const headHtml = `<tr>${cols.map(c => `<th style="background:#1f2228;color:#7adfe6;border:1px solid #cccccc;padding:2px 7px;text-align:left">${impEsc(c.label)}</th>`).join('')}</tr>`;
+        const bodyHtml = rows.map(r => `<tr>${cols.map(c => `<td style="border:1px solid #cccccc;padding:2px 7px">${impEsc(c.val(r))}</td>`).join('')}</tr>`).join('');
+        const html = `<table style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:13px">${headHtml}${bodyHtml}</table>`;
+        const text = [cols.map(c => c.label).join('\t')].concat(rows.map(r => cols.map(c => String(c.val(r)).replace(/[\t\n\r]/g, ' ')).join('\t'))).join('\n');
+        writeSheetsClipboard(html, text, `📤 ${rows.length} ${label} row(s) copied — paste into Sheets`);
+        impStatus(`📤 ${rows.length} ${label} row(s) on the clipboard (${site}) — paste into Google Sheets / Excel`);
+    }
+    function impExportTiers(how) {
+        const live = imp.points.filter(p => !p.done && p.sel && p.pri);
+        if (!live.length) { impStatus('No selected tiered points to export — check the boundaries', '#ffb347'); return; }
+        const rows = live.slice().sort((a, b) => (a.pri.padName || '').localeCompare(b.pri.padName || '') || a.name.localeCompare(b.name));
+        const change = (p) => !p.dup ? 'new asset' : (!p.pri.tier ? (p.pri.before ? `loses ${p.pri.before}` : 'untiered') : (p.pri.before === p.pri.tier ? 'same' : (p.pri.before ? `${p.pri.before} → ${p.pri.tier}` : `+${p.pri.tier}`)));
+        const fmt = (n) => n == null ? '' : Math.round(n);
+        const cols = [
+            { label: 'Name', val: p => p.name }, { label: 'Tier', val: p => p.pri.tier || '' }, { label: 'Tier before', val: p => p.pri.before || '' }, { label: 'Change', val: change },
+            { label: 'Pad', val: p => p.pri.padName || '' }, { label: 'Pad BLPD', val: p => fmt(p.pri.padTotal) }, { label: 'Asset BLPD', val: p => fmt(p.pri.blpd) }, { label: 'Assets on pad', val: p => p.pri.padN },
+            { label: 'Type', val: p => p.typeRaw || '' }, { label: 'Off pad (ft)', val: p => p.pri.off || '' }, { label: 'Flags', val: p => (p.pri.flags || []).join(' · ') }, { label: 'Latitude', val: p => p.lat.toFixed(6) }, { label: 'Longitude', val: p => p.lng.toFixed(6) }, { label: 'File', val: () => imp.fileName || '' },
+        ];
+        impExportTable(rows, cols, how, 'priority-tiers', 'tier');
     }
     function impLoadTypeMap() { try { imp.typeMap = JSON.parse(GM_getValue(IMP_TYPEMAP_KEY, '{}')) || {}; } catch (e) { imp.typeMap = {}; } }
     function impSaveTypeMap() { try { GM_setValue(IMP_TYPEMAP_KEY, JSON.stringify(imp.typeMap)); } catch (e) {} }
@@ -20997,6 +23510,9 @@
             const o = { lat: String(lat), lng: String(lng) };
             const nmEl = pm.querySelector(':scope > name');
             o.name = nmEl ? String(nmEl.textContent || '').trim() : '';
+            // v4.330: a placemark <description> becomes a "description" column (auto-maps to Notes)
+            const dsEl = pm.querySelector(':scope > description');
+            if (dsEl) { const dv = String(dsEl.textContent || '').trim(); if (dv) { o.description = dv; headerSet.add('description'); } }
             pm.querySelectorAll('ExtendedData Data').forEach(d => {
                 const k = d.getAttribute('name'); if (!k) return;
                 const v = d.querySelector('value');
@@ -21025,8 +23541,253 @@
             lat: find(['latitude', 'lat', 'y'], /lat/),
             lng: find(['longitude', 'lon', 'lng', 'long', 'x'], /lon|lng/),
             name: find(['name', 'pad_name', 'well name', 'asset name', 'asset', 'title', 'label'], /name/),
-            type: find(['type', 'pad_type', 'category', 'profiletype', 'v or h', 'designation', 'subtype', 'class'], /type/),
+            type: find(['type', 'pad_type', 'asset_type', 'asset type', 'well_type', 'well type', 'production_method_name', 'production method', 'production_method', 'method', 'category', 'profiletype', 'v or h', 'designation', 'subtype', 'class', 'equipment', 'kind'], /type|method|categ|class|equip/),
+            notes: find(['notes', 'note', 'description', 'comment', 'comments', 'remarks'], /note|desc|comment|remark/),   // v4.330 → asset notes (v4.345: seeds the Notes checklist)
         };
+    }
+    // v4.345: Notes = any number of extra columns, each with a cleaned label, in
+    // the user's order. Composed at commit as "Label\nvalue" blocks separated
+    // by a blank line: first block = the client's ORIGINAL name verbatim, last
+    // = who / when / which file. Column choice + labels remembered per header
+    // signature with the rest of the mapping.
+    const IMP_AUTHOR_KEY = 'aim_imp_author';
+    function impAuthor() { try { return String(GM_getValue(IMP_AUTHOR_KEY, '') || '').trim(); } catch (e) { return ''; } }
+    function impSetAuthor() {
+        const cur = impAuthor();
+        const v = prompt('Your name for the "Imported by" line in every asset\'s notes:', cur || '');
+        if (v === null) return;
+        try { GM_setValue(IMP_AUTHOR_KEY, String(v).trim()); } catch (e) {}
+        impRenderMappingUi();
+    }
+    function impCleanLabel(col) {
+        let t = String(col || '').replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[_\.\-]+/g, ' ').replace(/\s+/g, ' ').trim();
+        return t.split(' ').map(w => w.length ? w[0].toUpperCase() + w.slice(1).toLowerCase() : w).join(' ');
+    }
+    function impNotesCols() {
+        const m = imp.mapping; if (!m) return [];
+        if (!Array.isArray(m.notesCols)) m.notesCols = m.notes ? [{ col: m.notes, label: impCleanLabel(m.notes) }] : [];
+        m.notesCols = m.notesCols.filter(c => c && imp.headers.includes(c.col));
+        return m.notesCols;
+    }
+    const IMP_STAMP_RE = /^Imported by (.+?) on (\d{4}-\d{2}-\d{2} \d{2}:\d{2}) from (.+?)(?: · (created|updated) by import)?\s*$/m;
+    function impComposeNotes(p, when, how) {
+        const r = imp.rows[p.i] || {};
+        const parts = [`Original name\n${p.rawName || p.name}`].concat(p.src === 'enverus' ? [`Source\nAdded from Enverus — not in the client's list (${imp.fileName || 'file'})`] : []).concat(impPriNotesBlocks(p, String(when).slice(0, 10))).concat(impEnvNotesBlock(p));
+        impNotesCols().forEach(c => { const v = String(r[c.col] == null ? '' : r[c.col]).trim(); if (v) parts.push(`${c.label || impCleanLabel(c.col)}\n${v}`); });
+        parts.push(`Imported by ${impAuthor() || 'AIM user'} on ${when} from ${imp.fileName || 'file'} · ${how === 'update' ? 'updated' : 'created'} by import`);
+        return parts.join('\n\n').slice(0, 2000);
+    }
+    // ---- v4.365 UNDO BY STAMP — reads the SITE, not the session. Groups every
+    // asset whose notes end in our stamp line by (file · time · author); a
+    // group's "created" assets can be deleted as a batch (confirm + Delete
+    // Guard). "updated" assets are listed but not touched here — their previous
+    // type + notes live in the session undo record / the backup manifest. ----
+    function impScanImports() {
+        const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+        const groups = new Map();
+        ents.filter(e => e && e.type === 3 && typeof e.description === 'string').forEach(e => {
+            const m = e.description.match(IMP_STAMP_RE); if (!m) return;
+            const key = `${m[3]}|${m[2]}|${m[1]}`;
+            if (!groups.has(key)) groups.set(key, { key, file: m[3], when: m[2], who: m[1], created: [], updated: [] });
+            (m[4] === 'updated' ? groups.get(key).updated : groups.get(key).created).push(e);
+        });
+        return [...groups.values()].sort((a, b) => b.when.localeCompare(a.when));
+    }
+    // ---- 📊 ANALYZE — what would change if this list were applied, before anything is written.
+    // Compares the loaded list (selected points or the whole file) with the site: NEW (not on the
+    // site), GONE (on the site, inside the area, not in the list), MOVED (client coordinate more than
+    // N ft from where the asset sits), TIER / TYPE changes (what the update would rewrite), and
+    // PRODUCTION changes (this asset's BLPD vs the number our last import wrote into its notes). ----
+    function impAnalyze() {
+        const A = imp.ana;
+        const live = imp.points.filter(p => !p.done);
+        const pts = A.scope === 'all' ? live : live.filter(p => p.sel);
+        if (!imp.assetIndex) impBuildAssetIndex();
+        const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+        const byId = new Map(ents.map(e => [e.id, e]));
+        const subCounts = impSiteSubtypes(); const siteSubs = [...subCounts.keys()];
+        const defSub = impApplyShield([...subCounts.entries()].sort((a, b) => b[1] - a[1]).map(x => x[0])[0] || 'well-cluster');
+        const baseSub = (p) => { if (!imp.mapping || !imp.mapping.type) return p.dup && p.dupSubtype ? impApplyShield(impTierStrip(p.dupSubtype)) : (impApplyShield((imp.typeMap['__all__'] || '').trim() || defSub)); return impResolveSubtype(p.typeRaw || '', siteSubs).value || ''; };
+        const R = { new: [], gone: [], moved: [], tier: [], type: [], prod: [], same: 0, n: pts.length, at: impNowStamp() };
+        const inFile = new Set(imp.points.map(p => (genCleanName(p.name) || '').toLowerCase()).filter(Boolean));
+        pts.forEach(p => {
+            if (!p.dup) { R.new.push({ p, name: p.name, detail: `${p.typeRaw || ''}${p.pri && p.pri.tier ? ` · ${p.pri.tier}` : ''}`, lat: p.lat, lng: p.lng }); return; }
+            let changed = false;
+            const a = (imp.assetIndex || []).find(x => x.id === p.dupId);
+            if (a) {
+                const dm = pointToPolygonMeters(p.lat, p.lng, a.ring);
+                const ft = isFinite(dm) ? Math.round(dm / GEN_FT_TO_M) : null;
+                if (ft != null && ft > A.movedFt) { R.moved.push({ p, name: p.name, detail: `client coordinate ${ft.toLocaleString()} ft from where "${a.name}" sits`, before: `${a.centroid.lat.toFixed(6)}, ${a.centroid.lng.toFixed(6)}`, after: `${p.lat.toFixed(6)}, ${p.lng.toFixed(6)}`, dist: ft, lat: p.lat, lng: p.lng, lat2: a.centroid.lat, lng2: a.centroid.lng }); changed = true; }
+                const oldBase = impTierStrip(a.subtype || ''), newBase = baseSub(p);
+                if (newBase && oldBase.toLowerCase() !== newBase.toLowerCase()) { R.type.push({ p, name: p.name, detail: `type "${oldBase || '—'}" → "${newBase}"`, before: oldBase, after: newBase, lat: p.lat, lng: p.lng }); changed = true; }
+                if (imp.pri.on && p.pri) { const was = impTierOf(a.subtype || ''), now = p.pri.tier || ''; if (was !== now) { R.tier.push({ p, name: p.name, detail: `${was || 'no tier'} → ${now || 'no tier'}${p.pri.padTotal != null ? ` · pad ${Math.round(p.pri.padTotal).toLocaleString()} BLPD` : ''}`, before: was || 'none', after: now || 'none', lat: p.lat, lng: p.lng }); changed = true; } }
+                const e = byId.get(a.id);
+                const m = e && typeof e.description === 'string' ? e.description.match(/this asset ([\d,]+) BLPD/) : null;
+                const prev = m ? parseFloat(m[1].replace(/,/g, '')) : null, now = (p.pri && p.pri.blpd != null) ? p.pri.blpd : impPriBlpdSafe(p);
+                if (prev != null && now != null && Math.abs(now - prev) >= Math.max(5, 0.2 * Math.max(prev, 1))) { R.prod.push({ p, name: p.name, detail: `${Math.round(prev).toLocaleString()} → ${Math.round(now).toLocaleString()} BLPD (${now > prev ? '+' : ''}${Math.round(100 * (now - prev) / Math.max(prev, 1))}%)`, before: Math.round(prev), after: Math.round(now), lat: p.lat, lng: p.lng }); changed = true; }
+            }
+            if (!changed) R.same++;
+        });
+        // gone: site assets inside the area whose name the list does not carry (any row)
+        (imp.assetIndex || []).forEach(a => {
+            if (!a.clean || inFile.has(a.clean)) return;
+            if (imp.shapes.length && !imp.shapes.some(sh => impShapeContains(sh, a.centroid.lat, a.centroid.lng))) return;
+            if (!imp.shapes.length && A.scope !== 'all') return;             // no boundary + selected scope → no area to judge "gone" in
+            R.gone.push({ a, name: a.name, detail: `on the site (${impTierStrip(a.subtype) || 'no type'}${impTierOf(a.subtype) ? ` · ${impTierOf(a.subtype)}` : ''}) but not in the list`, lat: a.centroid.lat, lng: a.centroid.lng });
+        });
+        ['new', 'gone', 'moved', 'tier', 'type', 'prod'].forEach(k => R[k].sort((x, y) => (y.dist || 0) - (x.dist || 0) || String(x.name).localeCompare(String(y.name))));
+        A.result = R; A.tab = A.tab && R[A.tab] && R[A.tab].length ? A.tab : (['moved', 'gone', 'tier', 'type', 'prod', 'new'].find(k => R[k].length) || 'new');
+        impRenderAnalyzeUi();
+        impStatus(`📊 ${R.n} in scope vs the site: <b>${R.new.length}</b> new · <b style="color:#ff8a80">${R.gone.length}</b> gone · <b style="color:#ffb347">${R.moved.length}</b> moved &gt; ${A.movedFt} ft · <b style="color:#ffe14d">${R.tier.length}</b> tier · ${R.type.length} type · ${R.prod.length} production · ${R.same} unchanged — nothing written`);
+    }
+    function impRenderAnalyzeUi() {
+        const el = document.getElementById('aim-imp-analyze'); if (!el) return;
+        const A = imp.ana, R = A.result;
+        if (!imp.points.length) { el.innerHTML = ''; return; }
+        const inCss = 'background:#1a1d23;border:1px solid rgba(122,223,230,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px';
+        const cats = [
+            { id: 'new', label: 'New', color: '#5fff5f', hint: 'in the list, not on the site — Create makes them' },
+            { id: 'gone', label: 'Gone', color: '#ff8a80', hint: 'on the site inside the area, not in the list — nothing is deleted; decide with the client' },
+            { id: 'moved', label: `Moved > ${A.movedFt} ft`, color: '#ffb347', hint: 'the client coordinate is far from where the asset sits — the update does not move it' },
+            { id: 'tier', label: 'Tier change', color: '#ffe14d', hint: 'P prefix the update would rewrite' },
+            { id: 'type', label: 'Type change', color: '#c39bd3', hint: 'subtype the update would rewrite' },
+            { id: 'prod', label: 'Production change', color: '#7adfe6', hint: 'this asset\'s BLPD vs what our last import wrote in its notes (≥ 20 %)' },
+        ];
+        const pill = (c) => { const n = R ? R[c.id].length : 0; const on = R && A.tab === c.id; return `<button data-impana-tab="${c.id}" title="${impEsc(c.hint)}" ${R ? '' : 'disabled'} style="background:${on ? c.color + '33' : 'transparent'};border:1px solid ${c.color}${on ? 'cc' : '55'};color:${n ? c.color : '#666'};border-radius:10px;padding:1px 8px;cursor:pointer;font:inherit;font-size:10px;font-weight:${on ? 700 : 400}">${c.label} ${n}</button>`; };
+        const rows = R ? R[A.tab] : [];
+        const cat = cats.find(c => c.id === A.tab) || cats[0];
+        const row = (x, i) => `<div data-impana-row="${i}" style="display:flex;align-items:center;gap:6px;padding:1px 4px;border-bottom:1px solid rgba(255,255,255,0.05);font-size:10.5px;color:#cfd6dc;cursor:pointer" onmouseover="this.style.background='rgba(255,255,255,0.05)'" onmouseout="this.style.background=''" title="click = zoom"><span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${cat.color};flex:none"></span><b style="flex:none;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${impEsc(x.name)}</b><span style="color:#8a949e;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${impEsc(x.detail)}</span></div>`;
+        el.innerHTML = `<div style="padding:6px 8px;background:rgba(122,223,230,0.04);border:1px dashed rgba(122,223,230,0.3);border-radius:3px;margin-bottom:6px">
+            <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:4px;font-size:11px">
+                <b style="color:#7adfe6">📊 Analyze — what this list would change</b><span style="color:#888;font-size:10px">read-only; run it on a new quarterly list before Create</span>
+                <label style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:#cfd6dc">moved over <input type="number" data-impana-ft value="${A.movedFt}" min="0" step="50" style="width:56px;${inCss};text-align:right"> ft</label>
+                <select data-impana-scope style="${inCss}"><option value="selected"${A.scope === 'selected' ? ' selected' : ''}>selected points</option><option value="all"${A.scope === 'all' ? ' selected' : ''}>whole file</option></select>
+                <button data-impana-run style="background:rgba(122,223,230,0.15);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:3px 12px;cursor:pointer;font:inherit;font-size:11px;font-weight:600">⟳ Analyze</button>
+                <span style="flex:1"></span>
+                ${R ? `<span style="color:#888;font-size:10px">${impEsc(R.at)} · ${R.same} unchanged</span><button data-impana-rep="sheets" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">📤 Sheets</button><button data-impana-rep="csv" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">⬇ CSV</button>` : ''}
+            </div>
+            <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:4px">${cats.map(pill).join('')}</div>
+            ${R ? `<div style="font-size:10px;color:#888;margin-bottom:3px">${impEsc(cat.hint)}</div><div style="max-height:200px;overflow:auto;border:1px solid rgba(255,255,255,0.06);border-radius:3px;background:rgba(0,0,0,0.15)">${rows.slice(0, 600).map(row).join('') || '<div style="padding:6px;color:#5fff5f;font-size:10px">none</div>'}${rows.length > 600 ? `<div style="padding:4px;color:#888;font-size:10px">first 600 of ${rows.length} — export for the full list</div>` : ''}</div>` : ''}
+        </div>`;
+        el.querySelector('[data-impana-ft]').onchange = function () { const v = parseFloat(this.value); if (isFinite(v) && v >= 0) { A.movedFt = v; impSaveParams(); if (R) impAnalyze(); else impRenderAnalyzeUi(); } };
+        el.querySelector('[data-impana-scope]').onchange = function () { A.scope = this.value === 'all' ? 'all' : 'selected'; if (R) impAnalyze(); };
+        el.querySelector('[data-impana-run]').onclick = () => { try { impAnalyze(); } catch (e) { console.warn(`${TAG} 📊`, e); impStatus(`📊 Analyze failed: ${impEsc(e && e.message || e)}`, '#ff6060'); } };
+        el.querySelectorAll('[data-impana-tab]').forEach(b => b.onclick = () => { A.tab = b.getAttribute('data-impana-tab'); impRenderAnalyzeUi(); });
+        el.querySelectorAll('[data-impana-rep]').forEach(b => b.onclick = () => { try { impExportAnalyze(b.getAttribute('data-impana-rep')); } catch (e) { impStatus(`Export failed: ${impEsc(e && e.message || e)}`, '#ff6060'); } });
+        el.querySelectorAll('[data-impana-row]').forEach(r => r.onclick = () => { const x = rows[Number(r.getAttribute('data-impana-row'))]; if (!x) return; const pts = [{ lat: x.lat, lng: x.lng, name: x.name }]; if (x.lat2 != null) pts.push({ lat: x.lat2, lng: x.lng2, name: `${x.name} (on the site)` }); impZoomToPoints(pts, x.name); impStatus(`🔎 ${impEsc(x.name)} — ${impEsc(x.detail)}`); });
+    }
+    function impExportAnalyze(how) {
+        const R = imp.ana.result; if (!R) { impStatus('Run ⟳ Analyze first', '#ffb347'); return; }
+        const label = { new: 'New', gone: 'Gone from the list', moved: 'Moved', tier: 'Tier change', type: 'Type change', prod: 'Production change' };
+        const rows = []; ['moved', 'gone', 'tier', 'type', 'prod', 'new'].forEach(k => R[k].forEach(x => rows.push(Object.assign({ change: label[k] }, x))));
+        if (!rows.length) { impStatus('Nothing changed — nothing to export', '#5fff5f'); return; }
+        const cols = [
+            { label: 'Change', val: x => x.change }, { label: 'Asset', val: x => x.name }, { label: 'Detail', val: x => x.detail }, { label: 'Before', val: x => x.before == null ? '' : x.before }, { label: 'After', val: x => x.after == null ? '' : x.after },
+            { label: 'Distance (ft)', val: x => x.dist == null ? '' : x.dist }, { label: 'Latitude', val: x => Number(x.lat).toFixed(6) }, { label: 'Longitude', val: x => Number(x.lng).toFixed(6) }, { label: 'File', val: () => imp.fileName || '' }, { label: 'Analyzed', val: () => R.at },
+        ];
+        impExportTable(rows, cols, how, 'list-vs-site', 'change');
+    }
+    function impRenderImportsUi() {
+        const el = document.getElementById('aim-imp-imports'); if (!el) return;
+        let groups = []; try { groups = impScanImports(); } catch (e) { console.warn(`${TAG} 📥 import scan failed:`, e); }
+        if (!groups.length) { el.innerHTML = `<div style="font-size:10px;color:#888;padding:2px 0">No imports found on this site (assets this tool writes carry an "Imported by …" line in their notes).</div>`; return; }
+        el.innerHTML = `<div style="padding:6px 8px;background:rgba(255,179,71,0.05);border:1px dashed rgba(255,179,71,0.4);border-radius:3px;font-size:11px;color:#cfd6dc">
+            <div style="display:flex;gap:8px;align-items:center;margin-bottom:4px"><b style="color:#ffb347">🕘 Imports on this site</b><span style="color:#888;font-size:10px">read from the assets themselves — works after any reload, from any machine</span><span style="flex:1"></span><button data-impimp-refresh style="background:none;border:1px solid rgba(255,255,255,0.15);color:#9ad;border-radius:3px;padding:1px 8px;cursor:pointer;font:inherit;font-size:10px">↻ refresh</button></div>
+            ${groups.slice(0, 12).map(g => `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:3px 0;border-top:1px solid rgba(255,255,255,0.06);font-size:10.5px">
+                <span style="color:#cfd6dc"><b>${impEsc(g.when)}</b> · ${impEsc(g.file)} · ${impEsc(g.who)}</span>
+                <span style="color:#888">${g.created.length} created${g.updated.length ? ` · ${g.updated.length} updated` : ''}</span>
+                <span style="flex:1"></span>
+                ${g.created.length ? `<button data-impimp-show="${impEsc(g.key)}" style="background:none;border:1px solid rgba(122,223,230,0.4);color:#7adfe6;border-radius:3px;padding:1px 8px;cursor:pointer;font:inherit;font-size:10px">🔎 show</button><button data-impimp-del="${impEsc(g.key)}" style="background:rgba(255,85,85,0.12);border:1px solid rgba(255,85,85,0.5);color:#ff8a80;border-radius:3px;padding:1px 8px;cursor:pointer;font:inherit;font-size:10px;font-weight:600">🗑 delete the ${g.created.length} created</button>` : '<span style="color:#666;font-size:10px">updates only — revert via the session undo / backup file</span>'}
+            </div>`).join('')}${groups.length > 12 ? `<div style="color:#888;font-size:10px">… +${groups.length - 12} older imports</div>` : ''}
+        </div>`;
+        el.querySelector('[data-impimp-refresh]').onclick = async () => { try { await fetchMapObjects(genState.siteID, true); } catch (e) {} impRenderImportsUi(); };
+        el.querySelectorAll('[data-impimp-show]').forEach(b => b.onclick = () => {
+            const g = impScanImports().find(x => x.key === b.getAttribute('data-impimp-show')); if (!g) return;
+            const pts = g.created.map(e => { const c = ringCentroid(entityCoords(e) || []); return c ? { lat: c.lat, lng: c.lng, name: e.name || '' } : null; }).filter(Boolean);
+            if (pts.length) impZoomToPoints(pts, g.file);
+            impStatus(`🔎 ${g.created.length} asset(s) created by the ${impEsc(g.when)} import: ${impEsc(g.created.slice(0, 8).map(e => e.name).join(' · '))}${g.created.length > 8 ? ' …' : ''}`);
+        });
+        el.querySelectorAll('[data-impimp-del]').forEach(b => b.onclick = () => { impDeleteImportGroup(b.getAttribute('data-impimp-del')).catch(e => { console.warn(`${TAG} 📥 import delete failed:`, e); impStatus(`Delete failed: ${impEsc(e && e.message || e)}`, '#ff6060'); }); });
+    }
+    async function impDeleteImportGroup(key) {
+        if (liteBlockedWrite('delete imported assets')) return;
+        const sid = genState.siteID;
+        try { await fetchMapObjects(sid, true); } catch (e) {}
+        const g = impScanImports().find(x => x.key === key);
+        if (!g || !g.created.length) { impStatus('That import has no created assets left on the site', '#ffb347'); impRenderImportsUi(); return; }
+        const csrf = getCsrfToken();
+        if (!csrf) { impStatus('No CSRF token — make one native save anywhere in Percepto first, then retry', '#ff6060'); return; }
+        const names = g.created.map(e => e.name);
+        if (!confirm(`Delete the ${g.created.length} asset(s) CREATED by the import on ${g.when} from ${g.file}?\n\n${names.slice(0, 12).join('\n')}${names.length > 12 ? `\n… +${names.length - 12} more` : ''}\n\nUpdated assets are not touched. Each delete is banked by Delete Guard when installed.`)) return;
+        try { downloadJSONFile(`asset-import-undo-${sid}-${Date.now()}.json`, JSON.stringify({ site: sid, import: { file: g.file, when: g.when, who: g.who }, deleted: g.created }, null, 1)); } catch (e) {}
+        let ok = 0, fail = 0;
+        const dead = new Set();
+        for (let i = 0; i < g.created.length; i++) {
+            const e = g.created[i];
+            impStatus(`deleting ${i + 1}/${g.created.length} — "${impEsc(e.name)}"…`);
+            try {
+                const r = await fetch(`/map_objects/${encodeURIComponent(e.id)}/`, { method: 'DELETE', credentials: 'same-origin', headers: { 'X-CSRFToken': csrf, 'Accept': 'application/json, text/plain, */*' } });
+                if (r.ok || r.status === 404) { ok++; dead.add(e.id); }
+                else { fail++; console.warn(`${TAG} 📥 undo-by-stamp #${e.id}: server ${r.status}${r.status === 409 ? ' (Delete Guard blocked — its pre-delete backup failed)' : ''}`); if (r.status === 403) { impStatus(`ABORTED — server 403 at ${i + 1}/${g.created.length}`, '#ff6060'); break; } }
+            } catch (err) { fail++; console.warn(`${TAG} 📥 undo-by-stamp #${e.id}:`, err.message); }
+            await sleep(DELETE_GAP_MS);
+        }
+        imp.lastCreated = imp.lastCreated.filter(id => !dead.has(id));
+        try { await fetchMapObjects(sid, true); } catch (e) {}
+        imp._rootCache = null; impBuildAssetIndex(); impComputeDups(); impRefreshAfterSelChange();
+        try { impMarkDirty(); } catch (e) {}
+        impRenderImportsUi();
+        impStatus(`🗑 ${ok} deleted${fail ? `, <span style="color:#ff6060">${fail} failed</span>` : ''} — undo file downloaded (the deleted assets' full records)`, fail ? '#ffb347' : '#5fff5f');
+        showToast(fail ? `Undo: ${ok} deleted, ${fail} failed` : `✓ ${ok} imported asset(s) deleted`, fail ? 'rgba(255,96,96,0.55)' : undefined);
+    }
+    function impNowStamp() { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; }
+    function impRenderNotesCols(host) {
+        const el = host.querySelector('#aim-imp-notescols'); if (!el) return;
+        const m = imp.mapping || {};
+        const cols = impNotesCols();
+        const fixed = new Set([m.name, m.lat, m.lng].filter(Boolean));
+        const checked = cols.map(c => c.col);
+        const rest = imp.headers.filter(h => !fixed.has(h) && !checked.includes(h));
+        const sample = imp.rows[0] || {};
+        const inCss = 'background:#1a1d23;border:1px solid rgba(122,223,230,0.45);color:#fff;padding:1px 4px;border-radius:3px;font:inherit;font-size:10px';
+        const row = (h, on, idx) => `<div data-impnrow="${impEsc(h)}" style="display:flex;gap:6px;align-items:center;padding:1px 0;font-size:11px;color:${on ? '#cfd6dc' : '#8a949e'}">
+            <input type="checkbox" data-impncol="${impEsc(h)}" ${on ? 'checked' : ''} style="accent-color:#7adfe6">
+            <span style="min-width:150px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${impEsc(h)}">${impEsc(h)}</span>
+            ${on ? `<span style="color:#888">as</span><input type="text" data-impnlabel="${impEsc(h)}" value="${impEsc((cols[idx] && cols[idx].label) || impCleanLabel(h))}" style="${inCss};width:140px" title="Label written above the value in the notes">
+            <button data-impnup="${impEsc(h)}" title="move up" style="background:none;border:1px solid rgba(255,255,255,0.15);color:#9ad;border-radius:3px;padding:0 4px;cursor:pointer;font:inherit;font-size:10px">▲</button><button data-impndn="${impEsc(h)}" title="move down" style="background:none;border:1px solid rgba(255,255,255,0.15);color:#9ad;border-radius:3px;padding:0 4px;cursor:pointer;font:inherit;font-size:10px">▼</button>` : ''}
+            <span style="color:#666;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0" title="sample value">${impEsc(String(sample[h] == null ? '' : sample[h]).slice(0, 40))}</span>
+        </div>`;
+        const first = imp.points.find(p => !p.done);
+        const preview = first ? impComposeNotes(first, impNowStamp(), 'create') : '';
+        el.innerHTML = `<div style="margin-top:8px;padding:6px 8px;background:rgba(122,223,230,0.04);border:1px dashed rgba(122,223,230,0.3);border-radius:3px">
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:4px;font-size:11px">
+                <b style="color:#7adfe6">Notes</b><span style="color:#888;font-size:10px">tick every column that should go into each asset's notes · label above, value below, blank line between · the client's original name is always first</span>
+                <span style="flex:1"></span>
+                <button data-impnall="1" style="background:none;border:1px solid rgba(255,255,255,0.15);color:#9ad;border-radius:3px;padding:1px 6px;cursor:pointer;font:inherit;font-size:10px">all</button>
+                <button data-impnnone="1" style="background:none;border:1px solid rgba(255,255,255,0.15);color:#9ad;border-radius:3px;padding:1px 6px;cursor:pointer;font:inherit;font-size:10px">none</button>
+            </div>
+            <div style="max-height:200px;overflow:auto;border:1px solid rgba(255,255,255,0.06);border-radius:3px;padding:2px 6px;background:rgba(0,0,0,0.12)">${checked.map((h, i) => row(h, true, i)).join('')}${rest.map(h => row(h, false)).join('')}</div>
+            <div style="margin-top:6px;font-size:10px;color:#888">Stamp: <b style="color:#cfd6dc">Imported by ${impEsc(impAuthor() || 'AIM user')}</b> on &lt;date time&gt; from ${impEsc(imp.fileName || 'file')} <a href="#" data-impnauthor="1" style="color:#7adfe6;margin-left:4px">${impAuthor() ? 'change name' : 'set your name'}</a></div>
+            ${preview ? `<details style="margin-top:4px"><summary style="cursor:pointer;color:#9ad;font-size:10px">preview — first point (${preview.length} / 2000 chars)</summary><pre style="margin:4px 0 0;padding:6px 8px;background:#1a1d23;border-radius:3px;font:inherit;font-size:10px;color:#cfd6dc;white-space:pre-wrap;max-height:220px;overflow:auto">${impEsc(preview)}</pre></details>` : ''}
+        </div>`;
+        const save = () => { impStoreMapping(imp.headers, { name: m.name, lat: m.lat, lng: m.lng, type: m.type, notesCols: impNotesCols() }); impRenderNotesCols(host); };
+        el.querySelectorAll('input[data-impncol]').forEach(cb => cb.onchange = () => {
+            const h = cb.getAttribute('data-impncol'); const cur = impNotesCols();
+            if (cb.checked) { if (!cur.some(c => c.col === h)) cur.push({ col: h, label: impCleanLabel(h) }); }
+            else m.notesCols = cur.filter(c => c.col !== h);
+            save();
+        });
+        el.querySelectorAll('input[data-impnlabel]').forEach(inp => inp.onchange = () => {
+            const h = inp.getAttribute('data-impnlabel'); const c = impNotesCols().find(x => x.col === h);
+            if (c) c.label = inp.value.trim() || impCleanLabel(h);
+            save();
+        });
+        const move = (h, d) => { const cur = impNotesCols(); const i = cur.findIndex(c => c.col === h); const j = i + d; if (i < 0 || j < 0 || j >= cur.length) return; const t = cur[i]; cur[i] = cur[j]; cur[j] = t; save(); };
+        el.querySelectorAll('button[data-impnup]').forEach(b => b.onclick = () => move(b.getAttribute('data-impnup'), -1));
+        el.querySelectorAll('button[data-impndn]').forEach(b => b.onclick = () => move(b.getAttribute('data-impndn'), 1));
+        const all = el.querySelector('button[data-impnall]'); if (all) all.onclick = () => { m.notesCols = imp.headers.filter(h => !fixed.has(h)).map(h => (impNotesCols().find(c => c.col === h)) || { col: h, label: impCleanLabel(h) }); save(); };
+        const none = el.querySelector('button[data-impnnone]'); if (none) none.onclick = () => { m.notesCols = []; save(); };
+        const au = el.querySelector('a[data-impnauthor]'); if (au) au.onclick = (ev) => { ev.preventDefault(); impSetAuthor(); };
     }
     function impStoredMapping(headers) {
         try {
@@ -21061,15 +23822,26 @@
                 imp.fileName = file.name;
                 imp.headers = parsed.headers;
                 imp.rows = parsed.rows;
+                imp.lastSavedAt = null;
+                imp.pri._guessed = false; imp.pri.summary = null; imp._secAdvanced = false;
+                imp.env._guessed = false; imp.env.summary = null; imp.env.checkedAt = null;
+                try { impRenderResumeUi(); } catch (e) {}
                 imp.siteID = genState.siteID;
-                imp.points = []; imp.shapes = []; imp.assetSel.clear(); imp.invalid = 0;
+                imp.points = []; imp.assetSel.clear(); imp.invalid = 0;   // v4.345: boundaries (imp.shapes) survive a data load — fence first, then load
                 imp.mapping = impStoredMapping(parsed.headers) || (isKml
                     ? { name: 'name', lat: 'lat', lng: 'lng', type: impGuessMapping(parsed.headers).type }
                     : impGuessMapping(parsed.headers));
-                impClearLayers(); impClearShapeLayers(); impClearAssetLayers();
+                impClearLayers(); impClearAssetLayers();
+                // v4.331: coordinates resolved → stage straight away (mapping row collapses to one line, "edit" reopens it)
+                const auto = !!(imp.mapping && imp.mapping.lat && imp.mapping.lng);
+                imp.mapOpen = !auto;
                 impRenderMappingUi();
-                impStatus(`Loaded <b>${impEsc(file.name)}</b> — ${imp.rows.length} row(s). Confirm the column mapping, then ✓ Apply.`
-                    + (kmlShapes.length ? ` <span style="color:#ffb347">(file also carries ${kmlShapes.length} polygon(s) — load it again via ⬆ Shape to use them as the access shape)</span>` : ''));
+                if (auto) {
+                    impBuildPoints();
+                    if (kmlShapes.length) impStatus(`${document.getElementById('aim-imp-result') ? document.getElementById('aim-imp-result').innerHTML : ''} <span style="color:#ffb347">(file also carries ${kmlShapes.length} polygon(s) — load it again via ⬆ Shape to use them as the access shape)</span>`);
+                } else {
+                    impStatus(`Loaded <b>${impEsc(file.name)}</b> — ${imp.rows.length} row(s). Pick the Latitude / Longitude columns, then ✓ Apply.`, '#ffb347');
+                }
                 impSyncUi();
             } catch (e) {
                 console.warn(`${TAG} 📥 file parse:`, e);
@@ -21085,24 +23857,35 @@
         if (!m || !m.lat || !m.lng) { impStatus('Pick the Latitude and Longitude columns first', '#ff6060'); return; }
         // a type column that is entirely empty is treated as "no type column"
         if (m.type && !imp.rows.some(r => (r[m.type] || '').trim() !== '')) m.type = null;
-        imp.points = []; imp.invalid = 0;
+        imp.points = []; imp.invalid = 0; imp.invalidRows = [];
         imp.rows.forEach((r, i) => {
             const lat = parseFloat(r[m.lat]), lng = parseFloat(r[m.lng]);
-            if (!isFinite(lat) || !isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) { imp.invalid++; return; }
+            if (!isFinite(lat) || !isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) { imp.invalid++; imp.invalidRows.push({ i, name: (m.name ? (r[m.name] || '').trim() : '') || `row ${i + 2}`, type: m.type ? (r[m.type] || '').trim() : '' }); return; }
             const name = m.name ? (r[m.name] || '').trim() : '';
-            imp.points.push({ i, name: name || `Import ${i + 1}`, lat, lng, typeRaw: m.type ? (r[m.type] || '').trim() : '', sel: false, dup: false, dupWhy: '', done: false });
+            imp.points.push({ i, name: name || `Import ${i + 1}`, rawName: name, lat, lng, typeRaw: m.type ? (r[m.type] || '').trim() : '', notes: '', sel: false, dup: false, dupWhy: '', child: null, near: null, done: false });
         });
-        impStoreMapping(imp.headers, { name: m.name, lat: m.lat, lng: m.lng, type: m.type });
+        impResolveFileDuplicates();   // v4.363: battery + well sharing a name → "<name> BATTERY"; other repeats → "-DUP"
+        if (m.pri && typeof m.pri === 'object' && !imp.pri._guessed) { ['oilCol', 'waterCol', 'blpdCol', 'priCol'].forEach(k => { imp.pri[k] = imp.headers.includes(m.pri[k]) ? m.pri[k] : null; }); if (typeof m.pri.on === 'boolean') imp.pri.on = m.pri.on; imp.pri._guessed = true; }
+        imp._rootCache = null;
+        impStoreMapping(imp.headers, { name: m.name, lat: m.lat, lng: m.lng, type: m.type, notesCols: impNotesCols(), pri: { on: imp.pri.on, oilCol: imp.pri.oilCol, waterCol: imp.pri.waterCol, blpdCol: imp.pri.blpdCol, priCol: imp.pri.priCol } });
+        impMarkDirty();
+        imp.mapOpen = false;
+        impRenderMappingUi();
+        if (!imp._secAdvanced) { imp._secAdvanced = true; imp.secOpen.data = false; imp.secOpen.type = true; imp.secOpen.create = true; if (imp.shapes.length) imp.secOpen.bounds = false; impSaveParams(); }
         impBuildAssetIndex();
         impComputeDups();
         impRecomputeSel();          // shapes placed before the data still apply
-        impRenderStaged();
+        impRenderStaged(); impRenderShapes();
         impRenderTypeMapUi();
-        const dupN = imp.points.filter(p => p.dup).length;
-        impStatus(`Staged <b>${imp.points.length}</b> point(s)`
+        try { impRenderEnvUi(); } catch (e) {}
+        imp.ana.result = null; try { impRenderAnalyzeUi(); } catch (e) {}
+        const dupN = imp.points.filter(p => p.dup).length, childN = imp.points.filter(p => p.child).length, nearN = imp.points.filter(p => p.near).length;
+        impStatus(`Staged <b>${imp.points.length}</b> point(s), all selected`
             + (imp.invalid ? ` · <span style="color:#ffb347">${imp.invalid} row(s) skipped (bad/missing coordinates)</span>` : '')
-            + (dupN ? ` · <span style="color:#ffd400">${dupN} flagged as likely duplicates</span>` : '')
-            + ' — ⭕/🖊 select a subset, then Create.');
+            + (dupN ? ` · <span style="color:#ffd400">${dupN} name duplicate(s)</span>` : '')
+            + (childN ? ` · <span style="color:#b48cff">${childN} parent/child</span>` : '')
+            + (nearN ? ` · <span style="color:#4fc3f7">${nearN} nearby</span>` : '')
+            + ' — map the type, set Size, then ✓ Create.');
         impSyncUi();
     }
     // ---- duplicate guard vs EXISTING site assets (name OR proximity) ----
@@ -21117,24 +23900,54 @@
         }).filter(Boolean);
     }
     function impComputeDups() {
+        impComputeDupsCore();
+        try { if (imp.pri.on) impComputePriority(); } catch (e) { console.warn(`${TAG} 📥 priority compute failed:`, e); }
+        try { impRenderPriUi(); } catch (e) {}
+    }
+    function impComputeDupsCore() {
         if (!imp.assetIndex) impBuildAssetIndex();
         const dupM = Math.max(0, impDupFt) * GEN_FT_TO_M;
         const dLat = (dupM / 111320) * 1.05;
         const byName = new Map();
         imp.assetIndex.forEach(a => { if (a.clean) byName.set(a.clean, a); });
         imp.points.forEach(p => {
-            p.dup = false; p.dupWhy = '';
+            p.dup = false; p.dupWhy = ''; p.child = null; p.near = null;
             const clean = (genCleanName(p.name) || '').toLowerCase();
             const nm = clean && byName.get(clean);
-            if (nm) { p.dup = true; p.dupWhy = `name matches existing asset "${nm.name}"`; return; }
-            if (!dupM) return;
+            // ONLY a name match is a duplicate (skipped unless included).
+            if (nm) { p.dup = true; p.dupWhy = `name matches existing asset "${nm.name}"`; p.dupId = nm.id; p.dupSubtype = nm.subtype || ''; } else { p.dupId = null; p.dupSubtype = ''; }
+            // v4.332: two informational flags, never skipped —
+            //   child = the square this point would become (Size ft) overlaps an
+            //           existing asset, partially or fully (parent/child);
+            //   near  = no overlap, but within the radius of one (nearby).
+            const sq = (p.shape && p.shape.length >= 3) ? p.shape : assetSquarePoints(p.lat, p.lng, impSizeFt);   // v4.367: a drawn outline is what will be created
+            let sla0 = Infinity, sla1 = -Infinity, slo0 = Infinity, slo1 = -Infinity; sq.forEach(v => { sla0 = Math.min(sla0, v.lat); sla1 = Math.max(sla1, v.lat); slo0 = Math.min(slo0, v.lng); slo1 = Math.max(slo1, v.lng); });
+            const halfLat = Math.max(sla1 - p.lat, p.lat - sla0) * 1.05, halfLng = Math.max(slo1 - p.lng, p.lng - slo0) * 1.05;
             const dLng = dLat / Math.max(0.2, Math.cos(p.lat * Math.PI / 180));
+            let bestNear = null, bestChild = null;
             for (const a of imp.assetIndex) {
-                if (p.lat < a.bbox.la0 - dLat || p.lat > a.bbox.la1 + dLat || p.lng < a.bbox.lo0 - dLng || p.lng > a.bbox.lo1 + dLng) continue;
+                if (p.lat < a.bbox.la0 - dLat - halfLat || p.lat > a.bbox.la1 + dLat + halfLat || p.lng < a.bbox.lo0 - dLng - halfLng || p.lng > a.bbox.lo1 + dLng + halfLng) continue;
+                if (nm && a === nm) continue;
+                const ov = impSquareOverlap(sq, a.ring);
+                if (ov) { if (!bestChild || (ov === 'full' && bestChild.full !== true)) bestChild = { name: a.name, id: a.id, full: ov === 'full' }; continue; }
                 const d = pointToPolygonMeters(p.lat, p.lng, a.ring);
-                if (d <= dupM) { p.dup = true; p.dupWhy = `${Math.round(d * M_TO_FT)} ft from existing asset "${a.name}" (guard ${impDupFt} ft)`; break; }
+                if (d <= dupM && (!bestNear || d < bestNear.d)) bestNear = { a, d };
             }
+            if (bestChild) p.child = bestChild;
+            else if (bestNear) p.near = { name: bestNear.a.name, id: bestNear.a.id, ft: Math.round(bestNear.d * M_TO_FT) };
         });
+    }
+    // square (4 corners) vs existing asset ring → 'full' | 'partial' | null
+    function impSquareOverlap(sq, ring) {
+        const cornersIn = sq.filter(c => pointInPolygon(c.lat, c.lng, ring)).length;
+        if (cornersIn === sq.length) return 'full';                                 // v4.368: any corner count (drawn outlines)
+        if (cornersIn > 0) return 'partial';
+        if (ring.some(v => pointInPolygon(v.lat, v.lng, sq))) return 'partial';     // asset vertex inside the square / outline
+        for (let i = 0; i < sq.length; i++) {                                       // edge crossings (no vertex inside either)
+            const a = sq[i], b = sq[(i + 1) % sq.length];
+            for (let j = 0, k = ring.length - 1; j < ring.length; k = j++) if (segIntersect(a, b, ring[k], ring[j])) return 'partial';
+        }
+        return null;
     }
     // ---- staged rendering: one shared canvas renderer, viewport-culled ----
     function impClearLayers() {
@@ -21157,6 +23970,7 @@
         const L = getLeafletL(), map = getLeafletMap();
         if (!L || !map) return;
         impClearLayers();
+        try { impRenderAssetShapes(); } catch (e) {}
         const live = imp.points.filter(p => !p.done);
         if (!live.length) { impEnsureMoveEnd(false); return; }
         impEnsureMoveEnd(true);
@@ -21170,11 +23984,13 @@
             if (bounds && !bounds.contains([p.lat, p.lng])) { culled++; continue; }
             if (drawn >= IMP_MAX_RENDER) { culled++; continue; }
             try {
+                const held = imp.moveHeld === p, pulse = !!(imp.pulse && imp.pulse.has(p)), flagged = !!(imp.pri.on && p.pri && p.pri.flags && p.pri.flags.length);
+                const tierOn = imp.pri.on && p.sel && p.pri;          // v4.352: tier colours read at a glance — selected dots grow + fill by tier
                 const opts = {
-                    radius: p.sel ? 4 : 2.2,
-                    color: p.dup ? '#ff3b3b' : '#ffffff',
-                    weight: p.dup ? 1.5 : 0.6,
-                    fillColor: p.sel ? '#5fff5f' : '#ff9d00',
+                    radius: pulse ? 9 : (held ? 7 : (p.sel ? (tierOn ? 5.5 : 4) : 2.2)),
+                    color: pulse ? '#ff5fff' : (held ? '#ff5fff' : (p.dup ? '#ff3b3b' : (p.child ? '#b48cff' : (p.near ? '#4fc3f7' : (flagged ? '#ffb347' : (p.orig ? '#ff5fff' : (p.src === 'enverus' ? '#ffd666' : '#ffffff'))))))),
+                    weight: pulse ? 3 : (held ? 2.5 : ((p.dup || p.child || p.near || p.orig || flagged) ? 1.5 : 0.6)),
+                    fillColor: held ? '#ff5fff' : ((p.sel && p.env && p.env.found && impEnvBucket(p.env) === 'plugged') ? '#ff5252' : ((p.sel && p.env && p.env.found && impEnvBucket(p.env) === 'inactive') ? '#ffb347' : (tierOn ? (IMP_TIER_COLORS[p.pri.tier] || IMP_TIER_COLORS.none) : (p.sel ? '#5fff5f' : '#ff9d00')))),
                     fillOpacity: 0.9, opacity: 0.9, interactive: false,
                 };
                 if (imp.renderer) opts.renderer = imp.renderer;
@@ -21287,13 +24103,17 @@
                 if (on) imp.assetSel.add(a.id);
             });
         } else {
+            // v4.331: with no shape drawn EVERY staged point is selected (the
+            // plain "upload this list" path); shapes narrow it, ☝ picks override.
+            const noShapes = imp.shapes.length === 0;
             imp.points.forEach(p => {
                 if (p.done) { p.sel = false; return; }
-                p.sel = (p.selManual !== undefined) ? p.selManual : imp.shapes.some(s => impShapeContains(s, p.lat, p.lng));
+                p.sel = (p.selManual !== undefined) ? p.selManual : (noShapes || imp.shapes.some(s => impShapeContains(s, p.lat, p.lng)));
             });
         }
     }
     function impRefreshAfterSelChange() {
+        impMarkDirty();
         impRecomputeSel();
         if (imp.target === 'assets') impRenderAssetSel(); else impRenderStaged();
         impRenderShapes(); impSyncUi();
@@ -21363,16 +24183,14 @@
         if (!impMasterEnabled) { showToast('Asset Importer is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
         if (!shapes.length) { impStatus(`No usable polygon in "${impEsc(srcName)}" — the shape KML needs a Polygon (or closed path)`, '#ff6060'); return; }
         if (imp.target === 'assets' && !imp.assetIndex) impBuildAssetIndex();
-        if (imp.target === 'staged' && !imp.points.some(p => !p.done)) {
-            impStatus(`Shape "${impEsc(srcName)}" parsed (${shapes.length} polygon(s)) but nothing is staged — load the data CSV/KML first, or tick 🗑 Delete mode to select existing assets`, '#ffb347');
-            return;
-        }
+        const nothingStaged = imp.target === 'staged' && !imp.points.some(p => !p.done);
         const before = impSelCount();
         shapes.forEach(s => {
             imp.shapes.push({ id: imp.shapeSeq++, kind: 'lasso', ring: s.ring, handle: ringCentroid(s.ring), name: s.name || srcName });
         });
         impRefreshAfterSelChange();
-        impStatus(`⬆ shape "${impEsc(srcName)}" applied — ${shapes.length} polygon(s), <b>+${impSelCount() - before}</b> ${imp.target === 'assets' ? 'existing asset(s)' : 'point(s)'} selected. ALT+drag a numbered handle to move a polygon.`);
+        if (nothingStaged) { impStatus(`⬆ boundary "${impEsc(srcName)}" held — ${shapes.length} polygon(s) drawn on the map. Load the data CSV/KML and only the points inside will be selected.`); return; }
+        impStatus(`⬆ boundary "${impEsc(srcName)}" applied — ${shapes.length} polygon(s) · <b>${impSelCount()}</b> ${imp.target === 'assets' ? 'existing asset(s)' : 'point(s)'} selected now (was ${before}). ALT+drag a numbered handle to move a polygon.`);
     }
     function impHandleShapeFile(file) {
         if (!file) return;
@@ -21383,6 +24201,246 @@
         };
         rd.onerror = () => impStatus('Shape file read failed', '#ff6060');
         rd.readAsText(file);
+    }
+    // ---- v4.367 ✏ SHAPE TOOLKIT — geometry in a local metre frame ----
+    function impProj(lat0, lng0) {
+        const kx = 111320 * Math.cos(lat0 * Math.PI / 180), ky = 111320;
+        return { to: (p) => ({ x: (p.lng - lng0) * kx, y: (p.lat - lat0) * ky }), from: (q) => ({ lat: lat0 + q.y / ky, lng: lng0 + q.x / kx }) };
+    }
+    function impHull(pts) {
+        const P = pts.slice().sort((a, b) => a.x - b.x || a.y - b.y);
+        if (P.length < 3) return P;
+        const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+        const lower = []; for (const p of P) { while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop(); lower.push(p); }
+        const upper = []; for (let i = P.length - 1; i >= 0; i--) { const p = P[i]; while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop(); upper.push(p); }
+        upper.pop(); lower.pop(); return lower.concat(upper);
+    }
+    function impRectAt(angle, pts) {                 // bbox of pts in a frame rotated by angle → 4 corners back in the original frame
+        const c = Math.cos(angle), sn = Math.sin(angle);
+        let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity;
+        pts.forEach(p => { const u = p.x * c + p.y * sn, v = -p.x * sn + p.y * c; u0 = Math.min(u0, u); u1 = Math.max(u1, u); v0 = Math.min(v0, v); v1 = Math.max(v1, v); });
+        const back = (u, v) => ({ x: u * c - v * sn, y: u * sn + v * c });
+        return { area: (u1 - u0) * (v1 - v0), corners: [back(u0, v0), back(u1, v0), back(u1, v1), back(u0, v1)], len: u1 - u0, wid: v1 - v0 };
+    }
+    function impMinAreaRect(pts) {
+        const h = impHull(pts); if (h.length < 3) return impRectAt(0, pts);
+        let best = null;
+        for (let i = 0; i < h.length; i++) { const a = h[i], b = h[(i + 1) % h.length]; const r = impRectAt(Math.atan2(b.y - a.y, b.x - a.x), pts); if (!best || r.area < best.area) best = r; }
+        return best;
+    }
+    function impStrokeToRing(strokeLL, widthM) {
+        if (strokeLL.length < 2) return null;
+        const pr = impProj(strokeLL[0].lat, strokeLL[0].lng);
+        const pts = strokeLL.map(pr.to);
+        let mx = 0, my = 0; pts.forEach(p => { mx += p.x; my += p.y; }); mx /= pts.length; my /= pts.length;
+        let cxx = 0, cxy = 0, cyy = 0; pts.forEach(p => { const dx = p.x - mx, dy = p.y - my; cxx += dx * dx; cxy += dx * dy; cyy += dy * dy; });
+        const theta = 0.5 * Math.atan2(2 * cxy, cxx - cyy);
+        const along = impRectAt(theta, pts);
+        let corners;
+        if (along.len < 1.5) return null;                                // a click, not a stroke
+        if (along.wid > 0.35 * along.len) corners = impMinAreaRect(pts).corners;   // a loop / blob → tightest rotated rectangle around it
+        else {                                                            // a straight-ish stroke → its length × the chosen width
+            const c = Math.cos(theta), sn = Math.sin(theta);
+            let u0 = Infinity, u1 = -Infinity, vs = 0; pts.forEach(p => { const u = p.x * c + p.y * sn; u0 = Math.min(u0, u); u1 = Math.max(u1, u); vs += -p.x * sn + p.y * c; });
+            const vc = vs / pts.length, hw = widthM / 2;
+            const back = (u, v) => ({ x: u * c - v * sn, y: u * sn + v * c });
+            corners = [back(u0, vc - hw), back(u1, vc - hw), back(u1, vc + hw), back(u0, vc + hw)];
+        }
+        return corners.map(pr.from);
+    }
+    function impSegClosest(p, a, b) {                 // closest point on segment ab to p (metre frame)
+        const dx = b.x - a.x, dy = b.y - a.y, l2 = dx * dx + dy * dy;
+        const t = l2 ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2)) : 0;
+        return { x: a.x + t * dx, y: a.y + t * dy };
+    }
+    // Snap: shift `moving` vertices (metre frame) so the closest vertex↔neighbour-edge distance becomes
+    // exactly gapM (v4.373: the required separation, default 15 ft = two 7.5 ft buffers touching) when
+    // it is within snapM of that. Returns the shift, or null when nothing is in reach.
+    function impSnapShift(movingXY, neighbourRingsXY, snapM, gapM) {
+        gapM = gapM || 0;
+        let best = null;
+        movingXY.forEach(v => neighbourRingsXY.forEach(ring => { for (let i = 0; i < ring.length; i++) { const q = impSegClosest(v, ring[i], ring[(i + 1) % ring.length]); const d = Math.hypot(q.x - v.x, q.y - v.y); if (d > 1e-6 && (!best || d < best.d)) best = { d, ux: (q.x - v.x) / d, uy: (q.y - v.y) / d }; } }));   // nearest edge first …
+        if (!best || Math.abs(best.d - gapM) > snapM) return null;                                     // … then only snap when it is within reach of the gap
+        const k = best.d - gapM;                       // + = move toward the neighbour, − = push away
+        return { dx: best.ux * k, dy: best.uy * k };
+    }
+    // Outward offset of a ring by dM (metre frame) — edge lines pushed along their outward normal, re-intersected.
+    function impOffsetRingXY(xy, dM) {
+        const n = xy.length; if (n < 3) return xy;
+        let area = 0; for (let i = 0; i < n; i++) { const a = xy[i], b = xy[(i + 1) % n]; area += a.x * b.y - b.x * a.y; }
+        const sgn = area > 0 ? 1 : -1;                 // CCW → outward normal is (dy, -dx)
+        const lines = [];
+        for (let i = 0; i < n; i++) { const a = xy[i], b = xy[(i + 1) % n]; const dx = b.x - a.x, dy = b.y - a.y, L = Math.hypot(dx, dy) || 1; const nx = sgn * dy / L, ny = -sgn * dx / L; lines.push({ ax: a.x + nx * dM, ay: a.y + ny * dM, dx, dy }); }
+        const out = [];
+        for (let i = 0; i < n; i++) {
+            const p = lines[(i - 1 + n) % n], q = lines[i];
+            const den = p.dx * q.dy - p.dy * q.dx;
+            if (Math.abs(den) < 1e-9) { out.push({ x: q.ax, y: q.ay }); continue; }
+            const t = ((q.ax - p.ax) * q.dy - (q.ay - p.ay) * q.dx) / den;
+            out.push({ x: p.ax + p.dx * t, y: p.ay + p.dy * t });
+        }
+        return out;
+    }
+    function impOffsetRing(ring, dM) { const c = ringCentroid(ring); const pr = impProj(c.lat, c.lng); return impOffsetRingXY(ring.map(pr.to), dM).map(pr.from); }
+    // v4.379: outer ring (+buf) with the inner ring (−buf) as its hole → a band of 2×buf centred on the outline.
+    // A box narrower than 2×buf has no clear centre: the inner ring would turn inside out, so it is dropped (solid fill).
+    function impBufferRings(ring) {
+        const d = imp.bufFt * GEN_FT_TO_M;
+        const outer = impOffsetRing(ring, d).map(v => [v.lat, v.lng]);
+        const c = ringCentroid(ring), pr = impProj(c.lat, c.lng), r = impMinAreaRect(ring.map(pr.to));
+        if (r.wid <= 2 * d + 0.3) return [outer];
+        return [outer, impOffsetRing(ring, -d).map(v => [v.lat, v.lng])];
+    }
+    function impNeighbourRings(p, pr, radiusM) {
+        const out = [];
+        imp.points.forEach(q => { if (q === p || q.done || !q.shape) return; if (approxMeters(p.lat, p.lng, q.lat, q.lng) > radiusM) return; out.push(q.shape.map(pr.to)); });
+        (imp.assetIndex || []).forEach(a => { if (approxMeters(p.lat, p.lng, a.centroid.lat, a.centroid.lng) > radiusM) return; out.push(a.ring.map(pr.to)); });
+        return out;
+    }
+    function impAssignShape(p, ring, how) {
+        if (!ring || ring.length < 3) return;
+        const c = ringCentroid(ring);
+        if (!p.orig) p.orig = { lat: p.lat, lng: p.lng };
+        p.shape = ring; p.lat = c.lat; p.lng = c.lng;
+        try { impComputeDups(); } catch (e) {}
+        impRefreshAfterSelChange();
+        const pr = impProj(c.lat, c.lng); const r = impMinAreaRect(ring.map(pr.to));
+        impStatus(`✏ "${impEsc(p.name)}" → ${how} · ${Math.round(r.len / GEN_FT_TO_M)} × ${Math.round(r.wid / GEN_FT_TO_M)} ft, ${ring.length} points — Create writes this outline instead of the ${impSizeFt} ft square · drag a corner / edge to adjust · Delete = back to a square`);
+    }
+    function impShapeFinishStroke() {
+        const st = imp.stroke; imp.stroke = null; impClearStrokeLayer();
+        if (!st || st.length < 2) return;
+        const ring = impStrokeToRing(st, imp.shapeW * GEN_FT_TO_M);
+        if (!ring) { impStatus('✏ too short — drag a longer stroke', '#ffb347'); return; }
+        let p = imp.shapeHeld;
+        if (!p) {                                                         // nearest unshaped dot within 150 ft of the shape centre
+            const c = ringCentroid(ring); let bd = Infinity;
+            imp.points.forEach(q => { if (q.done || q.shape) return; const d = approxMeters(c.lat, c.lng, q.lat, q.lng); if (d < bd) { bd = d; p = q; } });
+            if (!p || bd > 150 * GEN_FT_TO_M) { impStatus('✏ no unshaped dot within 150 ft of that shape — click a dot first, then CTRL+drag', '#ffb347'); impRenderStaged(); return; }
+        }
+        // snap the new outline flush to neighbours (always on for a fresh stroke)
+        const pr = impProj(p.lat, p.lng); const xy = ring.map(pr.to);
+        const sh = impSnapShift(xy, impNeighbourRings(p, pr, 60), imp.snapFt * GEN_FT_TO_M, imp.gapFt * GEN_FT_TO_M);
+        const snapped = sh ? xy.map(q => pr.from({ x: q.x + sh.dx, y: q.y + sh.dy })) : ring;
+        imp.shapeHeld = p;
+        impAssignShape(p, snapped, sh ? `outline (snapped to a ${imp.gapFt} ft gap from a neighbour)` : 'outline');
+    }
+    function impShapeClone(src, dst, noSnap) {
+        if (!src.shape) return;
+        const pr = impProj(dst.lat, dst.lng);
+        const c = ringCentroid(src.shape);
+        const dx = dst.lng - c.lng, dy = dst.lat - c.lat;
+        let ring = src.shape.map(v => ({ lat: v.lat + dy, lng: v.lng + dx }));
+        if (!noSnap) { const xy = ring.map(pr.to); const sh = impSnapShift(xy, impNeighbourRings(dst, pr, 60), imp.snapFt * GEN_FT_TO_M, imp.gapFt * GEN_FT_TO_M); if (sh) ring = xy.map(q => pr.from({ x: q.x + sh.dx, y: q.y + sh.dy })); }
+        impAssignShape(dst, ring, `copy of "${src.name}"'s outline${noSnap ? '' : ' (snapped if a neighbour was within reach)'}`);
+    }
+    function impShapeTargetAt(map, ll) {              // vertex / edge-midpoint of the HELD shape under the cursor
+        const p = imp.shapeHeld; if (!p || !p.shape) return null;
+        let cp; try { cp = map.latLngToContainerPoint([ll.lat, ll.lng]); } catch (e) { return null; }
+        const px = (v) => { try { return cp.distanceTo(map.latLngToContainerPoint([v.lat, v.lng])); } catch (e) { return Infinity; } };
+        const n = p.shape.length;
+        for (let i = 0; i < n; i++) if (px(p.shape[i]) <= IMP_PICK_PX) return { p, i, type: 'vert' };
+        for (let i = 0; i < n; i++) { const v = p.shape[i], w = p.shape[(i + 1) % n]; if (px({ lat: (v.lat + w.lat) / 2, lng: (v.lng + w.lng) / 2 }) <= IMP_PICK_PX) return { p, i, type: 'mid' }; }
+        // v4.374: anywhere along an edge drags that edge; anywhere inside moves the whole box
+        const toPx = (v) => { try { return map.latLngToContainerPoint([v.lat, v.lng]); } catch (e) { return null; } };
+        for (let i = 0; i < n; i++) {
+            const a = toPx(p.shape[i]), b = toPx(p.shape[(i + 1) % n]); if (!a || !b) continue;
+            const dx = b.x - a.x, dy = b.y - a.y, l2 = dx * dx + dy * dy; const t = l2 ? Math.max(0, Math.min(1, ((cp.x - a.x) * dx + (cp.y - a.y) * dy) / l2)) : 0;
+            if (Math.hypot(a.x + t * dx - cp.x, a.y + t * dy - cp.y) <= 7) return { p, i, type: 'edge' };
+        }
+        if (pointInPolygon(ll.lat, ll.lng, p.shape)) return { p, i: -1, type: 'move' };
+        return null;
+    }
+    function impClearStrokeLayer() { const map = getLeafletMap(); if (imp.strokeLayer) { try { if (map) map.removeLayer(imp.strokeLayer); } catch (e) {} imp.strokeLayer = null; } }
+    function impRenderStroke() {
+        const L = getLeafletL(), map = getLeafletMap(); if (!L || !map || !imp.stroke) return;
+        try { if (imp.strokeLayer) { imp.strokeLayer.setLatLngs(imp.stroke.map(q => [q.lat, q.lng])); return; } imp.strokeLayer = L.polyline(imp.stroke.map(q => [q.lat, q.lng]), { renderer: impShapeRenderer(), color: impShapeColor, weight: 3, opacity: 0.9, dashArray: '4,4', interactive: false }).addTo(map); } catch (e) {}
+    }
+    // v4.377: all ✏ layers draw on ONE canvas renderer. SVG paths changed every drag frame, and the
+    // Map Styler's MutationObserver on the overlay SVG rebuilt its own overlays each time — the lag.
+    function impShapeRenderer() {
+        const L = getLeafletL(); if (!L) return undefined;
+        if (!imp.shapeRenderer) { try { imp.shapeRenderer = L.canvas({ padding: 0.5 }); } catch (e) { imp.shapeRenderer = null; } }
+        return imp.shapeRenderer || undefined;
+    }
+    function impClearAssetShapeLayers() { const map = getLeafletMap(); (imp.assetShapeLayers || []).forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} }); imp.assetShapeLayers = []; impClearHeldLayers(); }
+    function impClearHeldLayers() { const map = getLeafletMap(); (imp.heldLayers || []).forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} }); imp.heldLayers = []; imp.heldRefs = null; if (imp._heldRaf) { cancelAnimationFrame(imp._heldRaf); imp._heldRaf = null; } }
+    // v4.375: two layer sets — the static outlines (redrawn only when the set changes) and the HELD
+    // outline with its buffer ring + handles (the only thing redrawn while dragging). The buffer is
+    // drawn for the held outline only.
+    function impRenderAssetShapes() {
+        const L = getLeafletL(), map = getLeafletMap(); if (!L || !map) return;
+        impClearAssetShapeLayers();
+        imp.points.forEach(p => {
+            if (p.done || !p.shape || p === imp.shapeHeld) return;
+            try {
+                const pl = L.polygon(p.shape.map(v => [v.lat, v.lng]), { renderer: impShapeRenderer(), color: impShapeColor, weight: 2, opacity: 0.95, fill: impShapeFill && impShapeOpacity > 0, fillColor: impShapeColor, fillOpacity: impShapeFill ? impShapeOpacity : 0, interactive: false });
+                pl.addTo(map); imp.assetShapeLayers.push(pl);
+            } catch (e) {}
+        });
+        impRenderHeldShape();
+    }
+    // v4.376: drag frames update the held layers IN PLACE (setLatLngs) at most once per animation
+    // frame; a full rebuild only when the vertex count changed or nothing is drawn yet.
+    function impUpdateHeldLive() {
+        if (imp._heldRaf) return;
+        imp._heldRaf = requestAnimationFrame(() => {
+            imp._heldRaf = null;
+            const p = imp.shapeHeld, R = imp.heldRefs;
+            if (!p || !p.shape || !R || R.p !== p || R.verts.length !== p.shape.length) { impRenderHeldShape(); return; }
+            try {
+                const n = p.shape.length;
+                if (R.buf) R.buf.setLatLngs(impBufferRings(p.shape));
+                R.poly.setLatLngs(p.shape.map(v => [v.lat, v.lng]));
+                for (let i = 0; i < n; i++) { const v = p.shape[i], w = p.shape[(i + 1) % n]; R.verts[i].setLatLng([v.lat, v.lng]); if (R.mids[i]) R.mids[i].setLatLng([(v.lat + w.lat) / 2, (v.lng + w.lng) / 2]); }
+            } catch (e) { impRenderHeldShape(); }
+        });
+    }
+    function impRenderHeldShape() {
+        const L = getLeafletL(), map = getLeafletMap(); if (!L || !map) return;
+        impClearHeldLayers(); imp.heldRefs = null;
+        const p = imp.shapeHeld; if (!p || p.done || !p.shape) return;
+        const editing = imp.mode === 'shape' || imp.mode === 'edit';
+        try {
+            const R = { p, buf: null, poly: null, verts: [], mids: [] };
+            if (imp.mode === 'shape' && imp.bufFt > 0 && impBufOpacity > 0) {
+                // v4.379: the buffer is a BAND straddling the outline — bufFt outside AND bufFt inside; the centre of the box stays clear
+                R.buf = L.polygon(impBufferRings(p.shape), { renderer: impShapeRenderer(), color: impBufColor, weight: 1, opacity: 0.7, dashArray: '3,3', fillColor: impBufColor, fillOpacity: impBufOpacity, fillRule: 'evenodd', interactive: false });
+                R.buf.addTo(map); imp.heldLayers.push(R.buf);
+            }
+            R.poly = L.polygon(p.shape.map(v => [v.lat, v.lng]), { renderer: impShapeRenderer(), color: '#ff5fff', weight: 3, opacity: 0.95, fill: impShapeFill && impShapeOpacity > 0, fillColor: impShapeColor, fillOpacity: impShapeFill ? impShapeOpacity : 0, interactive: false });
+            R.poly.addTo(map); imp.heldLayers.push(R.poly);
+            if (editing) {
+                const n = p.shape.length;
+                for (let i = 0; i < n; i++) {
+                    const v = p.shape[i], w = p.shape[(i + 1) % n];
+                    const d = L.circleMarker([v.lat, v.lng], { renderer: impShapeRenderer(), radius: 5, color: '#ffffff', weight: 1.5, fillColor: '#ff5fff', fillOpacity: 1, interactive: false }); d.addTo(map); imp.heldLayers.push(d); R.verts.push(d);
+                    const m = L.circleMarker([(v.lat + w.lat) / 2, (v.lng + w.lng) / 2], { renderer: impShapeRenderer(), radius: 4.5, color: '#ffffff', weight: 1, fillColor: impShapeColor, fillOpacity: 1, interactive: false }); m.addTo(map); imp.heldLayers.push(m); R.mids.push(m);
+                }
+            }
+            imp.heldRefs = R;
+        } catch (e) { imp.heldRefs = null; }
+    }
+    function impNearestStaged(map, ll, maxPx) {
+        let cp; try { cp = map.latLngToContainerPoint([ll.lat, ll.lng]); } catch (e) { return null; }
+        let best = null, bd = Infinity;
+        imp.points.forEach(p => {
+            if (p.done) return;
+            try { const d = cp.distanceTo(map.latLngToContainerPoint([p.lat, p.lng])); if (d < bd) { bd = d; best = p; } } catch (e) {}
+        });
+        return (best && bd <= (maxPx || IMP_PICK_PX)) ? best : null;
+    }
+    function impMovePointTo(p, ll) {
+        if (!p.orig) p.orig = { lat: p.lat, lng: p.lng };
+        p.lat = ll.lat; p.lng = ll.lng;
+        if (Math.abs(p.lat - p.orig.lat) < 1e-9 && Math.abs(p.lng - p.orig.lng) < 1e-9) delete p.orig;   // dropped back exactly where it started
+    }
+    function impFinishMove(p) {
+        imp.moveHeld = null; imp.moveDrag = false; imp.moveDownPt = null;
+        try { impComputeDups(); } catch (e) {}
+        impRefreshAfterSelChange();
+        const ft = p.orig ? Math.round(approxMeters(p.orig.lat, p.orig.lng, p.lat, p.lng) / GEN_FT_TO_M) : 0;
+        impStatus(ft ? `↔ "${impEsc(p.name)}" moved ${ft} ft — the asset will be created there${p.dup ? ' (still a name duplicate)' : ''}${p.child ? ` · now inside ${impEsc(p.child.name)}` : ''}` : `↔ "${impEsc(p.name)}" back at its file coordinates`);
     }
     function impPickAt(ll) {
         const map = getLeafletMap(); if (!map) return;
@@ -21475,7 +24533,31 @@
         impUnwire();
         imp._container = map.getContainer();
         imp._onDown = (ev) => {
-            if (!imp.mode || ev.button !== 0 || !ev.altKey) return;      // plain click stays free (pan / native edit)
+            if (!imp.mode || ev.button !== 0) return;
+            if (imp.mode === 'move') {                                   // v4.345: ↔ works WITHOUT Alt — a click on a dot picks it, a click away drops it, a click on nothing (nothing held) still pans
+                let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+                if (imp.moveHeld) { ev.preventDefault(); ev.stopPropagation(); impMovePointTo(imp.moveHeld, ll); impFinishMove(imp.moveHeld); return; }
+                const p = impNearestStaged(map, ll, IMP_PICK_PX * 1.5);
+                if (!p) { if (ev.altKey) { ev.preventDefault(); ev.stopPropagation(); impStatus('↔ no staged point there — click closer to a dot', '#ffb347'); } return; }
+                ev.preventDefault(); ev.stopPropagation();
+                imp.moveHeld = p; imp.moveDrag = false; imp.moveDownPt = { x: ev.clientX, y: ev.clientY };
+                impRenderStaged(); impSyncUi();
+                return;
+            }
+            if (imp.mode === 'shape') {                                  // v4.367 ✏: CTRL+drag = stroke · click a dot = hold · ALT+click a dot = copy the held outline · corner/edge of the held outline = drag
+                let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+                if (ev.ctrlKey || ev.metaKey) { ev.preventDefault(); ev.stopPropagation(); imp.stroke = [ll]; impRenderStroke(); return; }   // CTRL (Shift is Percepto's name reveal)
+                const t = impShapeTargetAt(map, ll);
+                if (t) { ev.preventDefault(); ev.stopPropagation(); const pr0 = impProj(t.p.lat, t.p.lng); imp.shapeEdit = { p: t.p, i: t.i, type: t.type, down: { x: ev.clientX, y: ev.clientY }, downLL: ll, moved: false, start: t.p.shape.map(v => ({ lat: v.lat, lng: v.lng })), pr: pr0, neigh: impNeighbourRings(t.p, pr0, 60) }; return; }   // v4.376: neighbours found ONCE per drag
+                const p = impNearestStaged(map, ll, IMP_PICK_PX * 1.5);
+                if (ev.altKey) { ev.preventDefault(); ev.stopPropagation(); if (!imp.shapeHeld || !imp.shapeHeld.shape) { impStatus('✏ hold a shaped dot first (click it), then ALT+click the dots that should get the same outline', '#ffb347'); return; } if (!p) { impStatus('✏ no dot there', '#ffb347'); return; } if (p === imp.shapeHeld) return; impShapeClone(imp.shapeHeld, p, false); return; }
+                if (!p) return;                                              // empty map → pan
+                ev.preventDefault(); ev.stopPropagation();
+                imp.shapeHeld = p; impRenderAssetShapes(); impSyncUi();
+                impStatus(`✏ holding "${impEsc(p.name)}"${p.shape ? ` (${p.shape.length}-point outline) — drag inside = move the box · drag an edge = pull it · drag a corner = that corner · ALT+click other dots to copy this outline · Delete = back to a square` : ' — CTRL+drag a stroke across the asset: a line becomes a rectangle, a loop becomes the tightest box'}`);
+                return;
+            }
+            if (!ev.altKey) return;                                      // every other tool: plain click stays free (pan / native edit)
             let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
             ev.preventDefault(); ev.stopPropagation();
             if (imp.mode === 'edit') {                                   // ✎ vertex / midpoint / circle-edge grab
@@ -21502,6 +24584,49 @@
             imp.lassoDownPt = { x: ev.clientX, y: ev.clientY };
         };
         imp._onMove = (ev) => {
+            if (imp.mode === 'shape' && imp.stroke && (ev.buttons & 1)) {   // ✏ stroke in progress
+                ev.preventDefault(); ev.stopPropagation();
+                let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+                const last = imp.stroke[imp.stroke.length - 1];
+                try { if (map.latLngToContainerPoint([last.lat, last.lng]).distanceTo(map.latLngToContainerPoint([ll.lat, ll.lng])) < 3) return; } catch (e) {}
+                imp.stroke.push(ll); impRenderStroke(); return;
+            }
+            if (imp.mode === 'shape' && imp.stroke && !(ev.buttons & 1)) { impShapeFinishStroke(); return; }
+            if (imp.mode === 'shape' && imp.shapeEdit) {                   // ✏ corner / edge drag on the held outline
+                const d = imp.shapeEdit;
+                if (!(ev.buttons & 1)) { imp._onUp(ev); return; }
+                if (!d.moved && Math.hypot(ev.clientX - d.down.x, ev.clientY - d.down.y) < 4) return;
+                ev.preventDefault(); ev.stopPropagation();
+                let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+                d.moved = true;
+                const p = d.p, n = d.start.length, pr = d.pr;
+                const ring = d.start.map(v => ({ lat: v.lat, lng: v.lng }));
+                if (!d.downLL) d.downLL = ll;
+                if (d.type === 'vert') ring[d.i] = { lat: ll.lat, lng: ll.lng };
+                else if (d.type === 'move') {                                // v4.374: whole box follows the cursor, size and rotation untouched
+                    const dl = ll.lat - d.downLL.lat, dg = ll.lng - d.downLL.lng;
+                    for (let i = 0; i < n; i++) ring[i] = { lat: d.start[i].lat + dl, lng: d.start[i].lng + dg };
+                }
+                else {                                                       // edge / midpoint: both endpoints move by the cursor delta from where the drag started → stays parallel
+                    const v = d.start[d.i], w = d.start[(d.i + 1) % n];
+                    const dl = ll.lat - d.downLL.lat, dg = ll.lng - d.downLL.lng;
+                    ring[d.i] = { lat: v.lat + dl, lng: v.lng + dg }; ring[(d.i + 1) % n] = { lat: w.lat + dl, lng: w.lng + dg };
+                }
+                if (!ev.altKey && imp.snapFt > 0) {                          // snap the moved corner(s) to the gap from a neighbour; Alt = free
+                    const idx = d.type === 'vert' ? [d.i] : (d.type === 'move' ? ring.map((_, i) => i) : [d.i, (d.i + 1) % n]);
+                    const movingXY = idx.map(i => pr.to(ring[i]));
+                    const sh = impSnapShift(movingXY, d.neigh, imp.snapFt * GEN_FT_TO_M, imp.gapFt * GEN_FT_TO_M);
+                    if (sh) idx.forEach(i => { const q = pr.to(ring[i]); ring[i] = pr.from({ x: q.x + sh.dx, y: q.y + sh.dy }); });
+                }
+                p.shape = ring; impUpdateHeldLive(); return;
+            }
+            if (imp.mode === 'move' && imp.moveHeld && imp.moveDownPt && (ev.buttons & 1)) {   // ↔ ALT+drag carries the point live
+                if (!imp.moveDrag && Math.hypot(ev.clientX - imp.moveDownPt.x, ev.clientY - imp.moveDownPt.y) < 4) return;
+                ev.preventDefault(); ev.stopPropagation();
+                let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+                imp.moveDrag = true; impMovePointTo(imp.moveHeld, ll); impRenderStaged();
+                return;
+            }
             if (imp.editDrag) {                                          // ✎ vertex / radius drag in progress
                 ev.preventDefault(); ev.stopPropagation();
                 let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
@@ -21547,6 +24672,25 @@
             impRenderShapes();
         };
         imp._onUp = (ev) => {
+            if (imp.mode === 'shape' && imp.stroke) { ev.preventDefault(); ev.stopPropagation(); impShapeFinishStroke(); return; }
+            if (imp.mode === 'shape' && imp.shapeEdit) {
+                const d = imp.shapeEdit; imp.shapeEdit = null;
+                ev.preventDefault(); ev.stopPropagation();
+                if (!d.moved) {
+                    if (d.type === 'mid') { const n = d.p.shape.length, v = d.p.shape[d.i], w = d.p.shape[(d.i + 1) % n]; d.p.shape.splice(d.i + 1, 0, { lat: (v.lat + w.lat) / 2, lng: (v.lng + w.lng) / 2 }); impRenderHeldShape(); impMarkDirty(); impStatus(`✏ point added — ${d.p.shape.length} points · drag it where it belongs`); }
+                    return;
+                }
+                const c = ringCentroid(d.p.shape); d.p.lat = c.lat; d.p.lng = c.lng;
+                try { impComputeDups(); } catch (e) {}
+                impRefreshAfterSelChange();
+                impStatus(`✏ "${impEsc(d.p.name)}" ${d.type === 'move' ? 'box moved (same size)' : (d.type === 'vert' ? 'corner moved' : 'edge pulled')}${ev.altKey ? ' · no snap' : ''}`);
+                return;
+            }
+            if (imp.mode === 'move' && imp.moveHeld) {
+                if (imp.moveDrag) { ev.preventDefault(); ev.stopPropagation(); const p = imp.moveHeld; impFinishMove(p); }   // drag → drop here
+                else imp.moveDownPt = null;                               // plain click → keep holding until the next ALT+click
+                return;
+            }
             if (imp.editDrag) { ev.preventDefault(); ev.stopPropagation(); impEndEditDrag(); return; }
             if (imp.dragShape) { ev.preventDefault(); ev.stopPropagation(); impEndShapeDrag(); return; }
             if (imp.mode !== 'lasso' || !imp.lassoRing) return;
@@ -21558,9 +24702,32 @@
         };
         imp._onKey = (ev) => {
             if (!imp.mode) return;
-            if ((ev.key || '').toLowerCase() === 'escape') {
+            const k = (ev.key || '').toLowerCase();
+            if (imp.mode === 'shape' && imp.shapeHeld && (k === 'delete' || k === 'backspace')) {   // ✏ back to a plain square
+                const t = ev.target; if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
                 ev.preventDefault(); ev.stopImmediatePropagation();
-                if (imp.editDrag) { impEndEditDrag(); }
+                const p = imp.shapeHeld; if (!p.shape) return;
+                p.shape = null; try { impComputeDups(); } catch (e) {} impRefreshAfterSelChange();
+                impStatus(`✏ "${impEsc(p.name)}" outline removed — it will be created as a ${impSizeFt} ft square again`);
+                return;
+            }
+            if (imp.mode === 'move' && imp.moveHeld && (k === 'delete' || k === 'backspace' || (k === 'b' && ev.altKey))) {   // v4.345: drop the held point from the import
+                const t = ev.target; if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+                ev.preventDefault(); ev.stopImmediatePropagation();
+                const p = imp.moveHeld;
+                if (p.orig) { p.lat = p.orig.lat; p.lng = p.orig.lng; delete p.orig; }
+                p.done = true; p.removed = true; p.sel = false;
+                imp.moveHeld = null; imp.moveDrag = false; imp.moveDownPt = null;
+                impRefreshAfterSelChange();
+                impStatus(`🗑 "${impEsc(p.name)}" removed from this import (not created) — ↩ reset moved brings removed points back too`);
+                return;
+            }
+            if (k === 'escape') {
+                ev.preventDefault(); ev.stopImmediatePropagation();
+                if (imp.mode === 'shape' && (imp.stroke || imp.shapeEdit)) { if (imp.shapeEdit) { imp.shapeEdit.p.shape = imp.shapeEdit.start; imp.shapeEdit = null; } imp.stroke = null; impClearStrokeLayer(); impRenderStaged(); impStatus('✏ cancelled'); }
+                else if (imp.mode === 'shape' && imp.shapeHeld) { imp.shapeHeld = null; impRenderStaged(); impSyncUi(); impStatus('✏ released'); }
+                else if (imp.moveHeld) { const p = imp.moveHeld; if (p.orig && imp.moveDrag) { p.lat = p.orig.lat; p.lng = p.orig.lng; delete p.orig; } imp.moveHeld = null; imp.moveDrag = false; imp.moveDownPt = null; impRenderStaged(); impSyncUi(); impStatus('↔ put back'); }
+                else if (imp.editDrag) { impEndEditDrag(); }
                 else if (imp.dragShape) { impEndShapeDrag(); }
                 else if (imp.lassoRing) { imp.lassoRing = null; impRenderShapes(); }
                 else impSetMode(null);
@@ -21569,6 +24736,16 @@
         // ✎ ALT+right-click a vertex deletes it (capture — beats the inspector's
         // right-click hit-test while Edit is armed).
         imp._onCtx = (ev) => {
+            if (imp.mode === 'shape' && imp.shapeHeld && imp.shapeHeld.shape) {
+                let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+                const t = impShapeTargetAt(map, ll); if (!t || t.type !== 'vert') return;
+                ev.preventDefault(); ev.stopImmediatePropagation();
+                if (t.p.shape.length <= 3) { showToast('An outline needs at least 3 points', 'rgba(255,179,71,0.6)'); return; }
+                t.p.shape.splice(t.i, 1); const c = ringCentroid(t.p.shape); t.p.lat = c.lat; t.p.lng = c.lng;
+                try { impComputeDups(); } catch (e) {} impRefreshAfterSelChange();
+                impStatus(`✏ corner removed — ${t.p.shape.length} points`);
+                return;
+            }
             if (imp.mode !== 'edit' || !ev.altKey) return;
             let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
             const t = impEditTargetAt(map, ll);
@@ -21605,7 +24782,11 @@
     }
     function impSetMode(mode) {
         if (mode && !impMasterEnabled) { showToast('Asset Importer is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
+        if (imp.moveHeld && mode !== 'move') { imp.moveHeld = null; imp.moveDrag = false; imp.moveDownPt = null; try { impRenderStaged(); } catch (e) {} }
+        if (mode !== 'shape') { imp.shapeHeld = null; imp.stroke = null; imp.shapeEdit = null; impClearStrokeLayer(); }
         imp.mode = mode || null;
+        if (imp.mode === 'shape' && !imp.secOpen.place) { imp.secOpen.place = true; impSaveParams(); }
+        if (imp.mode === 'move' && !imp.secOpen.place) { imp.secOpen.place = true; impSaveParams(); }
         if (imp.mode) {
             try { if (nfzDraw.active) setNfzMode(null); } catch (e) {}   // mutually exclusive with the other map tools
             try { if (advDraw.active) setAdvDraw(false); } catch (e) {}
@@ -21617,48 +24798,102 @@
         impSyncUi();
     }
     // ---- panel body (built in JS — the generator template just carries the container) ----
+    const IMP_BIG_BATCH = 1000;   // v4.342: creating more than this in one run needs an explicit ack
     function impRenderPanelBody() {
         const host = document.getElementById('aim-imp-controls');
         if (!host) return;
         const btnCss = (col) => `background:rgba(${col},0.12);color:rgb(${col});border:1px solid rgba(${col},0.5);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px`;
         const inCss = 'background:#1a1d23;border:1px solid rgba(122,223,230,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px;text-align:right';
         host.innerHTML = `
-            <div style="font-size:11px;color:#7adfe6;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">📥 Asset Importer — <span id="aim-imp-file-label" style="text-transform:none;letter-spacing:0">${impEsc(imp.fileName || 'no file loaded')}</span></div>
+            <div style="font-size:11px;color:#7adfe6;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">📥 Asset Importer — <span id="aim-imp-file-label" style="text-transform:none;letter-spacing:0">${impEsc(imp.fileName || 'no file loaded')}</span></div>
+            <div id="aim-imp-result" style="font-size:11px;color:#9ad;line-height:1.5;margin-bottom:6px;padding:5px 8px;background:rgba(122,223,230,0.05);border-radius:3px;min-height:16px">Boundaries first, then the data file. Points stage on the map (nothing is written); each section below collapses — its header always shows where it stands.</div>
+            <div id="aim-imp-render-note" style="font-size:10px;color:#7a8794;margin-bottom:6px"></div>
+            <div style="display:flex;flex-wrap:wrap;gap:4px;align-items:center;margin-bottom:8px;font-size:10px;color:#888">jump: ${IMP_SECTIONS.map(d => `<button data-impsecjump="${d.id}" style="background:transparent;border:1px solid rgba(${d.color},0.45);color:rgb(${d.color});border-radius:10px;padding:1px 8px;cursor:pointer;font:inherit;font-size:10px">${d.num ? d.num + ' ' : ''}${d.title}</button>`).join('')}</div>
+            <div id="aim-imp-resume" style="display:none;margin-bottom:8px"></div>
+            ${impSecOpenHtml('bounds')}
+            <div id="aim-imp-bounds" style="margin-bottom:8px;padding:6px 8px;background:rgba(186,140,255,0.05);border:1px dashed rgba(186,140,255,0.4);border-radius:3px">
+                <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+                    <span style="font-size:11px;color:#ba8cff;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">Boundaries</span>
+                    <button id="aim-imp-shape" title="Upload KML boundaries — pick several files at once, or one KML holding several polygons (they add up). Only staged points INSIDE a boundary are selected for creation. A polygon-only KML dropped on the panel routes here automatically." style="${btnCss('186,140,255')}">⬆ Load boundary KML(s)</button>
+                    <button id="aim-imp-circle" title="ALT+click the map to drop a circle boundary of radius r (e.g. 3 mi around a base). Convert it to a polygon with ⬡ on its row to reshape it." style="${btnCss('186,140,255')}">⭕ Circle</button>
+                    <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc">r <input type="number" id="aim-imp-radius" min="0" step="0.1" style="width:56px;${inCss}">
+                        <select id="aim-imp-radius-unit" style="${inCss};text-align:left"><option value="mi">mi</option><option value="ft">ft</option></select></label>
+                    <button id="aim-imp-lasso" title="ALT+drag a loop on the map to draw a polygon boundary freehand." style="${btnCss('186,140,255')}">🖊 Draw polygon</button>
+                    <button id="aim-imp-edit" title="Edit boundaries — ALT+drag a vertex dot to move it · ALT+click a midpoint dot to insert a vertex · ALT+right-click a vertex to delete it · ALT+drag a circle's white edge dot to resize it · numbered handles move whole shapes. To reshape a CIRCLE, first convert it with ⬡ on its row." style="${btnCss('186,140,255')}">✎ Edit</button>
+                    <button id="aim-imp-clearshapes" style="${btnCss('160,160,160')}">✕ Clear boundaries</button>
+                    <span id="aim-imp-bounds-note" style="color:#888;font-size:10px;flex-basis:100%">Boundaries first — a region-wide list stays light when only the points inside your boundaries are selected. Load one KML with one or more polygons (or several KMLs), or draw them; then load the data file below.</span>
+                </div>
+                <div id="aim-imp-shapes" style="margin-top:4px;max-height:190px;overflow:auto"></div>
+            </div>
+            ${IMP_SEC_CLOSE}
+            ${impSecOpenHtml('data')}
             <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px">
                 <button id="aim-imp-load" style="${btnCss('122,223,230')}">📂 Load CSV / KML</button>
                 <span style="color:#888;font-size:10px">or drag &amp; drop the file onto this panel</span>
+                <span style="flex:1"></span>
+                <button id="aim-imp-save" title="Save everything on this page — file, mapping, moved / removed points, boundaries — so you can pick up after a reload, a crash or a day off. Also saved automatically 3 s after any change and every few minutes (Control Panel → Asset Importer)." style="${btnCss('95,255,95')};display:none">💾 Save progress</button>
+                <span id="aim-imp-saved-note" style="color:#888;font-size:10px"></span>
             </div>
             <div id="aim-imp-mapping" style="margin-bottom:8px"></div>
-            <div id="aim-imp-selrow" style="display:none;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px">
-                <button id="aim-imp-circle" style="${btnCss('122,223,230')}">⭕ Circle</button>
-                <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc">r <input type="number" id="aim-imp-radius" min="0" step="0.1" style="width:56px;${inCss}">
-                    <select id="aim-imp-radius-unit" style="${inCss};text-align:left"><option value="mi">mi</option><option value="ft">ft</option></select></label>
-                <button id="aim-imp-lasso" style="${btnCss('122,223,230')}">🖊 Lasso</button>
-                <button id="aim-imp-pick" style="${btnCss('122,223,230')}">☝ Pick</button>
-                <button id="aim-imp-edit" title="Edit shapes — ALT+drag a vertex dot to move it · ALT+click a small midpoint dot to insert a new vertex there (keep dragging to place it) · ALT+right-click a vertex to delete it · ALT+drag a circle's white edge dot to resize it · numbered handles still move whole shapes. To add points to a CIRCLE, first convert it with the ⬡ button on its row below." style="${btnCss('122,223,230')}">✎ Edit</button>
-                <button id="aim-imp-shape" title="Upload a KML whose polygon(s) ARE the access shape — everything inside gets selected, exactly like a drawn lasso. Additive; works in 🗑 Delete mode too. A polygon-only KML dropped on the panel routes here automatically." style="${btnCss('186,140,255')}">⬆ Shape (KML)</button>
-                <button id="aim-imp-selall" style="${btnCss('160,160,160')}">Select all</button>
-                <button id="aim-imp-clearsel" style="${btnCss('160,160,160')}">Clear selection</button>
-                <button id="aim-imp-clearshapes" style="${btnCss('160,160,160')}">Clear shapes</button>
-            </div>
-            <div id="aim-imp-shapes" style="margin-bottom:8px"></div>
+            ${IMP_SEC_CLOSE}
+            ${impSecOpenHtml('type')}
+            <div id="aim-imp-pri" style="margin-bottom:8px"></div>
             <div id="aim-imp-typemap" style="margin-bottom:8px"></div>
+            ${IMP_SEC_CLOSE}
+            ${impSecOpenHtml('place')}
+            <div id="aim-imp-placerow" style="display:none;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px;padding:6px 8px;background:rgba(255,95,255,0.05);border:1px dashed rgba(255,95,255,0.35);border-radius:3px">
+                <button id="aim-imp-outline" title="Draw the asset's real outline before it is created. Click a dot to hold it, then CTRL+drag a stroke across the asset: a straight stroke along the LONG side of the asset becomes a rectangle that long by the narrow-side width (default 15 ft); a loop becomes the tightest box around it. A red buffer ring (default 7.5 ft) shows around the outline you are holding; snapping holds the gap (default 15 ft) to the neighbour instead of touching it. With a shaped dot held, ALT+click other dots to give them the same outline (copies snap flush to neighbours). Drag anywhere INSIDE the held outline to move the whole box (size and angle kept); drag anywhere along an edge to pull it longer / shorter (it stays parallel); drag a corner to move just that corner — all snap to the gap from a neighbour, hold Alt for no snap. Click an edge midpoint dot to add a corner, right-click a corner to remove it; Delete = back to a plain square. Esc releases." style="background:rgba(195,155,211,0.12);color:#c39bd3;border:1px solid rgba(195,155,211,0.5);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px">✏ Shape</button>
+                <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc" title="The NARROW side of the rectangle: draw the stroke along the LONG side of the asset and the box is that long by this wide">narrow side <input type="number" id="aim-imp-shapew" min="5" max="500" step="1" style="width:52px;${inCss}"> ft</label>
+                <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#ff6b6b" title="Red band drawn this far outside AND inside the outline you are holding while ✏ Shape is on (the box's centre stays clear) — a neighbour closer than two of these = too close. Colour / opacity in the Control Panel.">buffer <input type="number" id="aim-imp-bufft" min="0" max="100" step="0.5" style="width:52px;${inCss}"> ft</label>
+                <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc" title="Snapping holds THIS distance between an outline and its neighbour (0 = flush). Default 15 ft = two 7.5 ft buffers touching.">gap <input type="number" id="aim-imp-gapft" min="0" max="200" step="1" style="width:46px;${inCss}"> ft</label>
+                <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc" title="Corners / copies within this distance of a neighbouring outline snap flush to it (0 = never; hold Alt while dragging for no snap)">snap <input type="number" id="aim-imp-snapft" min="0" max="100" step="1" style="width:46px;${inCss}"> ft</label>
+                <span id="aim-imp-shape-note" style="color:#888;font-size:10px"></span>
+                <button id="aim-imp-move" title="Fix a point's location BEFORE it becomes an asset. Click a staged point to pick it up (it turns magenta), pan/zoom freely, click where it belongs to drop it — or just drag it. No Alt needed while this is on; clicking empty map still pans. Delete / Backspace while holding a point removes it from the import. Esc puts it back. Moved points keep a magenta ring; the square is created at the new spot." style="background:rgba(255,95,255,0.12);color:#ff5fff;border:1px solid rgba(255,95,255,0.5);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px">↔ Move point</button>
+                <span id="aim-imp-move-note" style="color:#888;font-size:10px"></span>
+                <button id="aim-imp-resetmoves" style="display:none;background:transparent;color:#ffb347;border:1px solid rgba(255,179,71,0.45);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px" title="Put every moved point back where the file had it">↩ reset moved</button>
+            </div>
+            <div id="aim-imp-flags" style="margin-bottom:8px"></div>
+            ${IMP_SEC_CLOSE}
+            ${impSecOpenHtml('env')}
+            <div id="aim-imp-env" style="margin-bottom:4px"></div>
+            ${IMP_SEC_CLOSE}
+            ${impSecOpenHtml('create')}
             <div id="aim-imp-commitrow" style="display:none;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px">
+                <div id="aim-imp-biggate" style="display:none;flex-basis:100%;padding:6px 8px;background:rgba(255,85,85,0.10);border:1px solid rgba(255,85,85,0.6);border-radius:3px;font-size:11px;color:#ff8a80;line-height:1.5">
+                    <b>⚠ <span id="aim-imp-biggate-n">0</span> assets selected — more than ${IMP_BIG_BATCH} in one run is NOT advisable.</b> Percepto's Site Setup page gets unstable with thousands of entities, the browser tab can freeze or crash mid-run, and you may have to reload the page and pick up where it stopped. Narrow the selection with a boundary KML first.<br>
+                    <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;color:#ffb3ad;margin-top:4px"><input type="checkbox" id="aim-imp-biggate-ack" style="accent-color:#ff5555"> I understand the risk — create them anyway</label>
+                </div>
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc" title="Square side of each created asset — same shape ➕ Create asset uses. Reshape in Percepto afterwards (auto-reshape is feature #251).">Size <input type="number" id="aim-imp-size" min="5" max="2000" step="5" style="width:52px;${inCss}"> ft</label>
-                <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#ffd400" title="Duplicate guard: a staged point is flagged when its name matches an existing asset OR it lies within the guard radius (Control Panel → Asset Importer) of one. Flagged points are SKIPPED unless this is on."><input type="checkbox" id="aim-imp-incdups" style="accent-color:#ffd400"> include flagged duplicates</label>
+                <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#ffd400" title="What happens to a staged point whose NAME matches an asset already on this site. Update = rewrite that asset's TYPE and NOTES from this file, never its shape or position (the quarterly re-run). Copy = create a second asset named …-2. Skip = leave it alone. Points merely inside / near an existing asset are only flagged and always created.">name matches <select id="aim-imp-dupmode" style="background:#1a1d23;border:1px solid rgba(255,212,0,0.45);color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px"><option value="update">update type + notes</option><option value="skip">skip</option><option value="copy">create a copy (-N)</option></select></label>
                 <button id="aim-imp-commit" style="${btnCss('95,255,95')};font-weight:600">✓ Create selected</button>
                 <button id="aim-imp-undocreate" style="${btnCss('255,179,71')}" title="Delete exactly the assets the most recent import created (this session). Each delete rides Delete Guard's undo ring when installed.">↩ Undo last import</button>
+            </div>
+            <div id="aim-imp-analyze" style="margin-top:6px"></div>
+            <div id="aim-imp-imports" style="margin-top:6px"></div>
+            ${IMP_SEC_CLOSE}
+            ${impSecOpenHtml('adv')}
+            <div id="aim-imp-adv">
+            <div id="aim-imp-selrow" style="display:none;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px">
+                <button id="aim-imp-pick" title="ALT+click a single staged point to toggle it in or out of the selection, regardless of boundaries." style="${btnCss('122,223,230')}">☝ Pick one</button>
+                <button id="aim-imp-selall" style="${btnCss('160,160,160')}">Select all</button>
+                <button id="aim-imp-clearsel" style="${btnCss('160,160,160')}">Clear selection</button>
             </div>
             <div id="aim-imp-delrow" style="display:none;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px;padding-top:8px;border-top:1px dashed rgba(255,85,85,0.35)">
                 <label style="display:inline-flex;align-items:center;gap:5px;font-size:11px;color:#ff8a80;font-weight:600" title="Flip the ⭕/🖊/☝ tools to select EXISTING site assets instead of staged points. Deleting requires the ack + slide-and-hold ceremony and rides Delete Guard's 24h undo ring."><input type="checkbox" id="aim-imp-delmode" style="accent-color:#ff5555"> 🗑 Delete mode — select existing assets</label>
                 <button id="aim-imp-delete" style="${btnCss('255,85,85')};font-weight:600;display:none">🗑 Delete selected…</button>
                 <button id="aim-imp-undodel" style="${btnCss('255,179,71')};display:none" title="Re-create the assets from the most recent bulk delete's bank (create-only — they come back with NEW ids; mission references do NOT rebind).">↩ Undo delete batch</button>
             </div>
-            <div id="aim-imp-render-note" style="font-size:10px;color:#7a8794;margin-bottom:4px"></div>
-            <div id="aim-imp-result" style="font-size:11px;color:#9ad;line-height:1.5">Load a region CSV or KML — points stage on the map (nothing is written), then select the subset this site's drone can cover.</div>`;
+            </div>
+            ${IMP_SEC_CLOSE}`;
         impWirePanelControls(host);
         impRenderMappingUi();
         impRenderTypeMapUi();
+        impRenderPriUi();
+        impRenderEnvUi();
+        impRenderResumeUi();
+        try { impRenderImportsUi(); } catch (e) {}
+        try { impRenderAnalyzeUi(); } catch (e) {}
+        impAutosaveTimer();
         impSyncUi();
     }
     function impWirePanelControls(host) {
@@ -21674,22 +24909,45 @@
         host.addEventListener('dragleave', () => { host.style.outline = ''; });
         host.addEventListener('drop', (ev) => {
             ev.preventDefault(); ev.stopPropagation(); host.style.outline = '';
-            const f = ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files[0];
-            if (f) impHandleFile(f);
+            Array.from((ev.dataTransfer && ev.dataTransfer.files) || []).forEach(f => impHandleFile(f));   // v4.343: several files at once (polygon-only KMLs become boundaries)
         });
         const rEl = q('aim-imp-radius'), ruEl = q('aim-imp-radius-unit');
         rEl.value = imp.radiusVal; ruEl.value = imp.radiusUnit;
         rEl.oninput = () => { const v = parseFloat(rEl.value); if (isFinite(v) && v > 0) { imp.radiusVal = v; impSaveParams(); } };
         ruEl.onchange = () => { imp.radiusUnit = ruEl.value; impSaveParams(); };
+        host.addEventListener('click', (ev) => {
+            const h = ev.target.closest('[data-impsechdr]');
+            if (h) { const id = h.getAttribute('data-impsechdr'); impSetSection(id, !(id === 'adv' ? (imp.secOpen.adv || !!imp.mode || imp.target === 'assets') : imp.secOpen[id]), false); return; }
+            const j = ev.target.closest('[data-impsecjump]');
+            if (j) { impSetSection(j.getAttribute('data-impsecjump'), true, true); }
+        });
         q('aim-imp-circle').onclick = () => impSetMode(imp.mode === 'circle' ? null : 'circle');
         q('aim-imp-lasso').onclick = () => impSetMode(imp.mode === 'lasso' ? null : 'lasso');
         q('aim-imp-pick').onclick = () => impSetMode(imp.mode === 'pick' ? null : 'pick');
         q('aim-imp-edit').onclick = () => impSetMode(imp.mode === 'edit' ? null : 'edit');
+        q('aim-imp-move').onclick = () => impSetMode(imp.mode === 'move' ? null : 'move');
+        q('aim-imp-outline').onclick = () => impSetMode(imp.mode === 'shape' ? null : 'shape');
+        const swEl = q('aim-imp-shapew'), snEl = q('aim-imp-snapft'), bfEl = q('aim-imp-bufft'), gpEl = q('aim-imp-gapft');
+        swEl.value = imp.shapeW; snEl.value = imp.snapFt; bfEl.value = imp.bufFt; gpEl.value = imp.gapFt;
+        swEl.onchange = () => { const v = parseFloat(swEl.value); if (isFinite(v) && v >= 5) { imp.shapeW = v; impSaveParams(); } };
+        snEl.onchange = () => { const v = parseFloat(snEl.value); if (isFinite(v) && v >= 0) { imp.snapFt = v; impSaveParams(); } };
+        bfEl.onchange = () => { const v = parseFloat(bfEl.value); if (isFinite(v) && v >= 0) { imp.bufFt = v; impSaveParams(); try { impRenderAssetShapes(); } catch (e) {} } };
+        gpEl.onchange = () => { const v = parseFloat(gpEl.value); if (isFinite(v) && v >= 0) { imp.gapFt = v; impSaveParams(); } };
+        q('aim-imp-save').onclick = () => { impSaveSession('manual'); };
+        q('aim-imp-resetmoves').onclick = () => {
+            let n = 0;
+            let r = 0;
+            imp.points.forEach(p => { if (p.orig) { p.lat = p.orig.lat; p.lng = p.orig.lng; delete p.orig; n++; } if (p.removed) { p.removed = false; p.done = false; r++; } });
+            imp.moveHeld = null; imp.moveDrag = false;
+            if (n || r) { try { impComputeDups(); } catch (e) {} impRefreshAfterSelChange(); }
+            impStatus(`↩ ${n} point(s) back at their file coordinates${r ? ` · ${r} removed point(s) restored` : ''}`);
+        };
         q('aim-imp-shape').onclick = () => {
             const inp = document.createElement('input');
             inp.type = 'file';
+            inp.multiple = true;   // v4.343: several boundary KMLs in one pick
             inp.accept = '.kml,application/vnd.google-earth.kml+xml';
-            inp.onchange = () => { const f = inp.files && inp.files[0]; if (f) impHandleShapeFile(f); };
+            inp.onchange = () => { Array.from(inp.files || []).forEach(f => impHandleShapeFile(f)); };
             inp.click();
         };
         q('aim-imp-selall').onclick = () => {
@@ -21701,16 +24959,16 @@
             // full reset for the active target: shapes AND manual picks
             imp.shapes = [];
             if (imp.target === 'assets') imp.assetManual.clear();
-            else imp.points.forEach(p => { delete p.selManual; });
+            else imp.points.forEach(p => { if (!p.done) p.selManual = false; });   // v4.331: explicit off (default is all-on)
             impRefreshAfterSelChange();
         };
-        q('aim-imp-clearshapes').onclick = () => { imp.shapes = []; impRefreshAfterSelChange(); impStatus(`shapes cleared — <b>${impSelCount()}</b> still selected via ☝ manual picks`); };
+        q('aim-imp-clearshapes').onclick = () => { imp.shapes = []; impRefreshAfterSelChange(); impStatus(imp.target === 'assets' ? `shapes cleared — <b>${impSelCount()}</b> still selected via ☝ manual picks` : `shapes cleared — <b>${impSelCount()}</b> selected (no shape = every staged point, minus ☝ manual deselects)`); };
         const szEl = q('aim-imp-size');
         szEl.value = impSizeFt;
-        szEl.oninput = () => { const v = parseFloat(szEl.value); if (isFinite(v) && v >= 5 && v <= 2000) impSizeFt = v; };
-        const incEl = q('aim-imp-incdups');
-        incEl.checked = imp.includeDups;
-        incEl.onchange = () => { imp.includeDups = incEl.checked; impSaveParams(); impSyncUi(); };
+        szEl.oninput = () => { const v = parseFloat(szEl.value); if (isFinite(v) && v >= 5 && v <= 2000) { impSizeFt = v; try { if (imp.points.length) { impComputeDups(); impRenderStaged(); impSyncUi(); } } catch (e) {} } };
+        const dmSel = q('aim-imp-dupmode');
+        dmSel.value = imp.dupMode;
+        dmSel.onchange = () => { imp.dupMode = dmSel.value; imp.includeDups = imp.dupMode === 'copy'; impSaveParams(); impSyncUi(); };
         q('aim-imp-commit').onclick = () => { impCommit(); };
         q('aim-imp-undocreate').onclick = () => { impUndoCreate(); };
         const dmEl = q('aim-imp-delmode');
@@ -21731,6 +24989,14 @@
         if (!el) return;
         if (!imp.headers.length) { el.innerHTML = ''; return; }
         const m = imp.mapping || {};
+        // v4.331: once staged, the mapping collapses to one line — "edit" reopens the pickers
+        if (!imp.mapOpen && imp.points.length && m.lat && m.lng) {
+            const part = (k, label) => `${label}=<b style="color:#cfd6dc">${impEsc(m[k] || '—')}</b>`;
+            const nc = impNotesCols();
+            el.innerHTML = `<div style="font-size:10px;color:#7a8794;padding:2px 0">Columns: ${part('name', 'Name')} · ${part('type', 'Type')} · ${part('lat', 'Lat')} · ${part('lng', 'Lng')} · Notes=<b style="color:#cfd6dc">original name${nc.length ? ` + ${nc.length} column${nc.length === 1 ? '' : 's'}` : ''} + stamp</b> <a href="#" id="aim-imp-mapedit" style="color:#7adfe6;margin-left:6px">edit</a></div>`;
+            el.querySelector('#aim-imp-mapedit').onclick = (ev) => { ev.preventDefault(); imp.mapOpen = true; impRenderMappingUi(); };
+            return;
+        }
         const sel = (key, label, allowNone) => {
             const opts = (allowNone ? `<option value="">— none —</option>` : '')
                 + imp.headers.map(h => `<option value="${impEsc(h)}"${m[key] === h ? ' selected' : ''}>${impEsc(h)}</option>`).join('');
@@ -21740,11 +25006,679 @@
         el.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:6px 8px;background:rgba(122,223,230,0.05);border:1px dashed rgba(122,223,230,0.3);border-radius:3px">
             ${sel('name', 'Name', true)} ${sel('lat', 'Lat', false)} ${sel('lng', 'Lng', false)} ${sel('type', 'Type', true)}
             <button id="aim-imp-applymap" style="background:rgba(95,255,95,0.15);color:#5fff5f;border:1px solid rgba(95,255,95,0.55);border-radius:3px;padding:4px 12px;cursor:pointer;font:inherit;font-size:11px;font-weight:600">✓ Apply</button>
+            <div id="aim-imp-notescols" style="flex-basis:100%"></div>
         </div>`;
         el.querySelectorAll('select[data-impmap]').forEach(s => {
-            s.onchange = () => { if (!imp.mapping) imp.mapping = {}; imp.mapping[s.getAttribute('data-impmap')] = s.value || null; };
+            s.onchange = () => { if (!imp.mapping) imp.mapping = {}; imp.mapping[s.getAttribute('data-impmap')] = s.value || null; impRenderNotesCols(el); };
         });
         el.querySelector('#aim-imp-applymap').onclick = () => { impBuildPoints(); };
+        impRenderNotesCols(el);
+    }
+    // v4.331: flag list — name duplicates (skipped unless included) + parent/child (inside / near an existing asset)
+    // ---- v4.356 ENVERUS CROSS-CHECK ----
+    // The client's list carries an API number per well; Enverus' `wells`
+    // dataset answers by API with one row PER WELLBORE (a re-entered well
+    // comes back 2–3×: the plugged original + the horizontal sidetracks), so
+    // rows merge per API: any PRODUCING bore wins, else the latest spud.
+    // `API_UWI_Unformatted=in(a,b,…)` takes 200 at a time (~4 s). Token from
+    // the secret key (GM-stored, prompt once), cached in memory.
+    const IMP_ENV_KEY = 'aim_imp_enverus_key';
+    const IMP_ENV_BASE = 'https://api.enverus.com/v3/direct-access/';
+    const IMP_ENV_FIELDS = 'WellName,API_UWI_Unformatted,ENVOperator,ENVWellStatus,ENVWellType,Trajectory,Latitude,Longitude,SpudDate,PlugDate,FirstProdDate,PadID,County,StateProvince';
+    let impEnvToken = null, impEnvTokenAt = 0;
+    function impEnvKey() { try { return String(GM_getValue(IMP_ENV_KEY, '') || '').trim(); } catch (e) { return ''; } }
+    function impEnvSetKey() {
+        const cur = impEnvKey();
+        const v = prompt('Enverus Developer API secret key (stored in Tampermonkey storage on this machine only):', cur ? '••••••••' + cur.slice(-4) : '');
+        if (v === null) return;
+        if (!/^•/.test(v)) { try { GM_setValue(IMP_ENV_KEY, String(v).trim()); } catch (e) {} impEnvToken = null; }
+        impRenderEnvUi();
+    }
+    async function impEnvFetchToken(force) {
+        if (!force && impEnvToken && (Date.now() - impEnvTokenAt) < 50 * 60000) return impEnvToken;
+        const key = impEnvKey(); if (!key) throw new Error('no Enverus key — set it in the Enverus section');
+        const r = await elevGmRequest({ method: 'POST', url: IMP_ENV_BASE + 'tokens', headers: { 'Content-Type': 'application/json' }, data: JSON.stringify({ secretKey: key }), timeout: 30000 });
+        if (!r.ok) throw new Error(`Enverus token ${r.status || 'network error'}${r.status === 401 || r.status === 403 ? ' — key refused' : ''}`);
+        let j = null; try { j = JSON.parse(r.responseText); } catch (e) {}
+        if (!j || !j.token) throw new Error('Enverus token response unreadable');
+        impEnvToken = j.token; impEnvTokenAt = Date.now();
+        return impEnvToken;
+    }
+    async function impEnvGet(query, retry) {
+        const tok = await impEnvFetchToken(false);
+        const r = await elevGmRequest({ method: 'GET', url: IMP_ENV_BASE + query, headers: { 'Authorization': 'Bearer ' + tok, 'Accept': 'application/json' }, timeout: 90000 });
+        if ((r.status === 401) && !retry) { await impEnvFetchToken(true); return impEnvGet(query, true); }
+        if (!r.ok) throw new Error(`Enverus ${r.status || 'network error'}: ${String(r.responseText || '').slice(0, 160)}`);
+        try { return JSON.parse(r.responseText); } catch (e) { throw new Error('Enverus response unreadable'); }
+    }
+    function impEnvApiOf(p) {
+        const col = imp.env.apiCol; if (!col) return '';
+        const raw = String((imp.rows[p.i] || {})[col] == null ? '' : (imp.rows[p.i] || {})[col]).replace(/\D/g, '');
+        if (raw.length >= 10) return raw.slice(0, 10);   // API10 = state+county+well; Enverus keys on the 10-digit form
+        return '';
+    }
+    function impEnvGuessApiCol(headers) {
+        const lower = headers.map(h => String(h).toLowerCase());
+        const i = lower.findIndex(h => /\bapi\b|api_|_api|uwi/.test(h) && !/type|date|method/.test(h));
+        return i >= 0 ? headers[i] : null;
+    }
+    const IMP_ENV_STATUS_RANK = { 'PRODUCING': 0, 'INJECTING': 1, 'DRILLED': 2, 'COMPLETED': 2, 'SPUD DATE ONLY': 3, 'PERMIT': 4, 'INACTIVE PRODUCER': 5, 'TA': 6, 'PERMIT EXPIRED': 7, 'PERMIT CANCELLED': 7, 'P & A': 8, 'P&A': 8, 'PLUGGED': 8 };
+    function impEnvMerge(rows) {
+        if (!rows.length) return null;
+        const rank = (r) => { const st = String(r.ENVWellStatus || '').toUpperCase(); const k = Object.keys(IMP_ENV_STATUS_RANK).find(x => st === x || st.startsWith(x)); return k ? IMP_ENV_STATUS_RANK[k] : 5; };
+        const sorted = rows.slice().sort((a, b) => rank(a) - rank(b) || String(b.SpudDate || '').localeCompare(String(a.SpudDate || '')));
+        const best = sorted[0];
+        const traj = [...new Set(rows.map(r => r.Trajectory).filter(Boolean))];
+        const d = (v) => v ? String(v).slice(0, 10) : '';
+        return { found: true, name: best.WellName || '', status: String(best.ENVWellStatus || '').toUpperCase(), type: best.ENVWellType || '', traj: traj.join('+'), op: best.ENVOperator || '', lat: best.Latitude, lng: best.Longitude, spud: d(best.SpudDate), plug: d(best.PlugDate), firstProd: d(best.FirstProdDate), pad: best.PadID || '', county: best.County || '', state: best.StateProvince || '', bores: rows.length, plugged: rows.some(r => r.PlugDate) && rank(best) >= 5 };
+    }
+    async function impEnvCheck() {
+        const c = imp.env;
+        if (c.running) return;
+        if (!imp.env.apiCol) { impStatus('Pick the API-number column in the Enverus section first', '#ffb347'); return; }
+        const pts = imp.points.filter(p => !p.done && (c.scope === 'all' || p.sel));   // v4.360: scope = selected points or the WHOLE file
+        const byApi = new Map();
+        pts.forEach(p => { const a = impEnvApiOf(p); p.env = a ? null : { found: false, noApi: true }; if (a) { if (!byApi.has(a)) byApi.set(a, []); byApi.get(a).push(p); } });
+        const apis = [...byApi.keys()];
+        if (!apis.length) { impStatus('No selected point has an API number in that column', '#ffb347'); impRenderEnvUi(); return; }
+        c.running = true; c.summary = null; impRenderEnvUi();
+        const got = new Map();
+        try {
+            await impEnvFetchToken(false);
+            for (let i = 0; i < apis.length; i += 200) {
+                const batch = apis.slice(i, i + 200);
+                impStatus(`🛢 Enverus: ${Math.min(i + 200, apis.length)} / ${apis.length} API numbers…`);
+                const rows = await impEnvGet(`wells?pagesize=1000&DeletedDate=null&API_UWI_Unformatted=in(${batch.join(',')})&fields=${IMP_ENV_FIELDS}`);
+                (rows || []).forEach(r => { const a = String(r.API_UWI_Unformatted || '').replace(/\D/g, '').slice(0, 10); if (!got.has(a)) got.set(a, []); got.get(a).push(r); });
+            }
+        } catch (e) {
+            c.running = false; impRenderEnvUi();
+            console.warn(`${TAG} 🛢 Enverus check failed:`, e);
+            impStatus(`🛢 Enverus check failed: ${impEsc(e && e.message || e)}`, '#ff6060');
+            return;
+        }
+        const when = impNowStamp();
+        byApi.forEach((list, a) => {
+            const m = impEnvMerge(got.get(a) || []);
+            list.forEach(p => {
+                if (!m) { p.env = { found: false, api: a }; return; }
+                const e = Object.assign({ api: a }, m);
+                e.distFt = (isFinite(e.lat) && isFinite(e.lng)) ? Math.round(approxMeters(p.lat, p.lng, e.lat, e.lng) / GEN_FT_TO_M) : null;
+                e.checkedAt = when;
+                p.env = e;
+            });
+        });
+        c.running = false; c.checkedAt = when;
+        impEnvSummarize();
+        try { if (imp.pri.on) { impComputePriority(); impRenderPriUi(); impRenderStaged(); } } catch (e) { console.warn(`${TAG} 🛢 re-tier failed:`, e); }
+        impMarkDirty();
+        impRenderEnvUi(); impSyncUi();
+        const S = c.summary;
+        impStatus(`🛢 Enverus (${c.scope === 'all' ? 'whole file' : 'selected points'}): ${S.found} of ${S.withApi} API numbers found · <span style="color:#5fff5f">${S.producing} producing</span> · <span style="color:#ffb347">${S.inactive} inactive / TA</span> · <span style="color:#ff6060">${S.plugged} plugged / expired</span>${S.notFound ? ` · ${S.notFound} not in Enverus` : ''}${S.far ? ` · ${S.far} more than 100 ft from the client coordinate` : ''}${S.otherOp ? ` · ${S.otherOp} under another operator` : ''}`);
+    }
+    // ---- v4.366 FILL-IN: the operator's wells INSIDE the boundaries whose API is
+    // not in the client's file. One request per county (ENVOperator + County +
+    // StateProvince filter server-side; a 1000-row cap is split by status, then
+    // by API range). Boxed client-side to the boundaries (or the staged points'
+    // bbox + 0.25 mi when there are none). ----
+    function impEnvInBox(lat, lng, box) {
+        if (imp.shapes.length) return imp.shapes.some(sh => impShapeContains(sh, lat, lng));
+        return box && lat >= box.la0 && lat <= box.la1 && lng >= box.lo0 && lng <= box.lo1;
+    }
+    function impEnvStatusGroup(st) { const b = impEnvBucket({ found: true, status: String(st || '').toUpperCase() }); return b === 'producing' ? 'producing' : (b === 'inactive' ? 'inactive' : (b === 'plugged' ? 'plugged' : 'drilled')); }
+    async function impEnvFetchOperatorWells(county, state, op, log) {
+        const base = `wells?pagesize=1000&DeletedDate=null&County=${encodeURIComponent(county)}&StateProvince=${encodeURIComponent(state)}&ENVOperator=${encodeURIComponent(op)}&fields=${IMP_ENV_FIELDS}`;
+        let rows = await impEnvGet(base);
+        if (rows.length < 1000) return rows;
+        log(`${county}: over 1,000 wells — splitting by status`);
+        const out = new Map(); rows.forEach(r => out.set(r.API_UWI_Unformatted + '|' + (r.SpudDate || ''), r));
+        const statuses = [...new Set(rows.map(r => r.ENVWellStatus).filter(Boolean))].concat(['PRODUCING', 'INJECTING', 'INACTIVE PRODUCER', 'P & A', 'DRILLED', 'COMPLETED', 'DUC', 'PERMIT EXPIRED', 'TA']);
+        for (const st of [...new Set(statuses)]) {
+            const part = await impEnvGet(`${base}&ENVWellStatus=${encodeURIComponent(st)}`);
+            part.forEach(r => out.set(r.API_UWI_Unformatted + '|' + (r.SpudDate || ''), r));
+            if (part.length >= 1000) {   // still capped → quarter the county's API range
+                const pref = String(part[0].API_UWI_Unformatted || '').slice(0, 5);
+                for (let q = 0; q < 10; q++) {
+                    const lo = `${pref}${q}0000`, hi = `${pref}${q}9999`;
+                    const chunk = await impEnvGet(`${base}&ENVWellStatus=${encodeURIComponent(st)}&API_UWI_Unformatted=btw(${lo},${hi})`);
+                    chunk.forEach(r => out.set(r.API_UWI_Unformatted + '|' + (r.SpudDate || ''), r));
+                }
+            }
+        }
+        return [...out.values()];
+    }
+    async function impEnvFindMissing() {
+        const c = imp.env;
+        if (c.finding) return;
+        const op = (c.missingOp || c.mainOp || '').trim();
+        if (!op) { impStatus('Run the 🛢 cross-check first (it learns the operator and counties), or type the operator name', '#ffb347'); return; }
+        const checked = imp.points.filter(p => !p.done && p.env && p.env.found);
+        const counties = new Map();
+        checked.forEach(p => { if (p.env.county) counties.set(`${p.env.county}|${p.env.state || 'TX'}`, { county: p.env.county, state: p.env.state || 'TX' }); });
+        if (!counties.size) { impStatus('No counties known yet — run the 🛢 cross-check on some points first', '#ffb347'); return; }
+        const live = imp.points.filter(p => !p.done);
+        let box = null;
+        if (!imp.shapes.length) {
+            const sel = live.filter(p => p.sel); if (!sel.length) { impStatus('Draw a boundary (or select points) so the search has an area', '#ffb347'); return; }
+            let la0 = Infinity, lo0 = Infinity, la1 = -Infinity, lo1 = -Infinity;
+            sel.forEach(p => { la0 = Math.min(la0, p.lat); lo0 = Math.min(lo0, p.lng); la1 = Math.max(la1, p.lat); lo1 = Math.max(lo1, p.lng); });
+            const dLat = 402 / 111320, dLng = 402 / (111320 * Math.cos((la0 + la1) / 2 * Math.PI / 180));
+            box = { la0: la0 - dLat, la1: la1 + dLat, lo0: lo0 - dLng, lo1: lo1 + dLng };
+        }
+        const known = new Set();
+        imp.points.forEach(p => { const a = impEnvApiOf(p); if (a) known.add(a); });
+        (imp.invalidRows || []).forEach(x => { const rr = imp.rows[x.i] || {}; const a = c.apiCol ? String(rr[c.apiCol] == null ? '' : rr[c.apiCol]).replace(/\D/g, '').slice(0, 10) : ''; if (a) known.add(a); });
+        c.finding = true; c.missing = null; impRenderEnvUi();
+        const log = (t) => impStatus(`🔍 Enverus fill-in: ${impEsc(t)}`);
+        const byApi = new Map();
+        try {
+            await impEnvFetchToken(false);
+            for (const { county, state } of counties.values()) {
+                log(`${op} wells in ${county} County, ${state}…`);
+                const rows = await impEnvFetchOperatorWells(county, state, op, log);
+                rows.forEach(r => { const a = String(r.API_UWI_Unformatted || '').replace(/\D/g, '').slice(0, 10); if (!a) return; if (!byApi.has(a)) byApi.set(a, []); byApi.get(a).push(r); });
+            }
+        } catch (e) {
+            c.finding = false; impRenderEnvUi();
+            console.warn(`${TAG} 🔍 fill-in failed:`, e); impStatus(`🔍 fill-in failed: ${impEsc(e && e.message || e)}`, '#ff6060'); return;
+        }
+        const cands = [];
+        byApi.forEach((rows, a) => {
+            const m = impEnvMerge(rows); if (!m || !isFinite(m.lat) || !isFinite(m.lng)) return;
+            if (!impEnvInBox(m.lat, m.lng, box)) return;
+            const inFile = known.has(a);
+            // nearest existing asset / pad on the site
+            let near = null, bd = Infinity;
+            (imp.assetIndex || []).forEach(x => { const d = pointToPolygonMeters(m.lat, m.lng, x.ring); if (d < bd) { bd = d; near = x; } });
+            cands.push(Object.assign({ api: a, inFile, group: impEnvStatusGroup(m.status), nearName: near ? near.name : '', nearFt: isFinite(bd) ? Math.round(bd / GEN_FT_TO_M) : null, inside: isFinite(bd) && bd === 0 }, m));
+        });
+        c.missing = cands.filter(x => !x.inFile).sort((a, b) => (a.nearFt == null ? 1e9 : a.nearFt) - (b.nearFt == null ? 1e9 : b.nearFt) || a.name.localeCompare(b.name));
+        c.missingTotal = cands.length; c.missingAt = impNowStamp(); c.missingOp = op; c.missingSel = new Set(c.missing.filter(x => c.missStatus[x.group]).map(x => x.api));
+        c.finding = false; impMarkDirty(); impRenderEnvUi();
+        const g = (k) => c.missing.filter(x => x.group === k).length;
+        impStatus(`🔍 ${op}: <b>${cands.length}</b> wells inside the area in ${counties.size} count${counties.size === 1 ? 'y' : 'ies'} · <b style="color:#ffb347">${c.missing.length} not in the client's list</b> (${g('producing')} producing · ${g('drilled')} drilled/permitted · ${g('inactive')} inactive · ${g('plugged')} plugged) — review the list below and stage the ones to add`);
+    }
+    function impEnvStageMissing() {
+        const c = imp.env; if (!c.missing) return;
+        const pick = c.missing.filter(x => c.missingSel.has(x.api) && !x.staged);
+        if (!pick.length) { impStatus('Tick the wells to add first', '#ffb347'); return; }
+        const m = imp.mapping || {};
+        pick.forEach(x => {
+            const row = {}; imp.headers.forEach(h => { row[h] = ''; });
+            if (m.name) row[m.name] = x.name;
+            if (m.lat) row[m.lat] = String(x.lat);
+            if (m.lng) row[m.lng] = String(x.lng);
+            if (c.apiCol) row[c.apiCol] = x.api;
+            const typeRaw = m.type ? `${/HORIZ/.test(x.traj) ? 'H' : 'V'} - WELL (Enverus)` : '';
+            if (m.type) row[m.type] = typeRaw;
+            imp.rows.push(row);
+            const i = imp.rows.length - 1;
+            const p = { i, name: x.name, rawName: x.name, lat: x.lat, lng: x.lng, typeRaw, notes: '', sel: false, dup: false, dupWhy: '', child: null, near: null, done: false, src: 'enverus', env: Object.assign({ api: x.api, found: true, checkedAt: c.missingAt, distFt: 0 }, x) };
+            imp.points.push(p); x.staged = true;
+        });
+        imp._rootCache = null;
+        impBuildAssetIndex(); impComputeDups(); impRecomputeSel();
+        impRenderStaged(); impRenderShapes(); impRenderTypeMapUi(); impRenderMappingUi();
+        impMarkDirty(); impSyncUi(); impRenderEnvUi();
+        impStatus(`➕ ${pick.length} well${pick.length === 1 ? '' : 's'} from Enverus staged as new points (orange dots, source noted in their notes) — they go through the same tiers / flags / Create as the rest`);
+    }
+    function impExportMissing(how) {
+        const c = imp.env; if (!c.missing || !c.missing.length) { impStatus('Nothing to export — run the fill-in first', '#ffb347'); return; }
+        const cols = [
+            { label: 'Well (Enverus name)', val: x => x.name }, { label: 'API', val: x => x.api }, { label: 'Status', val: x => x.status }, { label: 'Type', val: x => x.type }, { label: 'Trajectory', val: x => x.traj }, { label: 'Operator', val: x => x.op },
+            { label: 'Spud', val: x => x.spud }, { label: 'First prod', val: x => x.firstProd }, { label: 'Nearest mapped asset', val: x => x.nearName }, { label: 'Distance (ft)', val: x => x.nearFt == null ? '' : x.nearFt }, { label: 'County', val: x => x.county },
+            { label: 'Latitude', val: x => Number(x.lat).toFixed(6) }, { label: 'Longitude', val: x => Number(x.lng).toFixed(6) }, { label: 'Staged', val: x => x.staged ? 'yes' : '' },
+        ];
+        impExportTable(c.missing, cols, how, 'wells-not-in-list', 'missing-well');
+    }
+    function impEnvBucket(e) {
+        if (!e || e.noApi) return 'noapi';
+        if (!e.found) return 'notfound';
+        const st = e.status || '';
+        if (/^PRODUCING|^INJECTING/.test(st)) return 'producing';
+        if (/P ?& ?A|PLUGGED|EXPIRED|CANCELLED/.test(st)) return 'plugged';
+        if (/INACTIVE|^TA\b|SHUT/.test(st)) return 'inactive';
+        return 'other';
+    }
+    function impEnvSummarize() {
+        const c = imp.env;
+        const pts = imp.points.filter(p => !p.done && (c.scope === 'all' || p.sel) && p.env);
+        if (!pts.length) { c.summary = null; return; }
+        const ops = new Map();
+        pts.forEach(p => { if (p.env.found && p.env.op) ops.set(p.env.op, (ops.get(p.env.op) || 0) + 1); });
+        const mainOp = [...ops.entries()].sort((a, b) => b[1] - a[1])[0];
+        c.mainOp = mainOp ? mainOp[0] : '';
+        const S = { n: pts.length, withApi: pts.filter(p => !p.env.noApi).length, found: pts.filter(p => p.env.found).length, notFound: pts.filter(p => !p.env.found && !p.env.noApi).length, noApi: pts.filter(p => p.env.noApi).length,
+            producing: 0, inactive: 0, plugged: 0, other: 0, far: pts.filter(p => p.env.found && p.env.distFt != null && p.env.distFt > 100).length, otherOp: pts.filter(p => p.env.found && c.mainOp && p.env.op !== c.mainOp).length, mainOp: c.mainOp };
+        pts.forEach(p => { const b = impEnvBucket(p.env); if (S[b] !== undefined) S[b]++; });
+        c.summary = S;
+    }
+    function impEnvFlagged(p) {
+        const e = p.env; if (!e || e.noApi) return false;
+        if (!e.found) return true;
+        const b = impEnvBucket(e);
+        return b !== 'producing' || (e.distFt != null && e.distFt > 100) || (imp.env.mainOp && e.op !== imp.env.mainOp);
+    }
+    function impEnvShort(p) {
+        const e = p.env; if (!e) return '';
+        if (e.noApi) return 'no API number in the file';
+        if (!e.found) return `API ${e.api} not in Enverus`;
+        const bits = [e.status || '?'];
+        if (e.type) bits.push(e.type);
+        if (e.traj) bits.push(e.traj.toLowerCase());
+        if (e.plug) bits.push(`plugged ${e.plug}`);
+        if (e.distFt != null && e.distFt > 100) bits.push(`${e.distFt} ft from the client coordinate`);
+        if (imp.env.mainOp && e.op !== imp.env.mainOp) bits.push(`operator ${e.op}`);
+        return bits.join(' · ');
+    }
+    function impEnvNotesBlock(p) {
+        const e = p.env; if (!imp.env.notes || !e || !e.found) return [];
+        return [`Enverus\n${e.status || '?'}${e.type ? ` · ${e.type}` : ''}${e.traj ? ` · ${e.traj}` : ''}${e.op ? ` · ${e.op}` : ''}${e.spud ? ` · spud ${e.spud}` : ''}${e.plug ? ` · plugged ${e.plug}` : ''}${e.bores > 1 ? ` · ${e.bores} wellbores` : ''} · API ${e.api} · checked ${e.checkedAt || imp.env.checkedAt || ''}`];
+    }
+    function impRenderEnvUi() {
+        const el = document.getElementById('aim-imp-env'); if (!el) return;
+        const c = imp.env;
+        if (!imp.headers.length) { el.innerHTML = `<div style="font-size:11px;color:#888">after the data file — cross-checks every selected well against Enverus by API number (status, type, trajectory, operator, dates, location)</div>`; return; }
+        if (!c.apiCol && !c._guessed) { c.apiCol = impEnvGuessApiCol(imp.headers); c._guessed = true; }
+        const key = impEnvKey();
+        const inCss = 'background:#1a1d23;border:1px solid rgba(255,214,102,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px';
+        const S = c.summary;
+        const pill = (t, n, col) => `<span style="display:inline-block;padding:1px 8px;border-radius:10px;background:${col}22;border:1px solid ${col}88;color:${col};font-weight:600">${t} ${n}</span>`;
+        const inScope = (p) => !p.done && (c.scope === 'all' || p.sel);
+        const selN = imp.points.filter(inScope).length, withApi = imp.points.filter(p => inScope(p) && impEnvApiOf(p)).length;
+        el.innerHTML = `<div style="padding:6px 8px;background:rgba(255,214,102,0.05);border:1px dashed rgba(255,214,102,0.4);border-radius:3px;font-size:11px;color:#cfd6dc">
+            <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:6px">
+                <span style="color:#888;font-size:10px">Key:</span> ${key ? `<span style="color:#5fff5f">set (…${impEsc(key.slice(-4))})</span>` : '<span style="color:#ff6060">not set</span>'} <a href="#" data-impenv-key style="color:#7adfe6">${key ? 'change' : 'set key'}</a>
+                <label style="display:inline-flex;align-items:center;gap:4px">API column <select data-impenv-api style="max-width:170px;${inCss}"><option value="">— none —</option>${imp.headers.map(h => `<option value="${impEsc(h)}"${c.apiCol === h ? ' selected' : ''}>${impEsc(h)}</option>`).join('')}</select></label>
+                <label style="display:inline-flex;align-items:center;gap:4px" title="Selected = the points inside your boundaries. Whole file = every row in the client's list, boundaries ignored — use this for the client report."><b style="color:#ffd666">Scope</b> <select data-impenv-scope style="${inCss}"><option value="selected"${c.scope === 'selected' ? ' selected' : ''}>selected points (inside boundaries)</option><option value="all"${c.scope === 'all' ? ' selected' : ''}>WHOLE file</option></select></label>
+                <button data-impenv-run ${c.running || !key || !c.apiCol ? 'disabled' : ''} style="background:rgba(255,214,102,0.15);color:#ffd666;border:1px solid rgba(255,214,102,0.5);border-radius:3px;padding:3px 12px;cursor:pointer;font:inherit;font-size:11px;font-weight:600${c.running || !key || !c.apiCol ? ';opacity:0.5;cursor:default' : ''}">${c.running ? '⏳ checking…' : `🛢 Cross-check ${withApi} ${c.scope === 'all' ? 'wells in the whole file' : `selected well${withApi === 1 ? '' : 's'}`}`}</button>
+                <span style="color:#888;font-size:10px">${selN - withApi ? `${selN - withApi} ${c.scope === 'all' ? 'rows' : 'selected points'} without an API (batteries etc.) · ` : ''}~${Math.ceil(withApi / 200)} request${Math.ceil(withApi / 200) === 1 ? '' : 's'} · about ${Math.max(1, Math.round(Math.ceil(withApi / 200) * 4 / 60 * 10) / 10)} min</span>
+                <span style="flex:1"></span>
+                ${S ? `<button data-impenv-rep="sheets" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">📤 Report for Sheets</button><button data-impenv-rep="csv" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">⬇ CSV</button>` : ''}
+            </div>
+            ${S ? `<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:4px">
+                ${pill('● producing', S.producing, '#5fff5f')} ${pill('● inactive / TA', S.inactive, '#ffb347')} ${pill('● plugged / expired', S.plugged, '#ff5252')} ${S.other ? pill('● other', S.other, '#9ad') : ''} ${S.notFound ? pill('not in Enverus', S.notFound, '#ff8a80') : ''}
+                <span style="color:#888">· ${S.found} / ${S.withApi} found · checked ${impEsc(c.checkedAt || '')}${S.mainOp ? ` · operator mostly <b style="color:#cfd6dc">${impEsc(S.mainOp)}</b>` : ''}${S.otherOp ? ` · <span style="color:#ffb347">${S.otherOp} under another operator</span>` : ''}${S.far ? ` · <span style="color:#ffb347">${S.far} more than 100 ft off the client coordinate</span>` : ''}</span>
+            </div>
+            <div style="color:#888;font-size:10px">Everything that is not plainly producing is listed under Placement › 🛢 Enverus (click a row to zoom, ⓘ for the record). Selected dots on the map turn red when Enverus says plugged / expired and amber when inactive.</div>` : `<div style="color:#888;font-size:10px">Answers per well: status (producing / inactive / plugged…), type, vertical vs horizontal, operator, spud / plug dates and Enverus' own surface location vs the client's. Flags go to Placement › 🛢 Enverus.</div>`}
+            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin-top:6px;font-size:10px;color:#cfd6dc"><input type="checkbox" data-impenv-notes ${c.notes ? 'checked' : ''} style="accent-color:#ffd666"> write an "Enverus" block into each checked asset's notes (status · type · trajectory · operator · dates · API · checked date)</label>
+            <div style="margin-top:8px;padding-top:6px;border-top:1px dashed rgba(255,214,102,0.3)">
+                <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+                    <b style="color:#ffd666">🔍 Wells the list is missing</b>
+                    <span style="color:#888;font-size:10px">the operator's wells inside your boundaries whose API is not in the file — a pad with one listed well picks up its siblings</span>
+                    <label style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:#cfd6dc">operator <input type="text" data-impenv-op value="${impEsc(c.missingOp || c.mainOp || '')}" placeholder="from the cross-check" style="width:130px;${inCss}"></label>
+                    <button data-impenv-find ${c.finding || !key ? 'disabled' : ''} style="background:rgba(255,214,102,0.15);color:#ffd666;border:1px solid rgba(255,214,102,0.5);border-radius:3px;padding:3px 12px;cursor:pointer;font:inherit;font-size:11px;font-weight:600${c.finding || !key ? ';opacity:0.5;cursor:default' : ''}">${c.finding ? '⏳ searching…' : '🔍 Find missing wells'}</button>
+                    <span style="color:#888;font-size:10px">${imp.shapes.length ? `inside the ${imp.shapes.length} boundar${imp.shapes.length === 1 ? 'y' : 'ies'}` : 'no boundary — uses the selected points\' area + ¼ mi'} · needs a cross-check first (counties come from it)</span>
+                </div>
+                <div data-impenv-missing style="margin-top:4px"></div>
+            </div>
+            <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:8px;padding-top:6px;border-top:1px dashed rgba(255,214,102,0.3)">
+                <b style="color:#ffd666">📋 Client data review</b>
+                <span style="color:#888;font-size:10px">what the client needs to go check — High: wrong place / wrong well / not theirs · Medium: active-or-not and type disagreements, same well twice · Low: housekeeping (no coordinates, missing API, duplicate names — one line per name)</span>
+                <label style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:#cfd6dc">coordinate mismatch over <input type="number" data-impenv-mm value="${c.mismatchFt}" min="50" step="50" style="width:60px;${inCss};text-align:right"> ft</label>
+                <label style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:#cfd6dc" title="Battery + well sharing one name is OUR naming constraint — left out of the client report unless ticked"><input type="checkbox" data-impenv-ours ${c.includeOurs ? 'checked' : ''} style="accent-color:#ffd666"> include things we handle ourselves</label>
+                <span style="color:#888;font-size:10px">scope: <b style="color:#cfd6dc">${c.scope === 'all' ? 'WHOLE file' : 'selected points'}</b> (set above)</span>
+                <span style="flex:1"></span>
+                <button data-impenv-review="sheets" title="Summary table + one row per finding, colour-coded by severity — paste into Google Sheets and send" style="background:rgba(255,214,102,0.18);color:#ffd666;border:1px solid rgba(255,214,102,0.6);border-radius:3px;padding:3px 12px;cursor:pointer;font:inherit;font-size:11px;font-weight:600">📋 Report for Sheets</button>
+                <button data-impenv-review="csv" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">⬇ CSV</button>
+            </div>
+            <div data-impenv-review-note style="color:#888;font-size:10px;margin-top:4px"></div>
+        </div>`;
+        try {
+            const rows = impClientReviewRows();
+            const note = el.querySelector('[data-impenv-review-note]');
+            if (note) note.innerHTML = rows.length ? `${rows.filter(x => x.sev === 'High').length ? `<b style="color:#ff6060">${rows.filter(x => x.sev === 'High').length} high</b>` : '0 high'} · ${rows.filter(x => x.sev === 'Medium').length} medium · ${rows.filter(x => x.sev === 'Low').length} low${!S ? ' · <span style="color:#ffb347">run the cross-check first for the Enverus findings</span>' : ''} · written for a non-technical reader: plain-English finding, what it means, what we need, map links` : (S ? 'no findings in this scope' : 'run the cross-check for the Enverus findings — file hygiene findings show here regardless');
+        } catch (e) { console.warn(`${TAG} 📋 review preview failed:`, e); }
+        el.querySelector('[data-impenv-op]').onchange = function () { c.missingOp = this.value.trim(); };
+        const fb = el.querySelector('[data-impenv-find]'); if (fb) fb.onclick = () => { c.missingOp = (el.querySelector('[data-impenv-op]') || {}).value || c.missingOp; impEnvFindMissing().catch(e => { console.warn(`${TAG} 🔍`, e); impStatus(`🔍 ${impEsc(e && e.message || e)}`, '#ff6060'); }); };
+        impRenderMissingUi(el);
+        el.querySelector('[data-impenv-mm]').onchange = function () { const v = parseFloat(this.value); if (isFinite(v) && v >= 0) { c.mismatchFt = v; impMarkDirty(); impRenderEnvUi(); } };
+        el.querySelector('[data-impenv-ours]').onchange = function () { c.includeOurs = this.checked; impRenderEnvUi(); };
+        el.querySelector('[data-impenv-scope]').onchange = function () { c.scope = this.value === 'all' ? 'all' : 'selected'; impEnvSummarize(); impRenderEnvUi(); };
+        el.querySelectorAll('[data-impenv-review]').forEach(b => b.onclick = () => { try { impExportClientReview(b.getAttribute('data-impenv-review')); } catch (e) { console.warn(`${TAG} 📋`, e); impStatus(`Client review failed: ${impEsc(e && e.message || e)}`, '#ff6060'); } });
+        el.querySelector('[data-impenv-key]').onclick = (ev) => { ev.preventDefault(); impEnvSetKey(); };
+        el.querySelector('[data-impenv-api]').onchange = function () { c.apiCol = this.value || null; impMarkDirty(); impRenderEnvUi(); };
+        const run = el.querySelector('[data-impenv-run]'); if (run) run.onclick = () => { impEnvCheck().catch(e => { console.warn(`${TAG} 🛢`, e); impStatus(`🛢 ${impEsc(e && e.message || e)}`, '#ff6060'); }); };
+        el.querySelector('[data-impenv-notes]').onchange = function () { c.notes = this.checked; impMarkDirty(); };
+        el.querySelectorAll('[data-impenv-rep]').forEach(b => b.onclick = () => { try { impExportEnv(b.getAttribute('data-impenv-rep')); } catch (e) { impStatus(`Enverus report failed: ${impEsc(e && e.message || e)}`, '#ff6060'); } });
+    }
+    function impRenderMissingUi(host) {
+        const el = host.querySelector('[data-impenv-missing]'); if (!el) return;
+        const c = imp.env;
+        if (!c.missing) { el.innerHTML = ''; return; }
+        const list = c.missing;
+        if (!list.length) { el.innerHTML = `<div style="font-size:10px;color:#5fff5f">✓ every ${impEsc(c.missingOp)} well inside the area is already in the client's list (${c.missingTotal || 0} checked, ${impEsc(c.missingAt || '')})</div>`; return; }
+        const gcol = { producing: '#5fff5f', drilled: '#7adfe6', inactive: '#ffb347', plugged: '#ff5252' };
+        const glabel = { producing: 'producing / injecting', drilled: 'drilled / permitted / DUC', inactive: 'inactive / TA', plugged: 'plugged / expired' };
+        const shown = list.filter(x => c.missStatus[x.group]);
+        const nSel = shown.filter(x => c.missingSel.has(x.api) && !x.staged).length;
+        const chip = (k) => { const n = list.filter(x => x.group === k).length; return `<label style="display:inline-flex;align-items:center;gap:3px;font-size:10px;color:${gcol[k]};cursor:pointer"><input type="checkbox" data-impmiss-g="${k}" ${c.missStatus[k] ? 'checked' : ''} style="accent-color:${gcol[k]};margin:0"> ${glabel[k]} ${n}</label>`; };
+        const row = (x) => `<div data-impmiss-row="${x.api}" style="display:flex;align-items:center;gap:6px;padding:1px 4px;border-bottom:1px solid rgba(255,255,255,0.05);font-size:10.5px;color:${x.staged ? '#6f7a85' : '#cfd6dc'};cursor:pointer" onmouseover="this.style.background='rgba(255,255,255,0.05)'" onmouseout="this.style.background=''" title="click = zoom to it">
+            <input type="checkbox" data-impmiss-sel="${x.api}" ${x.staged ? 'disabled' : (c.missingSel.has(x.api) ? 'checked' : '')} style="accent-color:#ffd666;margin:0;flex:none">
+            <span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${gcol[x.group]};flex:none" title="${impEsc(x.status)}"></span>
+            <b style="flex:none;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${impEsc(x.name)}</b>
+            <span style="color:#8a949e;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${impEsc(x.status)} · ${impEsc(x.type || '')}${x.traj ? ` · ${impEsc(x.traj.toLowerCase())}` : ''} · API ${x.api}${x.nearFt != null ? ` · ${x.inside ? 'inside' : `${x.nearFt.toLocaleString()} ft from`} ${impEsc(x.nearName)}` : ' · no mapped asset nearby'}${x.staged ? ' · ✓ staged' : ''}</span>
+            <span data-impmiss-info="${x.api}" title="${impEsc(`${x.name} · API ${x.api}\n${x.status} · ${x.type || ''} · ${x.traj || ''} · ${x.op}\nspud ${x.spud || '—'} · first prod ${x.firstProd || '—'}${x.plug ? ` · plugged ${x.plug}` : ''}\n${Number(x.lat).toFixed(6)}, ${Number(x.lng).toFixed(6)} · ${x.county} County\n${x.nearName ? `${x.inside ? 'inside' : x.nearFt + ' ft from'} mapped asset "${x.nearName}"` : 'no mapped asset nearby'}${x.bores > 1 ? `\n${x.bores} wellbores` : ''}`)}" style="flex:none;width:14px;height:14px;line-height:12px;text-align:center;border:1px solid rgba(122,223,230,0.5);border-radius:50%;color:#7adfe6;font-size:9px;font-weight:700;cursor:help">i</span>
+        </div>`;
+        el.innerHTML = `<div style="padding:6px 8px;background:rgba(255,255,255,0.03);border:1px dashed rgba(255,214,102,0.3);border-radius:3px">
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:4px;font-size:11px"><b style="color:#ffd666">${list.length}</b> <span style="color:#cfd6dc">${impEsc(c.missingOp)} wells inside the area that are NOT in the client's list</span> <span style="color:#888;font-size:10px">(of ${c.missingTotal || 0} found · ${impEsc(c.missingAt || '')})</span>
+                ${chip('producing')} ${chip('drilled')} ${chip('inactive')} ${chip('plugged')}
+                <span style="flex:1"></span>
+                <button data-impmiss-all style="background:none;border:1px solid rgba(255,255,255,0.15);color:#9ad;border-radius:3px;padding:0 6px;cursor:pointer;font:inherit;font-size:10px">tick all shown</button>
+                <button data-impmiss-none style="background:none;border:1px solid rgba(255,255,255,0.15);color:#9ad;border-radius:3px;padding:0 6px;cursor:pointer;font:inherit;font-size:10px">untick</button>
+                <button data-impmiss-rep="sheets" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">📤 Sheets</button>
+                <button data-impmiss-rep="csv" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">⬇ CSV</button>
+            </div>
+            <div style="max-height:230px;overflow:auto;border:1px solid rgba(255,255,255,0.06);border-radius:3px;background:rgba(0,0,0,0.15)">${shown.map(row).join('') || '<div style="padding:6px;color:#888;font-size:10px">nothing in the ticked status groups</div>'}</div>
+            <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
+                <button data-impmiss-stage ${nSel ? '' : 'disabled'} style="background:rgba(95,255,95,0.15);color:#5fff5f;border:1px solid rgba(95,255,95,0.55);border-radius:3px;padding:4px 12px;cursor:pointer;font:inherit;font-size:11px;font-weight:600${nSel ? '' : ';opacity:0.45;cursor:default'}">➕ Stage ${nSel} as new points</button>
+                <span style="color:#888;font-size:10px">staged wells become ordinary points: name = Enverus well name, type "H - WELL (Enverus)" / "V - WELL (Enverus)" (change it in the Type table), notes carry a "Source: added from Enverus" block; nothing is written until ✓ Create. Plugged wells are off by default.</span>
+            </div>
+        </div>`;
+        el.onclick = (ev) => {
+            const g = ev.target.closest('[data-impmiss-g]'); if (g) { c.missStatus[g.getAttribute('data-impmiss-g')] = !!g.checked; impRenderMissingUi(host); return; }
+            const cb = ev.target.closest('[data-impmiss-sel]'); if (cb) { const a = cb.getAttribute('data-impmiss-sel'); if (cb.checked) c.missingSel.add(a); else c.missingSel.delete(a); impRenderMissingUi(host); return; }
+            if (ev.target.closest('[data-impmiss-all]')) { shown.forEach(x => { if (!x.staged) c.missingSel.add(x.api); }); impRenderMissingUi(host); return; }
+            if (ev.target.closest('[data-impmiss-none]')) { c.missingSel.clear(); impRenderMissingUi(host); return; }
+            const rp = ev.target.closest('[data-impmiss-rep]'); if (rp) { try { impExportMissing(rp.getAttribute('data-impmiss-rep')); } catch (e) { impStatus(`Export failed: ${impEsc(e && e.message || e)}`, '#ff6060'); } return; }
+            if (ev.target.closest('[data-impmiss-stage]')) { impEnvStageMissing(); return; }
+            if (ev.target.closest('[data-impmiss-info]')) return;
+            const r = ev.target.closest('[data-impmiss-row]'); if (r) { const x = list.find(y => y.api === r.getAttribute('data-impmiss-row')); if (x) { impZoomToPoints([{ lat: x.lat, lng: x.lng, name: `${x.name} (Enverus)` }], x.name); impStatus(`🔎 ${impEsc(x.name)} — ${impEsc(x.status)}${x.nearName ? ` · ${x.inside ? 'inside' : `${x.nearFt} ft from`} ${impEsc(x.nearName)}` : ''}`); } }
+        };
+    }
+    function impExportEnv(how) {
+        const pts = imp.points.filter(p => !p.done && p.sel && p.env && !p.env.noApi);
+        if (!pts.length) { impStatus('Run the cross-check first', '#ffb347'); return; }
+        const r = (p) => imp.rows[p.i] || {};
+        const cols = [
+            { label: 'Name', val: p => p.name }, { label: 'API', val: p => p.env.api || '' }, { label: 'Enverus name', val: p => p.env.name || '' }, { label: 'Enverus status', val: p => p.env.found ? p.env.status : 'NOT FOUND' },
+            { label: 'Type', val: p => p.env.type || '' }, { label: 'Trajectory', val: p => p.env.traj || '' }, { label: 'Operator', val: p => p.env.op || '' }, { label: 'Spud', val: p => p.env.spud || '' }, { label: 'Plug date', val: p => p.env.plug || '' }, { label: 'First prod', val: p => p.env.firstProd || '' },
+            { label: 'Wellbores', val: p => p.env.bores || '' }, { label: 'Offset ft (client vs Enverus)', val: p => p.env.distFt == null ? '' : p.env.distFt }, { label: 'File type', val: p => p.typeRaw || '' }, { label: 'File H/V', val: p => (imp.mapping && imp.mapping.type) ? '' : '' },
+            { label: 'Tier', val: p => (p.pri && p.pri.tier) || '' }, { label: 'Pad BLPD', val: p => (p.pri && p.pri.padTotal != null) ? Math.round(p.pri.padTotal) : '' }, { label: 'Asset BLPD', val: p => (p.pri && p.pri.blpd != null) ? Math.round(p.pri.blpd) : '' },
+            { label: 'Latitude', val: p => p.lat.toFixed(6) }, { label: 'Longitude', val: p => p.lng.toFixed(6) }, { label: 'Checked', val: p => p.env.checkedAt || '' },
+        ];
+        impExportTable(pts, cols, how, 'enverus-check', 'Enverus');
+    }
+    // ---- v4.358 CLIENT DATA REVIEW — the findings the client needs to go check.
+    // One row per finding, severity-ranked, client value vs Enverus / our map,
+    // suggested action. BIG = wrong place / wrong well / not theirs; MEDIUM =
+    // status or type disagreement; LOW = hygiene (no coordinates, duplicate
+    // names, missing API). Enverus rows exist only after a cross-check. ----
+    function impClientReviewRows() {
+        const c = imp.env;
+        const live = imp.points.filter(p => !p.done);
+        const pts = c.scope === 'all' ? live : live.filter(p => p.sel);
+        const rows = [];
+        const RECORDS = 'the public well records';   // Enverus is named once, in the report title
+        // sev: High / Medium / Low. find = short plain-English finding. means = one sentence a
+        // non-technical reader understands. ask = what we need from them.
+        const add = (sev, find, p, clientVal, otherVal, means, ask, extra) => rows.push(Object.assign({ sev, find, name: p ? (p.rawName || p.name) : (extra && extra.name) || '', api: p ? impEnvApiOf(p) : '', clientVal, otherVal, means, ask, lat: p ? p.lat : '', lng: p ? p.lng : '', lat2: '', lng2: '', p }, extra || {}));
+        const r = (p) => imp.rows[p.i] || {};
+        const isWellRow = (p) => !!impEnvApiOf(p) || /well|pump|lift|flow|plunger|jet|injector|pop/i.test(p.typeRaw || '');
+        const devCol = imp.headers.find(h => /deviation|h.?or.?v|traject|profile/i.test(h));
+        const ll = (la, lo) => `${Number(la).toFixed(6)}, ${Number(lo).toFixed(6)}`;
+        const ftTxt = (n) => `${Math.round(n).toLocaleString()} ft`;
+        pts.forEach(p => {
+            const e = p.env;
+            const blpd = (p.pri && p.pri.blpd != null) ? p.pri.blpd : impPriBlpdSafe(p);
+            const prodTxt = blpd == null ? '' : `${Math.round(blpd).toLocaleString()} barrels/day (oil + water)`;
+            if (e && !e.noApi) {
+                if (!e.found) add('High', 'API number not found', p, `API ${e.api}`, 'no well with this API number', `${RECORDS} have no well with this API number, so we cannot verify this well at all.`, 'Check the API number for this well.');
+                else {
+                    if (e.distFt != null && e.distFt > c.mismatchFt) add('High', 'Well is not where the list says', p, ll(p.lat, p.lng), `${ll(e.lat, e.lng)} — ${ftTxt(e.distFt)} away`, `${RECORDS} place this well ${ftTxt(e.distFt)} from the coordinates in your list. We would inspect the wrong spot.`, 'Confirm the correct surface location. The map links show both spots.', { distFt: e.distFt, lat2: e.lat, lng2: e.lng });
+                    if (c.mainOp && e.op && e.op !== c.mainOp) add('High', 'Operated by someone else', p, c.mainOp, e.op, `${RECORDS} list this well under ${e.op}, not ${c.mainOp}.`, 'Confirm this well belongs to you.');
+                    const bucket = impEnvBucket(e);
+                    if (bucket === 'plugged' && blpd > 0) add('High', 'Listed as producing, records say plugged', p, prodTxt, `${e.status}${e.plug ? ` (plugged ${e.plug})` : ''}`, `Your list shows production, but ${RECORDS} say the well is plugged or its permit expired.`, 'Confirm whether this well is still active.');
+                    else if (bucket === 'plugged') add('Medium', 'Records say plugged or expired', p, p.typeRaw || '', `${e.status}${e.plug ? ` (plugged ${e.plug})` : ''}`, `${RECORDS} say this well is plugged or its permit expired. A plugged well does not need inspection.`, 'Confirm whether it should stay on the inspection list.');
+                    else if (bucket === 'inactive' && blpd > 0) add('Medium', 'Listed as producing, records say inactive', p, prodTxt, e.status, `Your list shows production, but ${RECORDS} have the well as inactive.`, 'Confirm whether this well is producing.');
+                    else if (bucket === 'inactive') add('Low', 'Records say inactive', p, `${p.typeRaw || ''}${prodTxt ? ` · ${prodTxt}` : ''}`, e.status, `${RECORDS} have this well as inactive, and your list shows no production.`, 'Tell us if it should still be inspected; otherwise we leave it off the priority tiers.');
+                    else if (bucket === 'producing' && blpd === 0) add('Medium', 'Zero production, records say producing', p, '0 barrels/day', e.status, `Your list shows no production for this well, but ${RECORDS} have it producing. The production number sets its inspection priority.`, 'Check the production figures for this well.');
+                    if (devCol && e.traj) {
+                        const cv = String(r(p)[devCol] || '').toUpperCase();
+                        const ch = /HORIZ|^H$/.test(cv), cvv = /VERT|^V$/.test(cv);
+                        const eh = /HORIZ/.test(e.traj), ev = /VERT/.test(e.traj) && !eh;
+                        if ((ch && ev) || (cvv && eh)) add('Medium', 'Horizontal / vertical does not match records', p, cv, e.traj, `Your list calls this well ${cv.toLowerCase()}; ${RECORDS} have it as ${e.traj.toLowerCase()}. The well type changes how we fly it.`, 'Confirm whether the well is horizontal or vertical.');
+                    }
+                    if (e.name && p.rawName && impNormName(e.name) !== impNormName(p.rawName)) add('Low', 'Name differs from records', p, p.rawName, e.name, `We matched this well by API number; ${RECORDS} call it "${e.name}".`, 'No action unless the name in your list is wrong.');
+                }
+            }
+            if (!impEnvApiOf(p) && isWellRow(p) && c.apiCol) add('Low', 'Well has no API number', p, p.typeRaw || '', '—', 'Without an API number we cannot verify this well against public records.', 'Add the API number if it is a well.');
+            if (p.dup && p.pri && p.pri.off > 100) add('Low', 'Location differs from where we have it mapped', p, ll(p.lat, p.lng), `${ftTxt(p.pri.off)} from where we have "${p.pri.offOf}" mapped`, `The coordinates in your list are ${ftTxt(p.pri.off)} from where this asset sits on our map today (mapped from your earlier data).`, 'Confirm which location is right.', { distFt: p.pri.off });
+        });
+        // wells the public records put on the client's pads but the list does not have
+        (c.missing || []).forEach(x => { if (x.group === 'plugged') return; add('Medium', 'Well on your pads that is not in the list', null, '—', `${x.name} · API ${x.api} · ${x.status}${x.type ? ` · ${x.type}` : ''}${x.traj ? ` · ${x.traj.toLowerCase()}` : ''}${x.nearName ? ` · ${x.inside ? 'inside' : `${x.nearFt.toLocaleString()} ft from`} ${x.nearName}` : ''}`, `${RECORDS} list this ${x.op} well inside your inspection area, but it is not in the asset list we received.`, 'Confirm whether it should be inspected (and add it to the list if so).', { name: x.name, api: x.api, lat: x.lat, lng: x.lng }); });
+        // file-level hygiene — the whole list, since the client does not see our boundaries
+        (imp.invalidRows || []).forEach(x => { const rr = imp.rows[x.i] || {}; const apiRaw = c.apiCol ? String(rr[c.apiCol] == null ? '' : rr[c.apiCol]).replace(/\D/g, '').slice(0, 10) : ''; const planned = /NEW POP|PLANNED|FUTURE|TBD/i.test(x.type || '') || /\d{4}-\d{2}-\d{2}/.test(x.type || ''); add('Low', planned ? 'Planned well — no location yet' : 'No coordinates', null, x.type || '', '—', planned ? 'This looks like an upcoming well (the type carries a future date) with no location yet, so it is not on the map or the inspection list for now.' : 'This row has no latitude / longitude, so it cannot be placed on the map or inspected.', planned ? 'Send the coordinates once the pad is built.' : 'Add the coordinates.', { name: x.name, api: apiRaw }); });
+        const seen = new Map();
+        imp.points.forEach(p => { const k = impNormName(p.rawName || p.name); if (!seen.has(k)) seen.set(k, []); seen.get(k).push(p); });
+        seen.forEach((arr) => {
+            if (arr.length < 2) return;
+            const first = arr[0];
+            const apis = new Set(arr.map(p => impEnvApiOf(p)).filter(Boolean));
+            const types = arr.map(p => (p.typeRaw || '').toUpperCase());
+            const desc = arr.map(p => `${p.typeRaw || 'row'}${impEnvApiOf(p) ? ` (API ${impEnvApiOf(p)})` : ''} at ${ll(p.lat, p.lng)}`).join(' · ');
+            const hasBattery = types.some(t => /BATTERY|TANK/.test(t)), hasWell = types.some(t => !/BATTERY|TANK/.test(t));
+            if (arr.length === 2 && hasBattery && hasWell) { if (c.includeOurs) add('Low', 'Battery and well share one name', first, desc, '—', `Two different things carry the same name: a tank battery and a well. Our system needs each asset to have its own name, so we will call the battery "${first.rawName || first.name} BATTERY".`, 'No action needed unless you prefer a different battery name.', { name: first.rawName || first.name, lat2: arr[1].lat, lng2: arr[1].lng }); else rows.ours = (rows.ours || 0) + 1; }
+            else if (apis.size === 1 && arr.every(p => impEnvApiOf(p))) add('Medium', 'Same well listed twice', first, `${arr.length} rows · ${desc}`, '—', 'The same well (same API number) appears more than once in the list.', 'Remove the extra row.', { name: first.rawName || first.name, lat2: arr[1].lat, lng2: arr[1].lng });
+            else add('Low', 'Same name used for different assets', first, `${arr.length} rows · ${desc}`, '—', 'More than one asset carries this name. Our system needs each asset to have its own name.', 'Give each a distinct name (for example add the well number).', { name: first.rawName || first.name, lat2: arr[1].lat, lng2: arr[1].lng });
+        });
+        const order = { High: 0, Medium: 1, Low: 2 };
+        rows.sort((a, b) => order[a.sev] - order[b.sev] || a.find.localeCompare(b.find) || String(a.name).localeCompare(String(b.name)));
+        return rows;
+    }
+    function impNormName(v) { return String(v || '').toUpperCase().replace(/[^A-Z0-9]+/g, ' ').replace(/\s+/g, ' ').trim(); }
+    // v4.363: the client's list reuses names. Percepto needs one name per asset
+    // and we match on name, so: a battery + a well sharing a name → the battery
+    // becomes "<name> BATTERY" (what we told the client); any other repeat → the
+    // 2nd+ row gets "-DUP" and both rows are flagged (Placement › Same name) so
+    // they are easy to find and fix before Create. Names are matched against
+    // the site AFTER this, so an existing "X BATTERY" asset is still an update.
+    function impResolveFileDuplicates() {
+        const groups = new Map();
+        imp.points.forEach(p => { p.fileDup = null; const base = p.rawName || p.name; const k = impNormName(base); if (!k) return; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(p); });
+        let renamed = 0, dupped = 0;
+        groups.forEach(arr => {
+            if (arr.length < 2) return;
+            const isBatt = (p) => /BATTERY|TANK/i.test(p.typeRaw || '');
+            const batts = arr.filter(isBatt), wells = arr.filter(p => !isBatt(p));
+            if (arr.length === 2 && batts.length === 1 && wells.length === 1) {
+                const b = batts[0];
+                if (!/BATTERY\s*$/i.test(b.rawName || b.name)) { b.name = `${(b.rawName || b.name).trim()} BATTERY`; b.fileDup = { kind: 'battery', other: wells[0] }; wells[0].fileDup = { kind: 'well', other: b }; renamed++; }
+                return;
+            }
+            arr.forEach((p, i) => { p.fileDup = { kind: 'same', others: arr.filter(x => x !== p), n: arr.length }; if (i > 0) { p.name = `${(p.rawName || p.name).trim()}-DUP${i > 1 ? i : ''}`; dupped++; } });
+        });
+        if (renamed || dupped) console.log(`${TAG} 📥 file duplicates: ${renamed} batter${renamed === 1 ? 'y' : 'ies'} renamed "<name> BATTERY", ${dupped} row(s) suffixed -DUP`);
+    }
+    function impPriBlpdSafe(p) { try { return impPriBlpd(p); } catch (e) { return null; } }
+    function impMapsLink(la, lo) { return (la === '' || lo === '' || la == null || lo == null) ? '' : `https://www.google.com/maps?q=${Number(la).toFixed(6)},${Number(lo).toFixed(6)}`; }
+    function impExportClientReview(how) {
+        const rows = impClientReviewRows();
+        if (!rows.length) { impStatus('Nothing to report — no findings for the client in this scope', '#5fff5f'); return; }
+        const site = getCurrentSiteName() || `Site ${genState.siteID}`;
+        const client = String(site).split(/\s[-–—]\s|\s+Cobra|\s+\d/)[0].trim() || 'Client';
+        const cols = [
+            { label: 'Importance', val: x => x.sev }, { label: 'What we found', val: x => x.find }, { label: 'Asset (name in your list)', val: x => x.name }, { label: 'API number', val: x => x.api },
+            { label: 'In your list', val: x => x.clientVal }, { label: 'What the records / our map show', val: x => x.otherVal }, { label: 'Distance', val: x => x.distFt != null ? `${Math.round(x.distFt).toLocaleString()} ft` : '' },
+            { label: 'What this means', val: x => x.means }, { label: 'What we need from you', val: x => x.ask },
+            { label: 'Map link (your list)', val: x => impMapsLink(x.lat, x.lng) }, { label: 'Map link (records / 2nd row)', val: x => impMapsLink(x.lat2, x.lng2) },
+        ];
+        if (how === 'csv') { impExportTable(rows, cols, 'csv', 'asset-list-review', 'review'); return; }
+        const counts = new Map();
+        rows.forEach(x => { const k = `${x.sev}|${x.find}`; counts.set(k, (counts.get(k) || 0) + 1); });
+        const sevCol = { High: '#ffd6d6', Medium: '#fff2cc', Low: '#e8f0fe' };
+        const esc = impEsc;
+        const th = (t) => `<th style="background:#1f2228;color:#ffffff;border:1px solid #cccccc;padding:3px 8px;text-align:left;font-weight:700">${esc(t)}</th>`;
+        const td = (t, bg, bold) => `<td style="border:1px solid #cccccc;padding:3px 8px;vertical-align:top${bg ? `;background:${bg}` : ''}${bold ? ';font-weight:700' : ''}">${esc(t)}</td>`;
+        const tdLink = (u) => `<td style="border:1px solid #cccccc;padding:3px 8px">${u ? `<a href="${esc(u)}">open map</a>` : ''}</td>`;
+        const nHigh = rows.filter(x => x.sev === 'High').length, nMed = rows.filter(x => x.sev === 'Medium').length, nLow = rows.filter(x => x.sev === 'Low').length;
+        const title = `<table style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:13px"><tr><td style="font-size:16px;font-weight:700;padding:4px 0">${esc(client)} asset list — items to check (${impNowStamp().slice(0, 10)})</td></tr>
+            <tr><td style="padding:2px 0">We compared your asset list (${esc(imp.fileName || 'file')}) against the public well records (Enverus)${imp.env.checkedAt ? '' : ' — not yet run'} and against our site map. ${rows.length} item${rows.length === 1 ? '' : 's'} need a look: <b>${nHigh} high</b> · ${nMed} medium · ${nLow} low.${rows.ours ? ` (${rows.ours} names are shared by a tank battery and its well — we handle that on our side, nothing needed from you.)` : ''}</td></tr>
+            <tr><td style="padding:2px 0"><b>High</b> = the drone could be sent to the wrong place, or the well may not be yours / may not exist. <b>Medium</b> = the records disagree with your list about whether the well is active or what type it is. <b>Low</b> = housekeeping (missing coordinates, missing API numbers, duplicate names) — fix when convenient.</td></tr></table>`;
+        const sumHtml = `<table style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:13px"><tr>${th('Importance')}${th('What we found')}${th('How many')}</tr>${[...counts.entries()].map(([k, n]) => { const [sev, f] = k.split('|'); return `<tr>${td(sev, sevCol[sev], true)}${td(f)}${td(n)}</tr>`; }).join('')}</table>`;
+        const bodyHtml = rows.map(x => `<tr>${cols.slice(0, 9).map((cc, i) => td(cc.val(x), i === 0 ? sevCol[x.sev] : '', i === 0 || i === 1)).join('')}${tdLink(impMapsLink(x.lat, x.lng))}${tdLink(impMapsLink(x.lat2, x.lng2))}</tr>`).join('');
+        const html = `${title}<br>${sumHtml}<br><table style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:13px"><tr>${cols.map(cc => th(cc.label)).join('')}</tr>${bodyHtml}</table>`;
+        const text = [cols.map(cc => cc.label).join('\t')].concat(rows.map(x => cols.map(cc => String(cc.val(x)).replace(/[\t\n\r]/g, ' ')).join('\t'))).join('\n');
+        writeSheetsClipboard(html, text, `📋 ${rows.length} item(s) copied — paste into Sheets (title · summary · details)`);
+        impStatus(`📋 client review on the clipboard: <b style="color:#ff6060">${nHigh} high</b> · ${nMed} medium · ${nLow} low — paste into Google Sheets. Duplicate names are one line per name now.`);
+    }
+    // v4.353: PLACEMENT & FLAGS review list — compact, tabbed by kind, its own
+    // scrollbar, a Reviewed checkbox per point (saved with the session), click a
+    // row = zoom + pulse + name on the map, ⓘ = hover details. Covers the
+    // SELECTED points only (inside the boundaries), like the tiers.
+    function impFlagTabs(live) {
+        const sel = live.filter(p => p.sel);
+        return [
+            { id: 'dup', label: 'Name matches', color: '#ffd400', items: sel.filter(p => p.dup) },
+            { id: 'child', label: 'Parent/child', color: '#b48cff', items: sel.filter(p => p.child && !p.dup) },
+            { id: 'near', label: 'Nearby', color: '#4fc3f7', items: sel.filter(p => p.near && !p.child && !p.dup) },
+            { id: 'off', label: '📍 Off pad', color: '#ffb347', items: sel.filter(p => p.pri && p.pri.off > 0) },
+            { id: 'same', label: 'Same name in file', color: '#ff9d00', items: sel.filter(p => p.fileDup && p.fileDup.kind === 'same') },
+            { id: 'env', label: '🛢 Enverus', color: '#ffd666', items: sel.filter(p => impEnvFlagged(p)) },
+            { id: 'rev', label: '✓ Reviewed', color: '#5fff5f', items: sel.filter(p => p.reviewed && (p.dup || p.child || p.near || (p.pri && p.pri.off > 0) || impEnvFlagged(p) || (p.fileDup && p.fileDup.kind === 'same'))) },
+        ];
+    }
+    function impFlagKind(p) { return p.dup ? 'dup' : (p.child ? 'child' : (p.near ? 'near' : ((p.pri && p.pri.off > 0) ? 'off' : (impEnvFlagged(p) ? 'env' : ((p.fileDup && p.fileDup.kind === 'same') ? 'same' : 'dup'))))); }
+    function impFlagShort(tab, p) {
+        const ft = (v) => `${Math.round(v)} ft`;
+        if (tab === 'rev') { const k = impFlagKind(p); const lbl = { dup: 'name match', child: 'parent/child', near: 'nearby', off: 'off pad', env: 'Enverus', same: 'same name' }[k]; return `${lbl} · ${impFlagShort(k, p)}`; }
+        if (tab === 'env') return impEnvShort(p);
+        if (tab === 'same') { const f = p.fileDup; return `${f.n} rows share "${p.rawName || p.name}" → created as "${p.name}" · ${f.others.map(o => `${o.typeRaw || 'row'} ${Math.round(approxMeters(p.lat, p.lng, o.lat, o.lng) / GEN_FT_TO_M).toLocaleString()} ft away`).join(', ')}`; }
+        if (tab === 'dup') return `${imp.dupMode === 'update' ? '→ update type + notes' : (imp.dupMode === 'copy' ? '→ copy -N' : '→ skipped')}${p.pri && p.pri.off > 0 ? ` · client coord ${ft(p.pri.off)} off` : ' · on its polygon'}`;
+        if (tab === 'child') return `inside ${p.child.name} (${p.child.full ? 'fully' : 'partially'})`;
+        if (tab === 'near') return `${ft(p.near.ft)} from ${p.near.name}`;
+        if (tab === 'off') return p.dup ? `client coord ${ft(p.pri.off)} off ${p.pri.offOf} — existing asset stays put` : `${ft(p.pri.off)} off ${p.pri.offOf} — ↔ Move onto it or confirm it is separate`;
+        return '';
+    }
+    function impFlagDetails(p) {
+        const L = [];
+        L.push(`Name: ${p.name}${p.rawName && p.rawName !== p.name ? ` (file: ${p.rawName})` : ''}`);
+        if (p.typeRaw) L.push(`Type in file: ${p.typeRaw}`);
+        L.push(`Coordinates: ${p.lat.toFixed(6)}, ${p.lng.toFixed(6)}${p.orig ? ` (moved from ${p.orig.lat.toFixed(6)}, ${p.orig.lng.toFixed(6)})` : ''}`);
+        if (p.dup) L.push(`Name match: existing asset #${p.dupId}${p.dupSubtype ? ` · subtype "${p.dupSubtype}"` : ''} → ${imp.dupMode === 'update' ? 'its TYPE + NOTES are rewritten from this row; shape and position are not touched' : (imp.dupMode === 'copy' ? 'a second asset "-N" is created at this point' : 'skipped')}`);
+        if (p.child) L.push(`Parent/child: the ${impSizeFt} ft square lands ${p.child.full ? 'fully' : 'partially'} inside "${p.child.name}" (#${p.child.id}) — created as normal`);
+        if (p.near) L.push(`Nearby: ${Math.round(p.near.ft)} ft from "${p.near.name}" (#${p.near.id}), not overlapping it`);
+        if (p.pri) {
+            if (p.pri.off > 0) L.push(`Off pad: ${p.pri.off} ft outside "${p.pri.offOf}"${p.dup ? ' — the client coordinate differs from where the asset already sits; nothing to do unless the asset itself is misplaced' : ' — move the point onto the pad, or leave it if it really is a separate location'}`);
+            if (imp.pri.on) L.push(`Tier: ${p.pri.tier || ('none' + (p.pri.untier === 'zero' ? ' — zero production' : (p.pri.untier === 'env' ? ' — dead per Enverus' : '')))}${p.pri.padName ? ` · pad "${p.pri.padName}"` : ''}${p.pri.padTotal != null ? ` · pad total ${Math.round(p.pri.padTotal).toLocaleString()} BLPD across ${p.pri.padN}` : ''}${p.pri.blpd != null ? ` · this asset ${Math.round(p.pri.blpd).toLocaleString()} BLPD` : ''}${p.pri.before ? ` · was ${p.pri.before}` : ''}`);
+            if (p.pri.flags && p.pri.flags.length) L.push(`Pad flags: ${p.pri.flags.join(' · ')}`);
+        }
+        if (p.fileDup) L.push(p.fileDup.kind === 'same' ? `Same name in the file: ${p.fileDup.n} rows — this one is created as "${p.name}"` : (p.fileDup.kind === 'battery' ? `Battery renamed "${p.name}" (shares its name with the well ${Math.round(approxMeters(p.lat, p.lng, p.fileDup.other.lat, p.fileDup.other.lng) / GEN_FT_TO_M)} ft away)` : `Shares its name with a battery (renamed "${p.fileDup.other.name}")`));
+        if (p.env && !p.env.noApi) L.push(p.env.found ? `Enverus: ${p.env.name || ''} · ${p.env.status}${p.env.type ? ` · ${p.env.type}` : ''}${p.env.traj ? ` · ${p.env.traj}` : ''}${p.env.op ? ` · ${p.env.op}` : ''}${p.env.spud ? ` · spud ${p.env.spud}` : ''}${p.env.plug ? ` · plugged ${p.env.plug}` : ''}${p.env.firstProd ? ` · first prod ${p.env.firstProd}` : ''}${p.env.bores > 1 ? ` · ${p.env.bores} wellbores` : ''}${p.env.distFt != null ? ` · Enverus location ${p.env.distFt} ft from the client coordinate` : ''} · API ${p.env.api}` : `Enverus: API ${p.env.api} not found`);
+        if (p.reviewed) L.push('✓ reviewed');
+        return L.join('\n');
+    }
+    function impZoomToPoints(pts, label) {
+        const map = getLeafletMap(); if (!map || !pts.length) return;
+        let la0 = Infinity, lo0 = Infinity, la1 = -Infinity, lo1 = -Infinity;
+        pts.forEach(p => { la0 = Math.min(la0, p.lat); lo0 = Math.min(lo0, p.lng); la1 = Math.max(la1, p.lat); lo1 = Math.max(lo1, p.lng); });
+        const vp = impVisiblePadding(map);
+        try {
+            const tight = pts.length === 1 || approxMeters(la0, lo0, la1, lo1) < 15;
+            map.fitBounds(tight ? L_bounds([(la0 + la1) / 2, (lo0 + lo1) / 2]) : [[la0, lo0], [la1, lo1]], { paddingTopLeft: [vp.l + 70, vp.t + 70], paddingBottomRight: [vp.r + 70, vp.b + 70], maxZoom: tight ? Math.max(map.getZoom(), 18) : 19 });
+        } catch (e) { console.warn(`${TAG} 📥 zoom failed:`, e); return; }
+        impPulsePoints(pts, label);
+        setTimeout(() => { try { impRenderStaged(); } catch (e) {} }, 350);
+    }
+    function impRenderFlagsUi(live) {
+        const el = document.getElementById('aim-imp-flags');
+        if (!el) return;
+        if (!live || !live.length) { el.innerHTML = ''; return; }
+        const tabs = impFlagTabs(live);
+        const total = tabs.filter(t => t.id !== 'rev').reduce((a, t) => a + t.items.length, 0);
+        const uniq = new Set(); tabs.filter(t => t.id !== 'rev').forEach(t => t.items.forEach(p => uniq.add(p)));
+        const selTotal = live.filter(p => p.sel).length;
+        if (!total) { el.innerHTML = `<div style="font-size:11px;color:#5fff5f;padding:4px 0">✓ no placement flags among the selected points</div>`; return; }
+        // zoom for an Enverus row also pulses Enverus' own surface location
+        tabs.forEach(t => { t.extra = t.id === 'env' ? (p => (p.env && p.env.found && isFinite(p.env.lat)) ? [{ lat: p.env.lat, lng: p.env.lng, name: `${p.name} (Enverus)` }] : []) : (t.id === 'same' ? (p => (p.fileDup && p.fileDup.others ? p.fileDup.others.map(o => ({ lat: o.lat, lng: o.lng, name: o.name })) : [])) : null); });
+        if (!imp.flagTab || !tabs.find(t => t.id === imp.flagTab && (t.items.length || t.id === 'rev'))) imp.flagTab = (tabs.find(t => t.items.length) || tabs[0]).id;
+        const tab = tabs.find(t => t.id === imp.flagTab);
+        const items = tab.items.slice().sort((x, y) => (tab.id === 'rev' ? 0 : (x.reviewed === y.reviewed ? 0 : (x.reviewed ? 1 : -1))) || (tab.id === 'off' ? (y.pri.off - x.pri.off) : 0) || x.name.localeCompare(y.name));
+        const shown = (imp.flagHideReviewed && tab.id !== 'rev') ? items.filter(p => !p.reviewed) : items;
+        const CAP = 600;
+        const rev = tab.items.filter(p => p.reviewed).length;
+        const chip = (t) => { const r = t.id === 'rev' ? 0 : t.items.filter(p => p.reviewed).length; const on = t.id === tab.id; return `<button data-impflagtab="${t.id}" style="background:${on ? t.color + '33' : 'transparent'};border:1px solid ${t.color}${on ? 'cc' : '55'};color:${t.items.length ? t.color : '#666'};border-radius:10px;padding:1px 8px;cursor:pointer;font:inherit;font-size:10px;font-weight:${on ? 700 : 400}${t.id === 'rev' ? ';margin-left:6px' : ''}">${t.label} ${t.items.length}${r ? ` <span style="opacity:0.8">· ${r}✓</span>` : ''}</button>`; };
+        const row = (p) => `<div data-impflagrow="${p.i}" title="click = zoom to it (pulses, named on the map)" style="display:flex;align-items:center;gap:6px;padding:1px 4px;border-bottom:1px solid rgba(255,255,255,0.05);font-size:10.5px;color:${p.reviewed ? '#6f7a85' : '#cfd6dc'};cursor:pointer;${p.reviewed ? 'opacity:0.75' : ''}" onmouseover="this.style.background='rgba(255,255,255,0.05)'" onmouseout="this.style.background=''">
+            <input type="checkbox" data-impflagrev="${p.i}" ${p.reviewed ? 'checked' : ''} title="Reviewed" style="accent-color:#5fff5f;margin:0;flex:none">
+            ${imp.pri.on && p.pri && p.pri.tier ? `<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${IMP_TIER_COLORS[p.pri.tier]};flex:none" title="${p.pri.tier}"></span>` : ''}
+            <b style="flex:none;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;${p.reviewed ? 'text-decoration:line-through' : ''}">${impEsc(p.name)}</b>
+            <span style="color:#8a949e;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${impEsc(impFlagShort(tab.id, p))}</span>
+            ${p.orig ? '<span title="moved" style="color:#ff5fff;flex:none">↔</span>' : ''}
+            <span data-impflaginfo="${p.i}" title="${impEsc(impFlagDetails(p))}" style="flex:none;width:14px;height:14px;line-height:12px;text-align:center;border:1px solid rgba(122,223,230,0.5);border-radius:50%;color:#7adfe6;font-size:9px;font-weight:700;cursor:help">i</span>
+        </div>`;
+        el.innerHTML = `<div style="padding:6px 8px;background:rgba(255,255,255,0.03);border:1px dashed rgba(122,223,230,0.25);border-radius:3px;font-size:11px">
+            <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:4px">
+                <b style="color:#cfd6dc">Flags</b><span style="color:#888;font-size:10px" title="A point can carry more than one flag (e.g. a name match that is also off its pad counts in both tabs), so flags can outnumber points.">${total} flag${total === 1 ? '' : 's'} on <b style="color:#cfd6dc">${uniq.size}</b> of ${selTotal} selected points${total > uniq.size ? ` <span style="color:#666">(some points carry several)</span>` : ''}</span>
+                ${tabs.map(chip).join('')}
+                <span style="flex:1"></span>
+                <label style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:#9ad;cursor:pointer"><input type="checkbox" data-impflaghide ${imp.flagHideReviewed ? 'checked' : ''} style="accent-color:#5fff5f;margin:0"> hide reviewed</label>
+                <button data-imp-flags="sheets" title="Copy every flagged point as a table (Flag · Name · Existing asset · Detail · Reviewed · Type · Lat · Lng) — paste into Google Sheets / Excel" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">📤 Sheets</button>
+                <button data-imp-flags="csv" title="Download the same table as a CSV" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">⬇ CSV</button>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center;font-size:10px;color:#888;margin-bottom:3px">
+                <span style="color:${tab.color}">${tab.label}</span> · ${tab.id === 'rev' ? `<b style="color:#5fff5f">${tab.items.length}</b> done so far — untick a row to send it back` : `<b style="color:#5fff5f">${rev}</b> / ${tab.items.length} reviewed`}
+                <span style="display:inline-block;flex:1;max-width:160px;height:4px;border-radius:2px;background:rgba(255,255,255,0.08);overflow:hidden"><span style="display:block;height:100%;width:${tab.items.length ? Math.round(100 * rev / tab.items.length) : 0}%;background:#5fff5f"></span></span>
+                <span style="flex:1"></span>
+                <button data-impflagall="1" style="background:none;border:1px solid rgba(255,255,255,0.15);color:#9ad;border-radius:3px;padding:0 6px;cursor:pointer;font:inherit;font-size:10px" title="Mark every row shown in this tab as reviewed">✓ all shown</button>
+                <button data-impflagnone="1" style="background:none;border:1px solid rgba(255,255,255,0.15);color:#9ad;border-radius:3px;padding:0 6px;cursor:pointer;font:inherit;font-size:10px" title="Clear reviewed on this tab">clear</button>
+                <span style="color:#666">click a row = zoom · ⓘ = details</span>
+            </div>
+            <div data-impflaglist style="max-height:230px;overflow:auto;border:1px solid rgba(255,255,255,0.06);border-radius:3px;background:rgba(0,0,0,0.15)">
+                ${shown.slice(0, CAP).map(row).join('') || `<div style="padding:6px;color:#5fff5f;font-size:10px">${tab.id === 'rev' ? 'nothing reviewed yet' : `✓ all ${tab.items.length} reviewed`}</div>`}
+                ${shown.length > CAP ? `<div style="padding:4px;color:#888;font-size:10px">showing the first ${CAP} of ${shown.length} — review and hide, or export the full list</div>` : ''}
+            </div>
+        </div>`;
+        const byI = new Map(live.map(p => [String(p.i), p]));
+        el.onclick = (ev) => {
+            const ex = ev.target.closest('[data-imp-flags]');
+            if (ex) { try { impExportFlags(live.filter(p => p.sel), ex.getAttribute('data-imp-flags')); } catch (e) { console.warn(`${TAG} 📥 flags export failed:`, e); impStatus(`Flags export failed: ${impEsc(e && e.message || e)}`, '#ff6060'); } return; }
+            const tb = ev.target.closest('[data-impflagtab]');
+            if (tb) { imp.flagTab = tb.getAttribute('data-impflagtab'); impRenderFlagsUi(live); return; }
+            if (ev.target.closest('[data-impflaghide]')) { imp.flagHideReviewed = !!ev.target.checked; impRenderFlagsUi(live); return; }
+            if (ev.target.closest('[data-impflagall]')) { shown.forEach(p => { p.reviewed = true; }); impMarkDirty(); impRenderFlagsUi(live); impSecSummaries(); return; }
+            if (ev.target.closest('[data-impflagnone]')) { tab.items.forEach(p => { p.reviewed = false; }); impMarkDirty(); impRenderFlagsUi(live); impSecSummaries(); return; }
+            const cb = ev.target.closest('[data-impflagrev]');
+            if (cb) { const p = byI.get(cb.getAttribute('data-impflagrev')); if (p) { p.reviewed = !!cb.checked; impMarkDirty(); impRenderFlagsUi(live); impSecSummaries(); } return; }
+            if (ev.target.closest('[data-impflaginfo]')) return;
+            const r = ev.target.closest('[data-impflagrow]');
+            if (r) { const p = byI.get(r.getAttribute('data-impflagrow')); if (p) { const extra = []; if (p.dup && p.dupId != null) { const a = (imp.assetIndex || []).find(x => x.id === p.dupId); if (a && a.centroid) extra.push({ lat: a.centroid.lat, lng: a.centroid.lng, name: `${p.name} (existing asset)` }); } if (tab.extra) extra.push(...tab.extra(p)); impZoomToPoints([p].concat(extra), p.name); impStatus(`🔎 ${impEsc(p.name)} — ${impEsc(impFlagShort(tab.id, p))}`); } }
+        };
+    }
+    // v4.342: flagged points as a table — rich HTML + TSV on the clipboard
+    // (Sheets / Excel paste) or a CSV download. One row per flag; a point that
+    // is both a name dup and inside another asset gets two rows.
+    function impExportFlags(live, how) {
+        const rows = [];
+        live.forEach(p => {
+            if (p.dup) rows.push({ flag: 'Name match', name: p.name, other: p.name, detail: imp.dupMode === 'update' ? 'update type + notes' : (imp.dupMode === 'copy' ? 'copy created' : 'skipped'), p });
+            if (p.child) rows.push({ flag: 'Parent/child', name: p.name, other: p.child.name, detail: p.child.full ? 'fully inside' : 'partially inside', p });
+            if (p.near) rows.push({ flag: 'Nearby', name: p.name, other: p.near.name, detail: `${Math.round(p.near.ft)} ft`, p });
+            if (p.pri && p.pri.off > 0) rows.push({ flag: 'Off pad', name: p.name, other: p.pri.offOf, detail: `${p.pri.off} ft outside${p.dup ? ' (client coord differs; existing asset stays)' : ' (move or confirm separate)'}`, p });
+        });
+        if (!rows.length) { impStatus('No flagged points to export', '#ffb347'); return; }
+        const cols = [
+            { label: 'Flag', val: r => r.flag }, { label: 'Name', val: r => r.name }, { label: 'Existing asset', val: r => r.other },
+            { label: 'Detail', val: r => r.detail }, { label: 'Reviewed', val: r => r.p.reviewed ? 'yes' : '' }, { label: 'Type', val: r => r.p.typeRaw || '' },
+            { label: 'Latitude', val: r => isFinite(r.p.lat) ? r.p.lat.toFixed(6) : '' }, { label: 'Longitude', val: r => isFinite(r.p.lng) ? r.p.lng.toFixed(6) : '' },
+            { label: 'File', val: () => imp.fileName || '' },
+        ];
+        const site = getCurrentSiteName() || `Site ${genState.siteID}`;
+        if (how === 'csv') {
+            const q = (v) => { const t = String(v == null ? '' : v); return /[",\n\r]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
+            const csv = [cols.map(c => q(c.label)).join(',')].concat(rows.map(r => cols.map(c => q(c.val(r))).join(','))).join('\r\n');
+            const blob = new Blob(['\ufeff' + csv], { type: 'text/csv' });
+            const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `import-flags-${String(site).replace(/[^A-Za-z0-9_-]+/g, '_')}-${new Date().toISOString().slice(0, 10)}.csv`;
+            document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+            impStatus(`⬇ ${rows.length} flag row(s) downloaded as CSV`);
+            return;
+        }
+        const esc = (v) => impEsc(v);
+        const headHtml = `<tr>${cols.map(c => `<th style="background:#1f2228;color:#7adfe6;border:1px solid #cccccc;padding:2px 7px;text-align:left">${esc(c.label)}</th>`).join('')}</tr>`;
+        const bodyHtml = rows.map(r => `<tr>${cols.map(c => `<td style="border:1px solid #cccccc;padding:2px 7px">${esc(c.val(r))}</td>`).join('')}</tr>`).join('');
+        const html = `<table style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:13px">${headHtml}${bodyHtml}</table>`;
+        const text = [cols.map(c => c.label).join('\t')].concat(rows.map(r => cols.map(c => String(c.val(r)).replace(/[\t\n\r]/g, ' ')).join('\t'))).join('\n');
+        writeSheetsClipboard(html, text, `📤 ${rows.length} flag row(s) copied — paste into Sheets`);
+        impStatus(`📤 ${rows.length} flag row(s) on the clipboard (${site}) — paste into Google Sheets / Excel`);
     }
     function impSiteSubtypes() {
         const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
@@ -21755,46 +25689,106 @@
         });
         return counts;
     }
+    // v4.333: a CSV type value maps to ITSELF by default — matched to an existing
+    // site subtype ignoring case, else created as a new subtype on first commit.
+    // Only a blank value needs a hand-picked subtype. An explicit entry in the
+    // remembered typeMap still wins.
+    function impResolveSubtype(raw, subtypes) {
+        const key = (raw || '(blank)').toLowerCase();
+        const mapped = (imp.typeMap[key] || '').trim();
+        if (mapped) return { value: impApplyShield(mapped), source: 'map' };
+        if (!raw) return { value: '', source: 'none' };
+        const want = impApplyShield(raw);
+        const hit = (subtypes || []).find(st => st.toLowerCase() === want.toLowerCase());
+        return hit ? { value: hit, source: 'existing' } : { value: want, source: 'new' };
+    }
     function impRenderTypeMapUi() {
         const el = document.getElementById('aim-imp-typemap');
         if (!el) return;
         if (!imp.points.length) { el.innerHTML = ''; return; }
         const subCounts = impSiteSubtypes();
         const subtypes = [...subCounts.entries()].sort((a, b) => b[1] - a[1]).map(x => x[0]);
-        const defSub = subtypes[0] || 'well-cluster';
+        const defSub = impApplyShield(subtypes[0] || 'well-cluster');
         const dl = `<datalist id="aim-imp-subtype-list">${subtypes.map(s => `<option value="${impEsc(s)}"></option>`).join('')}</datalist>`;
         const inCss = 'background:#1a1d23;border:1px solid rgba(122,223,230,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px';
+        const shieldRow = `<label style="display:flex;align-items:center;gap:6px;font-size:11px;color:#cfd6dc;margin-top:6px;cursor:pointer" title="Site subtypes often carry a shielding modifier (\"v - pumping rod - unsh\", \"Tank Battery Shielded\"). Untick to drop that modifier from every subtype this import writes — assets are just assets."><input type="checkbox" id="aim-imp-keepshield" ${imp.keepShield ? 'checked' : ''} style="accent-color:#7adfe6"> keep shielded / unshielded modifiers in subtypes <span style="color:#888;font-size:10px">(untick = "v - pumping rod - unsh" → "v - pumping rod")</span></label>`;
+        const wireShield = () => { const k = el.querySelector('#aim-imp-keepshield'); if (k) k.onchange = () => { imp.keepShield = k.checked; impSaveParams(); impRenderTypeMapUi(); impSyncUi(); }; };
         if (!imp.mapping || !imp.mapping.type) {
-            const cur = imp.typeMap['__all__'] || defSub;
+            const cur = impApplyShield(imp.typeMap['__all__'] || defSub);
             el.innerHTML = `<div style="padding:6px 8px;background:rgba(122,223,230,0.05);border:1px dashed rgba(122,223,230,0.3);border-radius:3px;font-size:11px;color:#cfd6dc">
                 No type column — subtype for ALL created assets:
                 <input id="aim-imp-sub-all" type="text" list="aim-imp-subtype-list" value="${impEsc(cur)}" style="${inCss};width:140px">${dl}
-                <span style="color:#888;font-size:10px">(site's existing subtypes suggested; a new value is created on the site)</span></div>`;
+                <span style="color:#888;font-size:10px">(site's existing subtypes suggested; a new value is created on the site)</span>${shieldRow}</div>`;
             el.querySelector('#aim-imp-sub-all').oninput = function () { imp.typeMap['__all__'] = this.value.trim(); impSaveTypeMap(); impSyncUi(); };
+            wireShield();
             return;
         }
         const vals = new Map();
         imp.points.forEach(p => { const k = p.typeRaw || '(blank)'; vals.set(k, (vals.get(k) || 0) + 1); });
+        // v4.345: values that are the same word(s) + a trailing date/number ("NEW POP - 2026-11-17" ×54)
+        // are offered as ONE subtype with a click — never prefilled, so a real distinction is never lost.
+        const fam = new Map();
+        vals.forEach((n, v) => {
+            const mm = String(v).match(/^(.*?[A-Za-z].*?)[\s\-–—:#]+(\d{4}-\d{2}-\d{2}|\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}|\d{1,2}[\/\-]\d{2,4}|\d+)\s*$/);
+            if (!mm) return;
+            const base = mm[1].trim();
+            if (!fam.has(base)) fam.set(base, []);
+            fam.get(base).push(v);
+        });
+        const tidy = (b) => b.toLowerCase().split(/\s+/).map(w => w ? w[0].toUpperCase() + w.slice(1) : w).join(' ');
+        const famBanners = [...fam.entries()].filter(([b, arr]) => arr.length >= 2).map(([b, arr]) => {
+            const target = tidy(b);
+            const done = arr.every(v => (imp.typeMap[v.toLowerCase()] || '').toLowerCase() === target.toLowerCase());
+            const n = arr.reduce((a, v) => a + (vals.get(v) || 0), 0);
+            return `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:4px 6px;margin-bottom:4px;background:rgba(255,212,0,0.07);border:1px dashed rgba(255,212,0,0.4);border-radius:3px;font-size:11px;color:#cfd6dc">✨ <b>${arr.length}</b> values look like <b>${impEsc(b)}</b> + a date/number (${n} rows)${done ? ` — <span style="color:#5fff5f">combined as "${impEsc(target)}"</span>` : ''}
+                <button data-impfam="${impEsc(b)}" data-impfamto="${impEsc(target)}" style="background:rgba(255,212,0,0.15);color:#ffd400;border:1px solid rgba(255,212,0,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">${done ? 'Re-apply' : `Combine as "${impEsc(target)}"`}</button>
+                <input type="text" data-impfamname="${impEsc(b)}" value="${impEsc(target)}" title="the subtype they all become" style="${inCss};width:120px">
+                ${done ? `<button data-impfamundo="${impEsc(b)}" style="background:none;color:#9ad;border:1px solid rgba(255,255,255,0.15);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">split again</button>` : ''}</div>`;
+        }).join('');
+        const tag = (src, val) => src === 'new' ? `<span style="color:#5fff5f;font-size:10px">new subtype — created on the site</span>`
+            : src === 'existing' ? `<span style="color:#888;font-size:10px">existing subtype</span>`
+            : src === 'map' ? `<span style="color:#888;font-size:10px">${subCounts.has(val) ? 'existing subtype' : 'new subtype — created on the site'}</span>`
+            : `<span style="color:#ffd400;font-size:10px">blank in the file — pick a subtype</span>`;
         const rows = [...vals.entries()].sort((a, b) => b[1] - a[1]).map(([v, n]) => {
+            const raw = v === '(blank)' ? '' : v;
             const key = v.toLowerCase();
-            const mapped = (imp.typeMap[key] || '').trim();
-            const warn = !mapped;
-            return `<div style="display:flex;gap:8px;align-items:center;padding:2px 0${warn ? ';background:rgba(255,212,0,0.08)' : ''}">
+            const r = impResolveSubtype(raw, subtypes);
+            const warn = !r.value;
+            return `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:2px 0${warn ? ';background:rgba(255,212,0,0.08)' : ''}">
                 <span style="min-width:130px;color:${warn ? '#ffd400' : '#cfd6dc'};font-size:11px">${warn ? '⚠ ' : ''}${impEsc(v)} <span style="color:#888">×${n}</span></span>
                 <span style="color:#888">→</span>
-                <input type="text" list="aim-imp-subtype-list" data-imptype="${impEsc(key)}" value="${impEsc(mapped)}" placeholder="pick a subtype" style="${inCss};width:140px">
+                <input type="text" list="aim-imp-subtype-list" data-imptype="${impEsc(key)}" data-impraw="${impEsc(raw)}" value="${impEsc(r.value)}" placeholder="pick a subtype" style="${inCss};width:140px">
+                <span data-imptag>${tag(r.source, r.value)}</span>
             </div>`;
         }).join('');
         el.innerHTML = `<div style="padding:6px 8px;background:rgba(122,223,230,0.05);border:1px dashed rgba(122,223,230,0.3);border-radius:3px">
-            <div style="font-size:10px;color:#9ad;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px">Type mapping — CSV value → Percepto subtype <span style="color:#888;text-transform:none;letter-spacing:0">(remembered for next time; ⚠ unmapped values block Commit)</span></div>
-            ${rows}${dl}</div>`;
+            <div style="font-size:10px;color:#9ad;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px">Type — CSV value → Percepto subtype <span style="color:#cfd6dc;text-transform:none;letter-spacing:0">(${vals.size} value${vals.size === 1 ? '' : 's'})</span> <span style="color:#888;text-transform:none;letter-spacing:0">· the file's value is used as-is unless you change it; a changed value is remembered</span></div>
+            ${famBanners}<div style="max-height:${vals.size > 6 ? 200 : 999}px;overflow:auto;border:1px solid rgba(255,255,255,0.06);border-radius:3px;padding:0 6px;background:rgba(0,0,0,0.12)">${rows}</div>${dl}${shieldRow}</div>`;
+        wireShield();
+        el.querySelectorAll('button[data-impfam]').forEach(b => b.onclick = () => {
+            const base = b.getAttribute('data-impfam'); const inp = el.querySelector(`input[data-impfamname="${CSS.escape(base)}"]`);
+            const to = ((inp && inp.value.trim()) || b.getAttribute('data-impfamto') || '').trim(); if (!to) return;
+            (fam.get(base) || []).forEach(v => { imp.typeMap[v.toLowerCase()] = to; });
+            impSaveTypeMap(); impRenderTypeMapUi(); impSyncUi();
+            impStatus(`✨ ${(fam.get(base) || []).length} "${impEsc(base)} + date" values will be created as <b>${impEsc(to)}</b> (remembered)`);
+        });
+        el.querySelectorAll('button[data-impfamundo]').forEach(b => b.onclick = () => {
+            const base = b.getAttribute('data-impfamundo');
+            (fam.get(base) || []).forEach(v => { delete imp.typeMap[v.toLowerCase()]; });
+            impSaveTypeMap(); impRenderTypeMapUi(); impSyncUi();
+        });
         el.querySelectorAll('input[data-imptype]').forEach(inp => {
             inp.oninput = () => {
-                const k = inp.getAttribute('data-imptype');
+                const k = inp.getAttribute('data-imptype'), raw = inp.getAttribute('data-impraw') || '';
                 const v = inp.value.trim();
-                if (v) imp.typeMap[k] = v; else delete imp.typeMap[k];
+                // typing the file's own value back = no override (keeps the dictionary clean)
+                if (v && v.toLowerCase() !== raw.toLowerCase()) imp.typeMap[k] = v; else delete imp.typeMap[k];
                 impSaveTypeMap();
-                inp.parentElement.style.background = v ? '' : 'rgba(255,212,0,0.08)';
+                const r = impResolveSubtype(raw, subtypes);
+                const eff = v || r.value;
+                inp.parentElement.style.background = eff ? '' : 'rgba(255,212,0,0.08)';
+                const t = inp.parentElement.querySelector('[data-imptag]');
+                if (t) t.innerHTML = eff ? (subCounts.has(eff) || subtypes.some(st => st.toLowerCase() === eff.toLowerCase()) ? `<span style="color:#888;font-size:10px">existing subtype</span>` : `<span style="color:#5fff5f;font-size:10px">new subtype — created on the site</span>`) : tag('none', '');
                 impSyncUi();
             };
         });
@@ -21908,31 +25902,80 @@
             const show = (id, on, flex) => { const el = document.getElementById(id); if (el) el.style.display = on ? (flex ? 'flex' : '') : 'none'; };
             show('aim-imp-selrow', live.length > 0 || imp.target === 'assets', true);
             show('aim-imp-commitrow', live.length > 0 || imp.lastCreated.length > 0, true);
+            show('aim-imp-placerow', live.length > 0 && imp.target !== 'assets', true);
+            {
+                const moved = live.filter(p => p.orig).length, removed = imp.points.filter(p => p.removed).length;
+                const mn = document.getElementById('aim-imp-move-note');
+                if (mn) mn.innerHTML = imp.moveHeld ? `holding <b style="color:#ff5fff">${impEsc(imp.moveHeld.name)}</b> — click the new spot · <b>Delete</b> = drop it from the import · Esc = put back` : ((moved || removed) ? `<b style="color:#ff5fff">${moved}</b> moved (magenta ring)${removed ? ` · <b style="color:#ff8a80">${removed}</b> removed` : ''}` : 'click a dot to pick it up, click where it belongs · or drag it · Delete while holding = not imported');
+                const rb = document.getElementById('aim-imp-resetmoves');
+                if (rb) rb.style.display = (moved || removed) ? '' : 'none';
+                const mb = document.getElementById('aim-imp-move');
+                if (mb) { const on = imp.mode === 'move'; mb.style.background = on ? 'rgba(255,95,255,0.38)' : 'rgba(255,95,255,0.12)'; mb.textContent = on ? '↔ ON — click a dot, click its new spot · Delete=remove · Esc=off' : '↔ Move point'; }
+                const sb2 = document.getElementById('aim-imp-outline');
+                if (sb2) { const on = imp.mode === 'shape'; sb2.style.background = on ? 'rgba(195,155,211,0.42)' : 'rgba(195,155,211,0.12)'; sb2.textContent = on ? (imp.shapeHeld ? `✏ ON — holding ${imp.shapeHeld.name.slice(0, 18)} · CTRL+drag=outline · ALT+click=copy · Esc=release` : '✏ ON — click a dot, then CTRL+drag across the asset · Esc=off') : '✏ Shape'; }
+                const shapedN = live.filter(p => p.shape).length, sn2 = document.getElementById('aim-imp-shape-note');
+                if (sn2) sn2.innerHTML = shapedN ? `<b style="color:#c39bd3">${shapedN}</b> with a drawn outline (created as drawn; the rest as ${impSizeFt} ft squares)` : 'no outlines drawn — every point becomes a square';
+            }
             show('aim-imp-delrow', true, true);
+            impApplySections();   // v4.352: collapsible sections (Advanced forced open while a tool is armed / delete mode)
+            // v4.342: Boundaries note (top-level block)
+            const bn = document.getElementById('aim-imp-bounds-note');
+            if (bn) {
+                if (!imp.shapes.length) bn.textContent = live.length ? `none loaded — all ${live.length} staged points are selected. Load one KML with one or more polygons (or several KMLs), or draw one; only points inside a boundary are created.` : 'Boundaries first — a region-wide list stays light when only the points inside your boundaries are selected. Load one KML with one or more polygons (or several KMLs), or draw them; then load the data file below.';
+                else bn.textContent = imp.target === 'assets' ? `${imp.shapes.length} boundar${imp.shapes.length === 1 ? 'y' : 'ies'} — selecting EXISTING assets (🗑 Delete mode)` : `${imp.shapes.length} boundar${imp.shapes.length === 1 ? 'y' : 'ies'} · ${selN} of ${live.length} staged points inside${live.length ? '' : ' (load the data file to see counts)'}`;
+            }
+            const bc = document.getElementById('aim-imp-clearshapes');
+            if (bc) bc.style.display = imp.shapes.length ? '' : 'none';
+            impRenderFlagsUi(live);
+            try { if (imp.pri.on) impRenderPriSummary(); } catch (e) {}
             const modeBtn = (id, mode, label, onLabel) => {
                 const b = document.getElementById(id); if (!b) return;
                 const on = imp.mode === mode;
                 b.style.background = on ? 'rgba(122,223,230,0.35)' : 'rgba(122,223,230,0.12)';
                 b.textContent = on ? onLabel : label;
             };
-            modeBtn('aim-imp-circle', 'circle', '⭕ Circle', '⭕ ON — ALT+click centers a circle · Esc=off');
-            modeBtn('aim-imp-lasso', 'lasso', '🖊 Lasso', '🖊 ON — ALT+drag a loop · Esc=off');
-            modeBtn('aim-imp-pick', 'pick', '☝ Pick', '☝ ON — ALT+click toggles one · Esc=off');
-            modeBtn('aim-imp-edit', 'edit', '✎ Edit', '✎ ON — ALT+drag vertex=move · midpoint dot=add · right-click=delete · circle edge=resize · Esc=off');
+            const bModeBtn = (id, mode, label, onLabel) => {
+                const b = document.getElementById(id); if (!b) return;
+                const on = imp.mode === mode;
+                b.style.background = on ? 'rgba(186,140,255,0.38)' : 'rgba(186,140,255,0.12)';
+                b.textContent = on ? onLabel : label;
+            };
+            bModeBtn('aim-imp-circle', 'circle', '⭕ Circle', '⭕ ON — ALT+click the map to center a circle · Esc=off');
+            bModeBtn('aim-imp-lasso', 'lasso', '🖊 Draw polygon', '🖊 ON — ALT+drag a loop · Esc=off');
+            modeBtn('aim-imp-pick', 'pick', '☝ Pick one', '☝ ON — ALT+click toggles one · Esc=off');
+            bModeBtn('aim-imp-edit', 'edit', '✎ Edit', '✎ ON — ALT+drag vertex=move · midpoint dot=add · right-click=delete · circle edge=resize · Esc=off');
             const cb = document.getElementById('aim-imp-commit');
             if (cb) {
                 const dupsIn = live.filter(p => p.sel && p.dup).length;
-                const n = live.filter(p => p.sel && (!p.dup || imp.includeDups)).length;
-                cb.textContent = `✓ Create ${n} asset${n === 1 ? '' : 's'}${(dupsIn && !imp.includeDups) ? ` (${dupsIn} dup skipped)` : ''}`;
+                const upd = imp.dupMode === 'update' ? dupsIn : 0;
+                const n = live.filter(p => p.sel && (!p.dup || imp.dupMode !== 'skip')).length;
+                const cre = n - upd;
+                cb.textContent = `✓ ${cre ? `Create ${cre}` : ''}${cre && upd ? ' + ' : ''}${upd ? `update ${upd}` : ''}${!cre && !upd ? 'Create 0' : ''} asset${(cre + upd) === 1 ? '' : 's'}${(dupsIn && imp.dupMode === 'skip') ? ` (${dupsIn} name match${dupsIn === 1 ? '' : 'es'} skipped)` : ''}`;
+                const gate = document.getElementById('aim-imp-biggate'), gateN = document.getElementById('aim-imp-biggate-n'), gateAck = document.getElementById('aim-imp-biggate-ack');
+                if (gate) {
+                    const big = n > IMP_BIG_BATCH;
+                    gate.style.display = big ? '' : 'none';
+                    if (gateN) gateN.textContent = String(n);
+                    if (!big && gateAck) gateAck.checked = false;
+                }
             }
             const db = document.getElementById('aim-imp-delete');
             if (db) { db.style.display = imp.target === 'assets' ? '' : 'none'; db.textContent = `🗑 Delete ${imp.assetSel.size} selected…`; }
             const ub = document.getElementById('aim-imp-undodel');
             if (ub) ub.style.display = imp.lastDelete ? '' : 'none';
             const uc = document.getElementById('aim-imp-undocreate');
-            if (uc) uc.style.display = imp.lastCreated.length ? '' : 'none';
+            if (uc) {
+                const can = !!(imp.lastCreated.length || imp.lastUpdated.length);
+                uc.style.display = (live.length || can) ? '' : 'none';
+                uc.disabled = !can; uc.style.opacity = can ? '1' : '0.45'; uc.style.cursor = can ? 'pointer' : 'default';
+                uc.title = can ? 'Delete exactly the assets the last import created and put the previous type + notes back on the ones it updated. Survives a reload (saved with the session). Each delete also rides Delete Guard\'s undo ring.' : 'Nothing to undo yet — appears live once an import has written something';
+                uc.textContent = can ? `↩ Undo last import (${imp.lastCreated.length} created${imp.lastUpdated.length ? ` · ${imp.lastUpdated.length} updated` : ''})` : '↩ Undo last import';
+            }
             const fl = document.getElementById('aim-imp-file-label');
             if (fl) fl.textContent = imp.fileName ? `${imp.fileName} · ${live.length} staged · ${selN} selected` : 'no file loaded';
+            const sb = document.getElementById('aim-imp-save'), sn = document.getElementById('aim-imp-saved-note');
+            if (sb) sb.style.display = imp.headers.length ? '' : 'none';
+            if (sn) sn.textContent = !imp.headers.length ? '' : (imp.dirty ? 'unsaved changes — autosaves in a moment' : (imp.lastSavedAt ? `💾 saved ${impFmtWhen(imp.lastSavedAt)}` : ''));
         } catch (e) {}
     }
     // ---- COMMIT: create-only, rides createAssetSquare (template clone, Lite
@@ -21942,24 +25985,37 @@
         if (liteBlockedWrite('import assets')) return;
         const sid = genState.siteID;
         if (!sid || String(sid) !== String(getCurrentSiteID())) { showToast('Site changed — reopen the generator', 'rgba(255,96,96,0.55)'); return; }
-        const targets = imp.points.filter(p => !p.done && p.sel && (!p.dup || imp.includeDups));
-        const skippedDups = imp.points.filter(p => !p.done && p.sel && p.dup && !imp.includeDups).length;
-        if (!targets.length) { impStatus(`Nothing to create — select staged points first${skippedDups ? ` (${skippedDups} selected point(s) are dup-flagged; tick "include flagged duplicates" to force them)` : ''}`, '#ffb347'); return; }
+        const targets = imp.points.filter(p => !p.done && p.sel && (!p.dup || imp.dupMode !== 'skip'));
+        const skippedDups = imp.points.filter(p => !p.done && p.sel && p.dup && imp.dupMode === 'skip').length;
+        if (!targets.length) { impStatus(`Nothing to create — select staged points first${skippedDups ? ` (${skippedDups} selected point(s) match existing names; set "name matches" to update or copy)` : ''}`, '#ffb347'); return; }
+        if (imp.pri.on) { try { impComputePriority(); } catch (e) { impStatus(`Priority compute failed: ${impEsc(e && e.message || e)}`, '#ff6060'); return; } }
         // resolve every point's subtype BEFORE anything writes — unmapped types block loudly
         const subCounts = impSiteSubtypes();
         // same frequency-sorted default the type-mapping UI shows
         const defSub = [...subCounts.entries()].sort((a, b) => b[1] - a[1]).map(x => x[0])[0] || 'well-cluster';
         const missing = new Set();
+        const siteSubs = [...subCounts.keys()];
         const subtypeFor = (p) => {
-            if (!imp.mapping || !imp.mapping.type) return (imp.typeMap['__all__'] || '').trim() || defSub;
-            const v = (imp.typeMap[(p.typeRaw || '(blank)').toLowerCase()] || '').trim();
-            if (!v) missing.add(p.typeRaw || '(blank)');
-            return v;
+            let v;
+            if (!imp.mapping || !imp.mapping.type) v = impApplyShield((imp.typeMap['__all__'] || '').trim() || defSub);
+            else {
+                v = impResolveSubtype(p.typeRaw || '', siteSubs).value;   // v4.333: file value as-is unless overridden; v4.343: shielding modifier rule applied inside
+                if (!v) { missing.add(p.typeRaw || '(blank)'); return v; }
+            }
+            // v4.347: on an UPDATE with no type column, keep the asset's own base type
+            if (p.dup && imp.dupMode === 'update' && (!imp.mapping || !imp.mapping.type) && p.dupSubtype) v = impApplyShield(impTierStrip(p.dupSubtype));
+            return impTierPrefix(p, v);                                     // v4.347: "P1 - " prefix when tiers are on
         };
-        const plan = targets.map(p => ({ p, subtype: subtypeFor(p) }));
-        if (missing.size) { impStatus(`BLOCKED — unmapped type value(s): <b>${impEsc([...missing].join(' · '))}</b>. Map each in the Type mapping table above.`, '#ff6060'); return; }
+        const plan = targets.map(p => ({ p, subtype: subtypeFor(p), update: !!(p.dup && imp.dupMode === 'update' && p.dupId != null) }));
+        if (missing.size) { impStatus(`BLOCKED — rows with a blank type: pick a subtype for <b>${impEsc([...missing].join(' · '))}</b> in the Type table above.`, '#ff6060'); return; }
         const dry = (() => { try { return !!document.getElementById('aim-gen-dryrun').checked; } catch (e) { return true; } })();
-        if (dry) { impStatus(`DRY RUN — would create <b>${plan.length}</b> asset(s) (${impSizeFt}×${impSizeFt} ft squares)${skippedDups ? `, skipping ${skippedDups} dup(s)` : ''}: ${impEsc(plan.slice(0, 12).map(x => x.p.name).join(' · '))}${plan.length > 12 ? ' …' : ''}. Untick Dry run to write.`); return; }
+        const nUpd = plan.filter(x => x.update).length, nCre = plan.length - nUpd;
+        if (dry) { impStatus(`DRY RUN — would create <b>${nCre}</b> asset(s) (${impSizeFt}×${impSizeFt} ft squares)${nUpd ? ` and UPDATE type + notes on <b>${nUpd}</b> existing` : ''}${skippedDups ? `, skipping ${skippedDups} name match(es)` : ''}${imp.pri.on ? ` · tiers ON (${plan.filter(x => /^P[1-3] - /.test(x.subtype)).length} prefixed)` : ''}: ${impEsc(plan.slice(0, 12).map(x => `${x.update ? '↻ ' : ''}${x.p.name} [${x.subtype}]`).join(' · '))}${plan.length > 12 ? ' …' : ''}. Untick Dry run to write.`); return; }
+        if (plan.length > IMP_BIG_BATCH) {
+            const ack = (() => { try { return !!document.getElementById('aim-imp-biggate-ack').checked; } catch (e) { return false; } })();
+            if (!ack) { impStatus(`BLOCKED — <b>${plan.length}</b> assets is more than ${IMP_BIG_BATCH} in one run. Narrow the selection with a boundary KML, or tick "I understand the risk" under the Create button to proceed anyway.`, '#ff6060'); return; }
+            console.warn(`${TAG} 📥 big batch acknowledged: ${plan.length} creates in one run`);
+        }
         const csrf = getCsrfToken();
         if (!csrf) { impStatus('No CSRF token — make one native save anywhere in Percepto first, then retry', '#ff6060'); return; }
         // fresh entity fetch → template + used names reflect the live server
@@ -21975,19 +26031,45 @@
             let i = 2, n2; do { n2 = `${base}-${i++}`; } while (usedNames.has(n2));
             usedNames.add(n2); return n2;
         };
-        plan.forEach(x => { x.name = uniq(x.p.name); });
-        // backup manifest BEFORE any write (rollback = delete the created ids)
-        const manifest = { site: sid, at: new Date().toISOString(), file: imp.fileName, sizeFt: impSizeFt, creates: plan.map(x => ({ name: x.name, subtype: x.subtype, lat: x.p.lat, lng: x.p.lng })) };
+        const stamp = impNowStamp();
+        const byIdEnt = new Map(ents.map(e => [e.id, e]));
+        plan.forEach(x => { x.name = x.update ? (byIdEnt.get(x.p.dupId) || {}).name || x.p.name : uniq(x.p.name); x.notes = impComposeNotes(x.p, stamp, x.update ? 'update' : 'create'); });   // v4.345: notes = original name + chosen columns + who/when/file · v4.365: stamp says created / updated
+        let siteCfg = null;
+        if (nUpd) { try { siteCfg = await fetchSiteConfig(sid); } catch (e) {} if (!siteCfg) { impStatus('Could not read the site config (mountain-terrain flag) — updates refused, nothing written', '#ff6060'); return; } }
+        // backup manifest BEFORE any write (rollback = delete the created ids / re-POST the updated bodies)
+        const manifest = { site: sid, at: new Date().toISOString(), file: imp.fileName, sizeFt: impSizeFt,
+            creates: plan.filter(x => !x.update).map(x => ({ name: x.name, subtype: x.subtype, lat: x.p.lat, lng: x.p.lng, notes: x.notes, movedFrom: x.p.orig || null, shape: x.p.shape || null })),
+            updates: plan.filter(x => x.update).map(x => ({ id: x.p.dupId, name: x.name, after: { subtype: x.subtype, notes: x.notes }, before: byIdEnt.get(x.p.dupId) || null })) };
         try { localStorage.setItem(`aim_imp_commit_backup:${sid}`, JSON.stringify(manifest)); } catch (e) {}
         try { downloadJSONFile(`asset-import-${sid}-${Date.now()}.json`, JSON.stringify(manifest, null, 1)); } catch (e) { impStatus('backup manifest download failed (localStorage stash still written)'); }
         // fresh subtypes only need new_poi_type_str on their FIRST create
         const knownSubs = new Set([...impSiteSubtypes().keys()]);
-        let ok = 0, fail = 0, aborted = false;
-        const created = [];
+        let ok = 0, fail = 0, aborted = false, updOk = 0;
+        const created = [], updated = [];
         for (let i = 0; i < plan.length; i++) {
             const x = plan[i];
+            if (x.update) {                                              // v4.347: rewrite TYPE + NOTES on the existing asset, nothing else
+                impStatus(`updating ${i + 1}/${plan.length} — "${impEsc(x.name)}"…`);
+                const ent = byIdEnt.get(x.p.dupId);
+                if (!ent) { fail++; console.warn(`${TAG} 📥 update "${x.name}": existing asset #${x.p.dupId} not in the fresh fetch`); await sleep(DELETE_GAP_MS); continue; }
+                const body = buildWriteBody(ent, siteCfg);
+                body.description = String(x.notes || '').slice(0, 2000);
+                if (!body.custom || typeof body.custom !== 'object') body.custom = {};
+                body.custom.poi_type_str = x.subtype;
+                body.custom.new_poi_type_str = knownSubs.has(x.subtype) ? '' : x.subtype;
+                let st = 0, raw = '';
+                try { const rr = await fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) }); st = rr.status; raw = await rr.text(); }
+                catch (e) { raw = String(e && e.message || e); }
+                if (st === 200) { updOk++; updated.push({ id: ent.id, name: x.name, before: JSON.parse(JSON.stringify(ent)), point: x.p, subtype: x.subtype, notes: body.description }); knownSubs.add(x.subtype); x.p.done = true; x.p.sel = false; }
+                else {
+                    fail++; console.warn(`${TAG} 📥 update "${x.name}" failed: ${st} ${raw.slice(0, 200)}`);
+                    if (st === 403) { aborted = true; impStatus(`ABORTED at ${i + 1}/${plan.length} — server 403 (write permission lost). ${ok} created, ${updOk} updated, rest kept staged.`, '#ff6060'); break; }
+                }
+                await sleep(DELETE_GAP_MS);
+                continue;
+            }
             impStatus(`creating ${i + 1}/${plan.length} — "${impEsc(x.name)}"…`);
-            const r = await createAssetSquare(sid, x.p.lat, x.p.lng, impSizeFt, x.name, x.subtype, !knownSubs.has(x.subtype));
+            const r = await createAssetSquare(sid, x.p.lat, x.p.lng, impSizeFt, x.name, x.subtype, !knownSubs.has(x.subtype), x.notes || '', x.p.shape || null);
             if (r && r.ok) {
                 ok++; created.push({ id: r.id, name: x.name, point: x.p });
                 knownSubs.add(x.subtype);
@@ -22006,17 +26088,40 @@
         const byId = new Set(after.map(e => e.id));
         const verified = created.filter(c => byId.has(c.id));
         imp.lastCreated = verified.map(c => c.id);
+        const afterById = new Map(after.map(e => [e.id, e]));
+        const updVerified = updated.filter(u => { const e = afterById.get(u.id); return e && e.custom && String(e.custom.poi_type_str || '') === u.subtype && String(e.description || '') === u.notes; });
+        imp.lastUpdated = updated.map(u => ({ id: u.id, name: u.name, before: u.before }));
+        imp._rootCache = null;
         impBuildAssetIndex(); impComputeDups(); impRefreshAfterSelChange();
-        if (!aborted) impStatus(`DONE: <b>${ok}/${plan.length}</b> asset(s) created${fail ? `, <span style="color:#ff6060">${fail} FAILED (kept staged + selected)</span>` : ''}${skippedDups ? ` · ${skippedDups} dup(s) skipped` : ''} · verify ${verified.length}/${created.length} present · reload to edit them natively`, fail ? '#ffb347' : '#5fff5f');
-        showToast(fail ? `Import: ${ok} created, ${fail} FAILED — see the importer panel` : `✓ ${ok} asset(s) created`, fail ? 'rgba(255,96,96,0.55)' : undefined);
+        try { impSaveSession('import'); } catch (e) {}   // v4.364: the undo record is on disk before the user can reload
+        try { impRenderImportsUi(); } catch (e) {}
+        if (!aborted) impStatus(`DONE: <b>${ok}</b> created${nUpd ? ` · <b>${updOk}/${nUpd}</b> updated (type + notes)` : ''}${fail ? ` · <span style="color:#ff6060">${fail} FAILED (kept staged + selected)</span>` : ''}${skippedDups ? ` · ${skippedDups} name match(es) skipped` : ''} · verify ${verified.length}/${created.length} created present${nUpd ? `, ${updVerified.length}/${updated.length} updates match` : ''} · reload to edit them natively`, (fail || updVerified.length !== updated.length) ? '#ffb347' : '#5fff5f');
+        showToast(fail ? `Import: ${ok} created, ${updOk} updated, ${fail} FAILED — see the importer panel` : `✓ ${ok} created${updOk ? `, ${updOk} updated` : ''}`, fail ? 'rgba(255,96,96,0.55)' : undefined);
     }
     // Undo THIS import: delete exactly the ids the last commit created.
     async function impUndoCreate() {
         if (liteBlockedWrite('delete imported assets (undo)')) return;
-        if (!imp.lastCreated.length) { showToast('Nothing to undo (only the most recent import this session)', 'rgba(255,96,96,0.55)'); return; }
+        if (!imp.lastCreated.length && !imp.lastUpdated.length) { showToast('Nothing to undo (only the most recent import this session)', 'rgba(255,96,96,0.55)'); return; }
         const csrf = getCsrfToken();
         if (!csrf) { showToast('No CSRF token', 'rgba(255,96,96,0.55)'); return; }
-        if (!confirm(`Delete the ${imp.lastCreated.length} asset(s) created by the last import? (Delete Guard banks each when installed)`)) return;
+        if (!confirm(`Undo the last import: delete ${imp.lastCreated.length} created asset(s)${imp.lastUpdated.length ? ` and put the previous type + notes back on ${imp.lastUpdated.length} updated asset(s)` : ''}? (Delete Guard banks each delete when installed)`)) return;
+        if (imp.lastUpdated.length) {                                    // v4.347: revert updates by re-POSTing the banked before-bodies
+            const sid = genState.siteID; let siteCfg = null;
+            try { siteCfg = await fetchSiteConfig(sid); } catch (e) {}
+            if (!siteCfg) { impStatus('Could not read the site config — update revert refused (creates not touched either)', '#ff6060'); return; }
+            let rOk = 0, rFail = 0; const reverted = new Set();
+            for (const u of imp.lastUpdated) {
+                try {
+                    const body = buildWriteBody(u.before, siteCfg);
+                    const rr = await fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) });
+                    if (rr.status === 200) { rOk++; reverted.add(u.id); } else { rFail++; console.warn(`${TAG} 📥 revert #${u.id}: server ${rr.status}`); }
+                } catch (e) { rFail++; console.warn(`${TAG} 📥 revert #${u.id}:`, e.message); }
+                await sleep(DELETE_GAP_MS);
+            }
+            imp.lastUpdated = imp.lastUpdated.filter(u => !reverted.has(u.id));
+            impStatus(`↩ ${rOk} update(s) reverted${rFail ? `, <span style="color:#ff6060">${rFail} failed</span>` : ''}`);
+            if (!imp.lastCreated.length) { try { await fetchMapObjects(sid, true); } catch (e) {} imp._rootCache = null; impBuildAssetIndex(); impComputeDups(); impRefreshAfterSelChange(); return; }
+        }
         let ok = 0, fail = 0;
         const deleted = new Set();
         for (const id of imp.lastCreated) {
@@ -22028,6 +26133,7 @@
             await sleep(DELETE_GAP_MS);
         }
         imp.lastCreated = imp.lastCreated.filter(id => !deleted.has(id));
+        try { impMarkDirty(); } catch (e) {}
         try { await fetchMapObjects(genState.siteID, true); } catch (e) {}
         impBuildAssetIndex(); impComputeDups(); impRefreshAfterSelChange();
         showToast(fail ? `Undo: ${ok} deleted, ${fail} FAILED` : `↩ ${ok} imported asset(s) deleted`, fail ? 'rgba(255,96,96,0.55)' : undefined);
@@ -22304,7 +26410,126 @@
         showToast(fail ? `Restore: ${ok} ok, ${fail} FAILED` : `↩ ${ok} asset(s) restored`, fail ? 'rgba(255,96,96,0.55)' : undefined);
     }
     // ---- teardown (closeSiteGenerator) + panel show + CP open action ----
+    // ---- v4.346: SESSION SAVE / RESUME — a multi-hour placement job must survive
+    // a crash, a reload or a day off. Snapshot = the file (headers + rows as
+    // arrays), the mapping, every per-point override (moved coords, removed,
+    // created, manual select) and the boundaries, keyed per env-site in GM
+    // (Percepto sign-out wipes localStorage; GM survives). Saved 3 s after any
+    // change, every N minutes while dirty, on 💾, and on page hide. ----
+    let impAutosaveT = null, impAutosaveIv = null;
+    function impSessionKey() { return imp.siteID ? envSiteKey(imp.siteID) : null; }
+    function impMarkDirty() {
+        if (!imp.siteID || !imp.headers.length) return;
+        imp.dirty = true;
+        clearTimeout(impAutosaveT);
+        impAutosaveT = setTimeout(() => { try { impSaveSession('auto'); } catch (e) { console.warn(`${TAG} 📥 autosave failed:`, e); } }, 3000);
+    }
+    function impAutosaveTimer() {
+        clearInterval(impAutosaveIv); impAutosaveIv = null;
+        if (impAutosaveMin > 0) impAutosaveIv = setInterval(() => { if (imp.dirty) { try { impSaveSession('timer'); } catch (e) { console.warn(`${TAG} 📥 autosave failed:`, e); } } }, impAutosaveMin * 60000);
+    }
+    function impSaveSession(why) {
+        const k = impSessionKey(); if (!k || !imp.headers.length) return false;
+        const hdr = imp.headers;
+        const data = {
+            v: 1, savedAt: new Date().toISOString(), fileName: imp.fileName, headers: hdr,
+            rows: imp.rows.map(r => hdr.map(h => r[h] == null ? '' : String(r[h]))),
+            mapping: imp.mapping, invalid: imp.invalid,
+            points: imp.points.map(p => {
+                const o = { i: p.i };
+                if (p.orig) { o.lat = p.lat; o.lng = p.lng; o.orig = p.orig; }
+                if (p.removed) o.removed = true;
+                if (p.done && !p.removed) o.created = true;
+                if (p.selManual !== undefined) o.selManual = p.selManual;
+                if (p.reviewed) o.rv = true;
+                if (p.env && !p.env.noApi) o.env = p.env;
+                if (p.src) o.src = p.src;
+                if (p.shape && p.shape.length >= 3) o.shape = p.shape;
+                return (Object.keys(o).length > 1) ? o : null;
+            }).filter(Boolean),
+            shapes: imp.shapes.map(sh => sh.kind === 'circle' ? { id: sh.id, kind: 'circle', center: sh.center, radiusM: sh.radiusM, name: sh.name || '' } : { id: sh.id, kind: sh.kind, ring: sh.ring, handle: sh.handle, name: sh.name || '' }),
+            shapeSeq: imp.shapeSeq,
+            pri: { on: imp.pri.on, oilCol: imp.pri.oilCol, waterCol: imp.pri.waterCol, blpdCol: imp.pri.blpdCol, priCol: imp.pri.priCol },
+            env: { apiCol: imp.env.apiCol, notes: imp.env.notes, checkedAt: imp.env.checkedAt, mismatchFt: imp.env.mismatchFt, missing: imp.env.missing, missingAt: imp.env.missingAt, missingOp: imp.env.missingOp, missingTotal: imp.env.missingTotal },
+            undo: { created: imp.lastCreated.slice(), updated: imp.lastUpdated.map(u => ({ id: u.id, name: u.name, before: u.before })) },   // v4.364: undo survives a reload
+        };
+        const json = JSON.stringify(data);
+        const live = imp.points.filter(p => !p.done).length;
+        const meta = { v: 1, savedAt: data.savedAt, fileName: imp.fileName, rows: imp.rows.length, live, moved: imp.points.filter(p => p.orig).length, removed: imp.points.filter(p => p.removed).length, created: imp.points.filter(p => p.done && !p.removed).length, shapes: imp.shapes.length, bytes: json.length, siteName: getCurrentSiteName() || '', undoCreated: imp.lastCreated.length, undoUpdated: imp.lastUpdated.length };
+        try { GM_setValue(IMP_SESSION_DATA + k, json); GM_setValue(IMP_SESSION_META + k, JSON.stringify(meta)); }
+        catch (e) { console.warn(`${TAG} 📥 session save failed (${why}):`, e); impStatus(`💾 save failed: ${impEsc(e && e.message || e)}`, '#ff6060'); return false; }
+        imp.dirty = false; imp.lastSavedAt = data.savedAt;
+        clearTimeout(impAutosaveT);
+        try { impSyncUi(); } catch (e) {}
+        if (why === 'manual') impStatus(`💾 progress saved (${(json.length / 1048576).toFixed(1)} MB) — resume from the Asset Import page any time, even after a reload or sign-out`);
+        return true;
+    }
+    function impSessionMeta(k) { try { const m = JSON.parse(GM_getValue(IMP_SESSION_META + k, '') || 'null'); return m && m.v === 1 ? m : null; } catch (e) { return null; } }
+    function impDiscardSession() {
+        const k = impSessionKey(); if (!k) return;
+        try { GM_deleteValue(IMP_SESSION_DATA + k); GM_deleteValue(IMP_SESSION_META + k); } catch (e) {}
+        imp.dirty = false; imp.lastSavedAt = null;
+        impRenderResumeUi(); impSyncUi();
+    }
+    function impResumeSession() {
+        const k = impSessionKey(); if (!k) return;
+        let d; try { d = JSON.parse(GM_getValue(IMP_SESSION_DATA + k, '') || 'null'); } catch (e) { d = null; }
+        if (!d || d.v !== 1 || !Array.isArray(d.headers) || !Array.isArray(d.rows)) { impStatus('No usable saved session for this site', '#ffb347'); impDiscardSession(); return; }
+        const hdr = d.headers;
+        imp.fileName = d.fileName; imp.headers = hdr;
+        imp.rows = d.rows.map(arr => { const o = {}; hdr.forEach((h, i) => { o[h] = arr[i] == null ? '' : arr[i]; }); return o; });
+        imp.mapping = d.mapping || impGuessMapping(hdr);
+        imp.points = []; imp.assetSel.clear(); imp.assetManual.clear(); imp.invalid = 0;
+        imp.shapes = (d.shapes || []).map(sh => sh.kind === 'circle' ? { id: sh.id, kind: 'circle', center: sh.center, radiusM: sh.radiusM, name: sh.name || '' } : { id: sh.id, kind: sh.kind || 'lasso', ring: sh.ring, handle: sh.handle || ringCentroid(sh.ring), name: sh.name || '' });
+        imp.shapeSeq = Math.max(d.shapeSeq || 1, ...imp.shapes.map(sh => sh.id + 1), 1);
+        imp.mapOpen = false;
+        if (d.pri) { Object.assign(imp.pri, { on: !!d.pri.on, oilCol: d.pri.oilCol || null, waterCol: d.pri.waterCol || null, blpdCol: d.pri.blpdCol || null, priCol: d.pri.priCol || null }); imp.pri._guessed = true; }
+        if (d.env) { imp.env.apiCol = d.env.apiCol || null; imp.env.notes = d.env.notes !== false; imp.env.checkedAt = d.env.checkedAt || null; if (typeof d.env.mismatchFt === 'number') imp.env.mismatchFt = d.env.mismatchFt; if (Array.isArray(d.env.missing)) { imp.env.missing = d.env.missing; imp.env.missingAt = d.env.missingAt || null; imp.env.missingOp = d.env.missingOp || ''; imp.env.missingTotal = d.env.missingTotal || 0; imp.env.missingSel = new Set(); } imp.env._guessed = true; }
+        if (d.undo) { imp.lastCreated = Array.isArray(d.undo.created) ? d.undo.created.slice() : []; imp.lastUpdated = Array.isArray(d.undo.updated) ? d.undo.updated.filter(u => u && u.id != null && u.before) : []; console.log(`${TAG} 📥 resume: undo record ${imp.lastCreated.length} created / ${imp.lastUpdated.length} updated`); }
+        else console.log(`${TAG} 📥 resume: no undo record in this session (saved by an older version or before any import)`);
+        impRenderMappingUi();
+        impBuildPoints();                                            // rebuilds points from rows + mapping (also recomputes dups/flags)
+        const byI = new Map(imp.points.map(p => [p.i, p]));
+        let moved = 0, removed = 0, created = 0;
+        (d.points || []).forEach(o => {
+            const p = byI.get(o.i); if (!p) return;
+            if (o.orig) { p.orig = o.orig; p.lat = o.lat; p.lng = o.lng; moved++; }
+            if (o.removed) { p.removed = true; p.done = true; p.sel = false; removed++; }
+            if (o.created) { p.done = true; p.sel = false; created++; }
+            if (o.selManual !== undefined) p.selManual = o.selManual;
+            if (o.rv) p.reviewed = true;
+            if (o.env) p.env = o.env;
+            if (o.src) p.src = o.src;
+            if (Array.isArray(o.shape) && o.shape.length >= 3) p.shape = o.shape;
+        });
+        try { impComputeDups(); } catch (e) {}
+        impRefreshAfterSelChange();
+        try { impEnvSummarize(); impRenderEnvUi(); } catch (e) {}
+        imp.dirty = false; imp.lastSavedAt = d.savedAt;
+        impRenderResumeUi(); impRenderTypeMapUi(); impSyncUi();
+        impStatus(`↻ resumed <b>${impEsc(d.fileName || 'file')}</b> saved ${impEsc(impFmtWhen(d.savedAt))} — ${imp.points.filter(p => !p.done).length} staged · ${moved} moved · ${removed} removed · ${created} already created · ${imp.shapes.length} boundar${imp.shapes.length === 1 ? 'y' : 'ies'}`);
+    }
+    function impFmtWhen(iso) { try { const d = new Date(iso); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; } catch (e) { return String(iso || ''); } }
+    function impRenderResumeUi() {
+        const el = document.getElementById('aim-imp-resume'); if (!el) return;
+        const k = impSessionKey(); const m = k ? impSessionMeta(k) : null;
+        const inMemory = imp.headers.length > 0;
+        if (!m || inMemory) { el.innerHTML = ''; el.style.display = 'none'; return; }
+        el.style.display = '';
+        el.innerHTML = `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:6px 8px;background:rgba(95,255,95,0.07);border:1px solid rgba(95,255,95,0.45);border-radius:3px;font-size:11px;color:#cfd6dc">
+            <b style="color:#5fff5f">↻ Saved progress</b> <span>${impEsc(m.fileName || 'file')} · saved ${impEsc(impFmtWhen(m.savedAt))} · ${m.live} staged${m.moved ? ` · ${m.moved} moved` : ''}${m.removed ? ` · ${m.removed} removed` : ''}${m.created ? ` · ${m.created} created` : ''} · ${m.shapes} boundar${m.shapes === 1 ? 'y' : 'ies'} · ${(m.bytes / 1048576).toFixed(1)} MB${(m.undoCreated || m.undoUpdated) ? ` · <b style="color:#ffb347">undo: ${m.undoCreated || 0} created / ${m.undoUpdated || 0} updated</b>` : ''}</span>
+            <span style="flex:1"></span>
+            <button id="aim-imp-resume-go" style="background:rgba(95,255,95,0.18);color:#5fff5f;border:1px solid rgba(95,255,95,0.6);border-radius:3px;padding:3px 12px;cursor:pointer;font:inherit;font-size:11px;font-weight:600">↻ Resume</button>
+            <button id="aim-imp-resume-drop" style="background:transparent;color:#ff8a80;border:1px solid rgba(255,90,90,0.45);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px">Discard</button>
+        </div>`;
+        el.querySelector('#aim-imp-resume-go').onclick = () => { try { impResumeSession(); } catch (e) { console.warn(`${TAG} 📥 resume failed:`, e); impStatus(`Resume failed: ${impEsc(e && e.message || e)}`, '#ff6060'); } };
+        el.querySelector('#aim-imp-resume-drop').onclick = () => { if (confirm(`Discard the saved import progress for this site (${m.fileName || 'file'}, saved ${impFmtWhen(m.savedAt)})?`)) impDiscardSession(); };
+    }
+    try { uwin().addEventListener('pagehide', () => { if (imp.dirty) { try { impSaveSession('pagehide'); } catch (e) {} } }, true); } catch (e) {}
     function impTeardown() {
+        if (imp.dirty) { try { impSaveSession('close'); } catch (e) {} }
+        try { impClearPulse(); } catch (e) {}
+        try { impClearAssetShapeLayers(); impClearStrokeLayer(); } catch (e) {}
         try { impSetMode(null); } catch (e) {}
         impEnsureMoveEnd(false);
         impClearLayers(); impClearShapeLayers(); impClearAssetLayers();
@@ -22314,6 +26539,7 @@
     function impShowPanel() {
         const c = document.getElementById('aim-imp-controls');
         if (!c) return;
+        genShowPage('imp');
         c.style.display = 'block';
         const b = document.getElementById('aim-gen-import');
         if (b) b.style.background = 'rgba(122,223,230,0.32)';
@@ -23838,7 +28064,8 @@
             advUnwire(); advClearLayers(); advDraw.branchSrc = null; advDraw.reGroup = null; advDraw.snapSrcs = []; advDraw.vertSnapped = [];
         }
         try { const b = document.getElementById('aim-gen-advdraw'); if (b) { b.style.background = advDraw.active ? 'rgba(95,184,255,0.32)' : 'rgba(95,184,255,0.12)'; b.textContent = advDraw.active ? '✦ Adv Draw ON — ALT+click to START a corridor (plain click edits existing) · Shift=angle · Ctrl=asset · F=flip · dbl-click=finish · Esc=undo/off' : '✦ Advanced Draw'; } } catch (e) {}
-        try { const c = document.getElementById('aim-adv-controls'); if (c) c.style.display = advDraw.active ? 'block' : 'none'; } catch (e) {}
+        try { if (advDraw.active && genState.page && genState.page !== 'adv') genShowPage('adv'); } catch (e) {}
+        try { const c = document.getElementById('aim-adv-controls'); if (c) c.style.display = (advDraw.active || genState.page === 'adv') ? 'block' : 'none'; } catch (e) {}
     }
     // Open a slot in an FFZ ring at edge `edgeIdx` and route the corridor's open chain
     // out and back through it → one simple polygon (no boolean union, no holes on an open branch).
@@ -25692,7 +29919,815 @@
         standoffFt: 'aim-gen-standoff', depthFt: 'aim-gen-depth',
         aglFt: 'aim-gen-agl', deltaFt: 'aim-gen-delta', proximityFt: 'aim-gen-prox',
     };
-    let genState = { siteID: null, lastResult: null, lastParams: null };
+    let genState = { siteID: null, lastResult: null, lastParams: null, page: null };
+    // v4.341 Generate HUB: the modal opens on a tile menu; each tool is a page
+    // (only its own controls visible). genShowPageLive = the open modal's page
+    // switcher (closure over its box); genShowPage() is the module-level entry
+    // the tools' ShowPanel helpers / hotkey arms call to land on their page.
+    let genShowPageLive = null;
+    // v4.343: ⓘ help per page — what the tool is for, how to use it, what to try.
+    // ========================================================
+    // 🏗 RIGS & CRANES (#291, v4.381) — temporary NFZs from the daily sheet
+    // ========================================================
+    // Diamondback emails a daily CSV of wells with a crane / big rig on them
+    // (WELL_NAME, SURFACE_LATITUDE, SURFACE_LONGITUDE, JOB_TYPE_CATEGORY,
+    // START_DATE, END_DATE). Rows are WELLS: match each to a PAD here (GPS in a
+    // root pad polygon → nearest pad within N ft → exact child name → prefix),
+    // stage an NFZ = pad ∩ inset(FFZ, 15 ft) (standard FFZ ⇒ the pad exactly),
+    // commit create-only, and NEVER delete without a click: END_DATE passing or
+    // the row dropping off the sheet turns the row "ending" until a CSM confirms
+    // the equipment is gone. RPIC-spotted obstructions are added by hand and
+    // follow the same lifecycle; "mission pulled" is recorded so the restore is
+    // not forgotten (LILLY 49 UNIT 3LS lost a month that way, 2026-09-22).
+    // Source today = CSV dropped on the panel; the Apps Script bridge feeds the
+    // same ingest later. State per site in GM (`aim-rig-state:<env-sid>`).
+    // (RIG_* constants + state live at the top of the IIFE — TDZ rule, see v4.382)
+    function rigCfg() { if (rigCfgCache) return rigCfgCache; const o = elevGmGet('aim-rig-cfg', {}); rigCfgCache = Object.assign({}, RIG_DEFAULT_CFG, (o && typeof o === 'object') ? o : {}); return rigCfgCache; }
+    function rigCfgSet(k, v) { const c = rigCfg(); if (c[k] === v) return; c[k] = v; elevGmSet('aim-rig-cfg', c); }
+    function rigEnvKey(sid) { return `${/(^|\.)qa\.percepto\.app$/.test(location.hostname) ? 'qa-' : ''}${sid}`; }
+    function rigStateLoad(sid) {
+        if (rigRowsByKey && rigStateSid === String(sid)) return rigRowsByKey;
+        const o = elevGmGet(`aim-rig-state:${rigEnvKey(sid)}`, null);
+        rigRowsByKey = (o && typeof o === 'object' && o.rows) ? o : { day: '', rows: {}, log: [] };
+        rigStateSid = String(sid);
+        return rigRowsByKey;
+    }
+    // v4.387: the record of truth lives in the private data repo
+    // (aim-userscripts-data/rigs/<env-sid>.json); the GM copy is a cache.
+    // Save = GM now + debounced PUT; open = GET and take the newer stamp.
+    const rigSyncState = {};   // sid → { pulled, timer, status, at, dirty }
+    function rigRemotePath(sid) { return `rigs/${rigEnvKey(sid)}.json`; }
+    function rigStateSave(sid) {
+        if (!rigRowsByKey) return;
+        rigRowsByKey.updatedAt = new Date().toISOString(); rigRowsByKey.updatedBy = (typeof surveyLogin === 'string' && surveyLogin) || '';
+        try { elevGmSet(`aim-rig-state:${rigEnvKey(sid)}`, rigRowsByKey); } catch (e) { console.warn(`${RIG_TAG} state save failed`, e); }
+        const ss = rigSyncState[sid] = rigSyncState[sid] || {};
+        clearTimeout(ss.timer); ss.dirty = true;
+        ss.timer = setTimeout(() => rigPush(sid), 1500);
+    }
+    async function rigPush(sid) {
+        const ss = rigSyncState[sid] = rigSyncState[sid] || {};
+        if (!elevSharedToken) { ss.status = 'no token'; rigSyncBadge(sid); return; }
+        if (!rigRowsByKey || rigStateSid !== String(sid)) return;
+        try { ss.status = 'saving…'; rigSyncBadge(sid); await ghPutFile(rigRemotePath(sid), JSON.stringify(rigRowsByKey, null, 1), `[AIM rig] site ${sid}: ${rigRowsByKey.day || 'state'}`); ss.dirty = false; ss.status = 'synced'; ss.at = new Date(); }
+        catch (e) { ss.status = 'push failed'; console.warn(`${RIG_TAG} GitHub push failed`, e); showToast(`Rig state not saved to GitHub: ${e.message}`, 'rgba(255,96,96,0.55)'); }
+        rigSyncBadge(sid);
+    }
+    async function rigPull(sid, force) {
+        const ss = rigSyncState[sid] = rigSyncState[sid] || {};
+        if (ss.pulled && !force) return false;
+        if (!elevSharedToken) { ss.status = 'no token'; rigSyncBadge(sid); return false; }
+        ss.pulled = true;
+        try {
+            const remote = await ghGetJson(rigRemotePath(sid));
+            const local = rigStateLoad(sid);
+            if (remote && remote.rows && (!local.updatedAt || String(remote.updatedAt || '') > String(local.updatedAt))) {
+                rigRowsByKey = remote; rigStateSid = String(sid);
+                try { elevGmSet(`aim-rig-state:${rigEnvKey(sid)}`, remote); } catch (e) {}
+                ss.status = 'synced'; ss.at = new Date(); rigSyncBadge(sid); return true;
+            }
+            if (!remote && local.rows && Object.keys(local.rows).length) { rigPush(sid); return false; }   // first upload
+            if (ss.dirty) rigPush(sid); else { ss.status = 'synced'; ss.at = new Date(); }
+        } catch (e) { ss.status = 'pull failed'; console.warn(`${RIG_TAG} GitHub pull failed`, e); }
+        rigSyncBadge(sid); return false;
+    }
+    function rigSyncBadge(sid) {
+        const el = document.getElementById('aim-rig-sync'); if (!el) return;
+        const ss = rigSyncState[sid] || {}; const st = ss.status || 'not synced';
+        const ok = st === 'synced'; const col = ok ? '#5fff5f' : st === 'saving…' ? '#7adfe6' : '#ffb347';
+        el.innerHTML = `<span style="color:${col}" title="State file: aim-userscripts-data/${rigRemotePath(sid)}">☁ ${st}${ok && ss.at ? ` ${ss.at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : ''}${st === 'no token' ? ' — set the GitHub token in the Control Panel' : ''}</span>`;
+    }
+    // v4.389: 📡 feed — the laptop agent (aim-userscripts-data/rig-agent, plain Python on the
+    // work laptop) publishes the daily e-mail sheet to rigs/sheet/latest.json
+    // ({ day, fetchedAt, source, rows[{well,lat,lng,job,start,end}], diff }). When its day is
+    // newer than this site's last ingest it goes through the same rigIngest as a dropped CSV.
+    // Checked once per page load after the shared state is current; 📡 ↻ feed forces it.
+    const RIG_FEED_PATH = 'rigs/sheet/latest.json';
+    async function rigFeedCheck(sid, force) {
+        const ss = rigSyncState[sid] = rigSyncState[sid] || {};
+        if (ss.feedChecked && !force) { rigFeedBadge(sid); return; }
+        if (!elevSharedToken) { ss.feed = { status: 'no token' }; rigFeedBadge(sid); return; }
+        ss.feedChecked = true; ss.feed = { status: 'checking…' }; rigFeedBadge(sid);
+        try {
+            const feed = await ghGetJson(RIG_FEED_PATH);
+            if (!feed || !Array.isArray(feed.rows) || !feed.day) { ss.feed = { status: 'no feed yet' }; rigFeedBadge(sid); return; }
+            ss.feed = { status: 'ok', day: String(feed.day), at: feed.fetchedAt || '', n: feed.rows.length, source: feed.source || '' };
+            const st = rigStateLoad(sid);
+            if (st.day && String(st.day) >= String(feed.day)) { ss.feed.note = 'already ingested'; rigFeedBadge(sid); return; }
+            const num = v => (v == null || v === '' || !isFinite(Number(v))) ? null : Number(v);
+            const rows = feed.rows.map(r => ({ well: String(r.well || '').trim(), lat: num(r.lat), lng: num(r.lng), job: String(r.job || ''), start: String(r.start || ''), end: String(r.end || '') })).filter(r => r.well);
+            rigLog(sid, `feed ${feed.day} (${feed.source || 'agent'}, published ${feed.fetchedAt || '?'}): ${rows.length} rows`);
+            const res = rigIngest(sid, rows, String(feed.day));
+            ss.feed.note = `ingested ${feed.day}`;
+            showToast(`📡 Rig sheet ${feed.day} from the laptop agent: ${rows.length} rows · ${res.added} new · ${res.dropped} to verify`, 'rgba(255,154,61,0.6)');
+            rigRenderPanel(sid); rigDraw(sid);
+        } catch (e) { ss.feed = { status: 'feed failed', err: e && e.message || String(e) }; console.warn(`${RIG_TAG} feed`, e); showToast(`Rig feed: ${e && e.message || e}`, 'rgba(255,96,96,0.55)'); }
+        rigFeedBadge(sid);
+    }
+    function rigFeedBadge(sid) {
+        const el = document.getElementById('aim-rig-feed'); if (!el) return;
+        const f = (rigSyncState[sid] || {}).feed || { status: 'not checked' };
+        const col = f.status === 'ok' ? '#5fff5f' : f.status === 'checking…' ? '#7adfe6' : '#ffb347';
+        const when = f.at ? new Date(f.at) : null;
+        const whenTxt = when && !isNaN(when) ? ` ${when.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}` : '';
+        const esc = (v) => String(v == null ? '' : v).replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
+        el.innerHTML = `<span style="color:${col}" title="Laptop agent feed: aim-userscripts-data/${RIG_FEED_PATH}${f.err ? '\n' + esc(f.err) : ''}">📡 ${f.status === 'ok' ? `feed ${esc(f.day)}${whenTxt}${f.note ? ' · ' + esc(f.note) : ''}` : esc(f.status)}${f.status === 'no token' ? ' — set the GitHub token in the Control Panel' : ''}</span>`;
+    }
+    function rigToday() { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; }
+    function rigAddDays(day, n) { const d = new Date(day + 'T12:00:00'); d.setDate(d.getDate() + n); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; }
+    function rigNorm(s) { return String(s || '').toUpperCase().replace(/[\s\-_]+/g, ' ').trim(); }
+    function rigLog(sid, msg) { const st = rigStateLoad(sid); st.log.unshift(`${new Date().toISOString().slice(0, 16).replace('T', ' ')} ${msg}`); st.log = st.log.slice(0, 200); console.log(`${RIG_TAG} ${msg}`); }
+
+    // ---- CSV ----
+    function rigParseCsv(text) {
+        const lines = String(text || '').replace(/^﻿/, '').split(/\r?\n/).filter(l => l.trim());
+        if (!lines.length) throw new Error('empty file');
+        const split = (l) => { const out = []; let cur = '', q = false; for (const ch of l) { if (ch === '"') q = !q; else if (ch === ',' && !q) { out.push(cur); cur = ''; } else cur += ch; } out.push(cur); return out.map(v => v.trim().replace(/^"|"$/g, '')); };
+        const hdr = split(lines[0]).map(h => h.toUpperCase());
+        const idx = RIG_COLS.map(c => hdr.findIndex(h => h === c || h.replace(/[^A-Z]/g, '') === c.replace(/[^A-Z]/g, '')));
+        const missing = RIG_COLS.filter((c, i) => idx[i] < 0);
+        if (missing.length) throw new Error(`missing columns: ${missing.join(', ')} (got ${hdr.join(', ')})`);
+        const dayRe = /^(\d{4})-(\d{2})-(\d{2})/;
+        const day = v => { const m = String(v || '').match(dayRe); if (m) return `${m[1]}-${m[2]}-${m[3]}`; const m2 = String(v || '').match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/); return m2 ? `${m2[3]}-${m2[1].padStart(2, '0')}-${m2[2].padStart(2, '0')}` : ''; };
+        return lines.slice(1).map(split).filter(r => r.some(v => v)).map(r => ({ well: r[idx[0]] || '', lat: parseFloat(r[idx[1]]), lng: parseFloat(r[idx[2]]), job: r[idx[3]] || '', start: day(r[idx[4]]), end: day(r[idx[5]]) }))
+            .filter(r => r.well).map(r => { if (!isFinite(r.lat) || !isFinite(r.lng)) { r.lat = null; r.lng = null; } return r; });
+    }
+    function rigDayFromFilename(name) { const m = String(name || '').match(/(\d{1,2})[._-](\d{1,2})[._-](\d{2,4})/); if (!m) return rigToday(); const y = m[3].length === 2 ? '20' + m[3] : m[3]; return `${y}-${m[1].padStart(2, '0')}-${m[2].padStart(2, '0')}`; }
+
+    // ---- matching ----
+    function rigPads(sid) {
+        const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+        const tree = buildAssetTree(ents);
+        const assets = ents.filter(e => e && e.type === 3);
+        const rootOf = (e) => { let cur = e, g = 0; while (cur && g++ < 10) { const nn = tree.byId.get(cur.id); if (!nn || nn.parentId == null) return cur; const p = assets.find(a => a.id === nn.parentId); if (!p) return cur; cur = p; } return cur; };
+        return { assets, roots: assets.filter(e => { const nn = tree.byId.get(e.id); return !nn || nn.parentId == null; }).filter(e => (entityCoords(e) || []).length >= 3), rootOf };
+    }
+    function rigMatchRow(sid, row) {
+        const { assets, roots, rootOf } = rigPads(sid);
+        const cfg = rigCfg();
+        const res = { padId: null, padName: '', how: '', flag: '' };
+        let gpsPad = null, namePad = null;
+        if (row.lat != null) {
+            const inside = roots.filter(p => pointInPolygon(row.lat, row.lng, entityCoords(p)));
+            if (inside.length) gpsPad = inside[0];
+            else { let best = null, bd = Infinity; roots.forEach(p => { const d = pointToPolygonMeters(row.lat, row.lng, entityCoords(p)) * 3.28084; if (d < bd) { bd = d; best = p; } }); if (best && bd <= cfg.nearPadFt) { gpsPad = best; res.flag = `near pad edge (${Math.round(bd)} ft), not inside`; } }
+        }
+        const nw = rigNorm(row.well);
+        const exact = assets.find(a => rigNorm(a.name) === nw);
+        if (exact) namePad = rootOf(exact);
+        else { const pre = nw.split(' ').slice(0, 2).join(' '); const cand = assets.filter(a => rigNorm(a.name) === pre || rigNorm(a.name).startsWith(pre + ' ')); if (cand.length) { namePad = rootOf(cand[0]); res.flag = (res.flag ? res.flag + ' · ' : '') + `name matched by prefix "${pre}"`; } }
+        const pad = gpsPad || namePad;
+        if (!pad) { res.how = row.lat != null ? 'no pad near the GPS and no name match' : 'no GPS and no name match'; return res; }
+        res.padId = pad.id; res.padName = pad.name || `#${pad.id}`;
+        res.how = gpsPad && namePad ? (gpsPad.id === namePad.id ? 'GPS + name agree' : 'GPS') : gpsPad ? 'GPS only' : 'name only';
+        if (gpsPad && namePad && gpsPad.id !== namePad.id) res.flag = (res.flag ? res.flag + ' · ' : '') + `⚠ name points at "${namePad.name}" but GPS is on "${gpsPad.name}" — GPS used`;
+        return res;
+    }
+
+    // ---- geometry: pad ∩ inset(FFZ) ----
+    function rigInsetRing(ring, ft) {
+        // Offset every edge inward by ft and intersect consecutive offset lines.
+        const n = ring.length; if (n < 3) return null;
+        const lat0 = ring[0].lat, kx = Math.cos(lat0 * Math.PI / 180) * 364000, ky = 364000;   // deg → ft
+        const P = ring.map(p => ({ x: (p.lng - ring[0].lng) * kx, y: (p.lat - lat0) * ky }));
+        let area = 0; for (let i = 0; i < n; i++) { const a = P[i], b = P[(i + 1) % n]; area += a.x * b.y - b.x * a.y; }
+        const sgn = area > 0 ? 1 : -1;   // CCW ⇒ inward normal is left of the edge
+        const lines = P.map((a, i) => { const b = P[(i + 1) % n]; const dx = b.x - a.x, dy = b.y - a.y, L = Math.hypot(dx, dy) || 1; const nx = -dy / L * sgn, ny = dx / L * sgn; return { ax: a.x + nx * ft, ay: a.y + ny * ft, dx, dy }; });
+        const out = [];
+        for (let i = 0; i < n; i++) {
+            const l1 = lines[(i - 1 + n) % n], l2 = lines[i];
+            const det = l1.dx * l2.dy - l1.dy * l2.dx; if (Math.abs(det) < 1e-9) return null;
+            const t = ((l2.ax - l1.ax) * l2.dy - (l2.ay - l1.ay) * l2.dx) / det;
+            out.push({ lat: lat0 + (l1.ay + l1.dy * t) / ky, lng: ring[0].lng + (l1.ax + l1.dx * t) / kx });
+        }
+        return ringSelfIntersects(out) ? null : out;
+    }
+    function rigRingAreaFt2(ring) {
+        if (!ring || ring.length < 3) return 0;
+        const lat0 = ring[0].lat, kx = Math.cos(lat0 * Math.PI / 180) * 364000, ky = 364000;
+        let a = 0; for (let i = 0; i < ring.length; i++) { const p = ring[i], q = ring[(i + 1) % ring.length]; a += (p.lng - ring[0].lng) * kx * (q.lat - lat0) * ky - (q.lng - ring[0].lng) * kx * (p.lat - lat0) * ky; }
+        return Math.abs(a) / 2;
+    }
+    function rigGeometry(sid, padId) {
+        const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+        const pad = ents.find(e => e.id === padId); const ring = pad && entityCoords(pad); if (!ring || ring.length < 3) return null;
+        const c = ring.reduce((a, p) => ({ lat: a.lat + p.lat / ring.length, lng: a.lng + p.lng / ring.length }), { lat: 0, lng: 0 });
+        const ffz = ents.find(e => e.type === 16 && (entityCoords(e) || []).length >= 3 && pointInPolygon(c.lat, c.lng, entityCoords(e)));
+        if (!ffz) return { points: ring.map(p => ({ lat: p.lat, lng: p.lng })), note: 'no FFZ around the pad → pad outline' };
+        const inset = rigInsetRing(entityCoords(ffz), rigCfg().insetFt);
+        if (!inset) return { points: ring.map(p => ({ lat: p.lat, lng: p.lng })), note: `FFZ "${ffz.name}" inset failed (concave) → pad outline` };
+        const pc = terBPC();
+        if (!pc) return { points: ring.map(p => ({ lat: p.lat, lng: p.lng })), note: 'polygon-clipping unavailable → pad outline' };
+        try {
+            const r = pc.intersection([ring.map(p => [p.lng, p.lat])], [inset.map(p => [p.lng, p.lat])]);
+            const best = (r || []).map(poly => poly[0]).filter(x => x && x.length >= 4).sort((a, b) => b.length - a.length)[0];
+            if (!best) return { points: ring.map(p => ({ lat: p.lat, lng: p.lng })), note: 'intersection empty → pad outline' };
+            const pts = best.slice(0, -1).map(([lng, lat]) => ({ lat, lng }));
+            // v4.385 SAFEGUARD: a pad asset drawn over only part of its pad (LILLY 49 UNIT 3LS
+            // covered half) would leave the rest of the pad unblocked. If the asset covers
+            // less than padCoverPct of its FFZ-inset, use the whole FFZ inset and flag it.
+            const cover = rigRingAreaFt2(pts) / Math.max(1, rigRingAreaFt2(inset));
+            if (cover < (Number(rigCfg().padCoverPct) || 75) / 100) return { points: inset, flag: true, note: `⚠ pad polygon covers only ${Math.round(cover * 100)} % of its FFZ "${ffz.name}" → NFZ = whole FFZ inset ${rigCfg().insetFt} ft (fix the pad asset to shrink it)` };
+            const same = pts.length === ring.length && pts.every((p, i) => Math.abs(p.lat - ring[i].lat) < 1e-7 && Math.abs(p.lng - ring[i].lng) < 1e-7);
+            return { points: pts, note: same ? `pad outline (FFZ "${ffz.name}" is the standard 15 ft ring)` : `pad ∩ "${ffz.name}" inset ${rigCfg().insetFt} ft` };
+        } catch (e) { console.warn(`${RIG_TAG} clip failed`, e); return { points: ring.map(p => ({ lat: p.lat, lng: p.lng })), note: 'clip error → pad outline' }; }
+    }
+
+    // ---- ingest + lifecycle ----
+    function rigKey(row) { return rigNorm(row.well); }
+    function rigIngest(sid, rows, day) {
+        const st = rigStateLoad(sid); const today = rigToday();
+        const excl = String(rigCfg().exclude || '').split(/[,;\n]/).map(s => s.trim().toUpperCase()).filter(Boolean);
+        const seen = new Set(); let added = 0, changed = 0, dropped = 0, excluded = 0;
+        rows.forEach(r => {
+            if (excl.includes(String(r.job || '').toUpperCase())) { excluded++; return; }
+            const k = rigKey(r); seen.add(k);
+            const cur = st.rows[k];
+            if (!cur) { st.rows[k] = { well: r.well, lat: r.lat, lng: r.lng, job: r.job, start: r.start, end: r.end, firstSeen: day, lastSeen: day, source: 'sheet', status: 'new', padId: null, padName: '', how: '', flag: '', nfzId: null, nfzName: '', nfzBody: null, pulled: '', note: '', changes: [] }; added++; }
+            else {
+                if (cur.start !== r.start || cur.end !== r.end) { cur.changes.unshift(`${day}: ${cur.start || '?'}→${r.start || '?'} / ${cur.end || '—'}→${r.end || '—'}`); cur.changes = cur.changes.slice(0, 10); if (cur.status === 'active' || cur.status === 'ending') changed++; }
+                cur.start = r.start; cur.end = r.end; cur.job = r.job; cur.lastSeen = day;
+                if (cur.lat == null && r.lat != null) { cur.lat = r.lat; cur.lng = r.lng; }
+                if (cur.status === 'ending' && cur.endedKind === 'dropped') { cur.status = 'active'; cur.endedWhy = ''; cur.endedKind = ''; }   // came back
+            }
+        });
+        Object.keys(st.rows).forEach(k => { const c = st.rows[k]; if (c.source !== 'sheet' || seen.has(k)) return; if (c.lastSeen && day >= rigAddDays(c.lastSeen, rigCfg().graceDays + 1) && (c.status === 'active')) { c.status = 'ending'; c.endedWhy = `removed from sheet ${day}`; c.endedKind = 'dropped'; c.endedAt = day; dropped++; } else if (c.status === 'new' || c.status === 'staged' || c.status === 'upcoming' || c.status === 'unmatched' || c.status === 'offsite') { c.status = 'cleared'; c.clearedAt = day; c.endedWhy = `removed from sheet ${day} (nothing was written)`; } });
+        st.day = day;
+        rigReclassify(sid);
+        rigLog(sid, `ingest ${day}: ${rows.length} rows — ${added} new · ${changed} active rows re-dated · ${dropped} dropped → verify${excluded ? ` · ${excluded} excluded by job type` : ''}`);
+        rigStateSave(sid);
+        return { added, changed, dropped, excluded };
+    }
+    function rigReclassify(sid) {
+        const st = rigStateLoad(sid); const today = rigToday();
+        Object.values(st.rows).forEach(c => {
+            if (c.status === 'cleared') return;
+            if (!c.padId || c.status === 'new' || c.status === 'unmatched' || c.status === 'offsite' || c.status === 'upcoming' || c.status === 'staged') {
+                const m = rigMatchRow(sid, c); c.padId = m.padId; c.padName = m.padName; c.how = m.how; c.flag = m.flag;
+                if (!c.padId) { c.status = (c.lat != null) ? 'offsite' : 'unmatched'; return; }
+            }
+            if (c.status === 'active' || c.status === 'ending') {
+                if (c.status === 'active' && c.end && today > c.end && !(c.snoozeUntil && today <= c.snoozeUntil)) { c.status = 'ending'; c.endedWhy = `end date ${c.end} passed`; c.endedKind = 'ended'; c.endedAt = today; }
+                return;
+            }
+            c.status = (c.start && c.start > today) ? 'upcoming' : 'staged';
+        });
+        Object.values(st.rows).forEach(c => { try { rigSyncStage(c); } catch (e) {} });   // v4.391 stage pipeline
+    }
+    function rigAddManual(sid, f) {
+        const st = rigStateLoad(sid); const k = `RPIC ${rigNorm(f.pad)} ${f.kind}`.trim();
+        st.rows[k] = { well: f.pad, lat: null, lng: null, job: f.kind || 'RPIC report', start: f.start || rigToday(), end: f.end || '', firstSeen: rigToday(), lastSeen: rigToday(), source: 'rpic', by: f.by || '', status: 'new', padId: null, padName: '', how: '', flag: '', nfzId: null, nfzName: '', nfzBody: null, pulled: f.pulled || '', note: f.note || '', changes: [] };
+        rigReclassify(sid); rigLog(sid, `RPIC report added: ${f.pad} (${f.kind}) by ${f.by || '?'}`); rigStateSave(sid);
+    }
+
+    // ---- commit (create-only, mirrors nfzCommit rails) ----
+    async function rigCommit(sid) {
+        if (liteBlockedWrite('create rig NFZs')) return;
+        if (String(sid) !== String(getCurrentSiteID())) { showToast('Site changed — reopen the generator', 'rgba(255,96,96,0.55)'); return; }
+        const st = rigStateLoad(sid);
+        const todo = Object.entries(st.rows).filter(([, c]) => c.status === 'staged' && c.padId);
+        const out = document.getElementById('aim-rig-result'); const say = (m, col) => { if (out) { out.textContent = m; out.style.color = col || '#cfd6dc'; } console.log(`${RIG_TAG} commit: ${m}`); };
+        const logL = (m) => { rigLog(sid, m); say(m); };
+        if (!todo.length) { say('Nothing staged.'); return; }
+        const dry = (() => { try { return !!document.getElementById('aim-gen-dryrun').checked; } catch (e) { return true; } })();
+        // v4.391: standard FFZ ring → NFZ; custom FFZ (drone flies ON the pad) → cut the arcs inside every pad that FFZ spans.
+        const items = todo.map(([k, c]) => { const d = rigFfzDesign(sid, c.padId); c.design = d.kind; c.designPct = Math.round(d.pct * 100); c.pads = d.pads.map(p => p.name); c.padIds = d.pads.map(p => p.id); if (d.kind === 'custom') return { k, c, mode: 'cut', pads: d.pads, plan: rigCutPlan(sid, d.pads, d.ffz) }; const g = (c.nfzBody && Array.isArray(c.nfzBody.points) && c.nfzBody.points.length >= 3) ? { points: c.nfzBody.points, note: 'banked NFZ body (re-created)' } : rigGeometry(sid, c.padId); return { k, c, mode: 'nfz', pads: d.pads, g }; })
+            .filter(x => x.mode === 'cut' ? true : (x.g && x.g.points.length >= 3 && !ringSelfIntersects(x.g.points)));
+        for (const x of items) { try { x.c.missions = await rigMissionsOnPads(sid, x.pads); } catch (e) { console.warn(`${RIG_TAG} missions lookup failed`, e); x.c.missions = x.c.missions || []; } }
+        const geoms = items.filter(x => x.mode === 'nfz'); const cuts = items.filter(x => x.mode === 'cut');
+        const describe = x => x.mode === 'cut' ? `${x.plan.reduce((n, p) => n + (p.trimmed || []).length, 0)} leg(s) TRIMMED to the ${rigCfg().standoffFt || 15} ft line + ${x.plan.reduce((n, p) => n + p.cut.length - (p.trimmed || []).length, 0)} arc(s) REMOVED in ${x.plan.map(p => `"${p.fp.name}"`).join(', ') || 'no path'} for ${x.c.well} (custom FFZ ${x.c.designPct}% standard; pads ${x.pads.map(p => p.name).join(' + ')})` : `NFZ for ${x.c.well}`;
+        rigStateSave(sid);
+        // v4.398: PREVIEW first — arcs to cut in red, NFZs dashed — then confirm (live only).
+        rigPreview(sid, items);
+        const plan = `${items.map(describe).join('\n')}\nMissions on those pads: ${items.map(x => (x.c.missions || []).map(m => `${m.name} steps ${m.steps}`).join('; ') || 'none').join(' | ')}`;
+        if (dry) { say(`DRY RUN — ${plan.replace(/\n/g, ' · ')}. Red on the map = arcs that would be cut. Untick Dry run in the header to write.`, '#ffb300'); rigRenderPanel(sid); return; }
+        say(`PREVIEW — ${plan.replace(/\n/g, ' · ')}`, '#ffb300');
+        if (!confirm(`About to WRITE to site ${sid}:\n\n${plan}\n\nRed arcs on the map are the ones that will be cut (backed up first, restored exactly on ✓ Gone). Continue?`)) { say('Cancelled — nothing written.', '#ffb300'); return; }
+        const csrf = getCsrfToken(); if (!csrf) { showToast('No CSRF token — make one native save anywhere in Percepto first, then retry', 'rgba(255,96,96,0.55)'); return; }
+        let siteCfg = null; try { siteCfg = await fetchSiteConfig(sid); } catch (e) {}
+        try { await fetchMapObjects(sid, true); } catch (e) {}
+        const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+        const tmpl = ents.find(e => e.type === 4 && entityCoords(e)); let tmplBody = null;
+        if (tmpl) { try { tmplBody = buildWriteBody(tmpl, siteCfg); } catch (e) {} }
+        const used = new Set(ents.filter(e => e.type === 4 && e.name).map(e => e.name));
+        const uniq = (base) => { base = genCleanName(base) || 'RIG NFZ'; if (!used.has(base)) { used.add(base); return base; } let i = 2, n2; do { n2 = `${base} ${i++}`; } while (used.has(n2)); used.add(n2); return n2; };
+        const writes = geoms.map(x => { let b; if (tmplBody) { b = JSON.parse(JSON.stringify(tmplBody)); delete b.id; } else b = { type: 4, description: '', custom: {}, params: {}, asset_waypoints: null, constantly_present_asset_name: false, general_marker_type: '', marker_height: 0, restrictions: [], validated: false };
+            b.type = 4; b.name = uniq(`RIG ${x.c.well}`); b.description = `${RIG_TAG_PREFIX}${x.c.well}|${x.c.start || ''}|${x.c.end || ''}|${x.c.job || ''}|${x.c.source}`; b.site_id = sid; b.points = x.g.points; b.validated = false; b.arcs = []; b.mountain_terrain_site = !!(siteCfg && siteCfg.mountain_terrain); return { x, body: b }; });
+        try { downloadJSONFile(`rig-nfz-${sid}-${Date.now()}.json`, JSON.stringify({ site: sid, at: new Date().toISOString(), nfzs: writes.map(w => w.body) }, null, 1)); } catch (e) {}
+        let ok = 0, fail = 0;
+        for (const w of writes) {
+            try {
+                const r = await fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'X-CSRFToken': csrf, 'X-Requested-With': 'XMLHttpRequest' }, body: JSON.stringify(w.body) });
+                const txt = await r.text(); let json = null; try { json = JSON.parse(txt); } catch (e) {}
+                const saved = json && json.map_objects;
+                if (r.status === 403) throw Object.assign(new Error('403 — write permission lost, ABORTING'), { fatal: true });
+                if (r.status === 200 && saved && saved.id != null) { ok++; w.x.c.status = 'active'; w.x.c.nfzId = saved.id; w.x.c.nfzName = w.body.name; w.x.c.nfzBody = w.body; w.x.c.committedAt = rigToday(); w.x.c.geomNote = w.x.g.note; }
+                else throw new Error(`server ${r.status} ${(txt || '').slice(0, 120)}`);
+            } catch (e) { fail++; console.warn(`${RIG_TAG} create "${w.body.name}":`, e.message); if (e.fatal) break; }
+        }
+        try { await fetchMapObjects(sid, true); } catch (e) {}
+        writes.forEach(w => { if (w.x.c.status === 'active') { rigStamp(w.x.c, 'corrected'); rigIssueCreate(sid, w.x.c, w.x.pads, `Action: NFZ "${w.x.c.nfzName}" created (${w.x.g.note})`); } });
+        let cutOk = 0;
+        try {
+        for (const x of cuts) {
+            if (!x.plan.length) { logL(`${x.c.well}: custom FFZ but no flight-path arc crosses the pad(s) — already disconnected by hand; issue only`); x.c.status = 'active'; x.c.committedAt = rigToday(); x.c.fpCut = []; x.c.manualCut = true; rigStamp(x.c, 'corrected'); rigIssueCreate(sid, x.c, x.pads, 'Action: flight path was ALREADY disconnected by hand (no arc crosses the pad) — the tool has nothing to restore later; put the path back by hand when the equipment leaves. Remove the missions below.'); continue; }
+            try { await rigCutCommit(sid, x.c, x.plan, csrf, siteCfg, logL); x.c.status = 'active'; x.c.committedAt = rigToday(); cutOk++; rigStamp(x.c, 'corrected'); rigIssueCreate(sid, x.c, x.pads, `Action: flight-path arcs CUT inside ${x.pads.map(p => p.name).join(' + ')} — ${x.c.fpCut.map(f => `${f.name} −${f.cut}`).join(', ')} (restored exactly on ✓ Gone)`); }
+            catch (e) { fail++; console.warn(`${RIG_TAG} cut "${x.c.well}":`, e.message); logL(`${x.c.well}: cut FAILED — ${e.message}`); }
+        }
+        } catch (e) { fail++; console.error(`${RIG_TAG} protect phase threw`, e); logL(`protect FAILED — ${e.message}`); showToast(`Protect failed: ${e.message}`, 'rgba(255,96,96,0.6)'); }
+        Object.values(rigStateLoad(sid).rows).forEach(c => { try { rigSyncStage(c); } catch (e) {} });
+        rigLog(sid, `commit: ${ok} NFZ(s) created, ${cutOk} path cut(s)${fail ? `, ${fail} failed` : ''}`); rigStateSave(sid);
+        say(`${ok} NFZ(s) created · ${cutOk} flight path cut(s)${fail ? ` · ${fail} failed (see console)` : ''}. Issues posted to AIM Issues. Percepto shows the changes after a reload.`, fail ? '#ff6060' : '#5fff5f');
+        rigPreviewClear(); rigRenderPanel(sid); rigDraw(sid);
+    }
+    async function rigConfirmGone(sid, key) {
+        if (liteBlockedWrite('delete a rig NFZ')) return;
+        const st = rigStateLoad(sid); const c = st.rows[key]; if (!c) return;
+        if (c.fpBackups && c.fpBackups.length && !c.fpRestored) {
+            if (!confirm(`Restore ${c.fpBackups.length} flight path(s) exactly as before the cut for ${c.well}?`)) return;
+            try { await rigRestoreFps(sid, c); } catch (e) { console.warn(`${RIG_TAG} restore failed`, e); showToast(`Restore failed: ${e.message}`, 'rgba(255,96,96,0.55)'); return; }
+            c.status = 'cleared'; c.clearedAt = rigToday(); rigSyncStage(c);
+            const hostEl = document.getElementById('aim-rig-controls'); if (hostEl) hostEl.dataset.showCleared = '1';
+            rigLog(sid, `confirmed gone: ${c.well} — flight paths restored${(c.missions || []).some(m => m.pulled && !m.restored) ? ' · RESTORE the pulled missions' : ''}`);
+            if ((c.missions || []).some(m => m.pulled && !m.restored)) showToast(`${c.well} cleared — put the pulled missions back (click the stage pill)`, 'rgba(255,180,0,0.7)');
+            rigStateSave(sid); rigRenderPanel(sid); rigDraw(sid); return;
+        }
+        if (!c.nfzId) { c.status = 'cleared'; c.clearedAt = rigToday(); rigSyncStage(c); if (c.manualCut) { showToast(`${c.well} cleared — the flight path was disconnected BY HAND, reconnect it by hand`, 'rgba(255,180,0,0.75)'); rigLog(sid, `${c.well} cleared — manual flight-path cut must be restored by hand`); } rigStateSave(sid); rigRenderPanel(sid); rigDraw(sid); return; }
+        if (!confirm(`Delete NFZ "${c.nfzName}" (${c.well})?\nThe NFZ JSON is kept in this panel's state for re-creation.`)) return;
+        const csrf = getCsrfToken(); if (!csrf) { showToast('No CSRF token — make one native save first', 'rgba(255,96,96,0.55)'); return; }
+        try {
+            const r = await fetch(`/map_objects/${c.nfzId}/`, { method: 'DELETE', credentials: 'same-origin', headers: { 'X-CSRFToken': csrf, 'X-Requested-With': 'XMLHttpRequest' } });
+            if (!(r.status === 200 || r.status === 204)) throw new Error(`server ${r.status}`);
+            st.backups = st.backups || []; st.backups.unshift({ at: new Date().toISOString(), key, nfzId: c.nfzId, body: c.nfzBody }); st.backups = st.backups.slice(0, 50);
+            c.status = 'cleared'; c.clearedAt = rigToday(); c.deletedNfzId = c.nfzId; c.nfzId = null; rigSyncStage(c);
+            const hostEl2 = document.getElementById('aim-rig-controls'); if (hostEl2) hostEl2.dataset.showCleared = '1';
+            rigLog(sid, `confirmed gone: ${c.well} — NFZ ${c.deletedNfzId} deleted${c.pulled ? ` · RESTORE mission(s): ${c.pulled}` : ''}`);
+            if (c.pulled) showToast(`${c.well} cleared — restore the pulled mission(s): ${c.pulled}`, 'rgba(255,180,0,0.7)');
+            try { await fetchMapObjects(sid, true); } catch (e) {}
+        } catch (e) { console.warn(`${RIG_TAG} delete failed`, e); showToast(`Delete failed: ${e.message}`, 'rgba(255,96,96,0.55)'); }
+        rigStateSave(sid); rigRenderPanel(sid); rigDraw(sid);
+    }
+
+    // ---- map preview ----
+    function rigClearLayers() { const map = getLeafletMap(); rigLayers.forEach(l => { try { l.remove ? l.remove() : (map && map.removeLayer(l)); } catch (e) {} }); rigLayers = []; }
+    function rigDraw(sid) {
+        rigClearLayers();
+        const L = getLeafletL(), map = getLeafletMap(); if (!L || !map) return;
+        const st = rigStateLoad(sid);
+        Object.values(st.rows).forEach(c => {
+            if (!c.padId || c.status === 'cleared') return;
+            if (c.fpBackups && c.fpBackups.length && !c.fpRestored) {   // v4.402: a cut row draws its gaps, not an NFZ
+                try { c.fpBackups.forEach(b => { const live = elvLiveFp(sid, b.id); const liveArcs = (live && live.arcs) || []; (b.body.arcs || []).forEach(a => { const same = liveArcs.some(l => l.point_a && l.point_b && elvSame(l.point_a, a.point_a) && elvSame(l.point_b, a.point_b)); if (!same && a.point_a && a.point_b) rigLayers.push(L.polyline([[a.point_a.lat, a.point_a.lng], [a.point_b.lat, a.point_b.lng]], { color: '#ff2020', weight: 5, opacity: 0.9, dashArray: '8,6', interactive: false }).addTo(map)); }); }); } catch (e) { console.warn(`${RIG_TAG} gap draw`, e); }
+                return;
+            }
+            if (c.design === 'custom' && c.status !== 'active') return;   // staged custom rows preview on 🛡 Protect, no NFZ outline
+            const g = rigGeometry(sid, c.padId); if (!g) return;
+            const col = RIG_STATUS_COLOR[c.status] || '#ff5555';
+            try { const pl = L.polygon(g.points.map(p => [p.lat, p.lng]), { color: col, weight: 3, opacity: 0.95, fillColor: col, fillOpacity: c.status === 'ending' ? 0.45 : 0.25, dashArray: c.status === 'active' ? null : '6,5', interactive: false }).addTo(map); rigLayers.push(pl); } catch (e) { console.warn(`${RIG_TAG} draw failed`, e); }
+        });
+    }
+
+    // ---- panel ----
+    // ---- v4.391: FFZ design check → NFZ or arc cut · missions + steps · stages · issue · report ----
+    const RIG_STAGES = ['staged', 'corrected', 'missions', 'safe', 'verify', 'restoring', 'closed'];
+    const RIG_STAGE_LABEL = { staged: 'Staged', corrected: 'Site Setup corrected', missions: 'Missions pending', safe: 'Safe', verify: 'Verify', restoring: 'Restoring', closed: 'Closed' };
+    const RIG_STAGE_COLOR = { staged: '#7adfe6', corrected: '#ffb300', missions: '#ff9100', safe: '#5fff5f', verify: '#ff9100', restoring: '#ffb300', closed: '#8a8f98' };
+    const RIG_NOTIFY = ['PaydenW-AIM', 'ChristopherD-AIM'];
+    const rigAppsCache = {};
+    let rigIssueChannel = null;
+    function rigRingOf(e) { return (entityCoords(e) || []).map(p => ({ lat: p.lat, lng: p.lng })); }
+    function rigCentroid(ring) { return ring.reduce((a, p) => ({ lat: a.lat + p.lat / ring.length, lng: a.lng + p.lng / ring.length }), { lat: 0, lng: 0 }); }
+    function rigPolyTouch(a, b) { return a.some(p => pointInPolygon(p.lat, p.lng, b)) || b.some(p => pointInPolygon(p.lat, p.lng, a)) || pointInPolygon(rigCentroid(a).lat, rigCentroid(a).lng, b) || pointInPolygon(rigCentroid(b).lat, rigCentroid(b).lng, a); }
+    // The standard design: an FFZ ring ~15 ft outside the pad edge. Sample the FFZ
+    // outline every ~10 ft; if most samples sit 5–30 ft from the pad edge it is
+    // standard → NFZ works. Otherwise the FFZ is a custom corridor that puts the
+    // drone ON the pad → an NFZ cannot protect it; cut the flight-path arcs instead.
+    function rigFfzDesign(sid, padId) {
+        const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+        const pad = ents.find(e => e.id === padId); const ring = pad && rigRingOf(pad); if (!ring || ring.length < 3) return { kind: 'none', pct: 0, ffz: null, pads: [] };
+        const ffzs = ents.filter(e => e.type === 16 && rigRingOf(e).length >= 3 && rigPolyTouch(ring, rigRingOf(e)));
+        if (!ffzs.length) return { kind: 'none', pct: 0, ffz: null, pads: [pad] };
+        const ffz = ffzs.sort((a, b) => rigRingAreaFt2(rigRingOf(b)) - rigRingAreaFt2(rigRingOf(a)))[0];
+        const fr = rigRingOf(ffz); let n = 0, ok = 0;
+        for (let i = 0; i < fr.length; i++) {
+            const a = fr[i], b = fr[(i + 1) % fr.length]; const len = pointToPolygonMeters(a.lat, a.lng, [b, b, b]) * 3.28084 || 1; const steps = Math.max(1, Math.round(len / 10));
+            for (let s = 0; s < steps; s++) { const t = s / steps; const p = { lat: a.lat + (b.lat - a.lat) * t, lng: a.lng + (b.lng - a.lng) * t }; const d = pointToPolygonMeters(p.lat, p.lng, ring) * 3.28084; const inside = pointInPolygon(p.lat, p.lng, ring); n++; if (!inside && d >= 5 && d <= 30) ok++; }
+        }
+        const pct = n ? ok / n : 0;
+        const roots = rigPads(sid).roots.filter(p => rigPolyTouch(rigRingOf(p), fr));
+        return { kind: pct >= 0.5 ? 'standard' : 'custom', pct, ffz, pads: roots.length ? roots : [pad] };
+    }
+    // v4.396: an arc is cut when it touches the custom FFZ corridor (endpoint inside it or
+    // within 2 m of its edge — that is how a path "connects" to a zone) or when it lies
+    // inside one of the affected pads. The FDEs disconnect by pulling that endpoint off
+    // the corridor; removing the arc is the same gap, and the backup restores it exactly.
+    function rigArcInside(arc, padRings, ffzRing) {
+        const a = arc.point_a, b = arc.point_b; if (!a || !b) return false; const m = { lat: (a.lat + b.lat) / 2, lng: (a.lng + b.lng) / 2 };
+        const touch = (p, r) => pointInPolygon(p.lat, p.lng, r) || pointToPolygonMeters(p.lat, p.lng, r) <= 2;
+        if (ffzRing && (touch(a, ffzRing) || touch(b, ffzRing) || pointInPolygon(m.lat, m.lng, ffzRing))) return true;
+        return padRings.some(r => pointInPolygon(a.lat, a.lng, r) || pointInPolygon(b.lat, b.lng, r) || pointInPolygon(m.lat, m.lng, r));
+    }
+    // v4.402: the protected zone = every affected pad grown by standoffFt (15 ft = the
+    // standard FFZ ring). A leg with one end inside is TRIMMED to the line (altitudes
+    // kept); a leg entirely inside, or crossing with both ends outside, is removed.
+    // cutMode 'remove' = v4.396 behaviour (whole arc out).
+    function rigSegHit(a, b, ring) {   // nearest intersection of segment a→b with the ring, measured from a
+        let best = null;
+        for (let i = 0; i < ring.length; i++) {
+            const c = ring[i], d = ring[(i + 1) % ring.length];
+            const den = (b.lng - a.lng) * (d.lat - c.lat) - (b.lat - a.lat) * (d.lng - c.lng); if (Math.abs(den) < 1e-14) continue;
+            const t = ((c.lng - a.lng) * (d.lat - c.lat) - (c.lat - a.lat) * (d.lng - c.lng)) / den; const u = ((c.lng - a.lng) * (b.lat - a.lat) - (c.lat - a.lat) * (b.lng - a.lng)) / den;
+            if (t >= 0 && t <= 1 && u >= 0 && u <= 1 && (best == null || t < best)) best = t;
+        }
+        return best == null ? null : { lat: a.lat + (b.lat - a.lat) * best, lng: a.lng + (b.lng - a.lng) * best };
+    }
+    function rigCutPlan(sid, pads, ffz) {
+        const rings = pads.map(rigRingOf); const ffzRing = ffz ? rigRingOf(ffz) : null; const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+        const mode = rigCfg().cutMode === 'remove' ? 'remove' : 'trim'; const off = Number(rigCfg().standoffFt) || 15;
+        const zones = rings.map(r => rigInsetRing(r, -off) || r);   // grown outward; concave fallback = the pad itself
+        const inZone = p => zones.some(z => pointInPolygon(p.lat, p.lng, z));
+        return ents.filter(e => e.type === 15 && Array.isArray(e.arcs)).map(fp => {
+            const cut = [], keep = [], trimmed = [];
+            fp.arcs.forEach(a => {
+                const hit = rigArcInside(a, rings, ffzRing); const ai = a.point_a && inZone(a.point_a), bi = a.point_b && inZone(a.point_b);
+                if (!hit && !ai && !bi) { keep.push(a); return; }
+                if (mode === 'trim' && (ai !== bi)) {
+                    const outside = ai ? a.point_b : a.point_a, inside = ai ? a.point_a : a.point_b;
+                    const zone = zones.find(z => pointInPolygon(inside.lat, inside.lng, z)); const hitPt = zone && rigSegHit(outside, inside, zone);
+                    if (hitPt) { const o = Object.assign({}, a, ai ? { point_a: hitPt } : { point_b: hitPt }); keep.push(o); trimmed.push({ from: a, to: o }); cut.push(a); return; }
+                }
+                cut.push(a);
+            });
+            return { fp, cut, keep, trimmed };
+        }).filter(x => x.cut.length);
+    }
+    async function rigApps(sid) {
+        if (rigAppsCache[sid]) return rigAppsCache[sid];
+        const r = await fetch(`/available_app/?site_id=${encodeURIComponent(sid)}&type=1`, { credentials: 'include' }); if (!r.ok) throw new Error(`missions HTTP ${r.status}`);
+        const arr = await r.json(); rigAppsCache[sid] = Array.isArray(arr) ? arr : []; return rigAppsCache[sid];
+    }
+    function rigRanges(idx) { const out = []; let s = null, p = null; idx.forEach(i => { if (s == null) { s = p = i; } else if (i === p + 1) p = i; else { out.push(s === p ? `${s}` : `${s}-${p}`); s = p = i; } }); if (s != null) out.push(s === p ? `${s}` : `${s}-${p}`); return out.join(', '); }
+    async function rigMissionsOnPads(sid, pads) {
+        const rings = pads.map(rigRingOf); const apps = await rigApps(sid); const out = [];
+        apps.forEach(app => { const idx = []; (app.instructions || []).forEach((ins, i) => { const l = ins && ins.location; if (!l || typeof l.lat !== 'number') return; if (rings.some(r => pointInPolygon(l.lat, l.lng, r) || pointToPolygonMeters(l.lat, l.lng, r) <= 46)) idx.push(i + 1); }); if (idx.length) out.push({ id: app.id, name: app.name || `#${app.id}`, steps: rigRanges(idx), pulled: false, restored: false }); });
+        return out;
+    }
+    function rigStamp(c, stage) { c.stamps = c.stamps || {}; if (c.stage === stage) return; c.stage = stage; c.stamps[stage] = { at: new Date().toISOString().slice(0, 16).replace('T', ' '), by: (typeof surveyLogin === 'string' && surveyLogin) || '' }; }
+    function rigSyncStage(c) {
+        const ms = c.missions || [];
+        let st;
+        if (c.status === 'cleared') st = (c.fpBackups && !c.fpRestored) || ms.some(m => m.pulled && !m.restored) ? 'restoring' : (c.committedAt ? 'closed' : (c.stage || 'closed'));
+        else if (c.status === 'ending') st = 'verify';
+        else if (c.status === 'active') st = ms.some(m => !m.pulled) ? 'missions' : 'safe';
+        else if (c.status === 'staged') st = 'staged';
+        else { c.stage = ''; return; }   // upcoming / unmatched / off-site / new: nothing is being done → no stage
+        rigStamp(c, st);
+    }
+    function rigIssueChannelGet() {
+        if (rigIssueChannel) return rigIssueChannel;
+        try { rigIssueChannel = new BroadcastChannel('AIM_VALIDATOR_ISSUES'); rigIssueChannel.onmessage = (ev) => { const m = ev.data || {}; if (m.type !== 'ISSUE_CREATED' || !m.ref) return; const sid = getCurrentSiteID(); const st = sid && rigStateLoad(sid); if (!st) return; const c = Object.values(st.rows).find(x => x.issueRef === m.ref); if (c) { c.issueId = m.id; c.issueStatus = 'created'; rigLog(sid, `issue ${m.id} created for ${c.well}`); rigStateSave(sid); rigRenderPanel(sid); } }; } catch (e) { console.warn(`${RIG_TAG} issue channel`, e); }
+        return rigIssueChannel;
+    }
+    function rigIssueCreate(sid, c, pads, action) {
+        const ch = rigIssueChannelGet(); if (!ch) return;
+        const ring = rigRingOf(pads[0]); if (ring.length < 3) return;
+        c.issueRef = `rig-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+        // v4.403: five short lines. Step ranges stay in the panel; the note carries names + step counts.
+        const nSteps = m => String(m.steps || '').split(',').reduce((n, r) => { const t = r.trim().split('-').map(Number); return n + (t.length === 2 ? t[1] - t[0] + 1 : (t[0] ? 1 : 0)); }, 0);
+        const ms = (c.missions || []).map(m => `${m.name} (${nSteps(m)})`).join(' · ') || 'none';
+        const mmdd = d => (d || '').slice(5).replace('-', '-');
+        const done = c.fpCut && c.fpCut.length ? `Done: ${c.fpCut.map(f => `${f.name}${f.trimmed ? ` trim ${f.trimmed}` : ''}${f.cut ? ` −${f.cut}` : ''}`).join(' · ')} (restored on ✓ Gone)` : c.manualCut ? 'Done: path already disconnected by hand — reconnect by hand when clear' : c.nfzName ? `Done: NFZ ${c.nfzName}` : `Done: ${action}`;
+        const note = `🏗 ${(c.job || 'EQUIPMENT').toUpperCase()} — ${c.well}${c.source === 'rpic' ? ` (RPIC ${c.by || ''})` : ''}\nPads: ${pads.map(p => p.name).join(' + ')}\n${done}\nRemove missions: ${ms}\nSheet ${mmdd(c.start) || '?'} → ${mmdd(c.end) || 'open'}`;
+        c.issueStatus = 'pending';
+        try { ch.postMessage({ type: 'ISSUE_CREATE', siteID: String(sid), ref: c.issueRef, shape: 'polygon', polygon: ring.map(p => [p.lat, p.lng]), note, priority: 'HIGH', notify: RIG_NOTIFY, source: 'rig', category: 'obstacle' }); rigLog(sid, `issue requested for ${c.well} (ref ${c.issueRef})`); }
+        catch (e) { c.issueStatus = 'failed'; console.warn(`${RIG_TAG} issue post failed`, e); }
+        // v4.394: AIM Issues must answer with ISSUE_CREATED — if it doesn't, say so loudly.
+        setTimeout(() => { if (c.issueStatus === 'pending') { c.issueStatus = 'no answer'; rigLog(sid, `⚠ AIM Issues did not create the issue for ${c.well} — is AIM Issues ≥ 1.43 installed and running on this site?`); showToast(`⚠ Issue NOT created for ${c.well} — AIM Issues ≥ 1.43 must be running on this site`, 'rgba(255,96,96,0.7)'); rigStateSave(sid); rigRenderPanel(sid); } }, 4000);
+    }
+    let rigPreviewLayers = [];
+    function rigPreviewClear() { const map = getLeafletMap(); rigPreviewLayers.forEach(l => { try { l.remove ? l.remove() : (map && map.removeLayer(l)); } catch (e) {} }); rigPreviewLayers = []; }
+    function rigPreview(sid, items) {
+        rigPreviewClear(); const L = getLeafletL(), map = getLeafletMap(); if (!L || !map) return;
+        items.forEach(x => {
+            try {
+                if (x.mode === 'cut') x.plan.forEach(p => { p.cut.forEach(a => { rigPreviewLayers.push(L.polyline([[a.point_a.lat, a.point_a.lng], [a.point_b.lat, a.point_b.lng]], { color: '#ff2020', weight: 7, opacity: 0.95, interactive: false }).addTo(map)); }); (p.trimmed || []).forEach(t => { rigPreviewLayers.push(L.polyline([[t.to.point_a.lat, t.to.point_a.lng], [t.to.point_b.lat, t.to.point_b.lng]], { color: '#ffb300', weight: 7, opacity: 0.95, interactive: false }).addTo(map)); }); });
+                else if (x.g) rigPreviewLayers.push(L.polygon(x.g.points.map(p => [p.lat, p.lng]), { color: '#ff5555', weight: 3, dashArray: '6,5', fillColor: '#ff5555', fillOpacity: 0.3, interactive: false }).addTo(map));
+            } catch (e) { console.warn(`${RIG_TAG} preview draw`, e); }
+        });
+        setTimeout(rigPreviewClear, 90000);
+    }
+    async function rigCutCommit(sid, c, plan, csrf, siteCfg, logL) {
+        c.fpBackups = plan.map(x => ({ id: x.fp.id, name: x.fp.name || `#${x.fp.id}`, body: buildWriteBody(x.fp, siteCfg), arcs: x.fp.arcs.length, cut: x.cut.length }));
+        try { downloadJSONFile(`rig-fp-backup-${sid}-${c.well.replace(/\W+/g, '_')}-${Date.now()}.json`, JSON.stringify({ site: sid, well: c.well, at: new Date().toISOString(), flightPaths: c.fpBackups.map(b => b.body) }, null, 1)); } catch (e) {}
+        const done = [];
+        for (const x of plan) {
+            const body = buildWriteBody(x.fp, siteCfg);
+            body.arcs = x.keep.map(a => { const o = Object.assign({}, a); o.points = [{ lat: o.point_a.lat, lng: o.point_a.lng }, { lat: o.point_b.lat, lng: o.point_b.lng }]; o.min_alt = fpArcAltMeters(o.min_alt); o.max_alt = fpArcAltMeters(o.max_alt); return o; });
+            const pts = []; body.arcs.forEach(a => [a.point_a, a.point_b].forEach(p => { if (!pts.some(q => elvSame(q, p))) pts.push({ lat: p.lat, lng: p.lng }); })); body.points = pts;
+            const saved = await elvPostFp(body, csrf);
+            try { await fetchMapObjects(sid, true); } catch (e) {}
+            const live = elvLiveFp(sid, x.fp.id); const have = live && Array.isArray(live.arcs) ? live.arcs.length : -1;
+            if (have !== x.keep.length) throw new Error(`"${x.fp.name}": expected ${x.keep.length} arcs after cut, server has ${have}`);
+            done.push({ id: x.fp.id, name: x.fp.name, cut: x.cut.length - (x.trimmed || []).length, trimmed: (x.trimmed || []).length, left: x.keep.length });
+            c.fpCut = done.slice(); c.fpRestored = false; c.status = 'active'; c.committedAt = c.committedAt || rigToday(); rigStateSave(sid);   // v4.397: persist per path
+            logL(`"${x.fp.name}": ${(x.trimmed || []).length} leg(s) trimmed to the ${rigCfg().standoffFt || 15} ft line, ${x.cut.length - (x.trimmed || []).length} removed (${x.keep.length} arcs now, id ${saved && saved.id})`);
+        }
+        c.fpCut = done; c.fpRestored = false;
+    }
+    async function rigRestoreFps(sid, c) {
+        const csrf = getCsrfToken(); if (!csrf) throw new Error('no CSRF token — make one native save first');
+        for (const b of c.fpBackups || []) {
+            const body = JSON.parse(JSON.stringify(b.body)); body.site_id = sid;
+            await elvPostFp(body, csrf); try { await fetchMapObjects(sid, true); } catch (e) {}
+            const live = elvLiveFp(sid, b.id); const have = live && Array.isArray(live.arcs) ? live.arcs.length : -1;
+            if (have !== b.arcs) throw new Error(`"${b.name}": expected ${b.arcs} arcs after restore, server has ${have}`);
+            rigLog(sid, `restored "${b.name}" exactly (${b.arcs} arcs)`);
+        }
+        c.fpRestored = true;
+    }
+    // v4.392: one sentence per fact, in order — the history line tells the whole story.
+    function rigStory(c) {
+        const o = []; const at = k => c.stamps && c.stamps[k] ? c.stamps[k].at.slice(0, 10) : '';
+        if (c.source === 'rpic') o.push(`reported by ${c.by || 'RPIC'} ${c.firstSeen || ''}${c.job ? ` (${c.job})` : ''}`);
+        else o.push(`on sheet ${c.firstSeen || '?'}${c.lastSeen && c.lastSeen !== c.firstSeen ? ` → ${c.lastSeen}` : ''}${c.lastSeen && c.firstSeen ? ` (${Math.round((new Date(c.lastSeen) - new Date(c.firstSeen)) / 86400000) + 1} d)` : ''}`);
+        if (c.changes && c.changes.length) o.push(`dates changed ×${c.changes.length}`);
+        if (c.padId) o.push(`pad ${c.padName} via ${c.how || '?'}${c.flag ? ' ⚠' : ''}`); else if (c.how) o.push(c.how);
+        if (c.design === 'custom') o.push(`custom FFZ (${c.designPct}% standard)${c.pads && c.pads.length > 1 ? ` spanning ${c.pads.join(' + ')}` : ''}`);
+        if (c.fpCut && c.fpCut.length) o.push(`arcs cut ${c.committedAt || at('corrected')}: ${c.fpCut.map(f => `${f.name} −${f.cut}`).join(', ')}`);
+        else if (c.manualCut) o.push(`path already disconnected by hand ${c.committedAt || ''} — RESTORE BY HAND when clear`);
+        else if (c.fpCut) o.push(`no path crossed the pad — issue only ${c.committedAt || ''}`);
+        else if (c.nfzName) o.push(`NFZ ${c.nfzName} created ${c.committedAt || at('corrected')}`);
+        const ms = c.missions || [];
+        if (ms.length) { const pulled = ms.filter(m => m.pulled); o.push(pulled.length === ms.length ? `${ms.length} mission(s) pulled${at('safe') ? ` → safe ${at('safe')}` : ''}` : `${pulled.length}/${ms.length} missions pulled (${ms.filter(m => !m.pulled).map(m => m.name).join(', ')} still live)`); }
+        else if (c.committedAt) o.push('no missions on the pad');
+        if (c.issueId) o.push(`issue ${c.issueId}`);
+        if (c.endedWhy) o.push(c.endedWhy);
+        if (c.snoozeUntil && c.status === 'active') o.push(`still there until ${c.snoozeUntil}`);
+        if (c.clearedAt) { o.push(c.fpRestored ? `paths restored ${c.clearedAt}` : c.deletedNfzId ? `NFZ removed ${c.clearedAt}` : `cleared ${c.clearedAt}`); const back = ms.filter(m => m.pulled); if (back.length) o.push(back.every(m => m.restored) ? 'missions restored' : `${back.filter(m => m.restored).length}/${back.length} missions restored`); }
+        if (at('closed')) o.push(`closed ${at('closed')}`);
+        if (c.note) o.push(`note: ${c.note}`);
+        return o.join(' · ');
+    }
+    function rigReportRows(sid) {
+        const st = rigStateLoad(sid); const g = (c, k) => (c.stamps && c.stamps[k] && c.stamps[k].at) || '';
+        return Object.values(st.rows).filter(c => c.padId || c.committedAt).sort((a, b) => String(b.start || b.firstSeen || '').localeCompare(String(a.start || a.firstSeen || ''))).map(c => ({
+            'Well': c.well, 'Pad(s)': (c.pads || [c.padName]).filter(Boolean).join(' + '), 'Job': c.job, 'Source': c.source, 'Start': c.start || '', 'End': c.end || '', 'Status': RIG_STATUS_LABEL[c.status] || c.status, 'Stage': RIG_STAGE_LABEL[c.stage] || c.stage || '',
+            'Staged': g(c, 'staged'), 'Site Setup corrected': g(c, 'corrected'), 'Missions pending': g(c, 'missions'), 'Safe': g(c, 'safe'), 'Verify': g(c, 'verify'), 'Restoring': g(c, 'restoring'), 'Closed': g(c, 'closed'),
+            'Action': c.fpCut ? `cut ${c.fpCut.reduce((n, f) => n + f.cut, 0)} arcs in ${c.fpCut.map(f => f.name).join(', ')}` : (c.nfzName ? `NFZ ${c.nfzName}` : ''), 'Missions pulled': (c.missions || []).filter(m => m.pulled).map(m => `${m.name} ${m.steps}`).join('; '), 'Missions restored': (c.missions || []).filter(m => m.restored).map(m => m.name).join('; '),
+            'Issue': c.issueId || '', 'Days exposed': rigDaysOn(c) == null ? '' : rigDaysOn(c), 'Story': rigStory(c) }));
+    }
+    function rigReport(sid, kind) {
+        const rows = rigReportRows(sid); if (!rows.length) { showToast('No records yet', 'rgba(255,180,0,0.6)'); return; }
+        const cols = Object.keys(rows[0]); const title = `Rigs & cranes — ${getCurrentSiteName() || 'site ' + sid} — ${rigToday()}`;
+        if (kind === 'csv') { const q = v => { const t = String(v == null ? '' : v); return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; }; downloadJSONFile(`rig-report-${sid}-${rigToday()}.csv`, [cols.join(',')].concat(rows.map(r => cols.map(c => q(r[c])).join(','))).join('\n')); return; }
+        const esc = v => String(v == null ? '' : v).replace(/[&<>]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[ch]));
+        const html = `<table style="border-collapse:collapse;font-family:Arial;font-size:11px"><tr><td colspan="${cols.length}" style="font-weight:700;padding:2px 6px">${esc(title)}</td></tr><tr>${cols.map(c => `<th style="background:#1a1a1a;color:#14d2dc;border:1px solid #444;padding:3px 6px">${esc(c)}</th>`).join('')}</tr>${rows.map(r => `<tr>${cols.map(c => `<td style="border:1px solid #444;padding:3px 6px">${esc(r[c])}</td>`).join('')}</tr>`).join('')}</table>`;
+        const tsv = [title, cols.join('\t')].concat(rows.map(r => cols.map(c => String(r[c] == null ? '' : r[c]).replace(/[\t\n]/g, ' ')).join('\t'))).join('\n');
+        try { navigator.clipboard.write([new ClipboardItem({ 'text/html': new Blob([html], { type: 'text/html' }), 'text/plain': new Blob([tsv], { type: 'text/plain' }) })]).then(() => showToast(`Report (${rows.length} rows) copied — paste into Google Sheets`, 'rgba(95,255,95,0.6)'), () => { navigator.clipboard.writeText(tsv); showToast('Copied as plain text', 'rgba(255,180,0,0.6)'); }); } catch (e) { navigator.clipboard.writeText(tsv); showToast('Copied as plain text', 'rgba(255,180,0,0.6)'); }
+    }
+    function rigMissionsPopup(sid, key, ev) {
+        const st = rigStateLoad(sid); const c = st.rows[key]; if (!c) return;
+        const old = document.getElementById('aim-rig-mpop'); if (old) old.remove();
+        const pop = document.createElement('div'); pop.id = 'aim-rig-mpop';
+        const x = Math.min(window.innerWidth - 480, Math.max(8, (ev && ev.clientX || 200) - 120)), y = Math.min(window.innerHeight - 300, Math.max(8, (ev && ev.clientY || 200) + 12));
+        pop.style.cssText = `position:fixed;left:${x}px;top:${y}px;width:460px;max-height:60vh;overflow:auto;z-index:2147483600;background:#121519;border:1px solid #ff9a3d;border-radius:6px;box-shadow:0 8px 28px rgba(0,0,0,.6);font:11px 'Lato','Segoe UI',sans-serif;color:#e6e6e6;padding:8px 10px`;
+        const esc = v => String(v == null ? '' : v).replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
+        const ms = c.missions || [];
+        pop.innerHTML = `<div style="display:flex;gap:8px;align-items:center;margin-bottom:6px"><b style="color:#ff9a3d">${esc(c.well)}</b> <span style="color:${RIG_STAGE_COLOR[c.stage] || '#ccc'}">${esc(RIG_STAGE_LABEL[c.stage] || c.stage || '')}</span><span style="flex:1"></span><button data-x style="background:none;border:1px solid #444;color:#aaa;border-radius:3px;cursor:pointer;padding:0 6px">✕</button></div>
+            <div style="color:#bbb;margin-bottom:6px;line-height:1.5">${esc(rigStory(c))}</div>
+            <div style="color:#9aa;margin-bottom:6px">${c.fpCut ? `Arcs cut: ${c.fpCut.map(f => `${esc(f.name)} (−${f.cut}, ${f.left} left)`).join('; ')}${c.fpRestored ? ' · restored' : ''}` : c.nfzName ? `NFZ: ${esc(c.nfzName)}` : 'nothing written yet'}${c.issueId ? ` · issue ${esc(c.issueId)}` : ''}</div>
+            <div style="color:#7adfe6;font-weight:700;margin-bottom:4px">Missions with steps on the pad${c.pads && c.pads.length > 1 ? 's' : ''} — tick as you pull / restore them</div>
+            ${ms.length ? ms.map((m, i) => `<div style="display:flex;gap:10px;align-items:center;padding:2px 0;border-bottom:1px solid #222"><span style="flex:1"><b>${esc(m.name)}</b> <span style="color:#9aa">steps ${esc(m.steps)}</span></span><label style="cursor:pointer"><input type="checkbox" data-m="${i}" data-f="pulled" ${m.pulled ? 'checked' : ''}> pulled</label><label style="cursor:pointer;color:${m.pulled ? '#ccc' : '#555'}"><input type="checkbox" data-m="${i}" data-f="restored" ${m.restored ? 'checked' : ''} ${m.pulled ? '' : 'disabled'}> restored</label></div>`).join('') : '<div style="color:#777">No mission has a step within 15 ft of this pad.</div>'}
+            <div style="display:flex;gap:8px;margin-top:8px"><div style="flex:1;color:#777">Stages: ${RIG_STAGES.map(s => `<span style="color:${c.stamps && c.stamps[s] ? RIG_STAGE_COLOR[s] : '#444'}" title="${esc(c.stamps && c.stamps[s] ? c.stamps[s].at + ' ' + c.stamps[s].by : '')}">${esc(RIG_STAGE_LABEL[s])}</span>`).join(' → ')}</div></div>`;
+        document.body.appendChild(pop);
+        pop.querySelector('[data-x]').onclick = () => pop.remove();
+        pop.querySelectorAll('input[data-m]').forEach(cb => { cb.onchange = () => { const m = ms[Number(cb.dataset.m)]; m[cb.dataset.f] = cb.checked; if (cb.dataset.f === 'pulled' && !cb.checked) m.restored = false; rigLog(sid, `${c.well}: mission "${m.name}" ${cb.dataset.f} = ${cb.checked}`); rigSyncStage(c); rigStateSave(sid); rigRenderPanel(sid); rigMissionsPopup(sid, key, ev); }; });
+        setTimeout(() => { const off = (e) => { if (!pop.contains(e.target)) { pop.remove(); document.removeEventListener('mousedown', off, true); } }; document.addEventListener('mousedown', off, true); }, 0);
+    }
+
+    function rigRenderPanel(sid) {
+        const host = document.getElementById('aim-rig-controls'); if (!host) return;
+        if (host.dataset.view === 'history') { rigRenderHistory(sid, host); return; }
+        const st = rigStateLoad(sid); rigReclassify(sid);
+        const rows = Object.entries(st.rows).map(([k, c]) => ({ k, c }));
+        const order = { ending: 0, staged: 1, active: 2, upcoming: 3, unmatched: 4, new: 5, offsite: 6, cleared: 7 };
+        rows.sort((a, b) => (order[a.c.status] ?? 9) - (order[b.c.status] ?? 9) || String(a.c.well).localeCompare(String(b.c.well)));
+        const cnt = {}; rows.forEach(r => { cnt[r.c.status] = (cnt[r.c.status] || 0) + 1; });
+        const chip = (s) => cnt[s] ? `<span style="color:${RIG_STATUS_COLOR[s]};margin-right:10px"><b>${cnt[s]}</b> ${RIG_STATUS_LABEL[s] || s}</span>` : '';
+        const esc = (v) => String(v == null ? '' : v).replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
+        const showCleared = !!(host.dataset.showCleared === '1');
+        const hideNoise = rigCfg().hideNoise !== false;   // v4.393: off-site / unmatched hidden by default
+        const body = rows.filter(r => (showCleared || r.c.status !== 'cleared') && (!hideNoise || (r.c.status !== 'offsite' && r.c.status !== 'unmatched'))).map(({ k, c }) => {
+            const col = RIG_STATUS_COLOR[c.status] || '#ccc';
+            const days = c.start ? Math.round((new Date(rigToday()) - new Date(c.start)) / 86400000) : null;
+            const act = c.status === 'ending' ? `<button data-rig-act="gone" data-k="${esc(k)}" style="background:rgba(255,96,96,0.2);border:1px solid #ff6060;color:#ffb0b0;border-radius:3px;padding:1px 6px;cursor:pointer">✓ Gone — ${c.fpBackups && c.fpBackups.length && !c.fpRestored ? 'restore paths' : c.manualCut ? 'close (reconnect by hand)' : 'remove NFZ'}</button> <button data-rig-act="snooze" data-k="${esc(k)}" style="background:none;border:1px solid #555;color:#ccc;border-radius:3px;padding:1px 6px;cursor:pointer">↩ Still there (${rigCfg().snoozeDays} d)</button>`
+                : c.status === 'active' ? `<button data-rig-act="end" data-k="${esc(k)}" style="background:none;border:1px solid #555;color:#ccc;border-radius:3px;padding:1px 6px;cursor:pointer">Mark gone</button>`
+                : (c.status === 'staged' || c.status === 'upcoming' || c.status === 'unmatched' || c.status === 'offsite') ? `<button data-rig-act="drop" data-k="${esc(k)}" style="background:none;border:1px solid #555;color:#999;border-radius:3px;padding:1px 6px;cursor:pointer">Ignore</button>`
+                : c.status === 'cleared' && c.padId ? `<button data-rig-act="undo-gone" data-k="${esc(k)}" title="It is still there: back to Staged — then 🛡 Protect cuts / blocks it again with a fresh backup" style="background:rgba(255,154,61,0.15);border:1px solid #ff9a3d;color:#ffb060;border-radius:3px;padding:1px 6px;cursor:pointer">↩ Undo gone — re-stage</button>` : '';
+            const stg = c.stage || '';
+            return `<tr data-rig-row="${esc(k)}" style="border-bottom:1px solid #222;cursor:pointer">
+                <td style="padding:3px 6px;color:${col};font-weight:700;white-space:nowrap" title="${esc(c.status === 'unmatched' || c.status === 'offsite' ? (c.how || '') : (c.endedWhy || ''))}">${esc(c.status === 'active' ? (c.fpCut ? 'Active — arcs cut' : c.manualCut ? 'Active — cut by hand' : 'Active NFZ') : (RIG_STATUS_LABEL[c.status] || c.status))}${c.endedWhy ? ` <span style="color:#888;font-weight:400">(${esc(c.endedWhy)})</span>` : ''}</td>
+                <td style="padding:3px 6px;white-space:nowrap">${stg ? `<span data-rig-act="missions" data-k="${esc(k)}" title="${esc(c.stamps && c.stamps[stg] ? `${RIG_STAGE_LABEL[stg]} since ${c.stamps[stg].at}` : RIG_STAGE_LABEL[stg])} — click for missions / stage history" style="color:${RIG_STAGE_COLOR[stg]};border:1px solid ${RIG_STAGE_COLOR[stg]};border-radius:3px;padding:0 5px;cursor:pointer">${esc(RIG_STAGE_LABEL[stg])}${(c.missions || []).length ? ` <span style="color:#777">${(c.missions || []).filter(m => m.pulled).length}/${c.missions.length}</span>` : ''}</span>` : '<span style="color:#444">—</span>'}</td>
+                <td style="padding:3px 6px;color:#e6e6e6">${esc(c.well)}${c.source === 'rpic' ? ' <span style="color:#7adfe6" title="RPIC report">👁</span>' : ''}</td>
+                <td style="padding:3px 6px;color:#9aa">${esc(c.job)}</td>
+                <td style="padding:3px 6px;color:${c.padId ? '#cfd6dc' : '#ff6060'}" title="${esc(c.how)}${c.flag ? ' · ' + esc(c.flag) : ''}">${c.padId ? esc(c.padName) : '—'}${c.flag ? ' <span style="color:#ffb347">⚠</span>' : ''}</td>
+                <td style="padding:3px 6px;color:#9aa;white-space:nowrap">${esc(c.start || '?')} → ${esc(c.end || '—')}${c.changes && c.changes.length ? ` <span style="color:#ffb347" title="${esc(c.changes.join('\n'))}">✎${c.changes.length}</span>` : ''}</td>
+                <td style="padding:3px 6px;color:#9aa;text-align:center" title="days since start">${days != null && days >= 0 && c.status !== 'upcoming' ? days : (days != null && days < 0 ? `<span style="color:#666">in ${-days} d</span>` : '')}</td>
+                <td style="padding:3px 6px;color:#9aa">${(() => { if (!c.padId || c.status === 'cleared') return ''; const d = rigFfzDesign(sid, c.padId); if (d.kind === 'custom') return `<span title="FFZ is a custom corridor (${Math.round(d.pct * 100)} % of its edge sits 15 ft off the pad) — the drone flies ON this pad, so no NFZ: the flight-path arcs inside ${d.pads.map(p => p.name).join(' + ')} get cut instead" style="color:#ff6060;cursor:help">✂ cut arcs${d.pads.length > 1 ? ` (${d.pads.length} pads)` : ''}</span> `; const g = rigGeometry(sid, c.padId); return g ? `<span title="${esc(g.note)}" style="color:${g.flag ? '#ffb347' : '#777'};cursor:help">${g.flag ? '⚠ whole FFZ' : 'NFZ'}</span> ` : ''; })()}${c.manualCut ? `<span style="color:#ffb347" title="Flight path was already disconnected by hand — nothing for the tool to restore">✂ by hand</span> ` : ''}${c.fpCut ? `<span style="color:#ff9a3d" title="${esc(c.fpCut.map(f => `${f.name}: −${f.cut} arcs, ${f.left} left`).join('\n'))}">${c.fpRestored ? 'restored' : `${c.fpCut.reduce((n, f) => n + f.cut, 0)} arcs cut`}</span>` : ''}${c.nfzName ? esc(c.nfzName) : ''}${c.issueStatus ? ` <span ${c.issueStatus === 'created' ? '' : `data-rig-act="issue-retry" data-k="${esc(k)}"`} style="color:${c.issueStatus === 'created' ? '#5fff5f' : c.issueStatus === 'pending' ? '#7adfe6' : '#ff6060'};${c.issueStatus === 'created' ? '' : 'cursor:pointer'}" title="AIM Issue: ${esc(c.issueStatus)}${c.issueId ? ' ' + esc(c.issueId) : ''}${c.issueStatus === 'created' ? '' : ' — click to request it again (AIM Issues ≥ 1.43 must be running on this site)'}">${c.issueStatus === 'created' ? '🚩' : c.issueStatus === 'pending' ? '🚩…' : '🚩✗ retry'}</span>` : ''}${c.pulled ? ` <span style="color:#ffb347" title="mission(s) pulled — restore when cleared">⛔ ${esc(c.pulled)}</span>` : ''}</td>
+                <td style="padding:3px 6px;white-space:nowrap">${act}</td></tr>`;
+        }).join('');
+        host.innerHTML = `
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">
+                <b style="color:#ff9a3d">🏗 Rigs & cranes</b>
+                <label style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font-size:11px">📂 Load today's CSV<input type="file" accept=".csv,text/csv" data-rig-file style="display:none"></label>
+                <span style="color:#888;font-size:10px">drag & drop works · sheet day from the file name (Diamondback_Rig_Data_10.16.26.csv) · last ingest: <b style="color:#cfd6dc">${esc(st.day || 'never')}</b> · <span id="aim-rig-sync"></span> · <span id="aim-rig-feed"></span></span>
+                <span style="flex:1"></span>
+                <button data-rig-act="manual" style="background:none;border:1px solid #7adfe6;color:#7adfe6;border-radius:3px;padding:2px 8px;cursor:pointer;font-size:11px">👁 Add RPIC report</button>
+                <button data-rig-act="commit" style="background:rgba(255,154,61,0.18);border:1px solid #ff9a3d;color:#ffb060;border-radius:3px;padding:2px 10px;cursor:pointer;font-size:11px;font-weight:700">🛡 Protect staged${cnt.staged ? ` (${cnt.staged})` : ''}</button>
+                <label style="color:#888;font-size:10px;cursor:pointer"><input type="checkbox" data-rig-showcleared ${showCleared ? 'checked' : ''}> show cleared</label>
+                <label style="color:#888;font-size:10px;cursor:pointer" title="Rows with no pad on this site: off-site wells and wells with no GPS / no name match"><input type="checkbox" data-rig-hidenoise ${hideNoise ? 'checked' : ''}> hide off-site / unmatched</label>
+                <button data-rig-act="view-history" title="Every obstruction this site has had: stats, outcomes, re-stage" style="background:none;border:1px solid #555;color:#aaa;border-radius:3px;padding:2px 8px;cursor:pointer;font-size:11px">📜 History</button>
+                <button data-rig-act="report-sheets" title="Full report, every obstruction: stages with dates, actions, missions, issue, days exposed — paste into Google Sheets" style="background:rgba(122,223,230,0.12);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:3px;padding:2px 8px;cursor:pointer;font-size:11px">📤 Report</button>
+                <button data-rig-act="report-csv" title="Same report as CSV" style="background:none;border:1px solid #555;color:#aaa;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px">⬇ CSV</button>
+                <button data-rig-act="export" title="Download this site's raw rig state (rows, NFZ / flight-path bodies, log)" style="background:none;border:1px solid #555;color:#aaa;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px">⬇ state</button>
+                <button data-rig-act="feed" title="Re-read the laptop agent's daily feed (aim-userscripts-data/rigs/sheet/latest.json) and ingest it if it is newer than this site's last ingest" style="background:none;border:1px solid #555;color:#aaa;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px">📡 ↻ feed</button>
+            </div>
+            <div style="font-size:11px;margin-bottom:6px">${['ending', 'staged', 'active', 'upcoming', 'unmatched', 'offsite'].map(chip).join('')}${cnt.cleared ? `<span style="color:#666">${cnt.cleared} cleared</span>` : ''}</div>
+            <div id="aim-rig-enverus" data-aim-rig="enverus" style="display:none;margin-bottom:8px;padding:6px 8px;background:rgba(255,96,96,0.07);border:1px solid rgba(255,96,96,0.45);border-radius:3px;font-size:11px"></div>
+            <div data-rig-manual style="display:none;margin-bottom:8px;padding:6px 8px;background:rgba(122,223,230,0.06);border:1px solid rgba(122,223,230,0.3);border-radius:3px;font-size:11px">
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:6px">
+                    <input data-rig-f="pad" list="aim-rig-pads" placeholder="Pad / well name (as in site setup)" style="background:#0f1216;border:1px solid #444;color:#e6e6e6;padding:3px 6px">
+                    <datalist id="aim-rig-pads">${rigPads(sid).assets.map(a => `<option value="${esc(a.name)}">`).join('')}</datalist>
+                    <input data-rig-f="kind" placeholder="What (crane / rig / workover…)" style="background:#0f1216;border:1px solid #444;color:#e6e6e6;padding:3px 6px">
+                    <input data-rig-f="start" type="date" value="${rigToday()}" style="background:#0f1216;border:1px solid #444;color:#e6e6e6;padding:3px 6px">
+                    <input data-rig-f="end" type="date" placeholder="expected end" style="background:#0f1216;border:1px solid #444;color:#e6e6e6;padding:3px 6px">
+                    <input data-rig-f="by" placeholder="Reported by (RPIC)" style="background:#0f1216;border:1px solid #444;color:#e6e6e6;padding:3px 6px">
+                    <input data-rig-f="pulled" placeholder="Mission(s) pulled because of it" style="background:#0f1216;border:1px solid #444;color:#e6e6e6;padding:3px 6px">
+                </div>
+                <div style="margin-top:6px"><button data-rig-act="manual-add" style="background:rgba(122,223,230,0.15);border:1px solid #7adfe6;color:#7adfe6;border-radius:3px;padding:2px 10px;cursor:pointer">Add</button> <span style="color:#888">Same lifecycle as a sheet row: staged → NFZ → verify before removal; the pulled mission is shown until you clear it.</span></div>
+            </div>
+            <div style="max-height:300px;overflow:auto;border:1px solid #2a2a2a;border-radius:3px">
+                <table style="width:100%;border-collapse:collapse;font-size:11px"><thead><tr style="color:#7adfe6;text-align:left;position:sticky;top:0;background:#14171b"><th style="padding:4px 6px">Status</th><th style="padding:4px 6px" title="Staged → Site Setup corrected → Missions pending → Safe → Verify → Restoring → Closed">Stage</th><th style="padding:4px 6px">Well</th><th style="padding:4px 6px">Job</th><th style="padding:4px 6px">Pad</th><th style="padding:4px 6px">Start → End</th><th style="padding:4px 6px">Days</th><th style="padding:4px 6px">Site setup</th><th style="padding:4px 6px"></th></tr></thead>
+                <tbody>${body || `<tr><td colspan="9" style="padding:10px;color:#777">No rows yet — load today's CSV.</td></tr>`}</tbody></table>
+            </div>
+            <div id="aim-rig-result" style="margin-top:6px;font-size:11px;color:#cfd6dc"></div>
+            <div style="margin-top:4px;font-size:10px;color:#777">Rows are wells; each is matched to a pad by GPS inside a pad polygon, else the nearest pad within ${rigCfg().nearPadFt} ft, else by name (⚠ when name and GPS disagree). NFZ = pad ∩ FFZ inset ${rigCfg().insetFt} ft (= the pad exactly on a standard FFZ). Nothing is deleted without ✓ Gone. Click a row to pan.</div>
+            <details style="margin-top:4px;font-size:10px;color:#777"><summary style="cursor:pointer">log (${st.log.length})</summary><pre style="white-space:pre-wrap;margin:4px 0;color:#999">${esc(st.log.slice(0, 40).join('\n'))}</pre></details>`;
+        rigWire(sid, host);
+        rigSyncBadge(sid);
+        rigEnverusPrompt(sid, host).catch(e => console.warn(`${RIG_TAG} Enverus prompt threw:`, e));   // v4.390 (#288↔#291)
+        rigPull(sid, false).then(changed => { if (changed) { rigRenderPanel(sid); rigDraw(sid); } else rigFeedCheck(sid, false); });   // v4.389: feed check once the shared state is current
+    }
+    // v4.390 (#288 ↔ #291): "Enverus sees work on one of OUR pads that the rig sheet does not list."
+    // Reads the Hazard Layer's broadcast (Map Styler ≥34.171 adds reasons + signals), keeps the
+    // Enverus-sourced work-now features (rig / frac crew / drilling / telemetry), drops those the
+    // sheet already covers, and offers ➕ Add → the usual RPIC-row lifecycle (staged → NFZ → verify).
+    async function rigEnverusPrompt(sid, host) {
+        const box = host.querySelector('#aim-rig-enverus'); if (!box) return;
+        const hz = await hazardFeaturesFor(sid);
+        if (!hz || !Array.isArray(hz.features)) { box.style.display = 'none'; return; }
+        const { roots } = rigPads(sid);
+        const st = rigStateLoad(sid);
+        const covered = new Set(Object.values(st.rows).filter(c => c.padId && ['new', 'staged', 'active', 'ending', 'upcoming'].indexOf(c.status) !== -1).map(c => c.padId));
+        const esc = (v) => String(v == null ? '' : v).replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
+        const items = [];
+        hz.features.forEach(f => {
+            const sg = f.sig || {};
+            if (f.cls !== 'work' || f.source === 'rigsheet' || sg.sheet_rig) return;
+            if (!(sg.rig_active || sg.frac_active || sg.drilling_wells || sg.telemetry_7d || /^(DRILLING|COMPLETING)$/i.test(sg.pad_status || ''))) return;
+            const ring = f.ring || [];
+            if (ring.length < 3) return;
+            const lat = ring.reduce((t, q) => t + q[0], 0) / ring.length, lng = ring.reduce((t, q) => t + q[1], 0) / ring.length;
+            let pad = roots.find(p => pointInPolygon(lat, lng, entityCoords(p))) || null;
+            if (!pad) { let best = null, bd = Infinity; roots.forEach(p => { const d = pointToPolygonMeters(lat, lng, entityCoords(p)) * 3.28084; if (d < bd) { bd = d; best = p; } }); if (best && bd <= rigCfg().nearPadFt) pad = best; }
+            if (!pad || covered.has(pad.id)) return;
+            const why = Array.isArray(f.reasons) && f.reasons.length ? f.reasons[0] : (sg.rig_active ? 'rig on the pad' : sg.frac_active ? 'frac crew on the pad' : 'work on the pad');
+            items.push({ pad, why, name: f.name || '', lat, lng });
+        });
+        if (!items.length) { box.style.display = 'none'; return; }
+        box.style.display = 'block';
+        box.innerHTML = `<div style="color:#ff8080;font-weight:700;margin-bottom:3px">📡 Enverus sees work on ${items.length} of our pad${items.length > 1 ? 's' : ''} that the rig sheet does not list</div>`
+            + items.map((it, i) => `<div style="display:flex;gap:8px;align-items:center;margin:2px 0"><span style="color:#e6e6e6"><b>${esc(it.pad.name || '#' + it.pad.id)}</b> <span style="color:#9aa">— ${esc(it.why)}${it.name && it.name !== it.pad.name ? ` (Enverus: ${esc(it.name)})` : ''}</span></span><span style="flex:1"></span><button data-rig-env-add="${i}" style="background:rgba(122,223,230,0.15);border:1px solid #7adfe6;color:#7adfe6;border-radius:3px;padding:1px 8px;cursor:pointer">➕ Add as report</button></div>`).join('')
+            + `<div style="color:#888;margin-top:3px">Enverus lags a few days and never sees cranes; the sheet never sees what nobody reported. Add = same lifecycle as an RPIC row (staged → NFZ → verify before removal).</div>`;
+        box.querySelectorAll('[data-rig-env-add]').forEach(b => { b.onclick = (e) => {
+            e.stopPropagation();
+            const it = items[Number(b.dataset.rigEnvAdd)]; if (!it) return;
+            rigAddManual(sid, { pad: it.pad.name || `#${it.pad.id}`, kind: `Enverus: ${it.why}`.slice(0, 80), start: rigToday(), by: 'Enverus' });
+            showToast(`Added ${it.pad.name} from Enverus — now staged`, 'rgba(255,154,61,0.6)');
+            rigRenderPanel(sid); rigDraw(sid);
+        }; });
+    }
+    // v4.386: 📜 History — every obstruction this site has ever had, with stats
+    // and ↻ Re-stage (the banked NFZ body or a fresh geometry → back to Staged).
+    function rigDaysOn(c) { if (!c.start) return null; const end = c.clearedAt || c.endedAt || (c.status === 'cleared' ? null : rigToday()); if (!end) return null; return Math.max(0, Math.round((new Date(end) - new Date(c.start)) / 86400000)); }
+    function rigRenderHistory(sid, host) {
+        const st = rigStateLoad(sid);
+        const esc = (v) => String(v == null ? '' : v).replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
+        const all = host.dataset.histAll === '1';
+        // default = obstructions that touched a pad on THIS site (had a pad, an NFZ, or were cleared after one); off-site / unmatched noise behind a checkbox
+        const rows = Object.entries(st.rows).map(([k, c]) => ({ k, c })).filter(r => all || r.c.padId || r.c.nfzName || r.c.committedAt).sort((a, b) => String(b.c.start || b.c.firstSeen || '').localeCompare(String(a.c.start || a.c.firstSeen || '')));
+        const done = rows.filter(r => r.c.status === 'cleared');
+        const withDays = done.map(r => rigDaysOn(r.c)).filter(d => d != null);
+        const avg = withDays.length ? (withDays.reduce((a, b) => a + b, 0) / withDays.length).toFixed(1) : '—';
+        const top = (fn) => { const m = {}; rows.forEach(r => { const v = fn(r.c); if (v) m[v] = (m[v] || 0) + 1; }); return Object.entries(m).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, n]) => `${esc(k)} <span style="color:#777">×${n}</span>`).join(' · ') || '—'; };
+        const byMonth = {}; rows.forEach(r => { const m = String(r.c.start || r.c.firstSeen || '').slice(0, 7); if (m) byMonth[m] = (byMonth[m] || 0) + 1; });
+        const months = Object.keys(byMonth).sort().slice(-6).map(m => `${m} <b style="color:#cfd6dc">${byMonth[m]}</b>`).join(' · ') || '—';
+        const nfzN = rows.filter(r => r.c.committedAt).length, delN = rows.filter(r => r.c.deletedNfzId).length;
+        const body = rows.map(({ k, c }) => { const col = RIG_STATUS_COLOR[c.status] || '#ccc'; const d = rigDaysOn(c);
+            return `<tr style="border-bottom:1px solid #222;white-space:nowrap"><td style="padding:3px 6px;color:${col}">${esc(RIG_STATUS_LABEL[c.status] || c.status)}</td><td style="padding:3px 6px;color:#e6e6e6">${esc(c.well)}${c.source === 'rpic' ? ' <span style="color:#7adfe6">👁</span>' : ''}</td><td style="padding:3px 6px;color:#9aa">${esc(c.job)}</td><td style="padding:3px 6px;color:#9aa">${esc(c.padName || '—')}</td><td style="padding:3px 6px;color:#9aa;white-space:nowrap">${esc(c.start || '?')} → ${esc(c.end || '—')}</td><td style="padding:3px 6px;color:#9aa;text-align:center">${d == null ? '' : d}</td><td style="padding:3px 6px;color:#9aa;white-space:nowrap">${c.committedAt ? `${c.fpCut ? 'arcs cut' : 'NFZ'} ${esc(c.committedAt)}` : ''}</td><td style="padding:3px 6px;color:#9aa;white-space:nowrap">${esc(c.clearedAt || '')}</td><td style="padding:3px 6px;color:${RIG_STAGE_COLOR[c.stage] || '#9aa'}">${esc(RIG_STAGE_LABEL[c.stage] || c.stage || '')}</td><td style="padding:3px 6px;color:#bbb;white-space:normal;min-width:320px">${esc(rigStory(c))}${c.pulled ? ` · ⛔ ${esc(c.pulled)}` : ''}</td><td style="padding:3px 6px;white-space:nowrap">${c.status === 'cleared' ? `<button data-rig-act="restage" data-k="${esc(k)}" title="Back to Staged — ⬠ Create re-creates the NFZ (banked body when it had one)" style="background:none;border:1px solid #7adfe6;color:#7adfe6;border-radius:3px;padding:1px 6px;cursor:pointer">↻ Re-stage</button>` : ''}</td></tr>`; }).join('');
+        host.innerHTML = `
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px"><b style="color:#ff9a3d">📜 Rigs & cranes — history</b><span style="flex:1"></span><label style="color:#888;font-size:10px;cursor:pointer"><input type="checkbox" data-rig-histall ${all ? 'checked' : ''}> include off-site / unmatched</label><button data-rig-act="hist-csv" style="background:none;border:1px solid #555;color:#aaa;border-radius:3px;padding:2px 8px;cursor:pointer;font-size:11px">⬇ CSV</button><button data-rig-act="view-live" style="background:rgba(255,154,61,0.18);border:1px solid #ff9a3d;color:#ffb060;border-radius:3px;padding:2px 10px;cursor:pointer;font-size:11px">← back to live</button></div>
+            <div style="font-size:11px;color:#bbb;line-height:1.7;margin-bottom:6px"><b style="color:#cfd6dc">${rows.length}</b> records · <b style="color:#cfd6dc">${done.length}</b> cleared · <b style="color:#cfd6dc">${nfzN}</b> NFZs created · <b style="color:#cfd6dc">${delN}</b> removed · avg <b style="color:#cfd6dc">${avg}</b> days on pad (cleared rows)<br>jobs: ${top(c => c.job)}<br>pads: ${top(c => c.padName)}<br>by month: ${months}</div>
+            <div style="max-height:320px;overflow:auto;border:1px solid #2a2a2a;border-radius:3px"><table style="width:100%;border-collapse:collapse;font-size:11px"><thead><tr style="color:#7adfe6;text-align:left;position:sticky;top:0;background:#14171b"><th style="padding:4px 6px">Status</th><th style="padding:4px 6px">Well</th><th style="padding:4px 6px">Job</th><th style="padding:4px 6px">Pad</th><th style="padding:4px 6px">Start → End</th><th style="padding:4px 6px">Days</th><th style="padding:4px 6px">Site setup</th><th style="padding:4px 6px">Cleared</th><th style="padding:4px 6px">Stage</th><th style="padding:4px 6px">Story</th><th></th></tr></thead><tbody>${body || '<tr><td colspan="11" style="padding:10px;color:#777">Nothing yet.</td></tr>'}</tbody></table></div>`;
+        const ha = host.querySelector('[data-rig-histall]'); if (ha) ha.onchange = () => { host.dataset.histAll = ha.checked ? '1' : '0'; rigRenderHistory(sid, host); };
+        host.querySelectorAll('[data-rig-act]').forEach(b => { b.onclick = (e) => { e.stopPropagation(); const act = b.dataset.rigAct;
+            if (act === 'view-live') { host.dataset.view = ''; rigRenderPanel(sid); }
+            else if (act === 'restage') { const c = st.rows[b.dataset.k]; if (c) { c.status = 'staged'; c.endedWhy = ''; c.clearedAt = ''; c.deletedNfzId = null; c.nfzId = null; c.nfzName = ''; rigReclassify(sid); rigLog(sid, `re-staged from history: ${c.well}`); rigStateSave(sid); host.dataset.view = ''; rigRenderPanel(sid); rigDraw(sid); } }
+            else if (act === 'hist-csv') { const cols = ['Status', 'Well', 'Source', 'Job', 'Pad', 'Start', 'End', 'Days on pad', 'First seen', 'Last seen', 'NFZ created', 'Cleared', 'Outcome', 'Missions pulled', 'Note']; const q = v => { const t = String(v == null ? '' : v); return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; }; const csv = [cols.join(',')].concat(rows.map(({ c }) => [RIG_STATUS_LABEL[c.status] || c.status, c.well, c.source, c.job, c.padName, c.start, c.end, rigDaysOn(c) == null ? '' : rigDaysOn(c), c.firstSeen, c.lastSeen, c.committedAt || '', c.clearedAt || '', c.endedWhy || '', c.pulled || '', c.note || ''].map(q).join(','))).join('\n'); try { downloadJSONFile(`rig-history-${sid}-${rigToday()}.csv`, csv); } catch (err) { showToast('Export failed', 'rgba(255,96,96,0.55)'); } }
+        }; });
+    }
+    function rigWire(sid, host) {
+        const file = host.querySelector('[data-rig-file]');
+        const load = (f) => { if (!f) return; const rd = new FileReader(); rd.onload = () => { try { const rows = rigParseCsv(String(rd.result || '')); const res = rigIngest(sid, rows, rigDayFromFilename(f.name)); showToast(`Rig sheet ${rigDayFromFilename(f.name)}: ${rows.length} rows · ${res.added} new · ${res.dropped} to verify`, 'rgba(255,154,61,0.6)'); } catch (e) { showToast(`CSV: ${e.message}`, 'rgba(255,96,96,0.55)'); console.warn(`${RIG_TAG} csv`, e); } rigRenderPanel(sid); rigDraw(sid); }; rd.readAsText(f); };
+        if (file) file.onchange = () => load(file.files && file.files[0]);
+        host.ondragover = (e) => { e.preventDefault(); host.style.outline = '2px dashed #ff9a3d'; };
+        host.ondragleave = () => { host.style.outline = ''; };
+        host.ondrop = (e) => { e.preventDefault(); host.style.outline = ''; load(e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]); };
+        const sc = host.querySelector('[data-rig-showcleared]'); if (sc) sc.onchange = () => { host.dataset.showCleared = sc.checked ? '1' : '0'; rigRenderPanel(sid); };
+        const hn = host.querySelector('[data-rig-hidenoise]'); if (hn) hn.onchange = () => { rigCfgSet('hideNoise', !!hn.checked); rigRenderPanel(sid); };
+        host.querySelectorAll('[data-rig-act]').forEach(b => { b.onclick = (e) => {
+            e.stopPropagation(); const act = b.dataset.rigAct, k = b.dataset.k; const st = rigStateLoad(sid);
+            if (act === 'commit') rigCommit(sid);
+            else if (act === 'view-history') { host.dataset.view = 'history'; rigRenderPanel(sid); }
+            else if (act === 'manual') { const m = host.querySelector('[data-rig-manual]'); m.style.display = m.style.display === 'none' ? 'block' : 'none'; }
+            else if (act === 'manual-add') { const f = {}; host.querySelectorAll('[data-rig-f]').forEach(i => { f[i.dataset.rigF] = i.value.trim(); }); if (!f.pad) { showToast('Pad / well name is required', 'rgba(255,96,96,0.55)'); return; } rigAddManual(sid, f); rigRenderPanel(sid); rigDraw(sid); }
+            else if (act === 'gone') rigConfirmGone(sid, k);
+            else if (act === 'snooze') { const c = st.rows[k]; if (c) { c.status = 'active'; c.snoozeUntil = rigAddDays(rigToday(), rigCfg().snoozeDays); c.endedWhy = ''; const n = prompt('Still there — note (who confirmed / what you saw)?', c.note || ''); if (n != null) c.note = n; rigLog(sid, `still there: ${c.well} until ${c.snoozeUntil}${n ? ' — ' + n : ''}`); rigStateSave(sid); rigRenderPanel(sid); rigDraw(sid); } }
+            else if (act === 'end') { const c = st.rows[k]; if (c) { c.status = 'ending'; c.endedWhy = `marked gone ${rigToday()}`; c.endedKind = 'csm'; c.endedAt = rigToday(); rigSyncStage(c); rigStateSave(sid); rigRenderPanel(sid); rigDraw(sid); } }
+            else if (act === 'missions') rigMissionsPopup(sid, k, e);
+            else if (act === 'undo-gone') { const c = st.rows[k]; if (c) { c.status = 'staged'; c.endedWhy = ''; c.endedKind = ''; c.clearedAt = ''; c.deletedNfzId = null; c.nfzId = null; c.nfzName = ''; c.fpCut = null; c.fpRestored = false; c.committedAt = ''; c.issueStatus = ''; c.issueId = ''; (c.missions || []).forEach(m => { m.pulled = false; m.restored = false; }); rigReclassify(sid); rigLog(sid, `undo gone: ${c.well} re-staged (still there)`); rigStateSave(sid); host.dataset.showCleared = '0'; rigRenderPanel(sid); rigDraw(sid); showToast(`${c.well} is back to Staged — click 🛡 Protect staged to block it again`, 'rgba(255,154,61,0.7)'); } }
+            else if (act === 'issue-retry') { const c = st.rows[k]; if (c && c.padIds && c.padIds.length) { const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || []; const pads = c.padIds.map(id => ents.find(x => x.id === id)).filter(Boolean); if (pads.length) { rigIssueCreate(sid, c, pads, c.fpCut && c.fpCut.length ? `Action: flight-path arcs CUT — ${c.fpCut.map(f => `${f.name} −${f.cut}`).join(', ')} (restored exactly on ✓ Gone)` : c.manualCut ? 'Action: path already disconnected by hand — restore by hand when clear' : `Action: NFZ "${c.nfzName}" created`); rigStateSave(sid); rigRenderPanel(sid); } } }
+            else if (act === 'report-sheets') rigReport(sid, 'sheets');
+            else if (act === 'report-csv') rigReport(sid, 'csv');
+            else if (act === 'drop') { const c = st.rows[k]; if (c) { c.status = 'cleared'; c.endedWhy = 'ignored by CSM'; rigStateSave(sid); rigRenderPanel(sid); rigDraw(sid); } }
+            else if (act === 'export') { try { downloadJSONFile(`rig-state-${sid}-${rigToday()}.json`, JSON.stringify(st, null, 1)); } catch (err) { showToast('Export failed', 'rgba(255,96,96,0.55)'); } }
+            else if (act === 'feed') rigFeedCheck(sid, true);
+        }; });
+        host.querySelectorAll('tr[data-rig-row]').forEach(tr => { tr.onclick = () => { const c = rigStateLoad(sid).rows[tr.dataset.rigRow]; const map = getLeafletMap(); if (!c || !map) return; let ll = null; if (c.padId) { const g = rigGeometry(sid, c.padId); if (g) ll = g.points.reduce((a, p) => [a[0] + p.lat / g.points.length, a[1] + p.lng / g.points.length], [0, 0]); } else if (c.lat != null) ll = [c.lat, c.lng]; if (ll) { try { map.setView(ll, Math.max(map.getZoom(), 17)); } catch (e) {} } }; });
+    }
+    function rigRegisterCP() {
+        if (!controlChannel) return;
+        const c = rigCfg();
+        controlChannel.postMessage({ type: 'REGISTER', scriptId: RIG_SCRIPT_ID, name: '🏗 Rigs & cranes (temporary NFZs)', version: SCRIPT_VERSION, group: 'Site Setup', scope: 'site-setup', priority: 46,
+            description: 'Daily rig / crane sheet → NFZ per pad (pad ∩ FFZ inset) with a verify-before-delete lifecycle. Opens from ⊕ Generate → 🏗 Rigs & cranes.',
+            toggles: [
+                { id: 'rig-header', label: '🏗 Rigs & cranes — temporary NFZs (⊕ Generate → 🏗)', type: 'header' },
+                { id: 'nearPadFt', label: 'Match a well to the nearest pad within', type: 'number', min: 50, max: 2000, step: 10, default: c.nearPadFt, unit: 'ft' },
+                { id: 'insetFt', label: 'NFZ inset from a custom FFZ edge', type: 'number', min: 0, max: 100, step: 1, default: c.insetFt, unit: 'ft' },
+                { id: 'graceDays', label: 'Days a row may be missing before "verify"', type: 'number', min: 0, max: 10, step: 1, default: c.graceDays, unit: 'days' },
+                { id: 'snoozeDays', label: '"Still there" snooze', type: 'number', min: 1, max: 30, step: 1, default: c.snoozeDays, unit: 'days' },
+                { id: 'padCoverPct', label: 'Use the whole FFZ when the pad asset covers less than', type: 'number', min: 10, max: 100, step: 5, default: c.padCoverPct, unit: '%' },
+                { id: 'cutMode', label: 'Custom-FFZ pads: trim legs to the standoff line, or remove whole arcs', type: 'select', default: c.cutMode, options: [{ value: 'trim', label: 'Trim to the standoff line (drone may approach, never enter)' }, { value: 'remove', label: 'Remove the whole arc' }] },
+                { id: 'standoffFt', label: 'Standoff line around the pad for trimming', type: 'number', min: 5, max: 100, step: 1, default: c.standoffFt, unit: 'ft' },
+            ] });
+    }
+    function rigHandleToggle(msg) { const id = msg.toggleId; const raw = msg.value !== undefined ? msg.value : msg.enabled; if (!Object.prototype.hasOwnProperty.call(RIG_DEFAULT_CFG, id)) return; if (id === 'cutMode') { rigCfgSet(id, String(raw) === 'remove' ? 'remove' : 'trim'); return; } const v = Number(raw); if (!isFinite(v)) return; rigCfgSet(id, v); }
+
+    const GEN_PAGE_HELP = {
+        ffz: { what: 'Auto-builds one DRAFT inspection FFZ per Normal asset that sits near a power line: a single edge box on the shielded side, inner edge the standoff off the asset, altitudes DEM-checked per zone. Nothing is written until Commit.',
+            steps: ['Check the Power lines row says loaded (open the Map Styler tab once if not).', '1 · Settings — standoff, edge depth, AGL floor and Min/Max delta.', '2 · 👁 Preview on map — green = clean draft, red/blue = flagged. Drag / Q·E rotate / Alt-drag re-snap any draft; ✏️ Draw adds boxes by hand; 📥 Load site FFZs pulls existing zones in for editing.', '3 · Untick Dry run in the header → ✓ Commit draft FFZs. 💾 Save FFZ edits writes loaded zones back in place.'],
+            test: 'Preview on a small site, check the draft count against the asset count, then Commit with Dry run ON to see what WOULD be written.' },
+        adv: { what: 'Trace a corridor FFZ point-to-point along the asset-facing edge; the full box and the shielding band draw live as you click. Pieces fuse with 🔗 Merge and commit as ONE FFZ.',
+            steps: ['Click ✦ Advanced Draw to arm it.', 'ALT+click to start a corridor, click to add points, double-click (or Enter) to finish. Shift = 15° angle snap · Ctrl = magnet to the nearest asset offset · F = flip the width side · Esc = undo the last point.', '🔗 Merge fuses the pieces so you see exactly what will be created (↩ Unmerge brings the pieces back).', 'Untick Dry run → ✓ Commit draft FFZs.'],
+            test: 'Trace a two-segment corridor past one pad, Merge, then Commit with Dry run ON.' },
+        nfz: { what: 'Stage no-fly zones: ⬠ Trace draws a ring around anything (it auto-grows by the Buffer); ⚡ Stamp makes one from an existing asset outline in a single ALT+click. Commits are create-only type-4 NFZs.',
+            steps: ['Set Buffer (growth on finish) and Min size.', '⬠ NFZ Trace: ALT+click to start, click vertices, double-click to finish. Ctrl snaps onto the nearest asset boundary.', '⚡ NFZ Stamp: ALT+click inside an asset polygon — keep clicking for more.', '⚠ Narrow check paints any part of any NFZ thinner than Min size.', 'Untick Dry run → ✓ Commit NFZs. ↩ Undo removes exactly what the last commit created.'],
+            test: 'Stamp one asset, run Narrow check, Commit with Dry run ON.' },
+        fp: { what: 'Flight-path helpers along the power lines. 🛩 Routes proposes base→asset paths; 📥 Load site FPs pulls the existing paths into an editable preview; ✨ Snap & Clean pulls them ~50 ft parallel to the lines; 🧲 CTRL-snap arms snapping inside Percepto\'s own draw tool. This page previews and edits — writes happen through the native editor.',
+            steps: ['Power lines must be loaded; Routes also needs a base (SUM → 📍 Base picker).', '🛩 Routes or 📥 Load site FPs → cyan preview. Orange = out of the 40–65 ft band or over a pad.', 'Drag a white dot to move · click a line to add a point · right-click a dot to delete.', '✨ Snap & Clean re-aligns the whole network. ⧉ Copy JSON exports the route result.'],
+            test: 'Load site FPs, note the orange count, Snap & Clean, see it drop.' },
+        routes: { what: 'Turns the Map Styler\'s 🟠 Proposed Routes KML into real entities: route paths → flight paths, route polygons → FFZs. Endpoints auto-snap ≤50 ft to existing flight-path vertices; altitudes copy from the nearest existing entity. Create-only, with preview, dry run and undo.',
+            steps: ['Draw + commit routes in the Map Styler\'s Proposed Routes layer first.', '🟠 Convert routes → preview on the map and a list in the status line.', 'Untick Dry run → write. ↩ Undo deletes what the conversion created.'],
+            test: 'Convert with Dry run ON and compare the preview count to the routes you drew.' },
+        elv: { what: 'Finds every flight path that crosses a red transmission line and stages a climb-over there: Elevator 1 → Bridge → Elevator 2, bands from DEM in MSL with 10 ft overlaps, plus a pole marker per crossing. Writes one POST per flight path, each with a backup.',
+            steps: ['🔍 Scan crossings (or right-click a flight path → 🛗 for a manual point).', 'Review each staged crossing — bridge height, elevator lengths, preflight result.', 'Untick Dry run → Commit. ↩ Undo restores the flight paths and deletes the poles.'],
+            test: 'Scan a site with a known transmission crossing, confirm one staged set per crossing, Commit with Dry run ON.' },
+        szp: { what: 'Finds where the next safe zones should go. Candidate spots sit ON A PAD, just inside its edge — wells and small satellites first, big facilities only if allowed. Every flight path and free-fly zone is sampled, every asset joins (an unbuilt pad hops straight to the nearest path), and each spot is scored by the flight distance — along the paths and zones, not straight-line — that every point of the site would face to reach its nearest safe zone. The pick is the set that shortens the LONGEST flight, then the average. Existing safe zones (or the bases) stay fixed. Read-only: nothing is written.',
+            steps: ['Set how many zones to add, how far inside the pad edge, the hop limit for pads outside every FFZ, the small-battery size and the NFZ / tower clearances. Paste extra lat,lng lines for pads that are not on the site yet.', '▶ Plan safe zones — pink numbered spots on the map, before → after numbers in the panel, the farthest remaining point in red.', 'Click a row to jump, ⧉ copies its coordinates. Place the Safe Zone in Percepto by hand after a satellite check of the ground.', '📋 Copy report for the hand-off; ✕ Clear drops the preview.'],
+            test: 'Plan 3 zones on a site with one base, confirm the worst-case number drops, then plan 4 and watch the farthest point move.' },
+        imp: { what: 'Bring a client asset list into Percepto. Load a CSV or KML → points stage on the map (nothing written) → narrow with boundaries → map the type → ✓ Create makes real asset squares. Create-only, with dry run, backup manifest and undo.',
+            steps: ['The page is five numbered sections in working order (plus Advanced). Each header shows where it stands; click to open / close, or use the jump chips at the top. The status line under the title shows the latest result.', 'Boundaries first: ⬆ Load boundary KML (several polygons or several files), or draw a ⭕ circle / 🖊 polygon yourself; ✎ Edit reshapes any of them. Only points inside a boundary are selected.', '📂 Load CSV / KML (drag & drop works). Name / lat / lng are guessed; "edit" fixes the mapping.', '↔ Move point fixes a location before import: click a dot to pick it up, click where it belongs (or drag it); Delete while holding removes it from the import. Moved dots get a magenta ring; ↩ reset moved puts them back.', '✏ Shape draws the asset\'s real outline before it is created: click a dot, CTRL+drag a stroke across the asset (draw along the LONG side → a rectangle that long by the narrow side, default 15 ft; a loop → the tightest box). A red buffer ring (7.5 ft, editable) shows around the outline you are holding so you can see the 15 ft you must keep; ALT+click other dots to copy the held outline onto them — copies and dragged edges snap to a 15 ft gap from neighbours (gap editable, 0 = flush; Alt while dragging = no snap). Shift is left alone so Percepto\'s asset names stay visible. Drag inside the box to move it whole, drag an edge to pull it longer or shorter, drag a corner to move that corner; click an edge midpoint to add a corner, right-click a corner to remove it, Delete = back to a square. Colour / fill in the Control Panel.', 'Notes: under the mapping ("edit"), tick every extra column that belongs in the asset notes, rename labels, order them with ▲▼. The client\'s original name is always the first block, and a who / when / file stamp is always the last.', 'Progress is saved per site — automatically a few seconds after any change and every few minutes, or 💾 Save progress. Reopen the page later and ↻ Resume brings back the file, moved / removed points and boundaries.', 'Undo: ↩ Undo last import reverts the last run (creates deleted, updates put back) and survives a reload via ↻ Resume. Independently, 🕘 Imports on this site lists every import found on the assets themselves (the "Imported by …" line) and can delete a run\'s created assets from any machine, any time.', '📊 Analyze (in Create / update): the quarterly compare — run it on a new list before Create to see what would change: new · gone (on the site but not in the list; nothing is deleted) · moved over N ft · tier / type changes · production changes vs our last notes. Click a row to zoom; 📤 Sheets for the review.', '5 · Enverus check: set the Developer API key once, pick the API-number column, Cross-check — every selected well gets its Enverus status / type / trajectory / operator / dates and location; anything not plainly producing lands in Placement › 🛢 Enverus and an "Enverus" block goes into the notes.', '🔍 Find missing wells (same section, after a cross-check): every well the operator has inside your boundaries whose API is not in the file, with status and the nearest mapped asset — tick the ones to add, ➕ Stage, and they become ordinary points (source noted) that go through tiers, flags and Create like the rest. They also appear in the client review as "Well on your pads that is not in the list".', 'Priority tiers (in 3 · Type & priority): pick the oil + water columns (or a single BLPD column, or a ready-made P1/P2/P3 column); every asset on a pad shares the pad total; the tier is written as a type prefix ("P1 - …") and a Priority / Prioritized block in the notes. "name matches → update type + notes" is the quarterly re-run: load the new list, review the Tier report, Create.', 'Type: the file\'s type column maps to Percepto subtypes (new values are created on the site); with no type column one subtype applies to all.', 'Flags: name duplicates, parent/child, nearby — 📤 Copy for Sheets or ⬇ CSV for the account manager.', 'Size → untick Dry run → ✓ Create. ↩ Undo last import deletes exactly what it made.'],
+            test: 'Load the list, add one boundary, confirm the selected count drops, Create with Dry run ON.' },
+        rig: { what: 'Temporary no-fly zones for pads with a crane or big rig on them, from Diamondback\'s daily sheet (or an RPIC report). Each well row is matched to its pad, an NFZ = pad ∩ FFZ-inset is staged, and committed create-only. When the end date passes or the row drops off the sheet, the row turns VERIFY — nothing is deleted until a CSM confirms the equipment is gone.', steps: ['📂 Load today\'s CSV (drag & drop). The sheet day comes from the file name.', 'Check the table: Staged rows have a pad (hover the pad for how it matched; ⚠ = name and GPS disagree). Unmatched / off-site rows are listed, never guessed.', 'Untick Dry run in the header → ⬠ Create staged NFZs. A backup JSON downloads first; each NFZ is verified by refetch.', 'Next day: load the new CSV. Re-dated rows show ✎; dropped rows and passed end dates turn VERIFY — click ✓ Gone to delete that NFZ or ↩ Still there to snooze.', '👁 Add RPIC report for a crane a pilot spotted: same lifecycle, plus the mission(s) pulled so the restore is not forgotten.'], test: 'Load Diamondback_Rig_Data_10.16.26.csv on Cobra 01 with Dry run on: four rows match pads, the rest are off-site. Then load 10.15 then 10.16 to watch the diff.' },
+        sci: { what: 'Applies the Ortho Scanner review sheet\'s decisions: accepted NFZs and flight-path leg changes stage on the map (green / yellow, removed legs red), preflight runs, then Apply writes them — NFZs create-only, flight paths one POST each with Delete Guard backups.',
+            steps: ['Load the decisions JSON and the scan bundle from the review sheet.', 'Check the staged plan on the map and the preflight result.', 'Untick Dry run → Apply.'],
+            test: 'Load a bundle, confirm the staged counts match the sheet, Apply with Dry run ON.' },
+    };
+    const GEN_PAGE_NAMES = { ffz: '⊕ Inspection FFZs', adv: '✦ Advanced Draw', nfz: '⬠ NFZs', fp: '🛩 Flight Paths', routes: '🟠 Convert Routes', elv: '🛗 Elevators', imp: '📥 Asset Import', sci: '🔍 Scan Import', szp: '🛟 Safe Zone Planner', rig: '🏗 Rigs & cranes' };
+    function genShowPage(page) {
+        try { if (genShowPageLive) genShowPageLive(page); }
+        catch (e) { console.warn(`${GEN_TAG} page switch failed:`, e); }
+    }
     // When ON, editing an EXISTING FFZ recomputes its altitude band from the
     // modal's AGL/Δ fields on drop; OFF (default) preserves the saved band so a
     // move never silently rewrites altitude. genReadParamsLive = the open modal's
@@ -25705,10 +30740,12 @@
         if (m) m.remove();
         try { clearRoutePreview(); } catch (e) {} genRouteResult = null;
         genReadParamsLive = null;
+        genShowPageLive = null; genState.page = null;
         genAltModeOverride = null;
         try { setFpSnap(false); } catch (e) {}
         try { if (genVertEdit.active) exitGenVertEdit(false); } catch (e) {}
         try { clearDraftShielding(); } catch (e) {}
+        try { rigClearLayers(); rigPreviewClear(); } catch (e) {}
         genUndoStack = [];
         // Tear down Advanced Draw but DON'T clear its localStorage (so an in-progress
         // corridor survives close/reload — restored when the mode is re-armed).
@@ -25719,6 +30756,8 @@
         // 📥 importer: layers + listeners off the map; parsed data survives in
         // memory so reopening on the same site restores the staged view.
         try { impTeardown(); } catch (e) {}
+        try { sciTeardown(); } catch (e) {}
+        try { szpTeardown(); } catch (e) {}
         genDraw.active = false; genDraw.drawing = false; genDraw.pts = []; genDraw.tentative = null; genDraw.tentVertex = false; genDraw.tentOrtho = false; genDraw.lastSnap = null;
         try { const mp = getLeafletMap(); if (mp) { if (genDraw.poly) { try { mp.removeLayer(genDraw.poly); } catch (e) {} genDraw.poly = null; } clearDrawDots(mp); clearGhost(mp); clearSnapTargets(mp); if (genDraw.onMapMove) { try { mp.off('moveend', genDraw.onMapMove); } catch (e) {} genDraw.onMapMove = null; } mp.getContainer().style.cursor = ''; try { mp.doubleClickZoom.enable(); } catch (e) {} } } catch (e) {}
     }
@@ -25742,24 +30781,70 @@
         m.id = GEN_MODAL_ID;
         m.style.cssText = 'position:fixed;left:0;top:0;width:0;height:0;z-index:100000;pointer-events:none;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';
         const box = document.createElement('div');
-        box.style.cssText = 'position:fixed;left:16px;top:64px;width:430px;min-width:320px;min-height:160px;max-height:86vh;overflow:auto;resize:both;pointer-events:auto;background:#1f2228;border:1px solid rgba(122,223,230,0.5);border-radius:8px;padding:12px 16px;color:#e6e6e6;box-shadow:0 8px 32px rgba(0,0,0,0.7)';
+        box.style.cssText = 'position:fixed;left:16px;top:64px;width:430px;min-width:320px;min-height:160px;max-height:86vh;overflow:auto;resize:both;pointer-events:auto;background:#1f2228;border:1px solid rgba(122,223,230,0.5);border-radius:8px;padding:0 16px 12px;color:#e6e6e6;box-shadow:0 8px 32px rgba(0,0,0,0.7)';
+        const genTile = (page, icon, color, name, desc) => `<div data-gen-tile="${page}" role="button" tabindex="0"><span class="ic" style="color:${color}">${icon}</span><span><div class="nm">${name}</div><div class="ds">${desc}</div></span></div>`;
         const numField = (key, label, hint, step) => `
             <label style="display:flex;align-items:center;gap:8px;justify-content:space-between">
                 <span style="color:#cfd6dc;font-size:12px">${label}<span style="color:#888;font-size:10px"> ${hint}</span></span>
                 <span style="display:inline-flex;align-items:center;gap:5px"><input type="number" id="${GEN_MODAL_PARAM_IDS[key]}" value="${d[key]}" min="0" step="${step || 1}" style="width:64px;background:#1a1d23;border:1px solid rgba(122,223,230,0.45);color:#fff;padding:3px 6px;border-radius:3px;font:inherit;font-size:11px;text-align:right"><span style="color:#888;font-size:10px">ft</span></span>
             </label>`;
         box.innerHTML = `
+            <div id="aim-gen-head" style="position:sticky;top:0;z-index:3;background:#1f2228;margin:0 -16px 12px;padding:12px 16px 8px;border-bottom:1px solid rgba(122,223,230,0.25);box-shadow:0 6px 12px -6px rgba(0,0,0,0.6)">
             <button id="aim-gen-x" title="Close" style="position:absolute;top:8px;right:10px;width:24px;height:24px;line-height:22px;text-align:center;background:rgba(255,90,90,0.12);color:#ff8a80;border:1px solid rgba(255,90,90,0.45);border-radius:4px;cursor:pointer;font:inherit;font-size:14px;font-weight:700;padding:0">✕</button>
-            <div id="aim-gen-title" style="color:#7adfe6;font-weight:700;font-size:15px;margin-bottom:4px;cursor:move;user-select:none;padding-right:28px">⊕ Site Setup Generator <span style="color:#666;font-size:10px;font-weight:400">— drag · resize ↘</span></div>
-            <div style="color:#888;font-size:11px;margin-bottom:12px">${xmlEscape(siteName)} · ${assets.length} asset${assets.length === 1 ? '' : 's'} (${eligibleCount} eligible) · Phase A1 — inspection FFZs</div>
-            <div style="margin-bottom:12px;padding:8px 10px;background:rgba(95,255,95,0.06);border:1px dashed rgba(95,255,95,0.3);border-radius:3px;font-size:11px;color:#9ad;line-height:1.5">
+            <style>
+                #${GEN_MODAL_ID} [data-gen-tile]{display:flex;gap:10px;align-items:flex-start;padding:10px 12px;border-radius:6px;border:1px solid rgba(255,255,255,0.10);background:rgba(255,255,255,0.03);cursor:pointer;transition:background .12s,border-color .12s;text-align:left}
+                #${GEN_MODAL_ID} [data-gen-tile]:hover{background:rgba(122,223,230,0.10);border-color:rgba(122,223,230,0.55)}
+                #${GEN_MODAL_ID} [data-gen-tile] .ic{font-size:20px;line-height:1;width:26px;text-align:center;flex:none}
+                #${GEN_MODAL_ID} [data-gen-tile] .nm{font-size:12px;font-weight:700;color:#e6e6e6}
+                #${GEN_MODAL_ID} [data-gen-tile] .ds{font-size:10px;color:#8a949e;line-height:1.35;margin-top:2px}
+                #${GEN_MODAL_ID} .gen-grp{font-size:10px;color:#9ad;text-transform:uppercase;letter-spacing:0.6px;font-weight:600;margin:10px 0 6px}
+                #${GEN_MODAL_ID} #aim-gen-back:hover{background:rgba(122,223,230,0.22)}
+            </style>
+            <div id="aim-gen-title" style="color:#7adfe6;font-weight:700;font-size:15px;margin-bottom:4px;cursor:move;user-select:none;padding-right:28px;display:flex;align-items:center;gap:8px">
+                <button id="aim-gen-back" data-gen-sec="tool" title="Back to the tool menu" style="width:24px;height:24px;line-height:20px;text-align:center;background:rgba(122,223,230,0.10);color:#7adfe6;border:1px solid rgba(122,223,230,0.45);border-radius:4px;cursor:pointer;font:inherit;font-size:16px;font-weight:700;padding:0;flex:none">‹</button>
+                <span>⊕ Generate<span id="aim-gen-page-name" style="color:#e6e6e6"></span></span>
+                <button id="aim-gen-help-btn" data-gen-sec="tool" title="What this tool does, how to use it, what to try" style="width:22px;height:22px;line-height:18px;text-align:center;background:rgba(122,223,230,0.10);color:#7adfe6;border:1px solid rgba(122,223,230,0.45);border-radius:50%;cursor:pointer;font:inherit;font-size:13px;font-weight:700;padding:0;flex:none">i</button>
+                <span style="color:#666;font-size:10px;font-weight:400">— drag · resize ↘</span>
+            </div>
+            <div style="color:#888;font-size:11px">${xmlEscape(siteName)} · ${assets.length} asset${assets.length === 1 ? '' : 's'} (${eligibleCount} eligible)</div>
+            <label data-gen-sec="tool" id="aim-gen-dryrow" style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;margin-top:8px;padding:5px 10px;border-radius:3px;background:rgba(95,255,95,0.08);border:1px solid rgba(95,255,95,0.4)"><input type="checkbox" id="aim-gen-dryrun" checked style="accent-color:#5fff5f"> <b id="aim-gen-drylabel" style="color:#5fff5f">🧪 Dry run — nothing is written</b> <span style="color:#888;font-size:10px">(every tool on this panel honors it)</span></label>
+            </div>
+            <div id="aim-gen-help" style="display:none;margin-bottom:12px;padding:8px 10px;background:rgba(122,223,230,0.07);border:1px solid rgba(122,223,230,0.4);border-radius:4px;font-size:11px;color:#cfd6dc;line-height:1.5"></div>
+            <div id="aim-gen-menu" data-gen-sec="menu">
+                <div style="font-size:11px;color:#9ad;line-height:1.5;margin-bottom:4px">Pick a tool. Only that tool's controls show; <b style="color:#7adfe6">‹</b> brings you back here. Staged work stays on the map until the panel is closed.</div>
+                <div class="gen-grp">Build</div>
+                <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px">
+                    ${genTile('ffz', '⊕', '#5fff5f', 'Inspection FFZs', 'One shielded inspection zone per asset near a power line')}
+                    ${genTile('adv', '✦', '#5fb8ff', 'Advanced Draw', 'Trace a corridor FFZ point-to-point with live shielding')}
+                    ${genTile('nfz', '⬠', '#ff5555', 'NFZs', 'Trace or stamp no-fly zones around anything')}
+                    ${genTile('fp', '🛩', '#00e5ff', 'Flight Paths', 'Route, load, snap and clean paths along the power lines')}
+                    ${genTile('routes', '🟠', '#ff9100', 'Convert Routes', 'Proposed Route KML → real FFZs and flight paths')}
+                    ${genTile('elv', '🛗', '#ff9a3d', 'Elevators', 'Climb-overs where paths cross transmission lines')}
+                    ${genTile('szp', '🛟', '#ff9eb5', 'Safe Zone Planner', 'Next safe zones on pad edges (wells first): shortest worst-case flight')}
+                    ${genTile('ext:swb', '🕸', '#8ec2ff', 'SpiderWeb', 'Unshielded site: zone per asset + high point-to-point paths')}
+                    ${genTile('ext:ter', '⛰', '#c9a6ff', 'Terrain Profiler', 'Elevation bands + proposed floors / ceilings (read-only)')}
+                </div>
+                <div class="gen-grp">Import</div>
+                <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;margin-bottom:6px">
+                    ${genTile('rig', '🏗', '#ff9a3d', 'Rigs & cranes', 'Daily rig / crane sheet → temporary NFZ per pad, verify before removal')}
+                    ${genTile('imp', '📥', '#7adfe6', 'Asset Import', 'CSV / KML asset list → staged points → real assets')}
+                    ${genTile('sci', '🔍', '#7adfe6', 'Scan Import', 'Apply Ortho Scanner decisions: NFZs + path legs')}
+                    ${genTile('ext:gmt', '📌', '#c39bd3', 'GM Stamper', 'Template-driven General Markers, one click each')}
+                </div>
+            </div>
+            <div data-gen-sec="ffz" style="margin-bottom:12px;padding:8px 10px;background:rgba(95,255,95,0.06);border:1px dashed rgba(95,255,95,0.3);border-radius:3px;font-size:11px;color:#9ad;line-height:1.5">
                 Builds <b>one open inspection FFZ</b> per qualifying asset — a single edge box on the <b>side nearest a power line</b> (the shield), inner edge the standoff off the asset, ≥30 ft deep. Only <b>Normal</b> assets within the proximity of a line qualify. Altitudes are <b>DEM-checked per FFZ</b>. Output is a <b>DRAFT</b> — <b>preview first, nothing is written</b> until Commit (coming next).
             </div>
-            <div id="aim-gen-pl-row" style="margin-bottom:14px;padding:6px 10px;background:rgba(255,213,79,0.06);border:1px dashed rgba(255,213,79,0.3);border-radius:3px;font-size:11px;display:flex;align-items:center;justify-content:space-between;gap:8px">
+            <div id="aim-gen-pl-row" data-gen-sec="ffz adv fp routes" style="margin-bottom:14px;padding:6px 10px;background:rgba(255,213,79,0.06);border:1px dashed rgba(255,213,79,0.3);border-radius:3px;font-size:11px;display:flex;align-items:center;justify-content:space-between;gap:8px">
                 <span><b style="color:#ffd54f">Power lines:</b> <span id="aim-gen-pl-status">checking…</span></span>
                 <button id="aim-gen-pl-refresh" style="background:transparent;color:#ffd54f;border:1px solid rgba(255,213,79,0.45);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">↻ Refresh</button>
             </div>
-            <div style="margin-bottom:14px">
+            <div data-gen-sec="ffz adv" style="display:flex;align-items:center;gap:8px;margin-bottom:8px;padding-bottom:4px;border-bottom:1px solid rgba(122,223,230,0.25)">
+                <span style="font-size:12px;color:#7adfe6;font-weight:700">1 · Settings</span>
+                <button id="aim-gen-settings-toggle" style="background:none;border:none;color:#7a8794;cursor:pointer;font:inherit;font-size:11px;padding:0">▾ hide</button>
+                <span style="flex:1"></span><span style="color:#888;font-size:10px">remembered per site · defaults are the SOP values</span>
+            </div>
+            <div data-gen-sec="ffz" class="gen-settings" style="margin-bottom:14px">
                 <div style="font-size:11px;color:#9ad;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Filters</div>
                 <div style="display:flex;flex-direction:column;gap:8px">
                     <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:#cfd6dc"><input type="checkbox" id="aim-gen-skipbad" ${d.skipBadStates ? 'checked' : ''} style="accent-color:#7adfe6"> Skip unreachable / unshielded / empty <span style="color:#888;font-size:10px">(keeps Normal/Inactive/HY)</span></label>
@@ -25767,14 +30852,14 @@
                     ${numField('proximityFt', 'Max distance to power line', '(200 PL + 200 asset)', 25)}
                 </div>
             </div>
-            <div style="margin-bottom:14px">
+            <div data-gen-sec="ffz" class="gen-settings" style="margin-bottom:14px">
                 <div style="font-size:11px;color:#9ad;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">FFZ geometry</div>
                 <div style="display:flex;flex-direction:column;gap:8px">
                     ${numField('standoffFt', 'Standoff from asset', '(inner edge off the border)', 1)}
                     ${numField('depthFt', 'Edge depth', '(flyable thickness, ≥30)', 1)}
                 </div>
             </div>
-            <div style="margin-bottom:14px">
+            <div data-gen-sec="ffz adv" class="gen-settings" style="margin-bottom:14px">
                 <div style="font-size:11px;color:#9ad;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Altitude <span style="color:#888;text-transform:none;letter-spacing:0;font-weight:400">— floor = DEM ground + AGL, per FFZ</span></div>
                 <div style="display:flex;flex-direction:column;gap:8px">
                     ${numField('aglFt', 'AGL floor', '(above ground)', 5)}
@@ -25783,25 +30868,29 @@
                     <div id="aim-gen-altmode" style="margin-top:4px;padding:6px 8px;border-radius:3px;font-size:11px;background:rgba(122,223,230,0.06);border:1px dashed rgba(122,223,230,0.3);color:#9ad">Altitude reference: <span id="aim-gen-altmode-status">detecting…</span></div>
                 </div>
             </div>
-            <div id="aim-gen-stats" style="color:#9ad;font-size:11px;margin-bottom:12px;padding:6px 8px;background:rgba(122,223,230,0.08);border-radius:3px">Adjust parameters, then Preview.</div>
-            <div style="display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-bottom:14px">
-                <button id="aim-gen-close" style="background:transparent;color:#888;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">Close</button>
-                <button id="aim-gen-clear" style="background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">Clear preview</button>
-                <button id="aim-gen-draw" style="background:rgba(255,225,77,0.12);color:#ffe14d;border:1px solid rgba(255,225,77,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">✏️ Draw</button>
-                <button id="aim-gen-advdraw" title="Advanced Draw — click the inner (asset-facing) edge point-to-point to build a zigzag corridor FFZ. Live full-box preview + shielding band on the line. Shift=angle-snap 15° off the last segment · Ctrl=magnet-snap to the offset off the nearest asset · F=flip width side · double-click/Enter=finish · Esc=undo last point. Autosaves; commits as ONE FFZ via Commit." style="background:rgba(95,184,255,0.12);color:#5fb8ff;border:1px solid rgba(95,184,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">✦ Advanced Draw</button>
-                <button id="aim-gen-nfztrace" title="NFZ Trace — ALT+click to start, click to add vertices around anything (trace the shape exactly — the ring auto-grows by the Buffer on finish). Ctrl=snap onto the nearest asset's boundary · dbl-click/Enter=finish · Esc=undo last point. Grows by Buffer, pads to the min footprint, pulls overhangs inside the FFZ. Commits as type-4 NFZs, create-only." style="background:rgba(255,85,85,0.12);color:#ff5555;border:1px solid rgba(255,85,85,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">⬠ NFZ Trace</button>
-                <button id="aim-gen-nfzstamp" title="NFZ Stamp — ALT+click inside any asset polygon to instantly stage an NFZ = that asset's ring grown by the Buffer (min footprint + FFZ containment applied). Rapid-fire: keep ALT+clicking assets." style="background:rgba(255,85,85,0.12);color:#ff5555;border:1px solid rgba(255,85,85,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">⚡ NFZ Stamp</button>
-                <button id="aim-gen-import" title="Asset Importer — load a region CSV or KML, stage the points on the map (nothing is written), select a subset with a circle / freehand lasso / single picks, map CSV types to Percepto subtypes, and bulk-create the selection as real assets. Create-only + dry-run + backup. Also the inverse: 🗑 Delete mode spatially selects EXISTING assets for a heavily-confirmed bulk delete that rides Delete Guard." style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">📥 Import</button>
-                <button id="aim-gen-fpsnap" title="Arm CTRL-snap for Percepto's native flight-path draw tool: hold CTRL while clicking to place a waypoint and it snaps ~50ft parallel to the nearest power line (purple dot shows where). Release CTRL = free point." style="background:rgba(186,140,255,0.12);color:#ba8cff;border:1px solid rgba(186,140,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">🧲 CTRL-snap: off</button>
-                <button id="aim-gen-loadfp" title="Load the site's existing flight paths (drawn natively in Percepto) into the editable preview so they can be cleaned up." style="background:rgba(0,229,255,0.12);color:#00e5ff;border:1px solid rgba(0,229,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">📥 Load site FPs</button>
-                <button id="aim-gen-loadffz" title="Load the site's existing FFZs (amber) into the editable preview — move / rotate / Alt-snap (auto-size) / resize them, then 💾 Save FFZ edits to write them back in place." style="background:rgba(255,179,71,0.12);color:#ffb347;border:1px solid rgba(255,179,71,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">📥 Load site FFZs</button>
-                <button id="aim-gen-snapclean" title="Snap the whole loaded network ~50ft parallel to the power lines + clean up the vertices." style="background:rgba(186,140,255,0.14);color:#ba8cff;border:1px solid rgba(186,140,255,0.55);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">✨ Snap &amp; Clean</button>
-                <button id="aim-gen-routes" style="background:rgba(0,229,255,0.12);color:#00e5ff;border:1px solid rgba(0,229,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">🛩 Routes</button>
-                <button id="aim-gen-routes-json" title="Copy the last route result as JSON to the clipboard (to share for debugging)" style="background:rgba(0,229,255,0.08);color:#00e5ff;border:1px solid rgba(0,229,255,0.4);border-radius:3px;padding:8px 10px;cursor:pointer;font:inherit;font-size:12px">⧉ Copy JSON</button>
-                <button id="aim-gen-convroutes" title="Convert 🟠 Proposed Routes (drawn + committed in the Map Styler's route KML) into REAL entities: route paths → Flight Paths, route polygons → FFZs. FP endpoints auto-snap ≤50 ft to existing FP VERTICES (a shared waypoint extends that FP). Altitudes copied from the nearest existing entity. Preview + dry-run + undo; create-only." style="background:rgba(255,145,0,0.14);color:#ff9100;border:1px solid rgba(255,145,0,0.55);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">🟠 Convert routes</button>
-                <button id="aim-gen-preview" style="background:rgba(95,255,95,0.15);color:#5fff5f;border:1px solid rgba(95,255,95,0.55);border-radius:3px;padding:8px 18px;cursor:pointer;font:inherit;font-size:12px;font-weight:600">👁 Preview on map</button>
+            <div data-gen-sec="fp" style="margin-bottom:12px;padding:8px 10px;background:rgba(0,229,255,0.06);border:1px dashed rgba(0,229,255,0.3);border-radius:3px;font-size:11px;color:#9ad;line-height:1.5"><b style="color:#00e5ff">🛩 Routes</b> proposes base→asset flight paths along the power lines · <b>📥 Load site FPs</b> pulls the existing paths into the editable preview · <b>✨ Snap &amp; Clean</b> pulls them ~50 ft parallel to the lines · <b>🧲 CTRL-snap</b> arms snapping inside Percepto's native draw tool.</div>
+            <div data-gen-sec="routes" style="margin-bottom:12px;padding:8px 10px;background:rgba(255,145,0,0.06);border:1px dashed rgba(255,145,0,0.3);border-radius:3px;font-size:11px;color:#9ad;line-height:1.5">Converts the Map Styler's 🟠 <b>Proposed Routes</b> KML into real entities: route paths → flight paths, route polygons → FFZs. Preview, dry run and undo; create-only.</div>
+            <div id="aim-gen-stats" data-gen-sec="ffz adv fp routes" style="color:#9ad;font-size:11px;margin-bottom:12px;padding:6px 8px;background:rgba(122,223,230,0.08);border-radius:3px">Adjust parameters, then Preview.</div>
+            <div data-gen-sec="ffz adv" style="display:flex;align-items:center;gap:8px;margin-bottom:8px;padding-bottom:4px;border-bottom:1px solid rgba(122,223,230,0.25)">
+                <span style="font-size:12px;color:#7adfe6;font-weight:700">2 · Build drafts</span>
+                <span style="color:#888;font-size:10px">preview on the map, draw by hand, or load existing zones — nothing is written yet</span>
             </div>
-            <div id="aim-adv-controls" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(95,184,255,0.06);border:1px dashed rgba(95,184,255,0.35);border-radius:3px">
+            <div data-gen-sec="ffz adv nfz fp routes" style="display:flex;justify-content:flex-start;gap:8px;flex-wrap:wrap;margin-bottom:14px">
+                <button id="aim-gen-clear" data-gen-sec="ffz fp" style="background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">Clear preview</button>
+                <button id="aim-gen-draw" data-gen-sec="ffz" style="background:rgba(255,225,77,0.12);color:#ffe14d;border:1px solid rgba(255,225,77,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">✏️ Draw</button>
+                <button id="aim-gen-advdraw" data-gen-sec="adv" title="Advanced Draw — click the inner (asset-facing) edge point-to-point to build a zigzag corridor FFZ. Live full-box preview + shielding band on the line. Shift=angle-snap 15° off the last segment · Ctrl=magnet-snap to the offset off the nearest asset · F=flip width side · double-click/Enter=finish · Esc=undo last point. Autosaves; commits as ONE FFZ via Commit." style="background:rgba(95,184,255,0.12);color:#5fb8ff;border:1px solid rgba(95,184,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">✦ Advanced Draw</button>
+                <button id="aim-gen-nfztrace" data-gen-sec="nfz" title="NFZ Trace — ALT+click to start, click to add vertices around anything (trace the shape exactly — the ring auto-grows by the Buffer on finish). Ctrl=snap onto the nearest asset's boundary · dbl-click/Enter=finish · Esc=undo last point. Grows by Buffer, pads to the min footprint, pulls overhangs inside the FFZ. Commits as type-4 NFZs, create-only." style="background:rgba(255,85,85,0.12);color:#ff5555;border:1px solid rgba(255,85,85,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">⬠ NFZ Trace</button>
+                <button id="aim-gen-nfzstamp" data-gen-sec="nfz" title="NFZ Stamp — ALT+click inside any asset polygon to instantly stage an NFZ = that asset's ring grown by the Buffer (min footprint + FFZ containment applied). Rapid-fire: keep ALT+clicking assets." style="background:rgba(255,85,85,0.12);color:#ff5555;border:1px solid rgba(255,85,85,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">⚡ NFZ Stamp</button>
+                <button id="aim-gen-fpsnap" data-gen-sec="fp" title="Arm CTRL-snap for Percepto's native flight-path draw tool: hold CTRL while clicking to place a waypoint and it snaps ~50ft parallel to the nearest power line (purple dot shows where). Release CTRL = free point." style="background:rgba(186,140,255,0.12);color:#ba8cff;border:1px solid rgba(186,140,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">🧲 CTRL-snap: off</button>
+                <button id="aim-gen-loadfp" data-gen-sec="fp" title="Load the site's existing flight paths (drawn natively in Percepto) into the editable preview so they can be cleaned up." style="background:rgba(0,229,255,0.12);color:#00e5ff;border:1px solid rgba(0,229,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">📥 Load site FPs</button>
+                <button id="aim-gen-loadffz" data-gen-sec="ffz" title="Load the site's existing FFZs (amber) into the editable preview — move / rotate / Alt-snap (auto-size) / resize them, then 💾 Save FFZ edits to write them back in place." style="background:rgba(255,179,71,0.12);color:#ffb347;border:1px solid rgba(255,179,71,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">📥 Load site FFZs</button>
+                <button id="aim-gen-snapclean" data-gen-sec="fp" title="Snap the whole loaded network ~50ft parallel to the power lines + clean up the vertices." style="background:rgba(186,140,255,0.14);color:#ba8cff;border:1px solid rgba(186,140,255,0.55);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">✨ Snap &amp; Clean</button>
+                <button id="aim-gen-routes" data-gen-sec="fp" style="background:rgba(0,229,255,0.12);color:#00e5ff;border:1px solid rgba(0,229,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">🛩 Routes</button>
+                <button id="aim-gen-routes-json" data-gen-sec="fp" title="Copy the last route result as JSON to the clipboard (to share for debugging)" style="background:rgba(0,229,255,0.08);color:#00e5ff;border:1px solid rgba(0,229,255,0.4);border-radius:3px;padding:8px 10px;cursor:pointer;font:inherit;font-size:12px">⧉ Copy JSON</button>
+                <button id="aim-gen-convroutes" data-gen-sec="routes" title="Convert 🟠 Proposed Routes (drawn + committed in the Map Styler's route KML) into REAL entities: route paths → Flight Paths, route polygons → FFZs. FP endpoints auto-snap ≤50 ft to existing FP VERTICES (a shared waypoint extends that FP). Altitudes copied from the nearest existing entity. Preview + dry-run + undo; create-only." style="background:rgba(255,145,0,0.14);color:#ff9100;border:1px solid rgba(255,145,0,0.55);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">🟠 Convert routes</button>
+                <button id="aim-gen-preview" data-gen-sec="ffz" style="background:rgba(95,255,95,0.15);color:#5fff5f;border:1px solid rgba(95,255,95,0.55);border-radius:3px;padding:8px 18px;cursor:pointer;font:inherit;font-size:12px;font-weight:600">👁 Preview on map</button>
+            </div>
+            <div id="aim-adv-controls" data-gen-sec="adv" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(95,184,255,0.06);border:1px dashed rgba(95,184,255,0.35);border-radius:3px">
                 <div style="font-size:11px;color:#5fb8ff;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">✦ Advanced Draw</div>
                 <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;font-size:11px;color:#cfd6dc">
                     <label style="display:inline-flex;align-items:center;gap:4px" title="What the line you draw represents. FFZ inner edge = box starts at the line. Inner shielding edge = you trace around the assets and the standoff, FFZ, and outer shielding build outward.">Line <select id="aim-adv-anchor" style="background:#1a1d23;border:1px solid rgba(95,184,255,0.45);color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px"><option value="ffz-inner">= FFZ inner edge</option><option value="shielding">= shielding edge (on assets)</option></select></label>
@@ -25812,7 +30901,7 @@
                 </div>
                 <div style="font-size:10px;color:#7a8794;margin-top:6px"><b style="color:#ffd24d">ALT+click</b>=start a NEW corridor (plain click edits existing shapes) · <b style="color:#ff5fff">magenta dots</b>=snap flush to an existing corridor's centerline (matches width) · then <b style="color:#fff">click</b>=add points · <b style="color:#fff">drag a dot</b>=move vertex · <b style="color:#fff">drag an outer edge</b>=widen · <b style="color:#fff">Shift</b>=angle 15° · <b style="color:#fff">Ctrl</b>=snap to asset · <b style="color:#fff">F</b>=flip · <b style="color:#fff">dbl-click</b>=finish · <b style="color:#fff">Esc</b>=undo / turn off</div>
             </div>
-            <div id="aim-nfz-controls" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(255,85,85,0.06);border:1px dashed rgba(255,85,85,0.35);border-radius:3px">
+            <div id="aim-nfz-controls" data-gen-sec="nfz" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(255,85,85,0.06);border:1px dashed rgba(255,85,85,0.35);border-radius:3px">
                 <div style="font-size:11px;color:#ff5555;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">⬠ NFZ Draw — <span id="aim-nfz-count">0</span> draft(s)</div>
                 <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;font-size:11px;color:#cfd6dc;margin-bottom:8px">
                     <label style="display:inline-flex;align-items:center;gap:4px" title="Horizontal buffer: the traced/stamped ring grows outward by this much on finish — trace the shape exactly, the buffer does the safety margin.">Buffer <input type="number" id="aim-nfz-buffer" value="25" min="0" step="5" style="width:50px;background:#1a1d23;border:1px solid rgba(255,85,85,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px;text-align:right"> ft</label>
@@ -25822,12 +30911,15 @@
                     <button id="aim-nfz-undo" title="Delete exactly the NFZs the most recent commit created (this session). Each delete rides Delete Guard's 24h undo ring when installed." style="background:rgba(255,179,71,0.12);color:#ffb347;border:1px solid rgba(255,179,71,0.45);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px">↩ Undo last commit</button>
                     <button id="aim-nfz-narrow" title="Paint every part of every NFZ (drafts + this session's commits + the site's live NFZs) that is NARROWER than the Min size — catches a thin notch/tab on an otherwise-large NFZ that the simple min-size check can't see. Click again to clear the yellow overlay." style="background:rgba(255,212,0,0.12);color:#ffd400;border:1px solid rgba(255,212,0,0.45);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px">⚠ Narrow check</button>
                 </div>
-                <div id="aim-nfz-result" style="font-size:11px;color:#9ad;line-height:1.5">Drafts auto-grow by the Buffer, pad to the Min size, and pull inside the FFZ. Commit honors the Dry run checkbox in the Commit box.</div>
+                <div id="aim-nfz-result" style="font-size:11px;color:#9ad;line-height:1.5">Drafts auto-grow by the Buffer, pad to the Min size, and pull inside the FFZ. Commit honors the Dry run checkbox below.</div>
             </div>
-            <div id="aim-imp-controls" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(122,223,230,0.06);border:1px dashed rgba(122,223,230,0.35);border-radius:3px"></div>
-            <div style="padding:8px 10px;background:rgba(95,255,95,0.05);border:1px solid rgba(95,255,95,0.25);border-radius:3px">
-                <div style="font-size:11px;color:#9ad;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Commit</div>
-                <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:#cfd6dc;margin-bottom:8px"><input type="checkbox" id="aim-gen-dryrun" checked style="accent-color:#7adfe6"> Dry run <span style="color:#888;font-size:10px">(build + count, don't write)</span></label>
+            <div id="aim-imp-controls" data-gen-sec="imp" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(122,223,230,0.06);border:1px dashed rgba(122,223,230,0.35);border-radius:3px"></div>
+            <div id="aim-rig-controls" data-gen-sec="rig" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(255,154,61,0.06);border:1px dashed rgba(255,154,61,0.4);border-radius:3px"></div>
+            <div id="aim-sci-controls" data-gen-sec="sci" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(122,223,230,0.06);border:1px dashed rgba(122,223,230,0.35);border-radius:3px"></div>
+            <div id="aim-elv-controls" data-gen-sec="elv" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(255,154,61,0.06);border:1px dashed rgba(255,154,61,0.35);border-radius:3px"></div>
+            <div id="aim-szp-controls" data-gen-sec="szp" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(255,158,181,0.06);border:1px dashed rgba(255,158,181,0.35);border-radius:3px"></div>
+            <div data-gen-sec="ffz adv" style="padding:8px 10px;background:rgba(95,255,95,0.05);border:1px solid rgba(95,255,95,0.25);border-radius:3px">
+                <div style="font-size:12px;color:#7adfe6;margin-bottom:6px;font-weight:700">3 · Commit <span style="color:#888;font-size:10px;font-weight:400">— writes the drafts to the site · the 🧪 Dry run switch in the header decides whether anything is actually written</span></div>
                 <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:#cfd6dc;margin-bottom:8px"><input type="checkbox" id="aim-gen-shield" style="accent-color:#ff2d2d"> Show shielding on drafts <span style="color:#888;font-size:10px">(red inner / yellow outer)</span></label>
                 <div style="display:flex;gap:8px;flex-wrap:wrap">
                     <button id="aim-gen-merge" title="Merge your drawn pieces into the final fused shapes RIGHT NOW so you can see exactly what will be created. Already-merged shapes stay; build more and merge again any time. Non-destructive." style="background:rgba(95,184,255,0.18);color:#5fb8ff;border:1px solid rgba(95,184,255,0.6);border-radius:3px;padding:6px 14px;cursor:pointer;font:inherit;font-size:12px;font-weight:600">🔗 Merge</button>
@@ -25841,9 +30933,69 @@
         `;
         m.appendChild(box);
         document.body.appendChild(m);
+        // v4.341 HUB page switcher. Every [data-gen-sec] element lists the pages
+        // it belongs to; 'tool' = every page but the menu. Original inline
+        // display (flex / block / '') is remembered on first pass so flex rows
+        // come back as flex. Leaving the importer page disarms its select tools.
+        genState.page = null;
+        genShowPageLive = (page) => {
+            if (!GEN_PAGE_NAMES[page] && page !== 'menu') page = 'menu';
+            const prev = genState.page;
+            genState.page = page;
+            if (prev === 'imp' && page !== 'imp') { try { if (imp.mode) impSetMode(null); } catch (e) {} }
+            box.querySelectorAll('[data-gen-sec]').forEach(el => {
+                if (el.dataset.genDisplay === undefined) el.dataset.genDisplay = el.style.display === 'none' ? '' : el.style.display;
+                const secs = el.getAttribute('data-gen-sec').split(/\s+/);
+                const show = secs.includes(page) || (page !== 'menu' && secs.includes('tool'));
+                el.style.display = show ? el.dataset.genDisplay : 'none';
+            });
+            const nm = box.querySelector('#aim-gen-page-name');
+            if (nm) nm.textContent = page === 'menu' ? '' : ` · ${GEN_PAGE_NAMES[page]}`;
+            try { if (page === 'rig') { const sid0 = getCurrentSiteID(); if (sid0) { rigRenderPanel(sid0); rigDraw(sid0); } } else if (prev === 'rig') rigClearLayers(); } catch (e) { console.warn(`${RIG_TAG} page hook`, e); }
+            const help = box.querySelector('#aim-gen-help');
+            if (help) { help.style.display = 'none'; help.innerHTML = ''; }
+            box.scrollTop = 0;
+        };
+        box.querySelector('#aim-gen-help-btn').onclick = () => {
+            const help = box.querySelector('#aim-gen-help'); const h = GEN_PAGE_HELP[genState.page];
+            if (!help || !h) return;
+            if (help.style.display !== 'none') { help.style.display = 'none'; help.innerHTML = ''; return; }
+            help.innerHTML = `<div style="color:#7adfe6;font-weight:700;margin-bottom:4px">${GEN_PAGE_NAMES[genState.page]} — what it does</div><div>${h.what}</div>
+                <div style="color:#7adfe6;font-weight:700;margin:8px 0 4px">How to use it</div><ol style="margin:0;padding-left:18px">${h.steps.map(t => `<li style="margin-bottom:2px">${t}</li>`).join('')}</ol>
+                <div style="color:#7adfe6;font-weight:700;margin:8px 0 4px">Try it</div><div>${h.test}</div>
+                <div style="color:#888;font-size:10px;margin-top:6px">🧪 Dry run in the header keeps every commit on this panel read-only — leave it on while learning a tool.</div>`;
+            help.style.display = '';
+        };
+        box.querySelector('#aim-gen-back').onclick = () => genShowPage('menu');
+        (() => {
+            const cbx = box.querySelector('#aim-gen-dryrun'), row = box.querySelector('#aim-gen-dryrow'), lbl = box.querySelector('#aim-gen-drylabel');
+            const paint = () => {
+                const dry = !!cbx.checked;
+                lbl.textContent = dry ? '🧪 Dry run — nothing is written' : '⚠ LIVE — commits WRITE to the server';
+                lbl.style.color = dry ? '#5fff5f' : '#ff6060';
+                row.style.background = dry ? 'rgba(95,255,95,0.08)' : 'rgba(255,85,85,0.14)';
+                row.style.borderColor = dry ? 'rgba(95,255,95,0.4)' : 'rgba(255,85,85,0.7)';
+            };
+            cbx.addEventListener('change', paint); paint();
+            cbx.addEventListener('change', () => { try { impSecSummaries(); } catch (e) {} });
+        })();
+        box.querySelector('#aim-gen-menu').addEventListener('click', (e) => {
+            const t = e.target.closest('[data-gen-tile]'); if (!t) return;
+            const p = t.getAttribute('data-gen-tile');
+            if (p === 'ext:swb') { try { swbOpen(); } catch (err) { console.warn(`${GEN_TAG} SpiderWeb open failed:`, err); } return; }
+            if (p === 'ext:ter') { if (!terMasterEnabled) { showToast('Terrain Profiler is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; } try { terrainProfilerRun(); } catch (err) { console.warn(`${GEN_TAG} Profiler open failed:`, err); } return; }
+            if (p === 'ext:gmt') { try { gmtOpenPanel(); } catch (err) { console.warn(`${GEN_TAG} GM Stamper open failed:`, err); } return; }
+            genShowPage(p);
+        });
+        box.querySelector('#aim-gen-menu').addEventListener('keydown', (e) => {
+            if (e.key !== 'Enter' && e.key !== ' ') return;
+            const t = e.target.closest('[data-gen-tile]'); if (!t) return;
+            e.preventDefault(); t.click();
+        });
         // Drag by the title (resize via the box's native ↘ handle).
         const titleEl = box.querySelector('#aim-gen-title');
         if (titleEl) titleEl.addEventListener('mousedown', (e) => {
+            if (e.target.closest('button')) return;   // ‹ back button lives in the drag handle
             e.preventDefault();
             const r = box.getBoundingClientRect();
             const ox = r.left, oy = r.top, sx = e.clientX, sy = e.clientY;
@@ -25917,7 +31069,8 @@
             })();
         }
         const statsEl = box.querySelector('#aim-gen-stats');
-        box.querySelector('#aim-gen-close').onclick = () => closeSiteGenerator();
+        (() => { const t = box.querySelector('#aim-gen-settings-toggle'); if (!t) return; let open = true;
+            t.onclick = () => { open = !open; t.textContent = open ? '▾ hide' : '▸ show'; box.querySelectorAll('.gen-settings').forEach(el => { if (el.style.display !== 'none' || !open) el.style.display = open ? (el.dataset.genDisplay || '') : 'none'; }); }; })();
         box.querySelector('#aim-gen-x').onclick = () => closeSiteGenerator();
         box.querySelector('#aim-gen-clear').onclick = () => {
             clearGenPreview();
@@ -26175,13 +31328,44 @@
         // 📥 Asset Importer (feature #249)
         impLoadParams(); impLoadTypeMap();
         if (imp.siteID && String(imp.siteID) !== String(siteID)) {
+            if (imp.dirty) { try { impSaveSession('site-change'); } catch (e) {} }
             // a different site must never inherit another site's staged points
             imp.fileName = null; imp.headers = []; imp.rows = []; imp.mapping = null;
             imp.points = []; imp.shapes = []; imp.shapeSeq = 1; imp.assetSel.clear(); imp.assetManual.clear();
             imp.lastCreated = []; imp.lastDelete = null; imp.assetIndex = null;
             imp.target = 'staged'; imp.siteID = String(siteID);
         }
+        if (!imp.siteID) imp.siteID = String(siteID);   // v4.346: resume banner keys off the site
         impRenderPanelBody();
+        // v4.325: 🔍 Scan Import panel — files survive modal close on the SAME site; a new site resets.
+        if (sci.siteID !== String(siteID)) { sciClearLayers(); sci = { siteID: String(siteID), dec: null, scan: null, decName: null, scanName: null, plan: null, layers: [], running: false, stop: false, report: null, siteCfg: null }; }
+        sciRenderPanelBody();
+        const sciBtn = box.querySelector('#aim-gen-scan');
+        if (sciBtn) sciBtn.onclick = () => {
+            const c = document.getElementById('aim-sci-controls'); if (!c) return;
+            const opening = c.style.display === 'none';
+            c.style.display = opening ? 'block' : 'none';
+            sciBtn.style.background = opening ? 'rgba(122,223,230,0.32)' : 'rgba(122,223,230,0.12)';
+            if (opening && sci.plan) sciDraw(); else if (!opening) sciClearLayers();
+        };
+        if (sci.plan) { sciShowPanel(); sciDraw(); }
+        try { rigRenderPanel(siteID); } catch (e) { console.warn(`${RIG_TAG} panel render failed`, e); }   // v4.381 🏗
+        // v4.327: 🛗 Elevators panel — staged crossings survive modal close on the SAME site; a new site resets.
+        if (elv.siteID && elv.siteID !== String(siteID)) { elvClearLayers(); elv = { siteID: String(siteID), items: [], layers: [], writes: [], running: false, siteCfg: null, seq: 1 }; }
+        elvRenderPanelBody();
+        const elvBtn = box.querySelector('#aim-gen-elev');
+        if (elvBtn) elvBtn.onclick = () => {
+            const c = document.getElementById('aim-elv-controls'); if (!c) return;
+            const opening = c.style.display === 'none';
+            c.style.display = opening ? 'block' : 'none';
+            elvBtn.style.background = opening ? 'rgba(255,154,61,0.32)' : 'rgba(255,154,61,0.12)';
+            if (opening && elv.items.length) elvDraw(); else if (!opening) elvClearLayers();
+        };
+        if (elv.items.length) { elvShowPanel(); elvDraw(); elvSummary(); }
+        // v4.369: 🛟 Safe Zone Planner — a plan survives modal close on the SAME site; a new site resets.
+        if (szp.siteID && szp.siteID !== String(siteID)) { szpClearLayers(); szp = { siteID: null, result: null, layers: [], running: false, cancel: false }; }
+        szpRenderPanelBody();
+        if (szp.result) { szpShowPanel(); szpDraw(); }
         const impBtn = box.querySelector('#aim-gen-import');
         if (impBtn) impBtn.onclick = () => {
             const c = document.getElementById('aim-imp-controls');
@@ -26194,6 +31378,7 @@
         if (imp.points.some(p => !p.done)) {           // staged points from this session → panel opens armed
             impShowPanel(); impRenderStaged(); impRenderShapes(); impRenderAssetSel();
         }
+        if (!genState.page) genShowPage('menu');       // v4.341: fresh open lands on the tile menu
 
         // Advanced Draw live controls — load remembered params first so the fields show them.
         advLoadParams();
