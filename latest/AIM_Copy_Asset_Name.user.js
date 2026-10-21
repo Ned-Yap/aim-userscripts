@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.392
+// @version      4.393
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.392';
+    const SCRIPT_VERSION = '4.393';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -238,7 +238,7 @@
     const RIG_TAG = '[AIM RIG]';
     const RIG_TAG_PREFIX = 'AIM RIG NFZ|';
     const RIG_COLS = ['WELL_NAME', 'SURFACE_LATITUDE', 'SURFACE_LONGITUDE', 'JOB_TYPE_CATEGORY', 'START_DATE', 'END_DATE'];
-    const RIG_DEFAULT_CFG = { nearPadFt: 500, insetFt: 15, graceDays: 1, snoozeDays: 3, padCoverPct: 75, exclude: '' };   // v4.385 padCoverPct: below this share of its FFZ the pad polygon is distrusted → NFZ = whole FFZ inset
+    const RIG_DEFAULT_CFG = { nearPadFt: 500, insetFt: 15, graceDays: 1, snoozeDays: 3, padCoverPct: 75, hideNoise: true, exclude: '' };   // v4.385 padCoverPct: below this share of its FFZ the pad polygon is distrusted → NFZ = whole FFZ inset
     const RIG_STATUS_LABEL = { upcoming: 'Upcoming', staged: 'Staged', active: 'Active NFZ', ending: 'VERIFY — gone?', cleared: 'Cleared', unmatched: 'Unmatched', offsite: 'Off-site' };
     const RIG_STATUS_COLOR = { upcoming: '#ffb300', staged: '#7adfe6', active: '#ff5555', ending: '#ff9100', cleared: '#8a8f98', unmatched: '#ff6060', offsite: '#666' };
     let rigCfgCache = null, rigLayers = [], rigRowsByKey = null, rigStateSid = null;
@@ -30325,7 +30325,8 @@
         if (c.status === 'cleared') st = (c.fpBackups && !c.fpRestored) || ms.some(m => m.pulled && !m.restored) ? 'restoring' : (c.committedAt ? 'closed' : (c.stage || 'closed'));
         else if (c.status === 'ending') st = 'verify';
         else if (c.status === 'active') st = ms.some(m => !m.pulled) ? 'missions' : 'safe';
-        else st = 'staged';
+        else if (c.status === 'staged') st = 'staged';
+        else { c.stage = ''; return; }   // upcoming / unmatched / off-site / new: nothing is being done → no stage
         rigStamp(c, st);
     }
     function rigIssueChannelGet() {
@@ -30438,16 +30439,17 @@
         const chip = (s) => cnt[s] ? `<span style="color:${RIG_STATUS_COLOR[s]};margin-right:10px"><b>${cnt[s]}</b> ${RIG_STATUS_LABEL[s] || s}</span>` : '';
         const esc = (v) => String(v == null ? '' : v).replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
         const showCleared = !!(host.dataset.showCleared === '1');
-        const body = rows.filter(r => showCleared || r.c.status !== 'cleared').map(({ k, c }) => {
+        const hideNoise = rigCfg().hideNoise !== false;   // v4.393: off-site / unmatched hidden by default
+        const body = rows.filter(r => (showCleared || r.c.status !== 'cleared') && (!hideNoise || (r.c.status !== 'offsite' && r.c.status !== 'unmatched'))).map(({ k, c }) => {
             const col = RIG_STATUS_COLOR[c.status] || '#ccc';
             const days = c.start ? Math.round((new Date(rigToday()) - new Date(c.start)) / 86400000) : null;
             const act = c.status === 'ending' ? `<button data-rig-act="gone" data-k="${esc(k)}" style="background:rgba(255,96,96,0.2);border:1px solid #ff6060;color:#ffb0b0;border-radius:3px;padding:1px 6px;cursor:pointer">✓ Gone — remove NFZ</button> <button data-rig-act="snooze" data-k="${esc(k)}" style="background:none;border:1px solid #555;color:#ccc;border-radius:3px;padding:1px 6px;cursor:pointer">↩ Still there (${rigCfg().snoozeDays} d)</button>`
                 : c.status === 'active' ? `<button data-rig-act="end" data-k="${esc(k)}" style="background:none;border:1px solid #555;color:#ccc;border-radius:3px;padding:1px 6px;cursor:pointer">Mark gone</button>`
                 : (c.status === 'staged' || c.status === 'upcoming' || c.status === 'unmatched' || c.status === 'offsite') ? `<button data-rig-act="drop" data-k="${esc(k)}" style="background:none;border:1px solid #555;color:#999;border-radius:3px;padding:1px 6px;cursor:pointer">Ignore</button>` : '';
-            const stg = c.stage || 'staged';
+            const stg = c.stage || '';
             return `<tr data-rig-row="${esc(k)}" style="border-bottom:1px solid #222;cursor:pointer">
                 <td style="padding:3px 6px;color:${col};font-weight:700;white-space:nowrap" title="${esc(c.status === 'unmatched' || c.status === 'offsite' ? (c.how || '') : (c.endedWhy || ''))}">${esc(RIG_STATUS_LABEL[c.status] || c.status)}${c.endedWhy ? ` <span style="color:#888;font-weight:400">(${esc(c.endedWhy)})</span>` : ''}</td>
-                <td style="padding:3px 6px;white-space:nowrap"><span data-rig-act="missions" data-k="${esc(k)}" title="${esc(c.stamps && c.stamps[stg] ? `${RIG_STAGE_LABEL[stg]} since ${c.stamps[stg].at}` : RIG_STAGE_LABEL[stg])} — click for missions / stage history" style="color:${RIG_STAGE_COLOR[stg]};border:1px solid ${RIG_STAGE_COLOR[stg]};border-radius:3px;padding:0 5px;cursor:pointer">${esc(RIG_STAGE_LABEL[stg])}${(c.missions || []).length ? ` <span style="color:#777">${(c.missions || []).filter(m => m.pulled).length}/${c.missions.length}</span>` : ''}</span></td>
+                <td style="padding:3px 6px;white-space:nowrap">${stg ? `<span data-rig-act="missions" data-k="${esc(k)}" title="${esc(c.stamps && c.stamps[stg] ? `${RIG_STAGE_LABEL[stg]} since ${c.stamps[stg].at}` : RIG_STAGE_LABEL[stg])} — click for missions / stage history" style="color:${RIG_STAGE_COLOR[stg]};border:1px solid ${RIG_STAGE_COLOR[stg]};border-radius:3px;padding:0 5px;cursor:pointer">${esc(RIG_STAGE_LABEL[stg])}${(c.missions || []).length ? ` <span style="color:#777">${(c.missions || []).filter(m => m.pulled).length}/${c.missions.length}</span>` : ''}</span>` : '<span style="color:#444">—</span>'}</td>
                 <td style="padding:3px 6px;color:#e6e6e6">${esc(c.well)}${c.source === 'rpic' ? ' <span style="color:#7adfe6" title="RPIC report">👁</span>' : ''}</td>
                 <td style="padding:3px 6px;color:#9aa">${esc(c.job)}</td>
                 <td style="padding:3px 6px;color:${c.padId ? '#cfd6dc' : '#ff6060'}" title="${esc(c.how)}${c.flag ? ' · ' + esc(c.flag) : ''}">${c.padId ? esc(c.padName) : '—'}${c.flag ? ' <span style="color:#ffb347">⚠</span>' : ''}</td>
@@ -30465,6 +30467,7 @@
                 <button data-rig-act="manual" style="background:none;border:1px solid #7adfe6;color:#7adfe6;border-radius:3px;padding:2px 8px;cursor:pointer;font-size:11px">👁 Add RPIC report</button>
                 <button data-rig-act="commit" style="background:rgba(255,154,61,0.18);border:1px solid #ff9a3d;color:#ffb060;border-radius:3px;padding:2px 10px;cursor:pointer;font-size:11px;font-weight:700">⬠ Create staged NFZs${cnt.staged ? ` (${cnt.staged})` : ''}</button>
                 <label style="color:#888;font-size:10px;cursor:pointer"><input type="checkbox" data-rig-showcleared ${showCleared ? 'checked' : ''}> show cleared</label>
+                <label style="color:#888;font-size:10px;cursor:pointer" title="Rows with no pad on this site: off-site wells and wells with no GPS / no name match"><input type="checkbox" data-rig-hidenoise ${hideNoise ? 'checked' : ''}> hide off-site / unmatched</label>
                 <button data-rig-act="view-history" title="Every obstruction this site has had: stats, outcomes, re-stage" style="background:none;border:1px solid #555;color:#aaa;border-radius:3px;padding:2px 8px;cursor:pointer;font-size:11px">📜 History</button>
                 <button data-rig-act="report-sheets" title="Full report, every obstruction: stages with dates, actions, missions, issue, days exposed — paste into Google Sheets" style="background:rgba(122,223,230,0.12);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:3px;padding:2px 8px;cursor:pointer;font-size:11px">📤 Report</button>
                 <button data-rig-act="report-csv" title="Same report as CSV" style="background:none;border:1px solid #555;color:#aaa;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px">⬇ CSV</button>
@@ -30573,6 +30576,7 @@
         host.ondragleave = () => { host.style.outline = ''; };
         host.ondrop = (e) => { e.preventDefault(); host.style.outline = ''; load(e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]); };
         const sc = host.querySelector('[data-rig-showcleared]'); if (sc) sc.onchange = () => { host.dataset.showCleared = sc.checked ? '1' : '0'; rigRenderPanel(sid); };
+        const hn = host.querySelector('[data-rig-hidenoise]'); if (hn) hn.onchange = () => { rigCfgSet('hideNoise', !!hn.checked); rigRenderPanel(sid); };
         host.querySelectorAll('[data-rig-act]').forEach(b => { b.onclick = (e) => {
             e.stopPropagation(); const act = b.dataset.rigAct, k = b.dataset.k; const st = rigStateLoad(sid);
             if (act === 'commit') rigCommit(sid);
