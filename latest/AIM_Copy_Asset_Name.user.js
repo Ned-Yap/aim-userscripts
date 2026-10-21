@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.402
+// @version      4.403
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.402';
+    const SCRIPT_VERSION = '4.403';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -30392,8 +30392,12 @@
         const ch = rigIssueChannelGet(); if (!ch) return;
         const ring = rigRingOf(pads[0]); if (ring.length < 3) return;
         c.issueRef = `rig-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-        const ms = (c.missions || []).map(m => `${m.name} (steps ${m.steps})`).join('; ') || 'none found';
-        const note = `🏗 ${c.job || 'equipment'} on ${c.well} — pad ${pads.map(p => p.name).join(' + ')}\n${action}\nSheet: ${c.start || '?'} → ${c.end || 'open'} · source: ${c.source}${c.by ? ' (' + c.by + ')' : ''}\nMissions to REMOVE until clear: ${ms}`;
+        // v4.403: five short lines. Step ranges stay in the panel; the note carries names + step counts.
+        const nSteps = m => String(m.steps || '').split(',').reduce((n, r) => { const t = r.trim().split('-').map(Number); return n + (t.length === 2 ? t[1] - t[0] + 1 : (t[0] ? 1 : 0)); }, 0);
+        const ms = (c.missions || []).map(m => `${m.name} (${nSteps(m)})`).join(' · ') || 'none';
+        const mmdd = d => (d || '').slice(5).replace('-', '-');
+        const done = c.fpCut && c.fpCut.length ? `Done: ${c.fpCut.map(f => `${f.name}${f.trimmed ? ` trim ${f.trimmed}` : ''}${f.cut ? ` −${f.cut}` : ''}`).join(' · ')} (restored on ✓ Gone)` : c.manualCut ? 'Done: path already disconnected by hand — reconnect by hand when clear' : c.nfzName ? `Done: NFZ ${c.nfzName}` : `Done: ${action}`;
+        const note = `🏗 ${(c.job || 'EQUIPMENT').toUpperCase()} — ${c.well}${c.source === 'rpic' ? ` (RPIC ${c.by || ''})` : ''}\nPads: ${pads.map(p => p.name).join(' + ')}\n${done}\nRemove missions: ${ms}\nSheet ${mmdd(c.start) || '?'} → ${mmdd(c.end) || 'open'}`;
         c.issueStatus = 'pending';
         try { ch.postMessage({ type: 'ISSUE_CREATE', siteID: String(sid), ref: c.issueRef, shape: 'polygon', polygon: ring.map(p => [p.lat, p.lng]), note, priority: 'HIGH', notify: RIG_NOTIFY, source: 'rig' }); rigLog(sid, `issue requested for ${c.well} (ref ${c.issueRef})`); }
         catch (e) { c.issueStatus = 'failed'; console.warn(`${RIG_TAG} issue post failed`, e); }
