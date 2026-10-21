@@ -1,3 +1,8 @@
+## 2026-10-21 — 🏗 Obstacle issue type — AIM Issues latest v1.44 + Site Setup Tools latest v4.404 (latest only, feature #291)
+
+- **New issue type: 🏗 Obstacle (rig / crane).** Third category next to 🚩 Issue and 🛡✕ Unshielded Route: orange 🏗 marker and dashed orange outline while live, own filter chip in the site panel and the fleet panel, own chip in the create form, "Mark Obstacle" / "Mark as Issue" / "Mark Unshielded" convert buttons in the issue modal (one per other type), Slack parent line says *Obstacle (rig / crane)*. Resolved or ignored obstacles dim like a normal issue (equipment gone = background). Per-category approvers work via `"categoryApprovers": { "obstacle": [...] }`.
+- **Rigs & cranes tool (SST v4.404)** files its issues as Obstacles.
+
 ## 2026-10-21 — 🏗 Rigs & cranes: trim-first cuts, preview + confirm, undo, story, short issue note — Site Setup Tools latest v4.392 → v4.403 (latest only, feature #291)
 
 - **Trim, don't delete (v4.402).** On a custom-FFZ pad each connecting leg is shortened to end on the 15 ft standoff line around the pad (altitudes kept); legs entirely inside or crossing the pad are removed. Control Panel: trim | remove, standoff ft. Cut rows draw their gaps as red dashes, never an NFZ outline.

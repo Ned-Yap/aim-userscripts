@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.403
+// @version      4.404
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.403';
+    const SCRIPT_VERSION = '4.404';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -30399,7 +30399,7 @@
         const done = c.fpCut && c.fpCut.length ? `Done: ${c.fpCut.map(f => `${f.name}${f.trimmed ? ` trim ${f.trimmed}` : ''}${f.cut ? ` −${f.cut}` : ''}`).join(' · ')} (restored on ✓ Gone)` : c.manualCut ? 'Done: path already disconnected by hand — reconnect by hand when clear' : c.nfzName ? `Done: NFZ ${c.nfzName}` : `Done: ${action}`;
         const note = `🏗 ${(c.job || 'EQUIPMENT').toUpperCase()} — ${c.well}${c.source === 'rpic' ? ` (RPIC ${c.by || ''})` : ''}\nPads: ${pads.map(p => p.name).join(' + ')}\n${done}\nRemove missions: ${ms}\nSheet ${mmdd(c.start) || '?'} → ${mmdd(c.end) || 'open'}`;
         c.issueStatus = 'pending';
-        try { ch.postMessage({ type: 'ISSUE_CREATE', siteID: String(sid), ref: c.issueRef, shape: 'polygon', polygon: ring.map(p => [p.lat, p.lng]), note, priority: 'HIGH', notify: RIG_NOTIFY, source: 'rig' }); rigLog(sid, `issue requested for ${c.well} (ref ${c.issueRef})`); }
+        try { ch.postMessage({ type: 'ISSUE_CREATE', siteID: String(sid), ref: c.issueRef, shape: 'polygon', polygon: ring.map(p => [p.lat, p.lng]), note, priority: 'HIGH', notify: RIG_NOTIFY, source: 'rig', category: 'obstacle' }); rigLog(sid, `issue requested for ${c.well} (ref ${c.issueRef})`); }
         catch (e) { c.issueStatus = 'failed'; console.warn(`${RIG_TAG} issue post failed`, e); }
         // v4.394: AIM Issues must answer with ISSUE_CREATED — if it doesn't, say so loudly.
         setTimeout(() => { if (c.issueStatus === 'pending') { c.issueStatus = 'no answer'; rigLog(sid, `⚠ AIM Issues did not create the issue for ${c.well} — is AIM Issues ≥ 1.43 installed and running on this site?`); showToast(`⚠ Issue NOT created for ${c.well} — AIM Issues ≥ 1.43 must be running on this site`, 'rgba(255,96,96,0.7)'); rigStateSave(sid); rigRenderPanel(sid); } }, 4000);

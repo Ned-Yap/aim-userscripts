@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.43
+// @version      1.44
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -68,7 +68,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.43';
+    const SCRIPT_VERSION = '1.44';
 
     // Server model (v1.36): prod and QA are separate databases — the same
     // numeric site ID is two different sites. QA issues live in their own
@@ -312,13 +312,25 @@
     // v1.31: issue category. Only 'unshielded' is meaningful today; any
     // other/absent value renders + behaves as a normal issue (so old
     // clients and old records degrade gracefully).
+    // v1.44: 'obstacle' = a rig / crane / temporary structure on a pad
+    // (filed by the 🏗 Rigs & cranes tool, or by hand). Orange 🏗 marker,
+    // own filter chip, normal dim-when-resolved behaviour (resolved =
+    // equipment gone).
     const CATEGORY_META = {
-        unshielded: { text: 'UNSHIELDED ROUTE', short: 'Unshielded', color: '#b26bff' },
+        unshielded: { text: 'UNSHIELDED ROUTE', short: 'Unshielded', color: '#b26bff', fg: '#1a0d26', glyph: '🛡✕', bg: '#241536', verb: 'marked as Unshielded Route' },
+        obstacle:   { text: 'OBSTACLE · RIG / CRANE', short: 'Obstacle', color: '#ff9f1c', fg: '#2a1600', glyph: '🏗', bg: '#2e1d05', verb: 'marked as Obstacle (rig / crane)' },
     };
+    const ALL_CATEGORY_KEYS = ['issue', 'unshielded', 'obstacle'];
     function issueCategory(issue) {
-        return (issue && issue.category === 'unshielded') ? 'unshielded' : 'issue';
+        const c = issue && issue.category;
+        return (c && CATEGORY_META[c]) ? c : 'issue';
     }
     function isUnshielded(issue) { return issueCategory(issue) === 'unshielded'; }
+    function isObstacle(issue) { return issueCategory(issue) === 'obstacle'; }
+    function catMetaOf(issue) { return CATEGORY_META[issueCategory(issue)] || null; }
+    // Chip label for a category-change history entry (Slack plain / HTML).
+    function categoryVerb(to) { return CATEGORY_META[to] ? CATEGORY_META[to].verb : 'converted to normal issue'; }
+    function categoryVerbIcon(to) { return to === 'unshielded' ? '🛡' : to === 'obstacle' ? '🏗' : '🚩'; }
     // Per-issue approver check: global approver OR category approver for
     // this issue's category. This is what all moderation gates use.
     function isApproverFor(issue) {
@@ -388,7 +400,7 @@
     const panelFilters = new Set(['open', 'pending_fix', 'pending_ignore', 'ready-for-review', 'resolved', 'ignored']);
     // v1.31: category filter — both shown by default. Same M1 toggle / M2
     // solo semantics as the status chips.
-    const panelCategoryFilters = new Set(['issue', 'unshielded']);
+    const panelCategoryFilters = new Set(ALL_CATEGORY_KEYS);
     // v0.29: priority filter chips. Uses the literal string 'none' for
     // issues with no priority (issue.priority === null/undefined). All
     // four active by default. M1 toggle, M2 solo (same as status chips).
@@ -1000,7 +1012,7 @@
         // the actual ping happens in the assignment thread reply.
         const assignedSuffix = issue.assignee ? ` · 👤 @${slackEsc(issue.assignee)}` : '';
         // v1.31: unshielded routes are labeled as such on the parent board.
-        const kindLabel = isUnshielded(issue) ? '🛡✕ *Unshielded Route*' : 'issue';
+        const kindLabel = isUnshielded(issue) ? '🛡✕ *Unshielded Route*' : isObstacle(issue) ? '🏗 *Obstacle (rig / crane)*' : 'issue';
         const lines = [
             `${b.icon} *${b.text}* — ${kindLabel} on ${link}${pri}`,
             `>${note}`,
@@ -1310,6 +1322,8 @@
             const actor = slackPlain(by);
             const head = (to === 'unshielded')
                 ? `🛡 ${actor} marked this as an *Unshielded Route*`
+                : (to === 'obstacle')
+                ? `🏗 ${actor} marked this as an *Obstacle (rig / crane)*`
                 : `🚩 ${actor} converted this back to a *normal issue*`;
             const text = issue.slackThreadTs ? head
                        : `${head}\n_(${slackEsc((issue.note || '').slice(0, 80))} — ${siteLabelForSlack(issue.id)})_`;
@@ -1379,7 +1393,7 @@
         if (h.kind === 'priority') return `${by} set priority → ${slackEsc((h.toPriority || 'none'))}`;
         if (h.kind === 'reshape') return `${by} reshaped the area${h.note ? ` — ${slackEsc(h.note.slice(0, 80))}` : ''}`;
         if (h.kind === 'markermove') return h.markerPos ? `${by} moved the map icon` : `${by} reset the map icon position`;
-        if (h.kind === 'category') return (h.toCategory === 'unshielded') ? `${by} marked as Unshielded Route` : `${by} converted to normal issue`;
+        if (h.kind === 'category') return `${by} ${categoryVerb(h.toCategory)}`;
         if (h.kind === 'comment' || (h.fromStatus && h.fromStatus === h.toStatus)) return `${by} commented: ${slackEsc((h.note || '').slice(0, 80))}`;
         if (!h.fromStatus) return `${by} created`;
         const f = (STATUS_LABEL[h.fromStatus] || { text: h.fromStatus }).text;
@@ -3270,6 +3284,11 @@
                     style="padding:5px 12px;background:transparent;color:${catMeta.color};border:1.5px solid ${catMeta.color};border-radius:14px;cursor:pointer;font:inherit;font-size:11px;font-weight:700">
                     🛡✕ Unshielded Route
                 </button>
+                <button type="button" class="aim-issues-type-chip" data-category="obstacle"
+                    title="Rig, crane or other temporary structure on a pad"
+                    style="padding:5px 12px;background:transparent;color:${CATEGORY_META.obstacle.color};border:1.5px solid ${CATEGORY_META.obstacle.color};border-radius:14px;cursor:pointer;font:inherit;font-size:11px;font-weight:700">
+                    🏗 Obstacle (rig / crane)
+                </button>
             </div>`;
         card.innerHTML = `
             <div style="font-size:15px;font-weight:600;color:#ff8585;margin-bottom:10px">
@@ -3358,9 +3377,9 @@
             typeChips.forEach(c => {
                 const cat = c.dataset.category || null;
                 const isSel = (selectedCategory === cat);
-                const color = cat ? CATEGORY_META.unshielded.color : '#ff4d4d';
+                const color = cat ? CATEGORY_META[cat].color : '#ff4d4d';
                 c.style.background = isSel ? color : 'transparent';
-                c.style.color = isSel ? (cat ? '#1a0d26' : '#fff') : color;
+                c.style.color = isSel ? (cat ? CATEGORY_META[cat].fg : '#fff') : color;
             });
         };
         let lastTypeFire = 0;
@@ -3469,7 +3488,7 @@
         };
         // v1.31: category. Only stamped when non-default so normal issues
         // keep their pre-v1.31 record shape byte-for-byte.
-        if (category === 'unshielded') issue.category = 'unshielded';
+        if (category && CATEGORY_META[category]) issue.category = category;
         currentSiteIssues.push(issue);
         saveIssuesToStorage(siteID, currentSiteIssues);
         renderOneIssue(issue);
@@ -4162,7 +4181,7 @@
                 else if (h.kind === 'assign') trans = h.toAssignee ? `assigned → @${h.toAssignee}` : `unassigned`;
                 else if (h.kind === 'reshape') trans = `reshaped (${Array.isArray(h.polygon) ? h.polygon.length : '?'}-point ${h.toShape || 'polygon'})`;
                 else if (h.kind === 'markermove') trans = h.markerPos ? 'moved the map icon' : 'reset the map icon';
-                else if (h.kind === 'category') trans = (h.toCategory === 'unshielded') ? 'marked as Unshielded Route' : 'converted to normal issue';
+                else if (h.kind === 'category') trans = categoryVerb(h.toCategory);
                 else if (h.kind === 'comment' || h.fromStatus === h.toStatus) trans = `comment`;
                 else trans = `${h.fromStatus} → ${h.toStatus}`;
                 return `[${fmtDateTime(h.at)}] @${h.by}: ${trans}${note}`;
@@ -4235,7 +4254,7 @@
                 else if (h.kind === 'assign') trans = h.toAssignee ? `assigned → @${h.toAssignee}` : `unassigned`;
                 else if (h.kind === 'reshape') trans = `reshaped (${Array.isArray(h.polygon) ? h.polygon.length : '?'}-point ${h.toShape || 'polygon'})`;
                 else if (h.kind === 'markermove') trans = h.markerPos ? 'moved the map icon' : 'reset the map icon';
-                else if (h.kind === 'category') trans = (h.toCategory === 'unshielded') ? 'marked as Unshielded Route' : 'converted to normal issue';
+                else if (h.kind === 'category') trans = categoryVerb(h.toCategory);
                 else if (h.kind === 'comment' || h.fromStatus === h.toStatus) trans = `comment`;
                 else trans = `${h.fromStatus} → ${h.toStatus}`;
                 return `[${fmtDateTime(h.at)}] @${h.by}: ${trans}${note}`;
@@ -4343,6 +4362,13 @@
     // shield-✕ glyph; status still shows via dash pattern + the approved ✓
     // chip. Normal issues fall through to the status-driven look.
     function styleForIssue(issue) {
+        if (isObstacle(issue)) {
+            // v1.44: obstacle = orange while live; resolved/ignored fall back
+            // to the normal dimmed status look (equipment gone = background).
+            if (issue.status === 'resolved' || issue.status === 'ignored') return styleForStatus(issue.status);
+            const c = CATEGORY_META.obstacle.color;
+            return { color: c, fill: c, fillOpacity: 0.18, dashArray: '10,6', weight: 3 };
+        }
         if (!isUnshielded(issue)) return styleForStatus(issue.status);
         const c = CATEGORY_META.unshielded.color;
         // Approved (resolved) = permanent accepted marker: solid outline.
@@ -4356,6 +4382,11 @@
     // divIcon. The approved ✓ chip rides bottom-right, mirroring the green
     // "?" activity badge top-right.
     function iconForIssue(issue) {
+        if (isObstacle(issue)) {
+            const st = iconForStatus(issue.status);
+            const live = !(issue.status === 'resolved' || issue.status === 'ignored');
+            return { glyphHtml: live ? '🏗' : st.glyph, color: live ? CATEGORY_META.obstacle.color : st.color };
+        }
         if (!isUnshielded(issue)) return { glyphHtml: iconForStatus(issue.status).glyph, color: iconForStatus(issue.status).color };
         const c = CATEGORY_META.unshielded.color;
         const approvedTick = (issue.status === 'resolved') ? `
@@ -4601,7 +4632,7 @@
         }
         if (last.kind === 'reshape') return '✏ Reshaped';
         if (last.kind === 'markermove') return '📍 Icon moved';
-        if (last.kind === 'category') return (last.toCategory === 'unshielded') ? '🛡 Marked Unshielded' : '🚩 Marked Issue';
+        if (last.kind === 'category') return `${categoryVerbIcon(last.toCategory)} Marked ${CATEGORY_META[last.toCategory] ? CATEGORY_META[last.toCategory].short : 'Issue'}`;
         if (last.kind === 'comment' || (last.fromStatus && last.fromStatus === last.toStatus)) {
             return `💬 Commented`;
         }
@@ -4655,9 +4686,7 @@
             return h.markerPos ? `📍 <b>@${by}</b> moved the map icon` : `📍 <b>@${by}</b> reset the map icon`;
         }
         if (h.kind === 'category') {
-            return (h.toCategory === 'unshielded')
-                ? `🛡 <b>@${by}</b> marked as Unshielded Route`
-                : `🚩 <b>@${by}</b> converted to normal issue`;
+            return `${categoryVerbIcon(h.toCategory)} <b>@${by}</b> ${categoryVerb(h.toCategory)}`;
         }
         if (h.kind === 'comment' || (h.fromStatus && h.fromStatus === h.toStatus)) {
             return `💬 <b>@${by}</b> commented${note}`;
@@ -4704,8 +4733,8 @@
             ? `<span style="display:inline-block;padding:1px 6px;border-radius:8px;background:${priorityMeta(issue.priority).color};color:${priorityMeta(issue.priority).textColor};font-size:9px;font-weight:700;letter-spacing:0.5px;margin-left:6px">🎯 ${priorityMeta(issue.priority).text}</span>`
             : '';
         // v1.31: unshielded-route chip inline with the header line
-        const catHtml = isUnshielded(issue)
-            ? `<span style="display:inline-block;padding:1px 6px;border-radius:8px;background:${CATEGORY_META.unshielded.color};color:#1a0d26;font-size:9px;font-weight:700;letter-spacing:0.5px;margin-left:6px">🛡✕ UNSHIELDED ROUTE</span>`
+        const catHtml = catMetaOf(issue)
+            ? `<span style="display:inline-block;padding:1px 6px;border-radius:8px;background:${catMetaOf(issue).color};color:${catMetaOf(issue).fg};font-size:9px;font-weight:700;letter-spacing:0.5px;margin-left:6px">${catMetaOf(issue).glyph} ${catMetaOf(issue).text}</span>`
             : '';
         // v1.00: unseen-activity callout — green-tinted block listing
         // what's new since the user last opened this issue. Clears once
@@ -5054,7 +5083,7 @@
         const issue = ctx ? ctx.issues.find(i => i.id === issueId) : null;
         if (!issue) return false;
         const from = issueCategory(issue);
-        const to = (newCategory === 'unshielded') ? 'unshielded' : 'issue';
+        const to = (newCategory && CATEGORY_META[newCategory]) ? newCategory : 'issue';
         if (from === to) return false;   // no-op
         const isCreator = !!(issue.createdBy && cachedUsername && issue.createdBy === cachedUsername);
         const isLocalOnly = (issue.createdBy === 'local-only');
@@ -5075,7 +5104,7 @@
             toCategory: to,
             note: '',
         });
-        if (to === 'unshielded') issue.category = 'unshielded';
+        if (CATEGORY_META[to]) issue.category = to;
         else delete issue.category;
         persistCtx(ctx);
         rerenderCtx(ctx, issue);
@@ -5083,11 +5112,11 @@
         console.log(`${TAG} category ${issueId}: ${from} → ${to} by @${by}`);
         const wasLocalOnly = (issue.createdBy === 'local-only');
         if (cachedToken && !wasLocalOnly) {
-            showToast(to === 'unshielded' ? 'Marked as Unshielded Route — pushing…' : 'Converted to normal issue — pushing…', 2500);
+            showToast(`${categoryVerb(to).replace(/^marked/, 'Marked').replace(/^converted/, 'Converted')} — pushing…`, 2500);
             commitCtx(ctx, `@${by}: category → ${to}`);
             fireSlack(() => postSlackCategoryChange(issue, from, to, by));
         } else {
-            showToast(to === 'unshielded' ? 'Marked as Unshielded Route (local only).' : 'Converted to normal issue (local only).', 2500);
+            showToast(`${categoryVerb(to).replace(/^marked/, 'Marked').replace(/^converted/, 'Converted')} (local only).`, 2500);
         }
         return true;
     }
@@ -5295,8 +5324,8 @@
                         ? `📍 <span style="color:#c8cdd4;font-weight:700">moved the map icon</span>`
                         : `📍 <span style="color:#888;font-weight:700">reset the map icon to auto</span>`;
                 } else if (h.kind === 'category') {
-                    label = (h.toCategory === 'unshielded')
-                        ? `🛡 marked as <span style="color:${CATEGORY_META.unshielded.color};font-weight:700">UNSHIELDED ROUTE</span>`
+                    label = CATEGORY_META[h.toCategory]
+                        ? `${categoryVerbIcon(h.toCategory)} marked as <span style="color:${CATEGORY_META[h.toCategory].color};font-weight:700">${CATEGORY_META[h.toCategory].text}</span>`
                         : `🚩 converted to <span style="color:#ff8585;font-weight:700">normal issue</span>`;
                 } else if (h.kind === 'comment' || h.fromStatus === h.toStatus) {
                     label = `💬 commented`;
@@ -5369,13 +5398,19 @@
             // normal Issue and Unshielded Route (one-click migration for
             // sections that were flagged as plain issues pre-v1.31).
             const canConvert = canEditGeometry;   // v1.41: no map needed — allowed from the fleet panel
-            const isUnsh = isUnshielded(liveIssue);
+            // v1.44: one button per OTHER category (3-way: issue / unshielded / obstacle).
+            const curCat = issueCategory(liveIssue);
+            const convertDefs = [
+                { key: 'issue', label: '🚩 Mark as Issue', title: 'Convert back to a normal issue', bg: '#2a1212', color: '#ff8585' },
+                { key: 'unshielded', label: '🛡 Mark Unshielded', title: 'Mark as an Unshielded Route — purple shield-✕ marker that stays visible when approved', bg: CATEGORY_META.unshielded.bg, color: CATEGORY_META.unshielded.color },
+                { key: 'obstacle', label: '🏗 Mark Obstacle', title: 'Mark as an Obstacle — rig / crane on a pad (orange 🏗 marker, resolve when the equipment leaves)', bg: CATEGORY_META.obstacle.bg, color: CATEGORY_META.obstacle.color },
+            ];
             const convertBtnHtml = canConvert
-                ? `<button id="aim-issues-modal-convert"
-                       title="${isUnsh ? 'Convert back to a normal issue' : 'Mark as an Unshielded Route — purple shield-✕ marker that stays visible when approved'}"
-                       style="padding:7px 14px;background:#241536;color:${CATEGORY_META.unshielded.color};border:1px solid ${CATEGORY_META.unshielded.color};border-radius:4px;cursor:pointer;font:inherit;font-weight:700">
-                       ${isUnsh ? '🚩 Mark as Issue' : '🛡 Mark Unshielded'}
-                   </button>`
+                ? convertDefs.filter(d => d.key !== curCat).map(d => `<button class="aim-issues-modal-convert" data-category="${d.key}"
+                       title="${d.title}"
+                       style="padding:7px 14px;background:${d.bg};color:${d.color};border:1px solid ${d.color};border-radius:4px;cursor:pointer;font:inherit;font-weight:700">
+                       ${d.label}
+                   </button>`).join('')
                 : '';
             const resendBtnHtml = canResend
                 ? `<button id="aim-issues-modal-resend"
@@ -5694,7 +5729,7 @@
                     <span style="color:#aaa;font-size:14px;font-weight:600">Issue ·</span>
                     <span style="color:${statusMeta.color};font-weight:700;font-size:14px">${statusMeta.text}</span>
                     ${!isSiteIssue ? `<span title="Site ${escHtml(String(modalCtx.sid))}" style="display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:9px;background:#1a2029;color:#7adfe6;font-size:9px;font-weight:700;border:1px solid rgba(122,223,230,0.45);letter-spacing:0.3px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">🌐 ${escHtml(modalCtx.name || ('site ' + modalCtx.sid))}</span>` : ''}
-                    ${isUnshielded(liveIssue) ? `<span title="Unshielded Route — stays visible on the map when approved" style="display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:9px;background:#241536;color:${CATEGORY_META.unshielded.color};font-size:9px;font-weight:700;border:1px solid ${CATEGORY_META.unshielded.color}77;letter-spacing:0.3px">🛡✕ UNSHIELDED</span>` : ''}
+                    ${catMetaOf(liveIssue) ? `<span title="${isUnshielded(liveIssue) ? 'Unshielded Route — stays visible on the map when approved' : 'Obstacle — rig / crane on a pad; resolve when the equipment is gone'}" style="display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:9px;background:${catMetaOf(liveIssue).bg};color:${catMetaOf(liveIssue).color};font-size:9px;font-weight:700;border:1px solid ${catMetaOf(liveIssue).color}77;letter-spacing:0.3px">${catMetaOf(liveIssue).glyph} ${catMetaOf(liveIssue).short.toUpperCase()}</span>` : ''}
                     ${headerPri}
                     ${roleChip}
                     ${slackBadge}
@@ -6098,13 +6133,12 @@
             });
             // v1.31: category convert toggle. Non-destructive + audited, so
             // single click; re-render reflects the new chip/buttons.
-            const convertBtn = card.querySelector('#aim-issues-modal-convert');
-            if (convertBtn) {
+            card.querySelectorAll('.aim-issues-modal-convert').forEach(convertBtn => {
                 convertBtn.onclick = () => {
-                    applyCategoryChange(liveIssue.id, isUnshielded(liveIssue) ? 'issue' : 'unshielded');
+                    applyCategoryChange(liveIssue.id, convertBtn.dataset.category);
                     render();
                 };
-            }
+            });
             // v1.41: ↗ Open in site — deep link (same URL shape Slack uses).
             const openSiteBtn = card.querySelector('#aim-issues-modal-opensite');
             if (openSiteBtn) {
@@ -6231,7 +6265,7 @@
     let fleetDragInFlight = false;
     let fleetFilters = new Set(FLEET_ATTENTION_STATUSES);   // default view = "Needs attention"
     let fleetPriorityFilters = new Set(['high', 'medium', 'low', 'none']);
-    let fleetCategoryFilters = new Set(['issue', 'unshielded']);
+    let fleetCategoryFilters = new Set(ALL_CATEGORY_KEYS);
     let fleetSearch = '';
     let fleetSoloSid = null;         // left-rail solo (null = all sites)
     let fleetOnlyMyReview = false;   // ⚡ pendings I can approve
@@ -6618,7 +6652,7 @@
         const allLive = perSite.flatMap(p => p.live);
         const counts = { open: 0, pending_fix: 0, pending_ignore: 0, 'ready-for-review': 0, resolved: 0, ignored: 0 };
         allLive.forEach(i => { const s = i.status || 'open'; if (counts[s] !== undefined) counts[s]++; });
-        const catCounts = { issue: 0, unshielded: 0 };
+        const catCounts = { issue: 0, unshielded: 0, obstacle: 0 };
         allLive.forEach(i => { catCounts[issueCategory(i)]++; });
         const priCounts = { high: 0, medium: 0, low: 0, none: 0 };
         allLive.forEach(i => { const k = i.priority || 'none'; if (priCounts[k] !== undefined) priCounts[k]++; });
@@ -6647,7 +6681,8 @@
         }).join('');
         const catChips = [
             { key: 'issue', label: '🚩 Issues', color: '#ff8585', fg: '#2a0d0d' },
-            { key: 'unshielded', label: '🛡✕ Unshielded', color: CATEGORY_META.unshielded.color, fg: '#1a0d26' },
+            { key: 'unshielded', label: '🛡✕ Unshielded', color: CATEGORY_META.unshielded.color, fg: CATEGORY_META.unshielded.fg },
+            { key: 'obstacle', label: '🏗 Obstacles', color: CATEGORY_META.obstacle.color, fg: CATEGORY_META.obstacle.fg },
         ].map(c => chip('aim-fleet-catchip', `data-category="${c.key}"`, fleetCategoryFilters.has(c.key), c.color, c.label, catCounts[c.key], c.fg, 'M1 toggle · M2 solo')).join('');
         const priChips = ['high', 'medium', 'low', 'none'].map(p => {
             const m = p === 'none' ? { text: 'NONE', color: '#888', textColor: '#fff' } : priorityMeta(p);
@@ -6730,7 +6765,7 @@
                     <div>
                         <span style="display:inline-block;padding:2px 6px;border-radius:8px;background:${meta.color};color:${DARK.has(issue.status) ? '#000' : '#fff'};font-size:10px;font-weight:700">${meta.text}</span>
                         ${priM ? `<div style="margin-top:2px"><span style="display:inline-block;padding:1px 5px;border-radius:6px;background:${priM.color};color:${priM.textColor};font-size:9px;font-weight:700">🎯 ${priM.text}</span></div>` : ''}
-                        ${isUnshielded(issue) ? `<div style="margin-top:2px"><span style="display:inline-block;padding:1px 5px;border-radius:6px;background:${CATEGORY_META.unshielded.color};color:#1a0d26;font-size:9px;font-weight:700">🛡✕</span></div>` : ''}
+                        ${catMetaOf(issue) ? `<div style="margin-top:2px"><span title="${catMetaOf(issue).text}" style="display:inline-block;padding:1px 5px;border-radius:6px;background:${catMetaOf(issue).color};color:${catMetaOf(issue).fg};font-size:9px;font-weight:700">${catMetaOf(issue).glyph}</span></div>` : ''}
                         ${issue.deleted ? `<div style="font-size:9px;color:#ff8585;margin-top:2px;font-weight:700">🗑 DELETED</div>` : ''}
                     </div>
                     <div style="color:#e6e6e6;font-size:12px;line-height:1.35;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;${issue.deleted ? 'text-decoration:line-through;color:#999' : ''}">${escHtml(issue.note)}</div>
@@ -6900,7 +6935,7 @@
             });
         };
         wireChips('.aim-fleet-chip', 'status', fleetFilters, PANEL_STATUS_ORDER);
-        wireChips('.aim-fleet-catchip', 'category', fleetCategoryFilters, ['issue', 'unshielded']);
+        wireChips('.aim-fleet-catchip', 'category', fleetCategoryFilters, ALL_CATEGORY_KEYS);
         wireChips('.aim-fleet-prichip', 'priority', fleetPriorityFilters, ['high', 'medium', 'low', 'none']);
         P.querySelectorAll('.aim-fleet-quick').forEach(c => {
             c.onclick = () => {
@@ -7258,7 +7293,7 @@
         if (!!v.deleted !== fleetShowDeleted) fleetSelected.clear();   // live vs tombstone selections never mix
         fleetFilters = new Set(Array.isArray(v.statuses) && v.statuses.length ? v.statuses : FLEET_ATTENTION_STATUSES);
         fleetPriorityFilters = new Set(Array.isArray(v.priorities) && v.priorities.length ? v.priorities : ['high', 'medium', 'low', 'none']);
-        fleetCategoryFilters = new Set(Array.isArray(v.categories) && v.categories.length ? v.categories : ['issue', 'unshielded']);
+        fleetCategoryFilters = new Set(Array.isArray(v.categories) && v.categories.length ? v.categories : ALL_CATEGORY_KEYS);
         fleetOnlyMyReview = !!v.myReview; fleetOnlyMine = !!v.mine; fleetOnlyUnseen = !!v.unseen;
         fleetOnlyStale = !!v.stale; if (Number.isFinite(Number(v.staleDays)) && Number(v.staleDays) > 0) fleetStaleDays = Number(v.staleDays);
         fleetShowDeleted = !!v.deleted; fleetSearch = String(v.search || '');
@@ -7604,20 +7639,21 @@
 
         // v1.31: category chips — 🚩 Issues vs 🛡✕ Unshielded Routes. Same
         // M1 toggle / M2 solo semantics as the status chips.
-        const catCounts = { issue: 0, unshielded: 0 };
+        const catCounts = { issue: 0, unshielded: 0, obstacle: 0 };
         liveSiteIssues.forEach(i => { catCounts[issueCategory(i)]++; });
         const catChipsHtml = [
-            { key: 'issue', label: '🚩 Issues', color: '#ff8585' },
-            { key: 'unshielded', label: '🛡✕ Unshielded', color: CATEGORY_META.unshielded.color },
+            { key: 'issue', label: '🚩 Issues', color: '#ff8585', fg: '#2a0d0d', what: 'normal issues' },
+            { key: 'unshielded', label: '🛡✕ Unshielded', color: CATEGORY_META.unshielded.color, fg: CATEGORY_META.unshielded.fg, what: 'unshielded routes' },
+            { key: 'obstacle', label: '🏗 Obstacles', color: CATEGORY_META.obstacle.color, fg: CATEGORY_META.obstacle.fg, what: 'obstacles (rigs / cranes)' },
         ].map(c => {
             const active = panelCategoryFilters.has(c.key);
             return `<button class="aim-issues-panel-catchip" data-category="${c.key}"
-                title="${active ? 'Click to hide' : 'Click to show'} ${c.key === 'unshielded' ? 'unshielded routes' : 'normal issues'} — M2 to solo"
+                title="${active ? 'Click to hide' : 'Click to show'} ${c.what} — M2 to solo"
                 style="
                     padding:5px 10px;border-radius:14px;font:inherit;font-size:11px;font-weight:700;
                     border:1.5px solid ${c.color};
                     background:${active ? c.color : 'transparent'};
-                    color:${active ? (c.key === 'unshielded' ? '#1a0d26' : '#2a0d0d') : c.color};
+                    color:${active ? c.fg : c.color};
                     cursor:pointer;opacity:${active ? 1 : 0.55};
                     display:inline-flex;align-items:center;gap:6px">
                 <span>${c.label}</span>
@@ -7808,7 +7844,7 @@
                         if (h.kind === 'assign') return h.toAssignee ? `@${by}: 👤 assigned → @${h.toAssignee}` : `@${by}: 👤 unassigned`;
                         if (h.kind === 'reshape') return `@${by}: ✏ reshaped the area`;
                         if (h.kind === 'markermove') return `@${by}: 📍 moved the map icon`;
-                        if (h.kind === 'category') return (h.toCategory === 'unshielded') ? `@${by}: 🛡 marked Unshielded Route` : `@${by}: converted to normal issue`;
+                        if (h.kind === 'category') return `@${by}: ${categoryVerbIcon(h.toCategory)} ${categoryVerb(h.toCategory)}`;
                         if (h.kind === 'comment' || (h.fromStatus && h.fromStatus === h.toStatus)) {
                             return `@${by}: 💬 ${(h.note || '').slice(0, 80)}`;
                         }
@@ -8046,7 +8082,7 @@
             };
         });
         // v1.31: category chips — same M1 toggle / M2 solo semantics
-        const ALL_CATEGORIES = ['issue', 'unshielded'];
+        const ALL_CATEGORIES = ALL_CATEGORY_KEYS;
         panelEl.querySelectorAll('.aim-issues-panel-catchip').forEach(chip => {
             chip.onclick = () => {
                 const c = chip.dataset.category;
