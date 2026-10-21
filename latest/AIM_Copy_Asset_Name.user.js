@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.396
+// @version      4.397
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.396';
+    const SCRIPT_VERSION = '4.397';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -30187,6 +30187,7 @@
         const st = rigStateLoad(sid);
         const todo = Object.entries(st.rows).filter(([, c]) => c.status === 'staged' && c.padId);
         const out = document.getElementById('aim-rig-result'); const say = (m, col) => { if (out) { out.textContent = m; out.style.color = col || '#cfd6dc'; } console.log(`${RIG_TAG} commit: ${m}`); };
+        const logL = (m) => { rigLog(sid, m); say(m); };
         if (!todo.length) { say('Nothing staged.'); return; }
         const dry = (() => { try { return !!document.getElementById('aim-gen-dryrun').checked; } catch (e) { return true; } })();
         // v4.391: standard FFZ ring → NFZ; custom FFZ (drone flies ON the pad) → cut the arcs inside every pad that FFZ spans.
@@ -30369,7 +30370,9 @@
             try { await fetchMapObjects(sid, true); } catch (e) {}
             const live = elvLiveFp(sid, x.fp.id); const have = live && Array.isArray(live.arcs) ? live.arcs.length : -1;
             if (have !== x.keep.length) throw new Error(`"${x.fp.name}": expected ${x.keep.length} arcs after cut, server has ${have}`);
-            done.push({ id: x.fp.id, name: x.fp.name, cut: x.cut.length, left: x.keep.length }); logL(`cut ${x.cut.length} arc(s) from "${x.fp.name}" (${x.keep.length} left, id ${saved && saved.id})`);
+            done.push({ id: x.fp.id, name: x.fp.name, cut: x.cut.length, left: x.keep.length });
+            c.fpCut = done.slice(); c.fpRestored = false; c.status = 'active'; c.committedAt = c.committedAt || rigToday(); rigStateSave(sid);   // v4.397: persist per path
+            logL(`cut ${x.cut.length} arc(s) from "${x.fp.name}" (${x.keep.length} left, id ${saved && saved.id})`);
         }
         c.fpCut = done; c.fpRestored = false;
     }
