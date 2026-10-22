@@ -1,4 +1,6 @@
-## 2026-10-22 — 🩻 P&A assets: red ✕ for plugged ground, P&A ruleset, status review — Site Setup Tools latest v4.413 → v4.414 (latest only)
+## 2026-10-22 — 🩻 P&A assets: red ✕ for plugged ground, P&A ruleset, status review — Site Setup Tools latest v4.413 → v4.415 (latest only)
+
+- **v4.415** — the Well records (Enverus) section is now **three steps with one button each**: A · Check the list, B · Find missing, C · Report for the client. Key, API column, scope, operator, facilities, mismatch distance and the like are folded under ⚙ settings per step (open by themselves only while something still needs setting). Long grey paragraphs became one short line with the detail behind an ⓘ. The missing list reads "Show: producing · drilled / permitted · inactive · facilities · ✕ plugged / retired", the P&A rule is one highlighted line ("✕ plugged → P&A assets"), and the Stage button says what it will do ("➕ Stage 12 (3 as P&A)").
 
 - **v4.414** — fill-in results saved before v4.413 (or resumed from a session) had no P&A fields, so the plugged rows showed red dots, no ✕ on the map and nothing ticked. The P&A fields are now derived on the fly for any candidate that lacks them.
 
