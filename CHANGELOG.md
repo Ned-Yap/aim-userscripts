@@ -1,3 +1,7 @@
+## 2026-10-22 — 🏭 Enverus facilities in the fill-in — Site Setup Tools latest v4.410 (latest only)
+
+- **v4.410** — the Enverus facilities dataset is on the key now, so 🔍 Find missing wells pulls **facilities too** (tick on by default): tank batteries, compressor / meter / pumping stations, plants, with name, type, status, operator and location. Yours stage with their facility type (BATTERY, COMPRESSOR STATION …); other operators' as "3RD PARTY <type> (operator)" obstacles. A facility already in the list by name, or within 150 ft of anything staged, is treated as known. Retired / abandoned facilities sit with plugged (off by default). Our facilities missing from the client's list appear in the client review as "Facility of yours that is not in the list".
+
 ## 2026-10-21 — Client response: override a ⚠ move — Site Setup Tools latest v4.409 (latest only)
 
 - **v4.409** — a move the tool held back because the client's coordinate disagrees with the Enverus pin now has a **"move anyway"** tick on its row for after you've looked (click the row: current spot, client spot and the Enverus pin all pulse). The flag text says why it was held.

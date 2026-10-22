@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.409
+// @version      4.410
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.409';
+    const SCRIPT_VERSION = '4.410';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -22979,7 +22979,7 @@
         resp: { rows: null, fileName: null, at: null, applied: false, tab: null, moves: [], renames: [], removeIds: [], removeNames: [] },   // 📬 Client response
         swap: { pairs: [], pick: [], at: null, lastSwaps: [] },               // 🔁 mislabeled wellheads
         env: { apiCol: null, open: false, notes: true, checkedAt: null, summary: null, running: false, opFilter: '', mismatchFt: 300, scope: 'selected', includeOurs: false,
-            missing: null, missingAt: null, missingOp: '', missingSel: new Set(), missStatus: { producing: true, drilled: true, inactive: true, plugged: false }, finding: false },   // v4.366: fill-in   // v4.356: Enverus cross-check · v4.358: client review report
+            missing: null, missingAt: null, missingOp: '', missingSel: new Set(), missStatus: { producing: true, drilled: true, inactive: true, plugged: false, facility: true }, finding: false, missingFac: true },   // v4.366: fill-in · facilities too   // v4.356: Enverus cross-check · v4.358: client review report
         pri: { on: false, open: false, oilCol: null, waterCol: null, blpdCol: null, priCol: null, clusterFt: 100, padFt: 50, p1Min: 250, p1Max: 1500, summary: null, zeroUntier: true, envUntier: true },   // v4.347: priority tiers · v4.357: zero-production / Enverus-dead wells get no tier
         advOpen: false,                             // v4.331: ▸ Advanced (subset tools + delete mode) expanded — GM-remembered
         secOpen: { bounds: true, data: true, type: false, place: false, env: false, resp: false, create: true, adv: false },   // v4.352: collapsible sections — GM-remembered
@@ -23580,7 +23580,7 @@
     const IMP_STAMP_RE = /^Imported by (.+?) on (\d{4}-\d{2}-\d{2} \d{2}:\d{2}) from (.+?)(?: · (created|updated) by import)?\s*$/m;
     function impComposeNotes(p, when, how) {
         const r = imp.rows[p.i] || {};
-        const parts = [`Original name\n${p.rawName || p.name}`].concat(p.src === 'enverus' ? [`Source\nAdded from Enverus — not in the client's list (${imp.fileName || 'file'})`] : (p.src === 'enverus-3p' ? [`Source\nThird-party well (operator ${p.env && p.env.op ? p.env.op : 'unknown'}) from Enverus — mapped as an obstacle, not one of the client's assets`] : [])).concat(impClientNotesBlock(p)).concat(impPriNotesBlocks(p, String(when).slice(0, 10))).concat(impEnvNotesBlock(p));
+        const parts = [`Original name\n${p.rawName || p.name}`].concat(p.src === 'enverus' ? [`Source\nAdded from Enverus — not in the client's list (${imp.fileName || 'file'})`] : (p.src === 'enverus-3p' ? [`Source\nThird-party ${p.env && p.env.facility ? (p.env.facType || 'facility').toLowerCase() : 'well'} (operator ${p.env && p.env.op ? p.env.op : 'unknown'}) from Enverus — mapped as an obstacle, not one of the client's assets`] : [])).concat(impClientNotesBlock(p)).concat(impPriNotesBlocks(p, String(when).slice(0, 10))).concat(impEnvNotesBlock(p));
         impNotesCols().forEach(c => { const v = String(r[c.col] == null ? '' : r[c.col]).trim(); if (v) parts.push(`${c.label || impCleanLabel(c.col)}\n${v}`); });
         parts.push(`Imported by ${impAuthor() || 'AIM user'} on ${when} from ${imp.fileName || 'file'} · ${how === 'update' ? 'updated' : 'created'} by import`);
         return parts.join('\n\n').slice(0, 2000);
@@ -25658,6 +25658,17 @@
         await range(Number(pref + '00000'), Number(pref + '99999'));
         return [...out.values()];
     }
+    // Enverus FACILITIES (batteries, compressor / meter / pumping stations, plants…) for a county —
+    // same shape as the wells so they flow through the same candidate list.
+    const IMP_FAC_FIELDS = 'UniqueID,FacilityName,FacilityType,FacilitySubType,FacilityStatus,ENVOperator,RawOperator,Owner,Latitude,Longitude,County,StateProvince,UpdatedDate';
+    async function impEnvFetchFacilities(county, state, op) {
+        const rows = await impEnvGet(`facilities?pagesize=1000&DeletedDate=null&County=${encodeURIComponent(county)}&StateProvince=${encodeURIComponent(state)}${op ? `&ENVOperator=${encodeURIComponent(op)}` : ''}&fields=${IMP_FAC_FIELDS}`);
+        return rows.filter(r => isFinite(r.Latitude) && isFinite(r.Longitude)).map(r => ({
+            api: `FAC-${r.UniqueID}`, facility: true, name: String(r.FacilityName || '').trim() || `${r.FacilityType || 'FACILITY'} ${r.UniqueID}`,
+            status: String(r.FacilityStatus || '').toUpperCase(), type: [r.FacilityType, r.FacilitySubType].filter(Boolean).join(' / '), facType: String(r.FacilityType || '').toUpperCase(), traj: '',
+            op: r.ENVOperator || r.RawOperator || r.Owner || '', lat: r.Latitude, lng: r.Longitude, county: r.County || county, state: r.StateProvince || state, found: true, bores: 1, spud: '', plug: '', firstProd: '', pad: '',
+        }));
+    }
     async function impEnvFindMissing() {
         const c = imp.env;
         if (c.finding) return;
@@ -25689,26 +25700,29 @@
                 log(`${everyone ? 'every operator\'s' : op} wells in ${county} County, ${state}…`);
                 const rows = await impEnvFetchOperatorWells(county, state, everyone ? '' : op, log);
                 rows.forEach(r => { const a = String(r.API_UWI_Unformatted || '').replace(/\D/g, '').slice(0, 10); if (!a) return; if (!byApi.has(a)) byApi.set(a, []); byApi.get(a).push(r); });
+                if (c.missingFac) { log(`${everyone ? 'every operator\'s' : op} facilities in ${county} County…`); const facs = await impEnvFetchFacilities(county, state, everyone ? '' : op); facs.forEach(f => byApi.set(f.api, [f])); }
             }
         } catch (e) {
             c.finding = false; impRenderEnvUi();
             console.warn(`${TAG} 🔍 fill-in failed:`, e); impStatus(`🔍 fill-in failed: ${impEsc(e && e.message || e)}`, '#ff6060'); return;
         }
         const cands = [];
+        const liveNames = new Set(imp.points.filter(p => !p.done).map(p => impNormName(p.rawName || p.name)));
         byApi.forEach((rows, a) => {
-            const m = impEnvMerge(rows); if (!m || !isFinite(m.lat) || !isFinite(m.lng)) return;
+            const m = rows[0] && rows[0].facility ? rows[0] : impEnvMerge(rows); if (!m || !isFinite(m.lat) || !isFinite(m.lng)) return;
             if (!impEnvInBox(m.lat, m.lng, box)) return;
-            const inFile = known.has(a);
+            // a facility counts as "in the file" when the list already has it by name, or anything of ours sits within 150 ft of it
+            const inFile = m.facility ? (liveNames.has(impNormName(m.name)) || imp.points.some(p => !p.done && approxMeters(p.lat, p.lng, m.lat, m.lng) <= 46)) : known.has(a);
             // nearest existing asset / pad on the site
             let near = null, bd = Infinity;
             (imp.assetIndex || []).forEach(x => { const d = pointToPolygonMeters(m.lat, m.lng, x.ring); if (d < bd) { bd = d; near = x; } });
-            cands.push(Object.assign({ api: a, inFile, ours: !op || !m.op || m.op.toUpperCase() === op.toUpperCase(), group: impEnvStatusGroup(m.status), nearName: near ? near.name : '', nearFt: isFinite(bd) ? Math.round(bd / GEN_FT_TO_M) : null, inside: isFinite(bd) && bd === 0 }, m));
+            cands.push(Object.assign({ api: a, inFile, ours: !op || !m.op || m.op.toUpperCase() === op.toUpperCase(), group: m.facility ? (/ABANDON|RETIRED|DECOMM|INACTIVE|IDLE/.test(m.status) ? 'plugged' : 'facility') : impEnvStatusGroup(m.status), nearName: near ? near.name : '', nearFt: isFinite(bd) ? Math.round(bd / GEN_FT_TO_M) : null, inside: isFinite(bd) && bd === 0 }, m));
         });
         c.missing = cands.filter(x => !x.inFile).sort((a, b) => (a.ours === b.ours ? 0 : (a.ours ? -1 : 1)) || (a.nearFt == null ? 1e9 : a.nearFt) - (b.nearFt == null ? 1e9 : b.nearFt) || a.name.localeCompare(b.name));
         c.missingTotal = cands.length; c.missingAt = impNowStamp(); c.missingOp = op; c.missingSel = new Set(c.missing.filter(x => c.missStatus[x.group]).map(x => x.api));
         c.finding = false; impMarkDirty(); impRenderEnvUi();
-        const g = (k) => c.missing.filter(x => x.group === k).length, third = c.missing.filter(x => !x.ours).length;
-        impStatus(`🔍 ${everyone ? 'all operators' : op}: <b>${cands.length}</b> wells inside the area in ${counties.size} count${counties.size === 1 ? 'y' : 'ies'} · <b style="color:#ffb347">${c.missing.length} not in the client's list</b> (${g('producing')} producing · ${g('drilled')} drilled/permitted · ${g('inactive')} inactive · ${g('plugged')} plugged${third ? ` · <b style="color:#ffd666">${third} third-party</b>` : ''}) — review the list below and stage the ones to add`);
+        const g = (k) => c.missing.filter(x => x.group === k).length, third = c.missing.filter(x => !x.ours).length, facN = c.missing.filter(x => x.facility).length;
+        impStatus(`🔍 ${everyone ? 'all operators' : op}: <b>${cands.length}</b> wells inside the area in ${counties.size} count${counties.size === 1 ? 'y' : 'ies'} · <b style="color:#ffb347">${c.missing.length} not in the client's list</b> (${g('producing')} producing · ${g('drilled')} drilled/permitted · ${g('inactive')} inactive · ${g('plugged')} plugged${facN ? ` · <b style="color:#c39bd3">${facN} facilit${facN === 1 ? 'y' : 'ies'}</b>` : ''}${third ? ` · <b style="color:#ffd666">${third} third-party</b>` : ''}) — review the list below and stage the ones to add`);
     }
     function impEnvStageMissing() {
         const c = imp.env; if (!c.missing) return;
@@ -25720,8 +25734,8 @@
             if (m.name) row[m.name] = x.name;
             if (m.lat) row[m.lat] = String(x.lat);
             if (m.lng) row[m.lng] = String(x.lng);
-            if (c.apiCol) row[c.apiCol] = x.api;
-            const typeRaw = m.type ? (x.ours === false ? `3RD PARTY WELL (${(x.op || 'unknown operator').toUpperCase()})` : `${/HORIZ/.test(x.traj) ? 'H' : 'V'} - WELL (Enverus)`) : '';
+            if (c.apiCol && !x.facility) row[c.apiCol] = x.api;
+            const typeRaw = m.type ? (x.facility ? (x.ours === false ? `3RD PARTY ${x.facType || 'FACILITY'} (${(x.op || 'unknown operator').toUpperCase()})` : (x.facType || 'FACILITY')) : (x.ours === false ? `3RD PARTY WELL (${(x.op || 'unknown operator').toUpperCase()})` : `${/HORIZ/.test(x.traj) ? 'H' : 'V'} - WELL (Enverus)`)) : '';
             if (m.type) row[m.type] = typeRaw;
             imp.rows.push(row);
             const i = imp.rows.length - 1;
@@ -25747,7 +25761,7 @@
         if (!e || e.noApi) return 'noapi';
         if (!e.found) return 'notfound';
         const st = e.status || '';
-        if (/^PRODUCING|^INJECTING/.test(st)) return 'producing';
+        if (/^PRODUCING|^INJECTING|^IN SERVICE|^ACTIVE|^OPERAT/.test(st)) return 'producing';
         if (/P ?& ?A|PLUGGED|EXPIRED|CANCELLED/.test(st)) return 'plugged';
         if (/INACTIVE|^TA\b|SHUT/.test(st)) return 'inactive';
         return 'other';
@@ -25820,6 +25834,7 @@
                     <span style="color:#888;font-size:10px">the operator's wells inside your boundaries whose API is not in the file — a pad with one listed well picks up its siblings</span>
                     <label style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:#cfd6dc">operator <input type="text" data-impenv-op value="${impEsc(c.missingOp || c.mainOp || '')}" placeholder="from the cross-check" style="width:130px;${inCss}"></label>
                     <label style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:#ffd666;cursor:pointer" title="Every operator's wells inside the area, not just the client's. Anything that is not plugged is an obstacle the drone must know about: third-party wells stage as '3RD PARTY WELL (operator)', untiered, never inspected."><input type="checkbox" data-impenv-all ${c.missingAll ? 'checked' : ''} style="accent-color:#ffd666;margin:0"> every operator (3rd-party wells as obstacles)</label>
+                    <label style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:#c39bd3;cursor:pointer" title="Also pull Enverus FACILITIES in those counties — tank batteries, compressor / meter / pumping stations, plants. Yours stage with their facility type; other operators' as 3rd-party obstacles."><input type="checkbox" data-impenv-fac ${c.missingFac !== false ? 'checked' : ''} style="accent-color:#c39bd3;margin:0"> facilities too</label>
                     <button data-impenv-find ${c.finding || !key ? 'disabled' : ''} style="background:rgba(255,214,102,0.15);color:#ffd666;border:1px solid rgba(255,214,102,0.5);border-radius:3px;padding:3px 12px;cursor:pointer;font:inherit;font-size:11px;font-weight:600${c.finding || !key ? ';opacity:0.5;cursor:default' : ''}">${c.finding ? '⏳ searching…' : '🔍 Find missing wells'}</button>
                     <span style="color:#888;font-size:10px">${imp.shapes.length ? `inside the ${imp.shapes.length} boundar${imp.shapes.length === 1 ? 'y' : 'ies'}` : 'no boundary — uses the selected points\' area + ¼ mi'} · needs a cross-check first (counties come from it)</span>
                 </div>
@@ -25844,6 +25859,7 @@
         } catch (e) { console.warn(`${TAG} 📋 review preview failed:`, e); }
         el.querySelector('[data-impenv-op]').onchange = function () { c.missingOp = this.value.trim(); };
         el.querySelector('[data-impenv-all]').onchange = function () { c.missingAll = this.checked; };
+        el.querySelector('[data-impenv-fac]').onchange = function () { c.missingFac = this.checked; };
         const fb = el.querySelector('[data-impenv-find]'); if (fb) fb.onclick = () => { c.missingOp = (el.querySelector('[data-impenv-op]') || {}).value || c.missingOp; impEnvFindMissing().catch(e => { console.warn(`${TAG} 🔍`, e); impStatus(`🔍 ${impEsc(e && e.message || e)}`, '#ff6060'); }); };
         impRenderMissingUi(el);
         el.querySelector('[data-impenv-mm]').onchange = function () { const v = parseFloat(this.value); if (isFinite(v) && v >= 0) { c.mismatchFt = v; impMarkDirty(); impRenderEnvUi(); } };
@@ -25862,8 +25878,8 @@
         if (!c.missing) { el.innerHTML = ''; return; }
         const list = c.missing;
         if (!list.length) { el.innerHTML = `<div style="font-size:10px;color:#5fff5f">✓ every ${impEsc(c.missingOp)} well inside the area is already in the client's list (${c.missingTotal || 0} checked, ${impEsc(c.missingAt || '')})</div>`; return; }
-        const gcol = { producing: '#5fff5f', drilled: '#7adfe6', inactive: '#ffb347', plugged: '#ff5252' };
-        const glabel = { producing: 'producing / injecting', drilled: 'drilled / permitted / DUC', inactive: 'inactive / TA', plugged: 'plugged / expired' };
+        const gcol = { producing: '#5fff5f', drilled: '#7adfe6', inactive: '#ffb347', plugged: '#ff5252', facility: '#c39bd3' };
+        const glabel = { producing: 'producing / injecting', drilled: 'drilled / permitted / DUC', inactive: 'inactive / TA', plugged: 'plugged / expired / retired', facility: 'facilities (batteries, stations, plants)' };
         const shown = list.filter(x => c.missStatus[x.group]);
         const nSel = shown.filter(x => c.missingSel.has(x.api) && !x.staged).length;
         const chip = (k) => { const n = list.filter(x => x.group === k).length; return `<label style="display:inline-flex;align-items:center;gap:3px;font-size:10px;color:${gcol[k]};cursor:pointer"><input type="checkbox" data-impmiss-g="${k}" ${c.missStatus[k] ? 'checked' : ''} style="accent-color:${gcol[k]};margin:0"> ${glabel[k]} ${n}</label>`; };
@@ -25871,12 +25887,12 @@
             <input type="checkbox" data-impmiss-sel="${x.api}" ${x.staged ? 'disabled' : (c.missingSel.has(x.api) ? 'checked' : '')} style="accent-color:#ffd666;margin:0;flex:none">
             <span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${gcol[x.group]};flex:none" title="${impEsc(x.status)}"></span>
             <b style="flex:none;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${impEsc(x.name)}</b>
-            <span style="color:#8a949e;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${x.ours === false ? `<b style="color:#ffd666">${impEsc(x.op || '3rd party')}</b> · ` : ''}${impEsc(x.status)} · ${impEsc(x.type || '')}${x.traj ? ` · ${impEsc(x.traj.toLowerCase())}` : ''} · API ${x.api}${x.nearFt != null ? ` · ${x.inside ? 'inside' : `${x.nearFt.toLocaleString()} ft from`} ${impEsc(x.nearName)}` : ' · no mapped asset nearby'}${x.staged ? ' · ✓ staged' : ''}</span>
+            <span style="color:#8a949e;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${x.ours === false ? `<b style="color:#ffd666">${impEsc(x.op || '3rd party')}</b> · ` : ''}${x.facility ? '<b style="color:#c39bd3">facility</b> · ' : ''}${impEsc(x.status)} · ${impEsc(x.type || '')}${x.traj ? ` · ${impEsc(x.traj.toLowerCase())}` : ''} · ${x.facility ? `Enverus ${x.api}` : `API ${x.api}`}${x.nearFt != null ? ` · ${x.inside ? 'inside' : `${x.nearFt.toLocaleString()} ft from`} ${impEsc(x.nearName)}` : ' · no mapped asset nearby'}${x.staged ? ' · ✓ staged' : ''}</span>
             <span data-impmiss-info="${x.api}" title="${impEsc(`${x.name} · API ${x.api}\n${x.status} · ${x.type || ''} · ${x.traj || ''} · ${x.op}\nspud ${x.spud || '—'} · first prod ${x.firstProd || '—'}${x.plug ? ` · plugged ${x.plug}` : ''}\n${Number(x.lat).toFixed(6)}, ${Number(x.lng).toFixed(6)} · ${x.county} County\n${x.nearName ? `${x.inside ? 'inside' : x.nearFt + ' ft from'} mapped asset "${x.nearName}"` : 'no mapped asset nearby'}${x.bores > 1 ? `\n${x.bores} wellbores` : ''}`)}" style="flex:none;width:14px;height:14px;line-height:12px;text-align:center;border:1px solid rgba(122,223,230,0.5);border-radius:50%;color:#7adfe6;font-size:9px;font-weight:700;cursor:help">i</span>
         </div>`;
         el.innerHTML = `<div style="padding:6px 8px;background:rgba(255,255,255,0.03);border:1px dashed rgba(255,214,102,0.3);border-radius:3px">
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:4px;font-size:11px"><b style="color:#ffd666">${list.length}</b> <span style="color:#cfd6dc">${impEsc(c.missingOp)} wells inside the area that are NOT in the client's list</span> <span style="color:#888;font-size:10px">(of ${c.missingTotal || 0} found · ${impEsc(c.missingAt || '')})</span>
-                ${chip('producing')} ${chip('drilled')} ${chip('inactive')} ${chip('plugged')}
+                ${chip('producing')} ${chip('drilled')} ${chip('inactive')} ${chip('facility')} ${chip('plugged')}
                 <span style="flex:1"></span>
                 <button data-impmiss-all style="background:none;border:1px solid rgba(255,255,255,0.15);color:#9ad;border-radius:3px;padding:0 6px;cursor:pointer;font:inherit;font-size:10px">tick all shown</button>
                 <button data-impmiss-none style="background:none;border:1px solid rgba(255,255,255,0.15);color:#9ad;border-radius:3px;padding:0 6px;cursor:pointer;font:inherit;font-size:10px">untick</button>
@@ -25960,7 +25976,7 @@
             if (p.dup && p.pri && p.pri.off > 100) add('Low', 'Location differs from where we have it mapped', p, ll(p.lat, p.lng), `${ftTxt(p.pri.off)} from where we have "${p.pri.offOf}" mapped`, `The coordinates in your list are ${ftTxt(p.pri.off)} from where this asset sits on our map today (mapped from your earlier data).`, 'Confirm which location is right.', { distFt: p.pri.off });
         });
         // wells the public records put on the client's pads but the list does not have
-        (c.missing || []).forEach(x => { if (x.group === 'plugged' || x.ours === false) return; add('Medium', 'Well on your pads that is not in the list', null, '—', `${x.name} · API ${x.api} · ${x.status}${x.type ? ` · ${x.type}` : ''}${x.traj ? ` · ${x.traj.toLowerCase()}` : ''}${x.nearName ? ` · ${x.inside ? 'inside' : `${x.nearFt.toLocaleString()} ft from`} ${x.nearName}` : ''}`, `${RECORDS} list this ${x.op} well inside your inspection area, but it is not in the asset list we received.`, 'Confirm whether it should be inspected (and add it to the list if so).', { name: x.name, api: x.api, lat: x.lat, lng: x.lng }); });
+        (c.missing || []).forEach(x => { if (x.group === 'plugged' || x.ours === false) return; add('Medium', x.facility ? 'Facility of yours that is not in the list' : 'Well on your pads that is not in the list', null, '—', `${x.name} · API ${x.api} · ${x.status}${x.type ? ` · ${x.type}` : ''}${x.traj ? ` · ${x.traj.toLowerCase()}` : ''}${x.nearName ? ` · ${x.inside ? 'inside' : `${x.nearFt.toLocaleString()} ft from`} ${x.nearName}` : ''}`, `${RECORDS} list this ${x.op} well inside your inspection area, but it is not in the asset list we received.`, 'Confirm whether it should be inspected (and add it to the list if so).', { name: x.name, api: x.api, lat: x.lat, lng: x.lng }); });
         // file-level hygiene — the whole list, since the client does not see our boundaries
         (imp.invalidRows || []).forEach(x => { const rr = imp.rows[x.i] || {}; const apiRaw = c.apiCol ? String(rr[c.apiCol] == null ? '' : rr[c.apiCol]).replace(/\D/g, '').slice(0, 10) : ''; const planned = /NEW POP|PLANNED|FUTURE|TBD/i.test(x.type || '') || /\d{4}-\d{2}-\d{2}/.test(x.type || ''); add('Low', planned ? 'Planned well — no location yet' : 'No coordinates', null, x.type || '', '—', planned ? 'This looks like an upcoming well (the type carries a future date) with no location yet, so it is not on the map or the inspection list for now.' : 'This row has no latitude / longitude, so it cannot be placed on the map or inspected.', planned ? 'Send the coordinates once the pad is built.' : 'Add the coordinates.', { name: x.name, api: apiRaw }); });
         const seen = new Map();
