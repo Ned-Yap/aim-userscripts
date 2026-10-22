@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.412
+// @version      4.413
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.412';
+    const SCRIPT_VERSION = '4.413';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -22979,7 +22979,8 @@
         resp: { rows: null, fileName: null, at: null, applied: false, tab: null, moves: [], renames: [], removeIds: [], removeNames: [] },   // 📬 Client response
         swap: { pairs: [], pick: [], at: null, lastSwaps: [] },               // 🔁 mislabeled wellheads
         env: { apiCol: null, open: false, notes: true, checkedAt: null, summary: null, running: false, opFilter: '', mismatchFt: 300, scope: 'selected', includeOurs: false,
-            missing: null, missingAt: null, missingOp: '', missingSel: new Set(), missStatus: { producing: true, drilled: true, inactive: true, plugged: false, facility: true }, finding: false, missingFac: true },   // v4.366: fill-in · facilities too   // v4.356: Enverus cross-check · v4.358: client review report
+            missing: null, missingAt: null, missingOp: '', missingSel: new Set(), missStatus: { producing: true, drilled: true, inactive: true, plugged: true, facility: true }, finding: false, missingFac: true,
+            paAssets: true, paSizeFt: 100, paMatchFt: 250, paReview: null },   // v4.413: 🩻 plugged / retired → P&A assets (own size), status review (API match, location tolerance)   // v4.366: fill-in · facilities too   // v4.356: Enverus cross-check · v4.358: client review report
         pri: { on: false, open: false, oilCol: null, waterCol: null, blpdCol: null, priCol: null, clusterFt: 100, padFt: 50, p1Min: 250, p1Max: 1500, summary: null, zeroUntier: true, envUntier: true },   // v4.347: priority tiers · v4.357: zero-production / Enverus-dead wells get no tier
         advOpen: false,                             // v4.331: ▸ Advanced (subset tools + delete mode) expanded — GM-remembered
         secOpen: { bounds: true, data: true, type: false, place: false, env: false, resp: false, create: true, adv: false },   // v4.352: collapsible sections — GM-remembered
@@ -23001,7 +23002,7 @@
         lastDelete: null,                           // {siteID, when, entities:[full bodies]} — ↩ Undo batch source
         assetIndex: null,                           // cached [{id,name,clean,ring,bbox,centroid}] for dup-guard + delete select
     };
-    function impSaveParams() { try { GM_setValue(IMP_PARAMS_KEY, JSON.stringify({ radiusVal: imp.radiusVal, radiusUnit: imp.radiusUnit, includeDups: imp.includeDups, advOpen: imp.advOpen, keepShield: imp.keepShield, dupMode: imp.dupMode, secOpen: imp.secOpen, shapeW: imp.shapeW, snapFt: imp.snapFt, bufFt: imp.bufFt, gapFt: imp.gapFt, anaMovedFt: imp.ana.movedFt, pri: { clusterFt: imp.pri.clusterFt, padFt: imp.pri.padFt, p1Min: imp.pri.p1Min, p1Max: imp.pri.p1Max, open: imp.pri.open, setOpen: imp.pri.setOpen, zeroUntier: imp.pri.zeroUntier, envUntier: imp.pri.envUntier } })); } catch (e) {} }
+    function impSaveParams() { try { GM_setValue(IMP_PARAMS_KEY, JSON.stringify({ radiusVal: imp.radiusVal, radiusUnit: imp.radiusUnit, includeDups: imp.includeDups, advOpen: imp.advOpen, keepShield: imp.keepShield, dupMode: imp.dupMode, secOpen: imp.secOpen, shapeW: imp.shapeW, snapFt: imp.snapFt, bufFt: imp.bufFt, gapFt: imp.gapFt, anaMovedFt: imp.ana.movedFt, paAssets: imp.env.paAssets, paSizeFt: imp.env.paSizeFt, paMatchFt: imp.env.paMatchFt, pri: { clusterFt: imp.pri.clusterFt, padFt: imp.pri.padFt, p1Min: imp.pri.p1Min, p1Max: imp.pri.p1Max, open: imp.pri.open, setOpen: imp.pri.setOpen, zeroUntier: imp.pri.zeroUntier, envUntier: imp.pri.envUntier } })); } catch (e) {} }
     function impLoadParams() {
         try {
             const raw = GM_getValue(IMP_PARAMS_KEY, ''); if (!raw) return;
@@ -23024,6 +23025,9 @@
             if (typeof o.bufFt === 'number' && o.bufFt >= 0) imp.bufFt = o.bufFt;
             if (typeof o.anaMovedFt === 'number' && o.anaMovedFt >= 0) imp.ana.movedFt = o.anaMovedFt;
             if (typeof o.gapFt === 'number' && o.gapFt >= 0) imp.gapFt = o.gapFt;
+            if (typeof o.paAssets === 'boolean') imp.env.paAssets = o.paAssets;
+            if (typeof o.paSizeFt === 'number' && o.paSizeFt >= 5) imp.env.paSizeFt = o.paSizeFt;
+            if (typeof o.paMatchFt === 'number' && o.paMatchFt >= 0) imp.env.paMatchFt = o.paMatchFt;
         } catch (e) {}
     }
     // v4.352: section chrome — numbered, collapsible, one-line live summary in the header
@@ -23351,6 +23355,7 @@
     function impPriDemote(p) {
         const c = imp.pri; p.pri.untier = '';
         if (!p.pri.tier) return;
+        if (p.pa) { p.pri.untier = 'pa'; p.pri.tier = ''; return; }                   // v4.413: plugged / retired — flyable ground, never an inspection target
         if (p.thirdParty) { p.pri.untier = 'third'; p.pri.tier = ''; return; }        // not ours — an obstacle, never an inspection target
         if (p.client && p.client.producing) return;                                   // the client confirmed it is producing — beats Enverus
         if (p.client && (p.client.inactive || p.client.planned && !p.client.producing)) { p.pri.untier = 'client'; p.pri.tier = ''; return; }   // client says inactive / not yet drilled
@@ -23363,7 +23368,7 @@
         const q = p.pri;
         const line = q.tier
             ? `${q.tier} · ${c.priCol ? 'from the client\'s priority column' : `pad total ${fmt(q.padTotal)} BLPD across ${q.padN} asset${q.padN === 1 ? '' : 's'}${q.padWith < q.padN ? ` (${q.padWith} with numbers)` : ''}`}${q.blpd != null ? ` · this asset ${fmt(q.blpd)} BLPD` : ''}${q.padName && !/^new pad/.test(q.padName) ? ` · pad ${q.padName}` : ''}`
-            : (q.untier === 'third' ? 'not tiered — third-party well (obstacle, not inspected)' : (q.untier === 'client' ? `not tiered — client confirmed ${p.client && p.client.status ? p.client.status.toLowerCase() : 'inactive'}` : (q.untier === 'zero' ? 'not tiered — zero production (0 BLPD in the client list)' : (q.untier === 'env' ? `not tiered — Enverus reports ${p.env && p.env.status ? p.env.status : 'inactive'}` : `not tiered — ${q.flags[0] || 'no numbers'}`))));
+            : (q.untier === 'pa' ? `not tiered — ${p.pa && p.pa.label ? p.pa.label.toLowerCase() : 'plugged'} (flyable ground, not inspected)` : (q.untier === 'third' ? 'not tiered — third-party well (obstacle, not inspected)' : (q.untier === 'client' ? `not tiered — client confirmed ${p.client && p.client.status ? p.client.status.toLowerCase() : 'inactive'}` : (q.untier === 'zero' ? 'not tiered — zero production (0 BLPD in the client list)' : (q.untier === 'env' ? `not tiered — Enverus reports ${p.env && p.env.status ? p.env.status : 'inactive'}` : `not tiered — ${q.flags[0] || 'no numbers'}`)))));
         return [`Priority\n${line}`, `Prioritized\n${dateStr}`];
     }
     function impTierPrefix(p, subtype) {
@@ -23580,7 +23585,12 @@
     const IMP_STAMP_RE = /^Imported by (.+?) on (\d{4}-\d{2}-\d{2} \d{2}:\d{2}) from (.+?)(?: · (created|updated) by import)?\s*$/m;
     function impComposeNotes(p, when, how) {
         const r = imp.rows[p.i] || {};
-        const parts = [`Original name\n${p.rawName || p.name}`].concat(p.src === 'enverus' ? [`Source\nAdded from Enverus — not in the client's list (${imp.fileName || 'file'})`] : (p.src === 'enverus-3p' ? [`Source\nThird-party ${p.env && p.env.facility ? (p.env.facType || 'facility').toLowerCase() : 'well'} (operator ${p.env && p.env.op ? p.env.op : 'unknown'}) from Enverus — mapped as an obstacle, not one of the client's assets`] : [])).concat(p.rigWatch ? ['Rig / crane watch\nWorkover rigs and cranes are expected at this type of facility — check for them before each flight'] : []).concat(impClientNotesBlock(p)).concat(impPriNotesBlocks(p, String(when).slice(0, 10))).concat(impEnvNotesBlock(p));
+        const dateStr = String(when).slice(0, 10);
+        const fromEnv = (p.src === 'enverus' || p.src === 'enverus-3p') && p.env && p.env.found;
+        const parts = [`Original name\n${p.rawName || p.name}`].concat(p.src === 'enverus' ? [`Source\nAdded from Enverus — not in the client's list (${imp.fileName || 'file'})`] : (p.src === 'enverus-3p' ? [`Source\nThird-party ${p.env && p.env.facility ? (p.env.facType || 'facility').toLowerCase() : 'well'} (operator ${p.env && p.env.op ? p.env.op : 'unknown'}) from Enverus — mapped as an obstacle, not one of the client's assets`] : []))
+            .concat(p.pa ? impPaNotesBlocks(p, dateStr) : [])                                                   // v4.413: why it is here + the full record
+            .concat(p.rigWatch && !p.pa ? ['Rig / crane watch\nWorkover rigs and cranes are expected at this type of facility — check for them before each flight'] : []).concat(impClientNotesBlock(p)).concat(impPriNotesBlocks(p, dateStr)).concat(p.pa ? [] : impEnvNotesBlock(p))
+            .concat(fromEnv ? [`Status recorded\n${dateStr} · ${p.env.status || '?'}${p.statusWas ? ` (was ${p.statusWas})` : ''}`] : []);   // v4.413: the date this status was read — the future review compares against it
         impNotesCols().forEach(c => { const v = String(r[c.col] == null ? '' : r[c.col]).trim(); if (v) parts.push(`${c.label || impCleanLabel(c.col)}\n${v}`); });
         parts.push(`Imported by ${impAuthor() || 'AIM user'} on ${when} from ${imp.fileName || 'file'} · ${how === 'update' ? 'updated' : 'created'} by import`);
         return parts.join('\n\n').slice(0, 2000);
@@ -24411,7 +24421,7 @@
             //   child = the square this point would become (Size ft) overlaps an
             //           existing asset, partially or fully (parent/child);
             //   near  = no overlap, but within the radius of one (nearby).
-            const sq = (p.shape && p.shape.length >= 3) ? p.shape : assetSquarePoints(p.lat, p.lng, impSizeFt);   // v4.367: a drawn outline is what will be created
+            const sq = (p.shape && p.shape.length >= 3) ? p.shape : assetSquarePoints(p.lat, p.lng, impPointSizeFt(p));   // v4.367: a drawn outline is what will be created · v4.413: P&A size for plugged
             let sla0 = Infinity, sla1 = -Infinity, slo0 = Infinity, slo1 = -Infinity; sq.forEach(v => { sla0 = Math.min(sla0, v.lat); sla1 = Math.max(sla1, v.lat); slo0 = Math.min(slo0, v.lng); slo1 = Math.max(slo1, v.lng); });
             const halfLat = Math.max(sla1 - p.lat, p.lat - sla0) * 1.05, halfLng = Math.max(slo1 - p.lng, p.lng - slo0) * 1.05;
             const dLng = dLat / Math.max(0.2, Math.cos(p.lat * Math.PI / 180));
@@ -24471,11 +24481,20 @@
         // deliberately TINY (selected slightly larger so state still reads).
         let bounds = null; try { bounds = map.getBounds().pad(0.08); } catch (e) {}
         let drawn = 0, culled = 0; const hoverIdx = [];
+        // v4.413: red ✕ = plugged / expired / cancelled / retired (staged points AND the unstaged
+        // Enverus candidates, so the ones on our pads that never get written are still seen)
+        const drawX = (lat, lng, px, opts) => { const x = L.polyline(impXLatLngs(map, lat, lng, px), Object.assign({ interactive: false, lineCap: 'round' }, opts, imp.renderer ? { renderer: imp.renderer } : {})); x.addTo(map); imp.layers.push(x); };
         for (const p of live) {
             if (bounds && !bounds.contains([p.lat, p.lng])) { culled++; continue; }
             if (drawn >= IMP_MAX_RENDER) { culled++; continue; }
             try {
                 const held = imp.moveHeld === p, pulse = !!(imp.pulse && imp.pulse.has(p)), flagged = !!(imp.pri.on && p.pri && p.pri.flags && p.pri.flags.length);
+                if (impIsPlugged(p) && !pulse) {
+                    drawX(p.lat, p.lng, held ? 8 : (p.sel ? 6 : 3.5), { color: held ? '#ff5fff' : (p.orig ? '#ff7bff' : '#ff2d2d'), weight: held ? 3.5 : (p.sel ? 2.5 : 1.5), opacity: p.sel ? 0.95 : 0.7 });
+                    drawn++;
+                    try { const cp = map.latLngToContainerPoint([p.lat, p.lng]); hoverIdx.push({ x: cp.x, y: cp.y, p }); } catch (e) {}
+                    continue;
+                }
                 const tierOn = imp.pri.on && p.sel && p.pri;          // v4.352: tier colours read at a glance — selected dots grow + fill by tier
                 const opts = {
                     radius: pulse ? 9 : (held ? 7 : (p.sel ? (tierOn ? 5.5 : 4) : 2.2)),
@@ -24490,6 +24509,19 @@
                 try { const cp = map.latLngToContainerPoint([p.lat, p.lng]); hoverIdx.push({ x: cp.x, y: cp.y, p }); } catch (e) {}
             } catch (e) {}
         }
+        // unstaged plugged candidates from the fill-in (ghost ✕; the staged ones draw above as points)
+        try {
+            const cands = (imp.env.missing || []).filter(x => x.pa && !x.staged && imp.env.missStatus.plugged);
+            for (const x of cands) {
+                if (bounds && !bounds.contains([x.lat, x.lng])) continue;
+                if (drawn >= IMP_MAX_RENDER) break;
+                drawX(x.lat, x.lng, 4, { color: x.onPad ? '#ff6b6b' : '#ff2d2d', weight: 1.5, opacity: 0.55, dashArray: x.onPad ? '2,2' : null });
+                drawn++;
+                let pp = impCandHover.get(x);
+                if (!pp) { pp = { name: genCleanName(impPaName(x)), cand: x, env: x, pa: { label: x.paLabel, onPad: !!x.onPad }, typeRaw: impPaTypeFor(x.ours !== false, x.paLabel), thirdParty: x.ours === false }; impCandHover.set(x, pp); }
+                try { const cp = map.latLngToContainerPoint([x.lat, x.lng]); hoverIdx.push({ x: cp.x, y: cp.y, p: pp }); } catch (e) {}
+            }
+        } catch (e) { console.warn(`${TAG} 🩻 candidate ✕ render failed:`, e); }
         imp._hoverIdx = hoverIdx; impEnsureHover(true);
         const capEl = document.getElementById('aim-imp-render-note');
         if (capEl) capEl.textContent = culled ? `${drawn} of ${live.length} staged points drawn in this view (${culled} off-screen / over the ${IMP_MAX_RENDER} render cap — zoom/pan to see them)` : '';
@@ -24522,6 +24554,8 @@
     }
     function impHoverText(p) {
         const bits = [];
+        if (p.pa) bits.push(`🩻 ${p.pa.label || 'Plugged'} — flyable ground`);
+        if (p.cand) { bits.push(p.cand.onPad ? 'on our pad — shown only, never staged' : (imp.env.paAssets === false ? 'P&A staging off' : (imp.env.missingSel.has(p.cand.api) ? 'ticked to stage' : 'not ticked'))); }
         if (p.typeRaw) bits.push(p.typeRaw);
         if (imp.pri.on && p.pri) bits.push(p.pri.tier || 'no tier');
         if (p.dup) bits.push(imp.dupMode === 'update' ? 'update' : 'name match');
@@ -25416,6 +25450,7 @@
                     <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;color:#ffb3ad;margin-top:4px"><input type="checkbox" id="aim-imp-biggate-ack" style="accent-color:#ff5555"> I understand the risk — create them anyway</label>
                 </div>
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc" title="Square side of each created asset — same shape ➕ Create asset uses. Reshape in Percepto afterwards (auto-reshape is feature #251).">Size <input type="number" id="aim-imp-size" min="5" max="2000" step="5" style="width:52px;${inCss}"> ft</label>
+                <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#ff8a80" title="Square side for 🩻 P&A assets (plugged / expired / cancelled / retired wells and facilities staged from the fill-in) — bigger than a wellhead on purpose so the ✕ reads at a glance. ↔ Move and ✏ Shape still apply.">P&A size <input type="number" id="aim-imp-pasize" min="5" max="2000" step="5" style="width:52px;background:#1a1d23;border:1px solid rgba(255,138,128,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px"> ft</label>
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#ffd400" title="What happens to a staged point whose NAME matches an asset already on this site. Update = rewrite that asset's TYPE and NOTES from this file, never its shape or position (the quarterly re-run). Copy = create a second asset named …-2. Skip = leave it alone. Points merely inside / near an existing asset are only flagged and always created.">name matches <select id="aim-imp-dupmode" style="background:#1a1d23;border:1px solid rgba(255,212,0,0.45);color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px"><option value="update">update type + notes</option><option value="skip">skip</option><option value="copy">create a copy (-N)</option></select></label>
                 <button id="aim-imp-commit" style="${btnCss('95,255,95')};font-weight:600">✓ Create selected</button>
                 <button id="aim-imp-undocreate" style="${btnCss('255,179,71')}" title="Delete exactly the assets the most recent import created (this session). Each delete rides Delete Guard's undo ring when installed.">↩ Undo last import</button>
@@ -25520,6 +25555,9 @@
         const szEl = q('aim-imp-size');
         szEl.value = impSizeFt;
         szEl.oninput = () => { const v = parseFloat(szEl.value); if (isFinite(v) && v >= 5 && v <= 2000) { impSizeFt = v; try { if (imp.points.length) { impComputeDups(); impRenderStaged(); impSyncUi(); } } catch (e) {} } };
+        const paSzEl = q('aim-imp-pasize');
+        paSzEl.value = imp.env.paSizeFt;
+        paSzEl.oninput = () => { const v = parseFloat(paSzEl.value); if (isFinite(v) && v >= 5 && v <= 2000) { imp.env.paSizeFt = v; impSaveParams(); try { if (imp.points.length) { impComputeDups(); impRenderStaged(); impSyncUi(); } } catch (e) {} } };
         const dmSel = q('aim-imp-dupmode');
         dmSel.value = imp.dupMode;
         dmSel.onchange = () => { imp.dupMode = dmSel.value; imp.includeDups = imp.dupMode === 'copy'; impSaveParams(); impSyncUi(); };
@@ -25757,7 +25795,9 @@
             c.finding = false; impRenderEnvUi();
             console.warn(`${TAG} 🔍 fill-in failed:`, e); impStatus(`🔍 fill-in failed: ${impEsc(e && e.message || e)}`, '#ff6060'); return;
         }
-        const cands = [], rigWatch = [];
+        const cands = [], rigWatch = [], review = [];
+        const siteApi = impSiteApiIndex();                                   // v4.413: wells / facilities we already wrote carry their API in the notes
+        const padM = (imp.pri.padFt || 50) * GEN_FT_TO_M;
         const liveNames = new Set(imp.points.filter(p => !p.done).map(p => impNormName(p.rawName || p.name)));
         byApi.forEach((rows, a) => {
             const m = rows[0] && rows[0].facility ? rows[0] : impEnvMerge(rows); if (!m || !isFinite(m.lat) || !isFinite(m.lng)) return;
@@ -25773,38 +25813,124 @@
             // nearest existing asset / pad on the site
             let near = null, bd = Infinity;
             (imp.assetIndex || []).forEach(x => { const d = pointToPolygonMeters(m.lat, m.lng, x.ring); if (d < bd) { bd = d; near = x; } });
-            cands.push(Object.assign({ api: a, inFile, ours: !op || !m.op || m.op.toUpperCase() === op.toUpperCase(), group: m.facility ? (/ABANDON|RETIRED|DECOMM|INACTIVE|IDLE/.test(m.status) ? 'plugged' : 'facility') : impEnvStatusGroup(m.status), nearName: near ? near.name : '', nearFt: isFinite(bd) ? Math.round(bd / GEN_FT_TO_M) : null, inside: isFinite(bd) && bd === 0 }, m));
+            const ours = !op || !m.op || m.op.toUpperCase() === op.toUpperCase();
+            m.nearName = near ? near.name : ''; m.nearFt = isFinite(bd) ? Math.round(bd / GEN_FT_TO_M) : null; m.inside = isFinite(bd) && bd === 0;
+            // v4.413: already on the site by API (matched by the notes, NOT by location — we move these on purpose) → status review, never re-listed as missing
+            const onSite = siteApi.get(a);
+            if (onSite && !inFile) { review.push(impPaReviewRow(onSite, a, Object.assign({ api: a, ours }, m))); return; }
+            const group = m.facility ? (/ABANDON|RETIRED|DECOMM|INACTIVE|IDLE/.test(m.status) ? 'plugged' : 'facility') : impEnvStatusGroup(m.status);
+            const pa = group === 'plugged';
+            cands.push(Object.assign({ api: a, inFile, ours, group, nearName: m.nearName, nearFt: m.nearFt, inside: m.inside, pa, paLabel: pa ? impPaLabel(m.status) : '', onPad: isFinite(bd) && bd <= padM }, m));
         });
+        c.paReview = { at: impNowStamp(), rows: review.sort((x, y) => (y.changed - x.changed) || (y.moved - x.moved) || x.assetName.localeCompare(y.assetName)) };
         c.rigWatch = rigWatch.sort((x, y) => (x.ours === y.ours ? 0 : (x.ours ? -1 : 1)) || x.name.localeCompare(y.name));
         c.missing = cands.filter(x => !x.inFile).sort((a, b) => (a.ours === b.ours ? 0 : (a.ours ? -1 : 1)) || (a.nearFt == null ? 1e9 : a.nearFt) - (b.nearFt == null ? 1e9 : b.nearFt) || a.name.localeCompare(b.name));
-        c.missingTotal = cands.length; c.missingAt = impNowStamp(); c.missingOp = op; c.missingSel = new Set(c.missing.filter(x => c.missStatus[x.group]).map(x => x.api));
+        c.missingTotal = cands.length; c.missingAt = impNowStamp(); c.missingOp = op; c.missingSel = new Set(c.missing.filter(x => c.missStatus[x.group] && impPaStageable(x)).map(x => x.api));
         c.finding = false; impMarkDirty(); impRenderEnvUi();
         const g = (k) => c.missing.filter(x => x.group === k).length, third = c.missing.filter(x => !x.ours).length, facN = c.missing.filter(x => x.facility).length;
-        impStatus(`🔍 ${everyone ? 'all operators' : op}: <b>${cands.length}</b> wells inside the area in ${counties.size} count${counties.size === 1 ? 'y' : 'ies'} · <b style="color:#ffb347">${c.missing.length} not in the client's list</b> (${g('producing')} producing · ${g('drilled')} drilled/permitted · ${g('inactive')} inactive · ${g('plugged')} plugged${facN ? ` · <b style="color:#c39bd3">${facN} facilit${facN === 1 ? 'y' : 'ies'}</b>` : ''}${third ? ` · <b style="color:#ffd666">${third} third-party</b>` : ''}) — review the list below and stage the ones to add${c.rigWatch && c.rigWatch.length ? ` · <b style="color:#ff6060">🏗 ${c.rigWatch.length} rig / crane watch site${c.rigWatch.length === 1 ? '' : 's'}</b> (batteries, compressor stations, disposal — export below)` : ''}`);
+        impStatus(`🔍 ${everyone ? 'all operators' : op}: <b>${cands.length}</b> wells inside the area in ${counties.size} count${counties.size === 1 ? 'y' : 'ies'} · <b style="color:#ffb347">${c.missing.length} not in the client's list</b> (${g('producing')} producing · ${g('drilled')} drilled/permitted · ${g('inactive')} inactive · ${g('plugged')} plugged${facN ? ` · <b style="color:#c39bd3">${facN} facilit${facN === 1 ? 'y' : 'ies'}</b>` : ''}${third ? ` · <b style="color:#ffd666">${third} third-party</b>` : ''}) — review the list below and stage the ones to add${review.length ? ` · <b style="color:#ff8a80">🩻 ${review.length} already on the site by API</b> (${review.filter(x => x.changed).length} status changed · ${review.filter(x => x.moved).length} beyond ${c.paMatchFt} ft)` : ''}${c.rigWatch && c.rigWatch.length ? ` · <b style="color:#ff6060">🏗 ${c.rigWatch.length} rig / crane watch site${c.rigWatch.length === 1 ? '' : 's'}</b> (batteries, compressor stations, disposal — export below)` : ''}`);
     }
     function impEnvStageMissing() {
         const c = imp.env; if (!c.missing) return;
-        const pick = c.missing.filter(x => c.missingSel.has(x.api) && !x.staged);
-        if (!pick.length) { impStatus('Tick the wells to add first', '#ffb347'); return; }
+        const pick = c.missing.filter(x => c.missingSel.has(x.api) && !x.staged && impPaStageable(x));
+        const refused = c.missing.filter(x => c.missingSel.has(x.api) && !x.staged && !impPaStageable(x)).length;
+        if (!pick.length) { impStatus(refused ? `${refused} plugged / retired ticked but none can be staged — they sit on our pads (shown as red ✕ only)${c.paAssets === false ? ' or P&A staging is off' : ''}` : 'Tick the wells to add first', '#ffb347'); return; }
         const m = imp.mapping || {};
         pick.forEach(x => {
             const row = {}; imp.headers.forEach(h => { row[h] = ''; });
-            if (m.name) row[m.name] = x.name;
+            const paName = x.pa ? genCleanName(impPaName(x)) : '';                     // v4.413: [Status] - [API] — unique, searchable, says why it is there
+            if (m.name) row[m.name] = paName || x.name;
             if (m.lat) row[m.lat] = String(x.lat);
             if (m.lng) row[m.lng] = String(x.lng);
             if (c.apiCol && !x.facility) row[c.apiCol] = x.api;
-            const typeRaw = m.type ? (x.facility ? (x.ours === false ? `3RD PARTY ${x.facType || 'FACILITY'} (${(x.op || 'unknown operator').toUpperCase()})` : (x.facType || 'FACILITY')) : (x.ours === false ? `3RD PARTY WELL (${(x.op || 'unknown operator').toUpperCase()})` : `${/HORIZ/.test(x.traj) ? 'H' : 'V'} - WELL (Enverus)`)) : '';
+            const typeRaw = x.pa ? impPaTypeFor(x.ours !== false, x.paLabel) : (m.type ? (x.facility ? (x.ours === false ? `3RD PARTY ${x.facType || 'FACILITY'} (${(x.op || 'unknown operator').toUpperCase()})` : (x.facType || 'FACILITY')) : (x.ours === false ? `3RD PARTY WELL (${(x.op || 'unknown operator').toUpperCase()})` : `${/HORIZ/.test(x.traj) ? 'H' : 'V'} - WELL (Enverus)`)) : '');
             if (m.type) row[m.type] = typeRaw;
             imp.rows.push(row);
             const i = imp.rows.length - 1;
-            const p = { i, name: x.name, rawName: x.name, lat: x.lat, lng: x.lng, typeRaw, notes: '', sel: false, dup: false, dupWhy: '', child: null, near: null, done: false, src: x.ours === false ? 'enverus-3p' : 'enverus', thirdParty: x.ours === false, rigWatch: !!x.rigWatch, env: Object.assign({ api: x.api, found: true, checkedAt: c.missingAt, distFt: 0 }, x) };
+            const p = { i, name: paName || x.name, rawName: x.name, lat: x.lat, lng: x.lng, typeRaw, notes: '', sel: false, dup: false, dupWhy: '', child: null, near: null, done: false, src: x.ours === false ? 'enverus-3p' : 'enverus', thirdParty: x.ours === false, rigWatch: !!x.rigWatch, env: Object.assign({ api: x.api, found: true, checkedAt: c.missingAt, distFt: 0 }, x) };
+            if (x.pa) p.pa = { status: x.status, label: x.paLabel || impPaLabel(x.status), onPad: !!x.onPad };
             imp.points.push(p); x.staged = true;
         });
         imp._rootCache = null;
         impBuildAssetIndex(); impComputeDups(); impRecomputeSel();
         impRenderStaged(); impRenderShapes(); impRenderTypeMapUi(); impRenderMappingUi();
         impMarkDirty(); impSyncUi(); impRenderEnvUi();
-        impStatus(`➕ ${pick.length} well${pick.length === 1 ? '' : 's'} from Enverus staged as new points (orange dots, source noted in their notes) — they go through the same tiers / flags / Create as the rest`);
+        const nPa = pick.filter(x => x.pa).length;
+        impStatus(`➕ ${pick.length} well${pick.length === 1 ? '' : 's'} from Enverus staged as new points (orange dots, source noted in their notes)${nPa ? ` · <b style="color:#ff8a80">🩻 ${nPa} as P&A assets</b> (red ✕ · "[Status] - [API]" · ${c.paSizeFt} ft · never tiered · ↔ Move / ✏ Shape work on them)` : ''}${refused ? ` · ${refused} plugged on our pads left as ✕ only` : ''} — they go through the same flags / Create as the rest`);
+    }
+    // v4.413 — stage type + notes UPDATES for wells already on the site whose Enverus status moved.
+    // The point takes the ASSET's name (identity) and position (we moved it on purpose), so the
+    // commit's update path rewrites type + notes only. Name matches must be set to "update".
+    function impPaStageUpdates() {
+        const c = imp.env; const R = c.paReview; if (!R || !R.rows.length) return;
+        const rows = R.rows.filter(r => r.changed && !r.staged);
+        if (!rows.length) { impStatus('No status changes to stage', '#ffb347'); return; }
+        const m = imp.mapping || {};
+        rows.forEach(r => {
+            const x = r.cand, ours = x.ours !== false;
+            const row = {}; imp.headers.forEach(h => { row[h] = ''; });
+            if (m.name) row[m.name] = r.assetName;
+            if (m.lat) row[m.lat] = String(r.lat);
+            if (m.lng) row[m.lng] = String(r.lng);
+            if (c.apiCol && !x.facility) row[c.apiCol] = x.api;
+            const typeRaw = r.nowPlugged ? impPaTypeFor(ours, r.labelNow) : (x.facility ? (ours ? (x.facType || 'FACILITY') : `3RD PARTY ${x.facType || 'FACILITY'} (${(x.op || 'unknown operator').toUpperCase()})`) : (ours ? `${/HORIZ/.test(x.traj) ? 'H' : 'V'} - WELL (Enverus)` : `3RD PARTY WELL (${(x.op || 'unknown operator').toUpperCase()})`));
+            if (m.type) row[m.type] = typeRaw;
+            imp.rows.push(row);
+            const i = imp.rows.length - 1;
+            const p = { i, name: r.assetName, rawName: r.assetName, lat: r.lat, lng: r.lng, typeRaw, notes: '', sel: false, dup: false, dupWhy: '', child: null, near: null, done: false, src: ours ? 'enverus' : 'enverus-3p', thirdParty: !ours, rigWatch: !!x.rigWatch, statusWas: r.statusBefore, env: Object.assign({ api: x.api, found: true, checkedAt: R.at, distFt: r.distFt || 0 }, x) };
+            if (r.nowPlugged) p.pa = { status: x.status, label: r.labelNow, onPad: false };
+            imp.points.push(p); r.staged = true;
+        });
+        imp._rootCache = null;
+        impBuildAssetIndex(); impComputeDups(); impRecomputeSel();
+        impRenderStaged(); impRenderShapes(); impRenderTypeMapUi(); impRenderMappingUi();
+        impMarkDirty(); impSyncUi(); impRenderEnvUi();
+        impStatus(`↻ ${rows.length} status update${rows.length === 1 ? '' : 's'} staged as name matches — ✓ Create rewrites TYPE + NOTES only (shape and position untouched)${imp.dupMode !== 'update' ? ' · <b style="color:#ffb347">set "name matches" to update first</b>' : ''}`);
+    }
+    function impExportPaReview(how) {
+        const R = imp.env.paReview; if (!R || !R.rows.length) { impStatus('Nothing to export — run the fill-in first', '#ffb347'); return; }
+        const cols = [
+            { label: 'Asset on the site', val: r => r.assetName }, { label: 'Type', val: r => r.sub }, { label: 'API', val: r => r.api }, { label: 'Status when recorded', val: r => r.statusBefore || '(not recorded)' }, { label: 'Recorded on', val: r => r.recordedAt },
+            { label: 'Status now', val: r => r.statusNow }, { label: 'Changed', val: r => r.changed ? 'yes' : '' }, { label: 'Enverus point → asset (ft)', val: r => r.distFt == null ? '' : r.distFt }, { label: `Beyond ${imp.env.paMatchFt} ft`, val: r => r.moved ? 'yes' : '' },
+            { label: 'Operator', val: r => r.cand.op || '' }, { label: 'Enverus name', val: r => r.cand.name || '' }, { label: 'Plug date', val: r => r.cand.plug || '' }, { label: 'Checked', val: () => R.at },
+        ];
+        impExportTable(R.rows, cols, how, 'status-review', 'status-review');
+    }
+    function impRenderPaReviewUi(host) {
+        const el = host.querySelector('[data-impenv-pareview]'); if (!el) return;
+        const c = imp.env, R = c.paReview;
+        const inCss = 'background:#1a1d23;border:1px solid rgba(255,138,128,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px';
+        if (!R) { el.innerHTML = ''; return; }
+        const rows = R.rows, changed = rows.filter(r => r.changed), moved = rows.filter(r => r.moved), unknown = rows.filter(r => r.unknownBefore);
+        const shown = c.paReviewAll ? rows : rows.filter(r => r.changed || r.moved);
+        const row = (r, i) => `<div data-impparev-row="${i}" style="display:flex;align-items:center;gap:6px;padding:1px 4px;border-bottom:1px solid rgba(255,255,255,0.05);font-size:10.5px;color:${r.staged ? '#6f7a85' : '#cfd6dc'};cursor:pointer" onmouseover="this.style.background='rgba(255,255,255,0.05)'" onmouseout="this.style.background=''" title="click = zoom to the asset and the Enverus point">
+            <span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${r.changed ? '#ff8a80' : (r.moved ? '#ffb347' : '#5fff5f')};flex:none"></span>
+            <b style="flex:none;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${impEsc(r.assetName)}</b>
+            <span style="color:#8a949e;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r.changed ? `<b style="color:#ff8a80">${impEsc(r.statusBefore)} → ${impEsc(r.statusNow)}</b>${r.recordedAt ? ` (recorded ${impEsc(r.recordedAt)})` : ''}` : (r.unknownBefore ? `now ${impEsc(r.statusNow)} · <span style="color:#ffb347">no recorded status in its notes</span>` : `${impEsc(r.statusNow)} · unchanged${r.recordedAt ? ` since ${impEsc(r.recordedAt)}` : ''}`)}${r.distFt != null ? ` · Enverus point ${r.distFt.toLocaleString()} ft ${r.moved ? `<b style="color:#ffb347">away (beyond ${c.paMatchFt} ft)</b>` : 'away'}` : ''} · ${impEsc(r.sub || 'no type')}${r.staged ? ' · ✓ update staged' : ''}</span>
+            <span title="${impEsc(`${r.cand.name || ''} · ${r.cand.facility ? 'Enverus' : 'API'} ${r.api}\nnow: ${r.statusNow}\nrecorded: ${r.statusBefore || '—'}${r.recordedAt ? ` on ${r.recordedAt}` : ''}\n${r.cand.op || ''}${r.cand.plug ? ` · plugged ${r.cand.plug}` : ''}`)}" style="flex:none;width:14px;height:14px;line-height:12px;text-align:center;border:1px solid rgba(255,138,128,0.5);border-radius:50%;color:#ff8a80;font-size:9px;font-weight:700;cursor:help">i</span>
+        </div>`;
+        el.innerHTML = `<div style="padding:6px 8px;background:rgba(255,138,128,0.04);border:1px dashed rgba(255,138,128,0.35);border-radius:3px">
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:4px;font-size:11px"><b style="color:#ff8a80">🩻 Status review</b> <span style="color:#cfd6dc"><b>${rows.length}</b> already on the site, matched by the API in their notes</span> <span style="color:#888;font-size:10px">(location ignored — you move these on purpose · ${impEsc(R.at)})</span>
+                <span style="color:#ff8a80">${changed.length} status changed</span> · <span style="color:#ffb347">${moved.length} beyond</span> <input type="number" data-impparev-ft value="${c.paMatchFt}" min="0" step="50" style="width:56px;${inCss};text-align:right" title="How far the Enverus point may sit from the asset before it is worth a look — you move P&A assets on purpose, so this is tolerance, not an error"> ft${unknown.length ? ` · <span style="color:#888">${unknown.length} with no recorded status</span>` : ''}
+                <span style="flex:1"></span>
+                <label style="display:inline-flex;align-items:center;gap:3px;font-size:10px;color:#9ad;cursor:pointer"><input type="checkbox" data-impparev-all ${c.paReviewAll ? 'checked' : ''} style="accent-color:#9ad;margin:0"> show unchanged too</label>
+                <button data-impparev-rep="sheets" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">📤 Sheets</button>
+                <button data-impparev-rep="csv" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">⬇ CSV</button>
+            </div>
+            <div style="max-height:200px;overflow:auto;border:1px solid rgba(255,255,255,0.06);border-radius:3px;background:rgba(0,0,0,0.15)">${shown.map((r) => row(r, rows.indexOf(r))).join('') || `<div style="padding:6px;color:#5fff5f;font-size:10px">✓ every status matches what the notes recorded${moved.length ? '' : ' and every Enverus point sits within tolerance'}</div>`}</div>
+            <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
+                <button data-impparev-stage ${changed.filter(r => !r.staged).length ? '' : 'disabled'} style="background:rgba(255,138,128,0.15);color:#ff8a80;border:1px solid rgba(255,138,128,0.55);border-radius:3px;padding:4px 12px;cursor:pointer;font:inherit;font-size:11px;font-weight:600${changed.filter(r => !r.staged).length ? '' : ';opacity:0.45;cursor:default'}">↻ Stage ${changed.filter(r => !r.staged).length} status update${changed.filter(r => !r.staged).length === 1 ? '' : 's'}</button>
+                <span style="color:#888;font-size:10px">a staged update keeps the asset's name, shape and position; ✓ Create rewrites its TYPE (P&A Asset - &lt;status&gt; when plugged, the well / 3rd-party type otherwise) and NOTES with a fresh "Status recorded" date. Nothing is written until ✓ Create.</span>
+            </div>
+        </div>`;
+        el.onclick = (ev) => {
+            if (ev.target.closest('[data-impparev-ft]')) return;
+            const all = ev.target.closest('[data-impparev-all]'); if (all) { c.paReviewAll = !!all.checked; impRenderPaReviewUi(host); return; }
+            const rp = ev.target.closest('[data-impparev-rep]'); if (rp) { try { impExportPaReview(rp.getAttribute('data-impparev-rep')); } catch (e) { impStatus(`Export failed: ${impEsc(e && e.message || e)}`, '#ff6060'); } return; }
+            if (ev.target.closest('[data-impparev-stage]')) { try { impPaStageUpdates(); } catch (e) { console.warn(`${TAG} 🩻`, e); impStatus(`🩻 ${impEsc(e && e.message || e)}`, '#ff6060'); } return; }
+            const r = ev.target.closest('[data-impparev-row]'); if (r) { const x = rows[Number(r.getAttribute('data-impparev-row'))]; if (x) { impZoomToPoints([{ lat: x.lat, lng: x.lng, name: x.assetName }, { lat: x.lat2, lng: x.lng2, name: `${x.cand.name || x.api} (Enverus now: ${x.statusNow})` }], x.assetName); impStatus(`🔎 ${impEsc(x.assetName)} — ${x.changed ? `${impEsc(x.statusBefore)} → ${impEsc(x.statusNow)}` : impEsc(x.statusNow)}${x.distFt != null ? ` · Enverus point ${x.distFt} ft away` : ''}`); } }
+        };
+        const ft = el.querySelector('[data-impparev-ft]'); if (ft) ft.onchange = function () { const v = parseFloat(this.value); if (isFinite(v) && v >= 0) { c.paMatchFt = v; impSaveParams(); rows.forEach(r => { r.moved = r.distFt != null && r.distFt > v; }); impRenderPaReviewUi(host); } };
     }
     function impExportRigWatch(how) {
         const c = imp.env; const list = c.rigWatch || [];
@@ -25821,6 +25947,7 @@
             { label: 'Well (Enverus name)', val: x => x.name }, { label: 'API', val: x => x.api }, { label: 'Status', val: x => x.status }, { label: 'Type', val: x => x.type }, { label: 'Trajectory', val: x => x.traj }, { label: 'Operator', val: x => x.op },
             { label: 'Spud', val: x => x.spud }, { label: 'First prod', val: x => x.firstProd }, { label: 'Nearest mapped asset', val: x => x.nearName }, { label: 'Distance (ft)', val: x => x.nearFt == null ? '' : x.nearFt }, { label: 'County', val: x => x.county },
             { label: 'Latitude', val: x => Number(x.lat).toFixed(6) }, { label: 'Longitude', val: x => Number(x.lng).toFixed(6) }, { label: 'Staged', val: x => x.staged ? 'yes' : '' },
+            { label: 'P&A', val: x => x.pa ? impPaTypeFor(x.ours !== false, x.paLabel) : '' }, { label: 'On our pad', val: x => x.pa ? (x.onPad ? 'yes — shown only' : 'no') : '' },
         ];
         impExportTable(c.missing, cols, how, 'wells-not-in-list', 'missing-well');
     }
@@ -25832,6 +25959,75 @@
         if (/P ?& ?A|PLUGGED|EXPIRED|CANCELLED/.test(st)) return 'plugged';
         if (/INACTIVE|^TA\b|SHUT/.test(st)) return 'inactive';
         return 'other';
+    }
+    // ---- v4.413 🩻 P&A ASSETS. A plugged / expired / cancelled / retired well or facility is flyable
+    // ground — no rig or crane will ever turn up on it — but the pad still shows on imagery, so a
+    // reviewer who cannot see what we see would flag a mission over it. We map them ON PURPOSE,
+    // uniquely named and typed, with the full record and the date the status was read, so anyone
+    // reviewing can tell "seen and judged" from "missed". Only the ones OFF our pads are staged;
+    // the ones on our pads are shown (red X) but never written. ----
+    function impPaLabel(status) {
+        const st = String(status || '').toUpperCase();
+        if (/EXPIRED/.test(st)) return 'Expired';
+        if (/CANCEL/.test(st)) return 'Cancelled';
+        if (/ABANDON/.test(st)) return 'Abandoned';
+        if (/RETIRED/.test(st)) return 'Retired';
+        if (/DECOMM/.test(st)) return 'Decommissioned';
+        if (/INACTIVE|IDLE/.test(st)) return 'Inactive';
+        return 'Plugged';
+    }
+    function impPaTypeFor(ours, label) { return `${ours === false ? 'P&A 3rd Party' : 'P&A Asset'} - ${label || 'Plugged'}`; }
+    function impPaType(p) { return impPaTypeFor(!p.thirdParty, p.pa && p.pa.label); }
+    function impPaName(x) { return `${impPaLabel(x.status)} - ${x.facility ? (x.name || x.api) : x.api}`; }   // [Status] - [API] (facilities have no API → their name)
+    function impPaStageable(x) { return !x.pa || (imp.env.paAssets !== false && !x.onPad); }
+    function impPointSizeFt(p) { return p && p.pa ? (imp.env.paSizeFt || 100) : impSizeFt; }
+    function impIsPlugged(p) { return !!(p && ((p.pa) || (p.env && p.env.found && impEnvBucket(p.env) === 'plugged'))); }
+    // one-line record = everything the (i) shows (goes into the notes of a P&A asset)
+    function impEnvRecordText(e) {
+        const d = (v) => v || '—';
+        return [`${e.name || ''}${e.facility ? ` · Enverus ${e.api}` : ` · API ${e.api}`}`, `${d(e.status)} · ${d(e.type)}${e.traj ? ` · ${e.traj}` : ''} · ${d(e.op)}`,
+            e.facility ? '' : `spud ${d(e.spud)} · first prod ${d(e.firstProd)}${e.plug ? ` · plugged ${e.plug}` : ''}`,
+            `${Number(e.lat).toFixed(6)}, ${Number(e.lng).toFixed(6)}${e.county ? ` · ${e.county} County` : ''}`,
+            e.nearName ? `${e.inside ? 'inside' : `${e.nearFt} ft from`} mapped asset "${e.nearName}"` : 'no mapped asset nearby', e.bores > 1 ? `${e.bores} wellbores` : ''].filter(Boolean).join(' · ');
+    }
+    function impPaNotesBlocks(p, dateStr) {
+        const e = p.env || {}, q = p.pa || {};
+        const what = e.facility ? String(e.facType || 'facility').toLowerCase() : 'well';
+        return [
+            `${q.label || 'Plugged'} ${what} — flyable ground\nEnverus reports ${e.status || q.status || 'plugged'}${e.plug ? ` (plugged ${e.plug})` : ''}. Treated as open ground: no rig or crane is expected here, though the pad may still show on imagery. Mapped on purpose so a reviewer knows it was seen and judged, not missed.${p.thirdParty ? ` Operator ${e.op || 'unknown'} — not one of the client's assets.` : ''}`,
+            `${e.facility ? 'Facility' : 'Well'} record\n${impEnvRecordText(e)}`,
+        ];
+    }
+    // APIs already on the site, read from asset notes ("API 4222712345" / "API FAC-123" in the Enverus or record blocks)
+    function impSiteApiIndex() {
+        const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+        const idx = new Map();
+        ents.filter(e => e && e.type === 3 && typeof e.description === 'string').forEach(e => { const m = e.description.match(/\b(?:API|Enverus) (FAC-\d+|\d{10})\b/); if (m && !idx.has(m[1])) idx.set(m[1], e); });
+        return idx;
+    }
+    // the status we wrote last time + when: "Status recorded\n<date> · <STATUS>" (v4.413) or the older "Enverus\n<STATUS> · … · checked <date>"
+    function impPaStatusFromNotes(desc) {
+        const s = String(desc || '');
+        const m1 = s.match(/^Status recorded\n(\d{4}-\d{2}-\d{2})[^·\n]*· ([^\n(]+)/m); if (m1) return { at: m1[1], status: m1[2].trim().toUpperCase() };
+        const m2 = s.match(/^Enverus\n([^·\n]+)(?:[^\n]*?checked (\d{4}-\d{2}-\d{2}))?/m); if (m2) return { at: m2[2] || '', status: m2[1].trim().toUpperCase() };
+        return { at: '', status: '' };
+    }
+    function impPaReviewRow(ent, api, m) {
+        const ring = entityCoords(ent) || []; const cen = ring.length ? ringCentroid(ring) : null;
+        const dM = ring.length >= 3 ? pointToPolygonMeters(m.lat, m.lng, ring) : Infinity;
+        const was = impPaStatusFromNotes(ent.description);
+        const sub = (ent.custom && ent.custom.poi_type_str) ? String(ent.custom.poi_type_str) : '';
+        const now = String(m.status || '').toUpperCase();
+        return { assetId: ent.id, assetName: ent.name || '', api, sub, isPa: /^P&A /.test(sub), statusBefore: was.status, recordedAt: was.at, statusNow: now, labelNow: impPaLabel(now),
+            changed: !!was.status && was.status !== now, unknownBefore: !was.status, distFt: isFinite(dM) ? Math.round(dM / GEN_FT_TO_M) : null, moved: isFinite(dM) && dM > (imp.env.paMatchFt || 0) * GEN_FT_TO_M,
+            nowPlugged: impEnvBucket({ found: true, status: now }) === 'plugged', lat: cen ? cen.lat : m.lat, lng: cen ? cen.lng : m.lng, lat2: m.lat, lng2: m.lng, cand: m, staged: false };
+    }
+    // red X geometry: a pixel-sized cross around a lat/lng (re-computed on every render, so it stays the same size at every zoom)
+    const impCandHover = new WeakMap();   // candidate → hover pseudo-point (kept OFF the persisted candidate: no cycles in the session JSON)
+    function impXLatLngs(map, lat, lng, px) {
+        const c = map.latLngToContainerPoint([lat, lng]);
+        const ll = (dx, dy) => map.containerPointToLatLng([c.x + dx, c.y + dy]);
+        return [[ll(-px, -px), ll(px, px)], [ll(-px, px), ll(px, -px)]];
     }
     function impEnvSummarize() {
         const c = imp.env;
@@ -25906,6 +26102,7 @@
                     <span style="color:#888;font-size:10px">${imp.shapes.length ? `inside the ${imp.shapes.length} boundar${imp.shapes.length === 1 ? 'y' : 'ies'}` : 'no boundary — uses the selected points\' area + ¼ mi'} · needs a cross-check first (counties come from it)</span>
                 </div>
                 <div data-impenv-missing style="margin-top:4px"></div>
+                <div data-impenv-pareview style="margin-top:4px"></div>
             </div>
             <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:8px;padding-top:6px;border-top:1px dashed rgba(255,214,102,0.3)">
                 <b style="color:#ffd666">📋 Client data review</b>
@@ -25929,6 +26126,7 @@
         el.querySelector('[data-impenv-fac]').onchange = function () { c.missingFac = this.checked; };
         const fb = el.querySelector('[data-impenv-find]'); if (fb) fb.onclick = () => { c.missingOp = (el.querySelector('[data-impenv-op]') || {}).value || c.missingOp; impEnvFindMissing().catch(e => { console.warn(`${TAG} 🔍`, e); impStatus(`🔍 ${impEsc(e && e.message || e)}`, '#ff6060'); }); };
         impRenderMissingUi(el);
+        try { impRenderPaReviewUi(el); } catch (e) { console.warn(`${TAG} 🩻 review render failed:`, e); }
         el.querySelector('[data-impenv-mm]').onchange = function () { const v = parseFloat(this.value); if (isFinite(v) && v >= 0) { c.mismatchFt = v; impMarkDirty(); impRenderEnvUi(); } };
         el.querySelector('[data-impenv-ours]').onchange = function () { c.includeOurs = this.checked; impRenderEnvUi(); };
         el.querySelector('[data-impenv-scope]').onchange = function () { c.scope = this.value === 'all' ? 'all' : 'selected'; impEnvSummarize(); impRenderEnvUi(); };
@@ -25946,18 +26144,19 @@
         const list = c.missing;
         if (!list.length) { el.innerHTML = `<div style="font-size:10px;color:#5fff5f">✓ every ${impEsc(c.missingOp)} well inside the area is already in the client's list (${c.missingTotal || 0} checked, ${impEsc(c.missingAt || '')})</div>`; return; }
         const gcol = { producing: '#5fff5f', drilled: '#7adfe6', inactive: '#ffb347', plugged: '#ff5252', facility: '#c39bd3' };
-        const glabel = { producing: 'producing / injecting', drilled: 'drilled / permitted / DUC', inactive: 'inactive / TA', plugged: 'plugged / expired / retired', facility: 'facilities (batteries · compressor / meter / pumping stations · pipeline receipt points)' };
+        const glabel = { producing: 'producing / injecting', drilled: 'drilled / permitted / DUC', inactive: 'inactive / TA', plugged: '✕ plugged / expired / cancelled / retired', facility: 'facilities (batteries · compressor / meter / pumping stations · pipeline receipt points)' };
         const padM = (imp.pri.padFt || 50) * GEN_FT_TO_M;
         const onPad = (x) => x.inside || (x.nearFt != null && x.nearFt * GEN_FT_TO_M <= padM);
         const shown = list.filter(x => c.missStatus[x.group] && (!c.missOffPads || !onPad(x)));
         const offN = list.filter(x => !onPad(x)).length;
-        const nSel = shown.filter(x => c.missingSel.has(x.api) && !x.staged).length;
+        const nSel = shown.filter(x => c.missingSel.has(x.api) && !x.staged && impPaStageable(x)).length;
+        const paN = list.filter(x => x.pa).length, paOn = list.filter(x => x.pa && x.onPad).length;
         const chip = (k) => { const n = list.filter(x => x.group === k).length; return `<label style="display:inline-flex;align-items:center;gap:3px;font-size:10px;color:${gcol[k]};cursor:pointer"><input type="checkbox" data-impmiss-g="${k}" ${c.missStatus[k] ? 'checked' : ''} style="accent-color:${gcol[k]};margin:0"> ${glabel[k]} ${n}</label>`; };
         const row = (x) => `<div data-impmiss-row="${x.api}" style="display:flex;align-items:center;gap:6px;padding:1px 4px;border-bottom:1px solid rgba(255,255,255,0.05);font-size:10.5px;color:${x.staged ? '#6f7a85' : '#cfd6dc'};cursor:pointer" onmouseover="this.style.background='rgba(255,255,255,0.05)'" onmouseout="this.style.background=''" title="click = zoom to it">
-            <input type="checkbox" data-impmiss-sel="${x.api}" ${x.staged ? 'disabled' : (c.missingSel.has(x.api) ? 'checked' : '')} style="accent-color:#ffd666;margin:0;flex:none">
-            <span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${gcol[x.group]};flex:none" title="${impEsc(x.status)}"></span>
-            <b style="flex:none;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${impEsc(x.name)}</b>
-            <span style="color:#8a949e;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${x.ours === false ? `<b style="color:#ffd666">${impEsc(x.op || '3rd party')}</b> · ` : ''}${x.facility ? '<b style="color:#c39bd3">facility</b> · ' : ''}${impEsc(x.status)} · ${impEsc(x.type || '')}${x.traj ? ` · ${impEsc(x.traj.toLowerCase())}` : ''} · ${x.facility ? `Enverus ${x.api}` : `API ${x.api}`}${x.nearFt != null ? ` · ${x.inside ? 'inside' : `${x.nearFt.toLocaleString()} ft from`} ${impEsc(x.nearName)}` : ' · no mapped asset nearby'}${x.staged ? ' · ✓ staged' : ''}</span>
+            <input type="checkbox" data-impmiss-sel="${x.api}" ${x.staged || !impPaStageable(x) ? 'disabled' : (c.missingSel.has(x.api) ? 'checked' : '')} title="${x.pa && x.onPad ? 'on one of our pads — shown as a red ✕ only, never written to the site' : (x.pa && c.paAssets === false ? 'P&A staging is off (tick \'stage as P&A assets\')' : '')}" style="accent-color:#ffd666;margin:0;flex:none">
+            ${x.pa ? `<span style="display:inline-block;width:9px;height:9px;flex:none;color:#ff2d2d;font-weight:900;font-size:11px;line-height:9px;text-align:center" title="${impEsc(x.status)}">✕</span>` : `<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${gcol[x.group]};flex:none" title="${impEsc(x.status)}"></span>`}
+            <b style="flex:none;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${impEsc(x.pa ? genCleanName(impPaName(x)) : x.name)}</b>
+            <span style="color:#8a949e;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${x.pa ? `<b style="color:#ff8a80">🩻 ${impEsc(impPaTypeFor(x.ours !== false, x.paLabel))}</b>${x.onPad ? ' · <b style="color:#ffb347">on our pad — ✕ only</b>' : ''} · ${impEsc(x.name)} · ` : ''}${x.ours === false ? `<b style="color:#ffd666">${impEsc(x.op || '3rd party')}</b> · ` : ''}${x.facility ? '<b style="color:#c39bd3">facility</b> · ' : ''}${impEsc(x.status)} · ${impEsc(x.type || '')}${x.traj ? ` · ${impEsc(x.traj.toLowerCase())}` : ''} · ${x.facility ? `Enverus ${x.api}` : `API ${x.api}`}${x.nearFt != null ? ` · ${x.inside ? 'inside' : `${x.nearFt.toLocaleString()} ft from`} ${impEsc(x.nearName)}` : ' · no mapped asset nearby'}${x.staged ? ' · ✓ staged' : ''}</span>
             <span data-impmiss-info="${x.api}" title="${impEsc(`${x.name} · API ${x.api}\n${x.status} · ${x.type || ''} · ${x.traj || ''} · ${x.op}\nspud ${x.spud || '—'} · first prod ${x.firstProd || '—'}${x.plug ? ` · plugged ${x.plug}` : ''}\n${Number(x.lat).toFixed(6)}, ${Number(x.lng).toFixed(6)} · ${x.county} County\n${x.nearName ? `${x.inside ? 'inside' : x.nearFt + ' ft from'} mapped asset "${x.nearName}"` : 'no mapped asset nearby'}${x.bores > 1 ? `\n${x.bores} wellbores` : ''}`)}" style="flex:none;width:14px;height:14px;line-height:12px;text-align:center;border:1px solid rgba(122,223,230,0.5);border-radius:50%;color:#7adfe6;font-size:9px;font-weight:700;cursor:help">i</span>
         </div>`;
         el.innerHTML = `<div style="padding:6px 8px;background:rgba(255,255,255,0.03);border:1px dashed rgba(255,214,102,0.3);border-radius:3px">
@@ -25965,6 +26164,7 @@
                 ${chip('producing')} ${chip('drilled')} ${chip('inactive')} ${chip('facility')} ${chip('plugged')}
                 <span style="flex:1"></span>
                 <label style="display:inline-flex;align-items:center;gap:3px;font-size:10px;color:#ffb347;cursor:pointer" title="Hide anything that sits on or within the pad distance of an existing mapped asset — leaves the wells / facilities on ground we have nothing mapped on yet"><input type="checkbox" data-impmiss-offpads ${c.missOffPads ? 'checked' : ''} style="accent-color:#ffb347;margin:0"> off our pads only (${offN})</label>
+                ${paN ? `<label style="display:inline-flex;align-items:center;gap:3px;font-size:10px;color:#ff8a80;cursor:pointer" title="Plugged / expired / cancelled / retired wells and facilities are flyable ground, but the pad still shows on imagery. Staged as P&A assets they are named '[Status] - [API]', typed 'P&A Asset - <status>' (or 'P&A 3rd Party - <status>'), carry the full record + the date the status was read, use their own size (Create row) and are never tiered — so a reviewer sees we judged them, not missed them. Only the ones OFF our pads can be staged (${paOn} on our pads stay red ✕ only). Untick = still shown on the map, nothing staged."><input type="checkbox" data-impmiss-pa ${c.paAssets !== false ? 'checked' : ''} style="accent-color:#ff8a80;margin:0"> 🩻 stage ✕ as P&A assets (${paN - paOn} off our pads)</label>` : ''}
                 <button data-impmiss-all style="background:none;border:1px solid rgba(255,255,255,0.15);color:#9ad;border-radius:3px;padding:0 6px;cursor:pointer;font:inherit;font-size:10px">tick all shown</button>
                 <button data-impmiss-none style="background:none;border:1px solid rgba(255,255,255,0.15);color:#9ad;border-radius:3px;padding:0 6px;cursor:pointer;font:inherit;font-size:10px">untick</button>
                 <button data-impmiss-rep="sheets" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">📤 Sheets</button>
@@ -25974,14 +26174,15 @@
             <div style="max-height:230px;overflow:auto;border:1px solid rgba(255,255,255,0.06);border-radius:3px;background:rgba(0,0,0,0.15)">${shown.map(row).join('') || '<div style="padding:6px;color:#888;font-size:10px">nothing in the ticked status groups</div>'}</div>
             <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
                 <button data-impmiss-stage ${nSel ? '' : 'disabled'} style="background:rgba(95,255,95,0.15);color:#5fff5f;border:1px solid rgba(95,255,95,0.55);border-radius:3px;padding:4px 12px;cursor:pointer;font:inherit;font-size:11px;font-weight:600${nSel ? '' : ';opacity:0.45;cursor:default'}">➕ Stage ${nSel} as new points</button>
-                <span style="color:#888;font-size:10px">staged wells become ordinary points: name = Enverus well name, type "H - WELL (Enverus)" / "V - WELL (Enverus)" (change it in the Type table), notes carry a "Source: added from Enverus" block; nothing is written until ✓ Create. Plugged wells are off by default.</span>
+                <span style="color:#888;font-size:10px">staged wells become ordinary points: name = Enverus well name, type "H - WELL (Enverus)" / "V - WELL (Enverus)" (change it in the Type table), notes carry a "Source: added from Enverus" block; nothing is written until ✓ Create. Red ✕ = plugged / expired / cancelled / retired → staged as P&A assets ("[Status] - [API]", P&A size in the Create row, never tiered); the ones on our pads are shown only.</span>
             </div>
         </div>`;
         el.onclick = (ev) => {
-            const g = ev.target.closest('[data-impmiss-g]'); if (g) { c.missStatus[g.getAttribute('data-impmiss-g')] = !!g.checked; impRenderMissingUi(host); return; }
+            const g = ev.target.closest('[data-impmiss-g]'); if (g) { c.missStatus[g.getAttribute('data-impmiss-g')] = !!g.checked; impRenderMissingUi(host); impRenderStaged(); return; }
             const op = ev.target.closest('[data-impmiss-offpads]'); if (op) { c.missOffPads = !!op.checked; impRenderMissingUi(host); return; }
+            const pa = ev.target.closest('[data-impmiss-pa]'); if (pa) { c.paAssets = !!pa.checked; impSaveParams(); list.forEach(x => { if (x.pa && !x.staged) { if (impPaStageable(x) && c.missStatus.plugged) c.missingSel.add(x.api); else c.missingSel.delete(x.api); } }); impRenderMissingUi(host); impRenderStaged(); return; }
             const cb = ev.target.closest('[data-impmiss-sel]'); if (cb) { const a = cb.getAttribute('data-impmiss-sel'); if (cb.checked) c.missingSel.add(a); else c.missingSel.delete(a); impRenderMissingUi(host); return; }
-            if (ev.target.closest('[data-impmiss-all]')) { shown.forEach(x => { if (!x.staged) c.missingSel.add(x.api); }); impRenderMissingUi(host); return; }
+            if (ev.target.closest('[data-impmiss-all]')) { shown.forEach(x => { if (!x.staged && impPaStageable(x)) c.missingSel.add(x.api); }); impRenderMissingUi(host); return; }
             if (ev.target.closest('[data-impmiss-none]')) { c.missingSel.clear(); impRenderMissingUi(host); return; }
             const rp = ev.target.closest('[data-impmiss-rep]'); if (rp) { try { impExportMissing(rp.getAttribute('data-impmiss-rep')); } catch (e) { impStatus(`Export failed: ${impEsc(e && e.message || e)}`, '#ff6060'); } return; }
             const rg = ev.target.closest('[data-impmiss-rig]'); if (rg) { try { impExportRigWatch(rg.getAttribute('data-impmiss-rig')); } catch (e) { impStatus(`Export failed: ${impEsc(e && e.message || e)}`, '#ff6060'); } return; }
@@ -26601,6 +26802,7 @@
         const siteSubs = [...subCounts.keys()];
         const subtypeFor = (p) => {
             let v;
+            if (p.pa) return impPaType(p);                                             // v4.413: P&A Asset / P&A 3rd Party - <status>, never tiered, shielding modifier irrelevant
             if (!imp.mapping || !imp.mapping.type) v = impApplyShield((imp.typeMap['__all__'] || '').trim() || defSub);
             else {
                 v = impResolveSubtype(p.typeRaw || '', siteSubs).value;   // v4.333: file value as-is unless overridden; v4.343: shielding modifier rule applied inside
@@ -26614,7 +26816,8 @@
         if (missing.size) { impStatus(`BLOCKED — rows with a blank type: pick a subtype for <b>${impEsc([...missing].join(' · '))}</b> in the Type table above.`, '#ff6060'); return; }
         const dry = (() => { try { return !!document.getElementById('aim-gen-dryrun').checked; } catch (e) { return true; } })();
         const nUpd = plan.filter(x => x.update).length, nCre = plan.length - nUpd;
-        if (dry) { impStatus(`DRY RUN — would create <b>${nCre}</b> asset(s) (${impSizeFt}×${impSizeFt} ft squares)${nUpd ? ` and UPDATE type + notes on <b>${nUpd}</b> existing` : ''}${skippedDups ? `, skipping ${skippedDups} name match(es)` : ''}${imp.pri.on ? ` · tiers ON (${plan.filter(x => /^P[1-3] - /.test(x.subtype)).length} prefixed)` : ''}: ${impEsc(plan.slice(0, 12).map(x => `${x.update ? '↻ ' : ''}${x.p.name} [${x.subtype}]`).join(' · '))}${plan.length > 12 ? ' …' : ''}. Untick Dry run to write.`); return; }
+        const nPa = plan.filter(x => x.p.pa).length;
+        if (dry) { impStatus(`DRY RUN — would create <b>${nCre}</b> asset(s) (${impSizeFt}×${impSizeFt} ft squares${nPa ? `, 🩻 ${nPa} P&A at ${imp.env.paSizeFt} ft` : ''})${nUpd ? ` and UPDATE type + notes on <b>${nUpd}</b> existing` : ''}${skippedDups ? `, skipping ${skippedDups} name match(es)` : ''}${imp.pri.on ? ` · tiers ON (${plan.filter(x => /^P[1-3] - /.test(x.subtype)).length} prefixed)` : ''}: ${impEsc(plan.slice(0, 12).map(x => `${x.update ? '↻ ' : ''}${x.p.name} [${x.subtype}]`).join(' · '))}${plan.length > 12 ? ' …' : ''}. Untick Dry run to write.`); return; }
         if (plan.length > IMP_BIG_BATCH) {
             const ack = (() => { try { return !!document.getElementById('aim-imp-biggate-ack').checked; } catch (e) { return false; } })();
             if (!ack) { impStatus(`BLOCKED — <b>${plan.length}</b> assets is more than ${IMP_BIG_BATCH} in one run. Narrow the selection with a boundary KML, or tick "I understand the risk" under the Create button to proceed anyway.`, '#ff6060'); return; }
@@ -26642,7 +26845,7 @@
         if (nUpd) { try { siteCfg = await fetchSiteConfig(sid); } catch (e) {} if (!siteCfg) { impStatus('Could not read the site config (mountain-terrain flag) — updates refused, nothing written', '#ff6060'); return; } }
         // backup manifest BEFORE any write (rollback = delete the created ids / re-POST the updated bodies)
         const manifest = { site: sid, at: new Date().toISOString(), file: imp.fileName, sizeFt: impSizeFt,
-            creates: plan.filter(x => !x.update).map(x => ({ name: x.name, subtype: x.subtype, lat: x.p.lat, lng: x.p.lng, notes: x.notes, movedFrom: x.p.orig || null, shape: x.p.shape || null })),
+            creates: plan.filter(x => !x.update).map(x => ({ name: x.name, subtype: x.subtype, lat: x.p.lat, lng: x.p.lng, notes: x.notes, movedFrom: x.p.orig || null, shape: x.p.shape || null, sizeFt: impPointSizeFt(x.p), pa: x.p.pa || null })),
             updates: plan.filter(x => x.update).map(x => ({ id: x.p.dupId, name: x.name, after: { subtype: x.subtype, notes: x.notes }, before: byIdEnt.get(x.p.dupId) || null })) };
         try { localStorage.setItem(`aim_imp_commit_backup:${sid}`, JSON.stringify(manifest)); } catch (e) {}
         try { downloadJSONFile(`asset-import-${sid}-${Date.now()}.json`, JSON.stringify(manifest, null, 1)); } catch (e) { impStatus('backup manifest download failed (localStorage stash still written)'); }
@@ -26673,7 +26876,7 @@
                 continue;
             }
             impStatus(`creating ${i + 1}/${plan.length} — "${impEsc(x.name)}"…`);
-            const r = await createAssetSquare(sid, x.p.lat, x.p.lng, impSizeFt, x.name, x.subtype, !knownSubs.has(x.subtype), x.notes || '', x.p.shape || null);
+            const r = await createAssetSquare(sid, x.p.lat, x.p.lng, impPointSizeFt(x.p), x.name, x.subtype, !knownSubs.has(x.subtype), x.notes || '', x.p.shape || null);   // v4.413: P&A points use their own size
             if (r && r.ok) {
                 ok++; created.push({ id: r.id, name: x.name, point: x.p });
                 knownSubs.add(x.subtype);
@@ -27050,6 +27253,8 @@
                 if (p.src) o.src = p.src;
                 if (p.thirdParty) o.tp = true;
                 if (p.rigWatch) o.rw = true;
+                if (p.pa) o.pa = p.pa;
+                if (p.statusWas) o.sw = p.statusWas;
                 if (p.shape && p.shape.length >= 3) o.shape = p.shape;
                 if (p.client) o.client = p.client;
                 return (Object.keys(o).length > 1) ? o : null;
@@ -27057,7 +27262,7 @@
             shapes: imp.shapes.map(sh => sh.kind === 'circle' ? { id: sh.id, kind: 'circle', center: sh.center, radiusM: sh.radiusM, name: sh.name || '' } : { id: sh.id, kind: sh.kind, ring: sh.ring, handle: sh.handle, name: sh.name || '' }),
             shapeSeq: imp.shapeSeq,
             pri: { on: imp.pri.on, oilCol: imp.pri.oilCol, waterCol: imp.pri.waterCol, blpdCol: imp.pri.blpdCol, priCol: imp.pri.priCol },
-            env: { apiCol: imp.env.apiCol, notes: imp.env.notes, checkedAt: imp.env.checkedAt, mismatchFt: imp.env.mismatchFt, missing: imp.env.missing, missingAt: imp.env.missingAt, missingOp: imp.env.missingOp, missingTotal: imp.env.missingTotal },
+            env: { apiCol: imp.env.apiCol, notes: imp.env.notes, checkedAt: imp.env.checkedAt, mismatchFt: imp.env.mismatchFt, missing: imp.env.missing, missingAt: imp.env.missingAt, missingOp: imp.env.missingOp, missingTotal: imp.env.missingTotal, paReview: imp.env.paReview },
             undo: { created: imp.lastCreated.slice(), updated: imp.lastUpdated.map(u => ({ id: u.id, name: u.name, before: u.before })) },   // v4.364: undo survives a reload
             resp: imp.resp.rows ? { rows: imp.resp.rows.map(r => Object.assign({}, r)), fileName: imp.resp.fileName, at: imp.resp.at, applied: imp.resp.applied, moves: imp.resp.moves.map(x => ({ id: x.id, name: x.name, from: x.from, to: x.to, why: x.why, look: x.look, force: !!x.force })), renames: imp.resp.renames, removeIds: imp.resp.removeIds, removeNames: imp.resp.removeNames } : null,
         };
@@ -27092,7 +27297,7 @@
         imp.shapeSeq = Math.max(d.shapeSeq || 1, ...imp.shapes.map(sh => sh.id + 1), 1);
         imp.mapOpen = false;
         if (d.pri) { Object.assign(imp.pri, { on: !!d.pri.on, oilCol: d.pri.oilCol || null, waterCol: d.pri.waterCol || null, blpdCol: d.pri.blpdCol || null, priCol: d.pri.priCol || null }); imp.pri._guessed = true; }
-        if (d.env) { imp.env.apiCol = d.env.apiCol || null; imp.env.notes = d.env.notes !== false; imp.env.checkedAt = d.env.checkedAt || null; if (typeof d.env.mismatchFt === 'number') imp.env.mismatchFt = d.env.mismatchFt; if (Array.isArray(d.env.missing)) { imp.env.missing = d.env.missing; imp.env.missingAt = d.env.missingAt || null; imp.env.missingOp = d.env.missingOp || ''; imp.env.missingTotal = d.env.missingTotal || 0; imp.env.missingSel = new Set(); } imp.env._guessed = true; }
+        if (d.env) { imp.env.apiCol = d.env.apiCol || null; imp.env.notes = d.env.notes !== false; imp.env.checkedAt = d.env.checkedAt || null; if (typeof d.env.mismatchFt === 'number') imp.env.mismatchFt = d.env.mismatchFt; if (Array.isArray(d.env.missing)) { imp.env.missing = d.env.missing; imp.env.missingAt = d.env.missingAt || null; imp.env.missingOp = d.env.missingOp || ''; imp.env.missingTotal = d.env.missingTotal || 0; imp.env.missingSel = new Set(); } if (d.env.paReview && Array.isArray(d.env.paReview.rows)) imp.env.paReview = d.env.paReview; imp.env._guessed = true; }
         if (d.undo) { imp.lastCreated = Array.isArray(d.undo.created) ? d.undo.created.slice() : []; imp.lastUpdated = Array.isArray(d.undo.updated) ? d.undo.updated.filter(u => u && u.id != null && u.before) : []; console.log(`${TAG} 📥 resume: undo record ${imp.lastCreated.length} created / ${imp.lastUpdated.length} updated`); }
         if (d.resp && Array.isArray(d.resp.rows)) { Object.assign(imp.resp, { rows: d.resp.rows, fileName: d.resp.fileName, at: d.resp.at, applied: !!d.resp.applied, moves: d.resp.moves || [], renames: d.resp.renames || [], removeIds: d.resp.removeIds || [], removeNames: d.resp.removeNames || [], tab: null }); }
         else console.log(`${TAG} 📥 resume: no undo record in this session (saved by an older version or before any import)`);
@@ -27111,6 +27316,8 @@
             if (o.src) p.src = o.src;
             if (o.tp) p.thirdParty = true;
             if (o.rw) p.rigWatch = true;
+            if (o.pa) { p.pa = o.pa; if (!p.typeRaw) p.typeRaw = impPaTypeFor(!(o.tp), o.pa.label); }
+            if (o.sw) p.statusWas = o.sw;
             if (Array.isArray(o.shape) && o.shape.length >= 3) p.shape = o.shape;
             if (o.client) p.client = o.client;
         });
