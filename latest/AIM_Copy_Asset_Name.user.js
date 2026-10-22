@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.413
+// @version      4.414
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.413';
+    const SCRIPT_VERSION = '4.414';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -24511,6 +24511,7 @@
         }
         // unstaged plugged candidates from the fill-in (ghost ✕; the staged ones draw above as points)
         try {
+            impPaNormalizeCands();
             const cands = (imp.env.missing || []).filter(x => x.pa && !x.staged && imp.env.missStatus.plugged);
             for (const x of cands) {
                 if (bounds && !bounds.contains([x.lat, x.lng])) continue;
@@ -25832,6 +25833,7 @@
     }
     function impEnvStageMissing() {
         const c = imp.env; if (!c.missing) return;
+        impPaNormalizeCands();
         const pick = c.missing.filter(x => c.missingSel.has(x.api) && !x.staged && impPaStageable(x));
         const refused = c.missing.filter(x => c.missingSel.has(x.api) && !x.staged && !impPaStageable(x)).length;
         if (!pick.length) { impStatus(refused ? `${refused} plugged / retired ticked but none can be staged — they sit on our pads (shown as red ✕ only)${c.paAssets === false ? ' or P&A staging is off' : ''}` : 'Tick the wells to add first', '#ffb347'); return; }
@@ -25979,6 +25981,12 @@
     function impPaTypeFor(ours, label) { return `${ours === false ? 'P&A 3rd Party' : 'P&A Asset'} - ${label || 'Plugged'}`; }
     function impPaType(p) { return impPaTypeFor(!p.thirdParty, p.pa && p.pa.label); }
     function impPaName(x) { return `${impPaLabel(x.status)} - ${x.facility ? (x.name || x.api) : x.api}`; }   // [Status] - [API] (facilities have no API → their name)
+    // v4.414: candidates saved by a fill-in run before 4.413 (or resumed from a session) carry no P&A fields — derive them
+    function impPaNormalizeCands() {
+        const list = imp.env.missing; if (!Array.isArray(list)) return;
+        const padM = (imp.pri.padFt || 50) * GEN_FT_TO_M;
+        list.forEach(x => { if (x.pa !== undefined) return; x.pa = x.group === 'plugged'; x.paLabel = x.pa ? impPaLabel(x.status) : ''; x.onPad = !!(x.inside || (x.nearFt != null && x.nearFt * GEN_FT_TO_M <= padM)); });
+    }
     function impPaStageable(x) { return !x.pa || (imp.env.paAssets !== false && !x.onPad); }
     function impPointSizeFt(p) { return p && p.pa ? (imp.env.paSizeFt || 100) : impSizeFt; }
     function impIsPlugged(p) { return !!(p && ((p.pa) || (p.env && p.env.found && impEnvBucket(p.env) === 'plugged'))); }
@@ -26141,6 +26149,7 @@
         const el = host.querySelector('[data-impenv-missing]'); if (!el) return;
         const c = imp.env;
         if (!c.missing) { el.innerHTML = ''; return; }
+        impPaNormalizeCands();
         const list = c.missing;
         if (!list.length) { el.innerHTML = `<div style="font-size:10px;color:#5fff5f">✓ every ${impEsc(c.missingOp)} well inside the area is already in the client's list (${c.missingTotal || 0} checked, ${impEsc(c.missingAt || '')})</div>`; return; }
         const gcol = { producing: '#5fff5f', drilled: '#7adfe6', inactive: '#ffb347', plugged: '#ff5252', facility: '#c39bd3' };
