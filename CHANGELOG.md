@@ -1,3 +1,7 @@
+## 2026-10-22 — Facilities dialled in: capture set + rig / crane watch — Site Setup Tools latest v4.411 (latest only)
+
+- **v4.411** — facility types now follow the chart: **captured** as assets / obstacles = Battery, Compressor Station, Meter Station, Pumping Station, Pipeline Receipt/Delivery Location; everything else in the Enverus catalogue is dropped. **Rig / crane watch** = Battery, Compressor Station, Disposal Facility: every one inside the area (yours and others') goes to a 🏗 export (Sheets / CSV) for the rig / crane NFZ tool and the hazards layer, and a staged battery or compressor station carries a "Rig / crane watch" line in its notes. Enverus's "NOT AVAILABLE" status counts as in service.
+
 ## 2026-10-22 — 🏭 Enverus facilities in the fill-in — Site Setup Tools latest v4.410 (latest only)
 
 - **v4.410** — the Enverus facilities dataset is on the key now, so 🔍 Find missing wells pulls **facilities too** (tick on by default): tank batteries, compressor / meter / pumping stations, plants, with name, type, status, operator and location. Yours stage with their facility type (BATTERY, COMPRESSOR STATION …); other operators' as "3RD PARTY <type> (operator)" obstacles. A facility already in the list by name, or within 150 ft of anything staged, is treated as known. Retired / abandoned facilities sit with plugged (off by default). Our facilities missing from the client's list appear in the client review as "Facility of yours that is not in the list".
