@@ -1,3 +1,7 @@
+## 2026-10-21 — Client response: override a ⚠ move — Site Setup Tools latest v4.409 (latest only)
+
+- **v4.409** — a move the tool held back because the client's coordinate disagrees with the Enverus pin now has a **"move anyway"** tick on its row for after you've looked (click the row: current spot, client spot and the Enverus pin all pulse). The flag text says why it was held.
+
 ## 2026-10-21 — Client response: feedback next to the site buttons — Site Setup Tools latest v4.408 (latest only)
 
 - **v4.408** — 🏷 Apply moves + renames looked like it did nothing: with Dry run on its result went only to the status line pinned at the top of the panel. The result (dry-run list with distances, or the write summary) now also appears directly under the buttons, with a standing line saying whether Dry run is on.

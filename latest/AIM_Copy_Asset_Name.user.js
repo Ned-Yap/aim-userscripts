@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.408
+// @version      4.409
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.408';
+    const SCRIPT_VERSION = '4.409';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -23975,7 +23975,7 @@
         const R = imp.resp; const sid = genState.siteID;
         if (!R.applied) { impRespNote('✔ Apply to staged first', '#ffb347'); return; }
         if (liteBlockedWrite('apply client corrections')) return;
-        const moves = R.moves.filter(x => !x.look), looks = R.moves.filter(x => x.look), renames = R.renames;
+        const moves = R.moves.filter(x => !x.look || x.force), looks = R.moves.filter(x => x.look && !x.force), renames = R.renames;
         if (!moves.length && !renames.length) { impRespNote(`Nothing to write to the site from this response${looks.length ? ` — the ${looks.length} ⚠ move${looks.length === 1 ? ' is' : 's are'} held back until you clear the flag` : ''}`, '#5fff5f'); return; }
         const dry = (() => { try { return !!document.getElementById('aim-gen-dryrun').checked; } catch (e) { return true; } })();
         if (dry) { impRespNote(`🧪 <b>Dry run is ON — nothing was written.</b> It would move <b>${moves.length}</b> existing asset${moves.length === 1 ? '' : 's'} (polygon slid to the client's coordinate, shape kept)${looks.length ? ` and hold back ${looks.length} ⚠` : ''}${renames.length ? ` and rename <b>${renames.length}</b>` : ''}: ${impEsc(moves.map(x => `${x.name} ${Math.round(approxMeters(x.from.lat, x.from.lng, x.to.lat, x.to.lng) / GEN_FT_TO_M).toLocaleString()} ft`).concat(renames.map(x => `${x.from} → ${x.to}`)).join(' · '))}. Untick Dry run in the header, then press again to write.`, '#ffb347'); return; }
@@ -24058,7 +24058,7 @@
                     ${R.removeIds.length ? `<button id="aim-imp-resp-del" style="${btn('255,85,85', ';font-weight:600')}">🗑 Select the ${R.removeIds.length} for Bulk → Delete</button>` : ''}
                 </div>
                 <div data-impresp-sitenote style="font-size:10.5px;color:#9ad;line-height:1.5;margin-top:4px;min-height:14px">${(() => { let dry = true; try { dry = !!document.getElementById('aim-gen-dryrun').checked; } catch (e) {} return dry ? '🧪 Dry run is ON (header): the button only lists what it would do. Untick Dry run to write.' : '<b style="color:#ff6060">LIVE</b>: the button writes to the site (backup first, undo available).'; })()}</div>
-                ${R.moves.length ? `<div style="max-height:150px;overflow:auto;margin-top:4px;border:1px solid rgba(255,255,255,0.06);border-radius:3px;background:rgba(0,0,0,0.15)">${R.moves.map((x, i) => `<div data-impresp-move="${i}" style="display:flex;gap:6px;align-items:center;padding:1px 4px;border-bottom:1px solid rgba(255,255,255,0.05);font-size:10.5px;color:#cfd6dc;cursor:pointer" title="click = zoom (both spots pulse)"><span style="color:${x.look ? '#ff5252' : '#ffb347'};flex:none">${x.look ? '⚠' : '↔'}</span><b style="flex:none">${impEsc(x.name)}</b><span style="color:#8a949e;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${Math.round(approxMeters(x.from.lat, x.from.lng, x.to.lat, x.to.lng) / GEN_FT_TO_M).toLocaleString()} ft · ${impEsc(x.why)}${x.look ? ' · held back: Enverus disagrees — check it first' : ''}</span></div>`).join('')}</div>` : ''}
+                ${R.moves.length ? `<div style="max-height:150px;overflow:auto;margin-top:4px;border:1px solid rgba(255,255,255,0.06);border-radius:3px;background:rgba(0,0,0,0.15)">${R.moves.map((x, i) => `<div data-impresp-move="${i}" style="display:flex;gap:6px;align-items:center;padding:1px 4px;border-bottom:1px solid rgba(255,255,255,0.05);font-size:10.5px;color:#cfd6dc;cursor:pointer" title="click = zoom (both spots pulse)"><span style="color:${x.look && !x.force ? '#ff5252' : '#ffb347'};flex:none">${x.look && !x.force ? '⚠' : '↔'}</span><b style="flex:none">${impEsc(x.name)}</b><span style="color:#8a949e;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${Math.round(approxMeters(x.from.lat, x.from.lng, x.to.lat, x.to.lng) / GEN_FT_TO_M).toLocaleString()} ft · ${impEsc(x.why)}${x.look ? (x.force ? ' · <b style="color:#ffb347">you cleared the flag — will move</b>' : ' · held back: the client coordinate is far from the Enverus pin for this API — zoom, look, then tick to move anyway') : ''}</span>${x.look ? `<label style="display:inline-flex;align-items:center;gap:3px;flex:none;color:#ffb347" title="Include this move even though the client coordinate disagrees with Enverus"><input type="checkbox" data-impresp-force="${i}" ${x.force ? 'checked' : ''} style="accent-color:#ffb347;margin:0"> move anyway</label>` : ''}</div>`).join('')}</div>` : ''}
                 ${R.removeNames.length ? `<div style="font-size:10px;color:#ff8a80;margin-top:4px">to delete: ${impEsc(R.removeNames.slice(0, 12).join(' · '))}${R.removeNames.length > 12 ? ` … +${R.removeNames.length - 12}` : ''}</div>` : ''}
             </div>` : ''}` : ''}
         </div>`;
@@ -24068,7 +24068,8 @@
         const dl = el.querySelector('#aim-imp-resp-del'); if (dl) dl.onclick = () => impRespQueueDeletes();
         el.querySelectorAll('[data-impresp-tab]').forEach(b => b.onclick = () => { R.tab = b.getAttribute('data-impresp-tab'); impRenderRespUi(); });
         el.querySelectorAll('[data-impresp-row]').forEach(d => d.onclick = (ev) => { if (ev.target.closest('[data-impresp-info]')) return; const r = rows[Number(d.getAttribute('data-impresp-row'))]; if (!r) return; const pts = []; if (r.coords) pts.push({ lat: r.coords.lat, lng: r.coords.lng, name: `${r.name} (client)` }); if (r.listCoords) pts.push({ lat: r.listCoords.lat, lng: r.listCoords.lng, name: `${r.name} (list)` }); const p = impRespPointFor(r); if (p && p.env && p.env.found && isFinite(p.env.lat)) pts.push({ lat: p.env.lat, lng: p.env.lng, name: `${r.name} (Enverus)` }); const a = impRespAssetFor(r, p); if (a) pts.push({ lat: a.centroid.lat, lng: a.centroid.lng, name: `${a.name} (on site)` }); if (!pts.length && p) pts.push({ lat: p.lat, lng: p.lng, name: p.name }); if (pts.length) impZoomToPoints(pts, r.name); impStatus(`🔎 ${impEsc(r.name)} — ${impEsc(IMP_RESP_LABEL[r.action])}: ${impEsc(r.response.slice(0, 160))}`); });
-        el.querySelectorAll('[data-impresp-move]').forEach(d => d.onclick = () => { const x = R.moves[Number(d.getAttribute('data-impresp-move'))]; if (!x) return; impZoomToPoints([{ lat: x.from.lat, lng: x.from.lng, name: `${x.name} (now)` }, { lat: x.to.lat, lng: x.to.lng, name: `${x.name} (client)` }], x.name); });
+        el.querySelectorAll('[data-impresp-force]').forEach(cb => cb.onchange = (ev) => { ev.stopPropagation(); const x = R.moves[Number(cb.getAttribute('data-impresp-force'))]; if (x) { x.force = cb.checked; impMarkDirty(); impRenderRespUi(); } });
+        el.querySelectorAll('[data-impresp-move]').forEach(d => d.onclick = (ev) => { if (ev.target.closest('[data-impresp-force]') || ev.target.tagName === 'LABEL') return; const x = R.moves[Number(d.getAttribute('data-impresp-move'))]; if (!x) return; const pts = [{ lat: x.from.lat, lng: x.from.lng, name: `${x.name} (now)` }, { lat: x.to.lat, lng: x.to.lng, name: `${x.name} (client)` }]; if (x.p && x.p.env && x.p.env.found && isFinite(x.p.env.lat)) pts.push({ lat: x.p.env.lat, lng: x.p.env.lng, name: `${x.name} (Enverus)` }); impZoomToPoints(pts, x.name); });
     }
     // ---- 📊 ANALYZE — what would change if this list were applied, before anything is written.
     // Compares the loaded list (selected points or the whole file) with the site: NEW (not on the
@@ -26967,7 +26968,7 @@
             pri: { on: imp.pri.on, oilCol: imp.pri.oilCol, waterCol: imp.pri.waterCol, blpdCol: imp.pri.blpdCol, priCol: imp.pri.priCol },
             env: { apiCol: imp.env.apiCol, notes: imp.env.notes, checkedAt: imp.env.checkedAt, mismatchFt: imp.env.mismatchFt, missing: imp.env.missing, missingAt: imp.env.missingAt, missingOp: imp.env.missingOp, missingTotal: imp.env.missingTotal },
             undo: { created: imp.lastCreated.slice(), updated: imp.lastUpdated.map(u => ({ id: u.id, name: u.name, before: u.before })) },   // v4.364: undo survives a reload
-            resp: imp.resp.rows ? { rows: imp.resp.rows.map(r => Object.assign({}, r)), fileName: imp.resp.fileName, at: imp.resp.at, applied: imp.resp.applied, moves: imp.resp.moves.map(x => ({ id: x.id, name: x.name, from: x.from, to: x.to, why: x.why, look: x.look })), renames: imp.resp.renames, removeIds: imp.resp.removeIds, removeNames: imp.resp.removeNames } : null,
+            resp: imp.resp.rows ? { rows: imp.resp.rows.map(r => Object.assign({}, r)), fileName: imp.resp.fileName, at: imp.resp.at, applied: imp.resp.applied, moves: imp.resp.moves.map(x => ({ id: x.id, name: x.name, from: x.from, to: x.to, why: x.why, look: x.look, force: !!x.force })), renames: imp.resp.renames, removeIds: imp.resp.removeIds, removeNames: imp.resp.removeNames } : null,
         };
         const json = JSON.stringify(data);
         const live = imp.points.filter(p => !p.done).length;
