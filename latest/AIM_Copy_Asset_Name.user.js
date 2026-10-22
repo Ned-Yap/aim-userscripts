@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.407
+// @version      4.408
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.407';
+    const SCRIPT_VERSION = '4.408';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -23967,20 +23967,24 @@
         impMarkDirty(); impSyncUi(); impRenderRespUi();
         impStatus(`✔ client response applied to the staged points: ${nMoved} moved · ${nAdded} added with coordinates · ${nRemoved} removed from the import · ${nStatus} statuses · ${nRenamed} renamed · ${nSkipped} left alone (review / needs their confirmation / centroid / no change). Site side: <b>${moves.length}</b> asset move${moves.length === 1 ? '' : 's'}, <b>${R.renames.length}</b> rename${R.renames.length === 1 ? '' : 's'}, <b>${R.removeIds.length}</b> to delete — see below.`);
     }
+    function impRespNote(html, color) {
+        impStatus(html, color);
+        const el = document.querySelector('[data-impresp-sitenote]'); if (el) { el.innerHTML = html; el.style.color = color || '#9ad'; }
+    }
     async function impRespApplySite() {
         const R = imp.resp; const sid = genState.siteID;
-        if (!R.applied) { impStatus('✔ Apply to staged first', '#ffb347'); return; }
+        if (!R.applied) { impRespNote('✔ Apply to staged first', '#ffb347'); return; }
         if (liteBlockedWrite('apply client corrections')) return;
         const moves = R.moves.filter(x => !x.look), looks = R.moves.filter(x => x.look), renames = R.renames;
-        if (!moves.length && !renames.length) { impStatus('Nothing to write to the site from this response', '#5fff5f'); return; }
+        if (!moves.length && !renames.length) { impRespNote(`Nothing to write to the site from this response${looks.length ? ` — the ${looks.length} ⚠ move${looks.length === 1 ? ' is' : 's are'} held back until you clear the flag` : ''}`, '#5fff5f'); return; }
         const dry = (() => { try { return !!document.getElementById('aim-gen-dryrun').checked; } catch (e) { return true; } })();
-        if (dry) { impStatus(`DRY RUN — would move <b>${moves.length}</b> existing asset${moves.length === 1 ? '' : 's'} (polygon slid to the client's coordinate, shape kept)${looks.length ? ` (${looks.length} held back for a look)` : ''} and rename <b>${renames.length}</b>: ${impEsc(moves.slice(0, 6).map(x => `${x.name} → ${Math.round(approxMeters(x.from.lat, x.from.lng, x.to.lat, x.to.lng) / GEN_FT_TO_M).toLocaleString()} ft`).concat(renames.slice(0, 4).map(x => `${x.from} → ${x.to}`)).join(' · '))}${moves.length + renames.length > 10 ? ' …' : ''}. Untick Dry run to write.`); return; }
-        const csrf = getCsrfToken(); if (!csrf) { impStatus('No CSRF token — make one native save anywhere in Percepto first, then retry', '#ff6060'); return; }
+        if (dry) { impRespNote(`🧪 <b>Dry run is ON — nothing was written.</b> It would move <b>${moves.length}</b> existing asset${moves.length === 1 ? '' : 's'} (polygon slid to the client's coordinate, shape kept)${looks.length ? ` and hold back ${looks.length} ⚠` : ''}${renames.length ? ` and rename <b>${renames.length}</b>` : ''}: ${impEsc(moves.map(x => `${x.name} ${Math.round(approxMeters(x.from.lat, x.from.lng, x.to.lat, x.to.lng) / GEN_FT_TO_M).toLocaleString()} ft`).concat(renames.map(x => `${x.from} → ${x.to}`)).join(' · '))}. Untick Dry run in the header, then press again to write.`, '#ffb347'); return; }
+        const csrf = getCsrfToken(); if (!csrf) { impRespNote('No CSRF token — make one native save anywhere in Percepto first, then retry', '#ff6060'); return; }
         if (!confirm(`Write to the site: move ${moves.length} existing asset(s) to the client's corrected coordinates (shape kept) and rename ${renames.length}?\n\nA backup of each asset downloads first; ↩ Undo last import puts them back.`)) return;
         try { await fetchMapObjects(sid, true); } catch (e) {}
         const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || []; const byId = new Map(ents.map(e => [e.id, e]));
         let siteCfg = null; try { siteCfg = await fetchSiteConfig(sid); } catch (e) {}
-        if (!siteCfg) { impStatus('Could not read the site config — nothing written', '#ff6060'); return; }
+        if (!siteCfg) { impRespNote('Could not read the site config — nothing written', '#ff6060'); return; }
         const plan = [];
         moves.forEach(x => { const e = byId.get(x.id); if (!e) return; const ring = entityCoords(e); if (!ring || ring.length < 3) return; const c = ringCentroid(ring); const dl = x.to.lat - c.lat, dg = x.to.lng - c.lng; plan.push({ kind: 'move', e, name: e.name, points: ring.map(v => ({ lat: v.lat + dl, lng: v.lng + dg })) }); });
         renames.forEach(x => { const e = byId.get(x.id); if (!e) return; plan.push({ kind: 'rename', e, name: x.to, newName: x.to }); });
@@ -24003,7 +24007,7 @@
         R.moves = R.moves.filter(x => !done.some(d => d.id === x.id)); R.renames = R.renames.filter(x => !done.some(d => d.id === x.id));
         try { impSaveSession('client-corrections'); } catch (e) {}
         impRenderRespUi(); impSyncUi();
-        impStatus(`📬 site updated: <b>${ok}</b> written${fail ? `, <span style="color:#ff6060">${fail} failed</span>` : ''} — backup downloaded · ↩ Undo last import reverts them`, fail ? '#ffb347' : '#5fff5f');
+        impRespNote(`📬 site updated: <b>${ok}</b> written${fail ? `, <span style="color:#ff6060">${fail} failed</span>` : ''} — backup downloaded · ↩ Undo last import reverts them`, fail ? '#ffb347' : '#5fff5f');
     }
     function impRespQueueDeletes() {
         const R = imp.resp; if (!R.removeIds.length) { impStatus('No on-site assets to delete from this response', '#ffb347'); return; }
@@ -24053,6 +24057,7 @@
                     ${(R.moves.length || R.renames.length) ? `<button id="aim-imp-resp-site" style="${btn('255,179,71', ';font-weight:600')}">🏷 Apply moves + renames to the site</button>` : ''}
                     ${R.removeIds.length ? `<button id="aim-imp-resp-del" style="${btn('255,85,85', ';font-weight:600')}">🗑 Select the ${R.removeIds.length} for Bulk → Delete</button>` : ''}
                 </div>
+                <div data-impresp-sitenote style="font-size:10.5px;color:#9ad;line-height:1.5;margin-top:4px;min-height:14px">${(() => { let dry = true; try { dry = !!document.getElementById('aim-gen-dryrun').checked; } catch (e) {} return dry ? '🧪 Dry run is ON (header): the button only lists what it would do. Untick Dry run to write.' : '<b style="color:#ff6060">LIVE</b>: the button writes to the site (backup first, undo available).'; })()}</div>
                 ${R.moves.length ? `<div style="max-height:150px;overflow:auto;margin-top:4px;border:1px solid rgba(255,255,255,0.06);border-radius:3px;background:rgba(0,0,0,0.15)">${R.moves.map((x, i) => `<div data-impresp-move="${i}" style="display:flex;gap:6px;align-items:center;padding:1px 4px;border-bottom:1px solid rgba(255,255,255,0.05);font-size:10.5px;color:#cfd6dc;cursor:pointer" title="click = zoom (both spots pulse)"><span style="color:${x.look ? '#ff5252' : '#ffb347'};flex:none">${x.look ? '⚠' : '↔'}</span><b style="flex:none">${impEsc(x.name)}</b><span style="color:#8a949e;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${Math.round(approxMeters(x.from.lat, x.from.lng, x.to.lat, x.to.lng) / GEN_FT_TO_M).toLocaleString()} ft · ${impEsc(x.why)}${x.look ? ' · held back: Enverus disagrees — check it first' : ''}</span></div>`).join('')}</div>` : ''}
                 ${R.removeNames.length ? `<div style="font-size:10px;color:#ff8a80;margin-top:4px">to delete: ${impEsc(R.removeNames.slice(0, 12).join(' · '))}${R.removeNames.length > 12 ? ` … +${R.removeNames.length - 12}` : ''}</div>` : ''}
             </div>` : ''}` : ''}

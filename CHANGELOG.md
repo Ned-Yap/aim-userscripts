@@ -1,3 +1,7 @@
+## 2026-10-21 — Client response: feedback next to the site buttons — Site Setup Tools latest v4.408 (latest only)
+
+- **v4.408** — 🏷 Apply moves + renames looked like it did nothing: with Dry run on its result went only to the status line pinned at the top of the panel. The result (dry-run list with distances, or the write summary) now also appears directly under the buttons, with a standing line saying whether Dry run is on.
+
 ## 2026-10-21 — 🔁 Mislabeled wellheads + third-party wells — Site Setup Tools latest v4.407 (latest only)
 
 - **v4.407 — 🔁 Mislabeled wellheads (Placement, after a 🛢 cross-check).** ⟳ Find cross-references every name-matched asset's Enverus pin with the polygon it actually sits on: when A's pin sits on asset B and B's pin sits on A, the names are swapped on the ground (⇄ mutual, ticked); when only A's pin sits on B it is listed → for a look. ✋ Pick two adds a pair by hand (ALT+click two existing assets). Click a row to zoom with both assets and both pins pulsing. 🔁 Swap renames through a temporary name (Percepto needs unique names), keeps the ids so missions are unaffected, downloads a backup, honours Dry run, ↩ undo swaps reverses.
