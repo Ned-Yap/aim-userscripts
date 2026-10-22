@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.411
+// @version      4.412
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.411';
+    const SCRIPT_VERSION = '4.412';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -24444,7 +24444,7 @@
     function impClearLayers() {
         const map = getLeafletMap();
         imp.layers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
-        imp.layers = [];
+        imp.layers = []; imp._hoverIdx = [];
     }
     function impClearShapeLayers() {
         const map = getLeafletMap();
@@ -24463,14 +24463,14 @@
         impClearLayers();
         try { impRenderAssetShapes(); } catch (e) {}
         const live = imp.points.filter(p => !p.done);
-        if (!live.length) { impEnsureMoveEnd(false); return; }
+        if (!live.length) { impEnsureMoveEnd(false); impEnsureHover(false); return; }
         impEnsureMoveEnd(true);
         if (!imp.renderer) { try { imp.renderer = L.canvas({ padding: 0.3 }); } catch (e) { imp.renderer = null; } }
         // Tight cull: only what's actually in view (+small pan margin) is
         // drawn — a 10k-row region list never renders 10k markers. Markers
         // deliberately TINY (selected slightly larger so state still reads).
         let bounds = null; try { bounds = map.getBounds().pad(0.08); } catch (e) {}
-        let drawn = 0, culled = 0;
+        let drawn = 0, culled = 0; const hoverIdx = [];
         for (const p of live) {
             if (bounds && !bounds.contains([p.lat, p.lng])) { culled++; continue; }
             if (drawn >= IMP_MAX_RENDER) { culled++; continue; }
@@ -24487,11 +24487,56 @@
                 if (imp.renderer) opts.renderer = imp.renderer;
                 const c = L.circleMarker([p.lat, p.lng], opts);
                 c.addTo(map); imp.layers.push(c); drawn++;
+                try { const cp = map.latLngToContainerPoint([p.lat, p.lng]); hoverIdx.push({ x: cp.x, y: cp.y, p }); } catch (e) {}
             } catch (e) {}
         }
+        imp._hoverIdx = hoverIdx; impEnsureHover(true);
         const capEl = document.getElementById('aim-imp-render-note');
         if (capEl) capEl.textContent = culled ? `${drawn} of ${live.length} staged points drawn in this view (${culled} off-screen / over the ${IMP_MAX_RENDER} render cap — zoom/pan to see them)` : '';
     }
+    // Hover a staged dot → its name (plus type / tier / what it is) in a small tip. The dots are
+    // non-interactive canvas marks, so this is a pixel hit-test against the index built at render.
+    function impEnsureHover(on) {
+        const map = getLeafletMap(); if (!map) return;
+        const cont = map.getContainer();
+        if (on && !imp._onHover) {
+            imp._onHover = (ev) => {
+                if (imp._hoverRaf) return;
+                imp._hoverRaf = requestAnimationFrame(() => {
+                    imp._hoverRaf = null;
+                    const idx = imp._hoverIdx || []; if (!idx.length) { impHideHoverTip(); return; }
+                    const r = cont.getBoundingClientRect(); const x = ev.clientX - r.left, y = ev.clientY - r.top;
+                    let best = null, bd = 100;                                      // 10 px
+                    for (const h of idx) { const d2 = (h.x - x) * (h.x - x) + (h.y - y) * (h.y - y); if (d2 < bd) { bd = d2; best = h; } }
+                    if (!best) { impHideHoverTip(); return; }
+                    impShowHoverTip(cont, best.x, best.y, best.p);
+                });
+            };
+            imp._onHoverLeave = () => impHideHoverTip();
+            cont.addEventListener('mousemove', imp._onHover);
+            cont.addEventListener('mouseleave', imp._onHoverLeave);
+        } else if (!on && imp._onHover) {
+            try { cont.removeEventListener('mousemove', imp._onHover); cont.removeEventListener('mouseleave', imp._onHoverLeave); } catch (e) {}
+            imp._onHover = null; imp._onHoverLeave = null; impHideHoverTip();
+        }
+    }
+    function impHoverText(p) {
+        const bits = [];
+        if (p.typeRaw) bits.push(p.typeRaw);
+        if (imp.pri.on && p.pri) bits.push(p.pri.tier || 'no tier');
+        if (p.dup) bits.push(imp.dupMode === 'update' ? 'update' : 'name match');
+        if (p.src === 'enverus') bits.push('from Enverus'); if (p.src === 'enverus-3p') bits.push('3rd party'); if (p.src === 'client') bits.push('from the client response');
+        if (p.env && p.env.found && p.env.status) bits.push(p.env.status.toLowerCase());
+        if (p.shape) bits.push('outline drawn'); if (p.orig) bits.push('moved');
+        return bits.join(' · ');
+    }
+    function impShowHoverTip(cont, x, y, p) {
+        let tip = cont.querySelector('#aim-imp-hovertip');
+        if (!tip) { tip = document.createElement('div'); tip.id = 'aim-imp-hovertip'; tip.style.cssText = 'position:absolute;z-index:1200;pointer-events:none;background:#1f2228;color:#e6e6e6;border:1px solid rgba(122,223,230,0.6);border-radius:4px;padding:3px 7px;font:600 11px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;box-shadow:0 2px 8px rgba(0,0,0,0.6);white-space:nowrap;max-width:360px;overflow:hidden;text-overflow:ellipsis'; cont.appendChild(tip); }
+        if (tip._p !== p) { tip._p = p; const sub = impHoverText(p); tip.innerHTML = `${impEsc(p.name)}${sub ? `<span style="color:#9ad;font-weight:400"> · ${impEsc(sub)}</span>` : ''}`; }
+        tip.style.left = `${Math.round(x + 12)}px`; tip.style.top = `${Math.round(y - 28)}px`; tip.style.display = '';
+    }
+    function impHideHoverTip() { const map = getLeafletMap(); if (!map) return; const tip = map.getContainer().querySelector('#aim-imp-hovertip'); if (tip) { tip.style.display = 'none'; tip._p = null; } }
     function impEnsureMoveEnd(on) {
         const map = getLeafletMap(); if (!map) return;
         if (on && !imp._onMoveEnd) {
@@ -25902,7 +25947,10 @@
         if (!list.length) { el.innerHTML = `<div style="font-size:10px;color:#5fff5f">✓ every ${impEsc(c.missingOp)} well inside the area is already in the client's list (${c.missingTotal || 0} checked, ${impEsc(c.missingAt || '')})</div>`; return; }
         const gcol = { producing: '#5fff5f', drilled: '#7adfe6', inactive: '#ffb347', plugged: '#ff5252', facility: '#c39bd3' };
         const glabel = { producing: 'producing / injecting', drilled: 'drilled / permitted / DUC', inactive: 'inactive / TA', plugged: 'plugged / expired / retired', facility: 'facilities (batteries · compressor / meter / pumping stations · pipeline receipt points)' };
-        const shown = list.filter(x => c.missStatus[x.group]);
+        const padM = (imp.pri.padFt || 50) * GEN_FT_TO_M;
+        const onPad = (x) => x.inside || (x.nearFt != null && x.nearFt * GEN_FT_TO_M <= padM);
+        const shown = list.filter(x => c.missStatus[x.group] && (!c.missOffPads || !onPad(x)));
+        const offN = list.filter(x => !onPad(x)).length;
         const nSel = shown.filter(x => c.missingSel.has(x.api) && !x.staged).length;
         const chip = (k) => { const n = list.filter(x => x.group === k).length; return `<label style="display:inline-flex;align-items:center;gap:3px;font-size:10px;color:${gcol[k]};cursor:pointer"><input type="checkbox" data-impmiss-g="${k}" ${c.missStatus[k] ? 'checked' : ''} style="accent-color:${gcol[k]};margin:0"> ${glabel[k]} ${n}</label>`; };
         const row = (x) => `<div data-impmiss-row="${x.api}" style="display:flex;align-items:center;gap:6px;padding:1px 4px;border-bottom:1px solid rgba(255,255,255,0.05);font-size:10.5px;color:${x.staged ? '#6f7a85' : '#cfd6dc'};cursor:pointer" onmouseover="this.style.background='rgba(255,255,255,0.05)'" onmouseout="this.style.background=''" title="click = zoom to it">
@@ -25916,6 +25964,7 @@
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:4px;font-size:11px"><b style="color:#ffd666">${list.length}</b> <span style="color:#cfd6dc">${impEsc(c.missingOp)} wells inside the area that are NOT in the client's list</span> <span style="color:#888;font-size:10px">(of ${c.missingTotal || 0} found · ${impEsc(c.missingAt || '')})</span>
                 ${chip('producing')} ${chip('drilled')} ${chip('inactive')} ${chip('facility')} ${chip('plugged')}
                 <span style="flex:1"></span>
+                <label style="display:inline-flex;align-items:center;gap:3px;font-size:10px;color:#ffb347;cursor:pointer" title="Hide anything that sits on or within the pad distance of an existing mapped asset — leaves the wells / facilities on ground we have nothing mapped on yet"><input type="checkbox" data-impmiss-offpads ${c.missOffPads ? 'checked' : ''} style="accent-color:#ffb347;margin:0"> off our pads only (${offN})</label>
                 <button data-impmiss-all style="background:none;border:1px solid rgba(255,255,255,0.15);color:#9ad;border-radius:3px;padding:0 6px;cursor:pointer;font:inherit;font-size:10px">tick all shown</button>
                 <button data-impmiss-none style="background:none;border:1px solid rgba(255,255,255,0.15);color:#9ad;border-radius:3px;padding:0 6px;cursor:pointer;font:inherit;font-size:10px">untick</button>
                 <button data-impmiss-rep="sheets" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">📤 Sheets</button>
@@ -25930,6 +25979,7 @@
         </div>`;
         el.onclick = (ev) => {
             const g = ev.target.closest('[data-impmiss-g]'); if (g) { c.missStatus[g.getAttribute('data-impmiss-g')] = !!g.checked; impRenderMissingUi(host); return; }
+            const op = ev.target.closest('[data-impmiss-offpads]'); if (op) { c.missOffPads = !!op.checked; impRenderMissingUi(host); return; }
             const cb = ev.target.closest('[data-impmiss-sel]'); if (cb) { const a = cb.getAttribute('data-impmiss-sel'); if (cb.checked) c.missingSel.add(a); else c.missingSel.delete(a); impRenderMissingUi(host); return; }
             if (ev.target.closest('[data-impmiss-all]')) { shown.forEach(x => { if (!x.staged) c.missingSel.add(x.api); }); impRenderMissingUi(host); return; }
             if (ev.target.closest('[data-impmiss-none]')) { c.missingSel.clear(); impRenderMissingUi(host); return; }
@@ -27094,7 +27144,7 @@
         try { impClearPulse(); } catch (e) {}
         try { impClearAssetShapeLayers(); impClearStrokeLayer(); } catch (e) {}
         try { impSetMode(null); } catch (e) {}
-        impEnsureMoveEnd(false);
+        impEnsureMoveEnd(false); impEnsureHover(false);
         impClearLayers(); impClearShapeLayers(); impClearAssetLayers();
         // parsed data stays in memory — reopening the generator on the SAME
         // site restores the staged view; a different site resets it.

@@ -1,3 +1,7 @@
+## 2026-10-22 — Hover names on staged dots · off-our-pads filter — Site Setup Tools latest v4.412 (latest only)
+
+- **v4.412** — hovering a staged dot shows its name with the type, tier, what it is (name match / from Enverus / 3rd party / from the client response), Enverus status, and whether it was moved or has a drawn outline. The 🔍 missing-wells list gained **"off our pads only"**: hides anything on or within the pad distance of an existing mapped asset, leaving the wells and facilities on ground nothing is mapped on yet.
+
 ## 2026-10-22 — Facilities dialled in: capture set + rig / crane watch — Site Setup Tools latest v4.411 (latest only)
 
 - **v4.411** — facility types now follow the chart: **captured** as assets / obstacles = Battery, Compressor Station, Meter Station, Pumping Station, Pipeline Receipt/Delivery Location; everything else in the Enverus catalogue is dropped. **Rig / crane watch** = Battery, Compressor Station, Disposal Facility: every one inside the area (yours and others') goes to a 🏗 export (Sheets / CSV) for the rig / crane NFZ tool and the hazards layer, and a staged battery or compressor station carries a "Rig / crane watch" line in its notes. Enverus's "NOT AVAILABLE" status counts as in service.
