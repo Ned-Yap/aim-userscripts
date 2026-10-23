@@ -1,4 +1,6 @@
-## 2026-10-22 — 🩻 P&A assets: red ✕ for plugged ground, P&A ruleset, status review — Site Setup Tools latest v4.413 → v4.423 (latest only)
+## 2026-10-22 — 🩻 P&A assets: red ✕ for plugged ground, P&A ruleset, status review — Site Setup Tools latest v4.413 → v4.424 (latest only)
+
+- **v4.424** — while SHIFT is held, the NFZ under the cursor gets our own red label drawn above everything, so the NFZ name wins even after Percepto's Shift reveal switches its hover to the asset underneath. Several NFZs stacked = all names.
 
 - **v4.423** — entity name labels: DOM-level watcher — any small element appearing in the map document whose text is exactly an entity name on the site is hidden unless SHIFT is held, however Percepto builds it. Console logs each label it catches.
 
