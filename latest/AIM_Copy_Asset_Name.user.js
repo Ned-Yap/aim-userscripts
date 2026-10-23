@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.432
+// @version      4.433
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.432';
+    const SCRIPT_VERSION = '4.433';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -23003,7 +23003,7 @@
         target: 'staged',                           // 'staged' | 'assets' (🗑 delete mode)
         mode: null,                                 // null | 'circle' | 'lasso' | 'pick' | 'edit' | 'move'
         moveHeld: null, moveDrag: false, moveDownPt: null,   // v4.344: ↔ Move point — the staged point being carried
-        shapeHeld: null, stroke: null, strokeLayer: null, assetShapeLayers: [], heldLayers: [], shapeEdit: null, shapeW: 15, snapFt: 10, bufFt: 7.5, gapFt: 15,   // v4.367: ✏ Shape · v4.373: W = the NARROW side (15 ft), buffer 7.5 ft each side, snap keeps a 15 ft gap
+        shapeHeld: null, stroke: null, strokeLayer: null, assetShapeLayers: [], heldLayers: [], shapeEdit: null, shapeW: 15, snapFt: 10, bufFt: 7.5, gapFt: 15, line: null, lineStart: null, lineLayer: null, linePrev: null, alignDeg: 5,   // v4.433: two-click line + align tolerance   // v4.367: ✏ Shape · v4.373: W = the NARROW side (15 ft), buffer 7.5 ft each side, snap keeps a 15 ft gap
         radiusVal: 3, radiusUnit: 'mi', includeDups: false,   // v4.343: 3 mi = the usual base reach circle
         keepShield: true,                           // v4.343: keep "- unsh" / "shielded" modifiers in subtypes (off = strip them)
         dupMode: 'update',                          // v4.347: name matches an existing asset → 'skip' | 'update' (type + notes only) | 'copy' (create "-N")
@@ -23036,7 +23036,7 @@
         lastDelete: null,                           // {siteID, when, entities:[full bodies]} — ↩ Undo batch source
         assetIndex: null,                           // cached [{id,name,clean,ring,bbox,centroid}] for dup-guard + delete select
     };
-    function impSaveParams() { try { GM_setValue(IMP_PARAMS_KEY, JSON.stringify({ radiusVal: imp.radiusVal, radiusUnit: imp.radiusUnit, includeDups: imp.includeDups, advOpen: imp.advOpen, keepShield: imp.keepShield, dupMode: imp.dupMode, secOpen: imp.secOpen, shapeW: imp.shapeW, snapFt: imp.snapFt, bufFt: imp.bufFt, gapFt: imp.gapFt, anaMovedFt: imp.ana.movedFt, paAssets: imp.env.paAssets, paSizeFt: imp.env.paSizeFt, paMatchFt: imp.env.paMatchFt, hvOn: imp.hv.on, hvEnv: imp.hv.useEnv, pri: { clusterFt: imp.pri.clusterFt, padFt: imp.pri.padFt, p1Min: imp.pri.p1Min, p1Max: imp.pri.p1Max, open: imp.pri.open, setOpen: imp.pri.setOpen, zeroUntier: imp.pri.zeroUntier, envUntier: imp.pri.envUntier } })); } catch (e) {} }
+    function impSaveParams() { try { GM_setValue(IMP_PARAMS_KEY, JSON.stringify({ radiusVal: imp.radiusVal, radiusUnit: imp.radiusUnit, includeDups: imp.includeDups, advOpen: imp.advOpen, keepShield: imp.keepShield, dupMode: imp.dupMode, secOpen: imp.secOpen, shapeW: imp.shapeW, snapFt: imp.snapFt, bufFt: imp.bufFt, gapFt: imp.gapFt, anaMovedFt: imp.ana.movedFt, paAssets: imp.env.paAssets, paSizeFt: imp.env.paSizeFt, paMatchFt: imp.env.paMatchFt, hvOn: imp.hv.on, hvEnv: imp.hv.useEnv, alignDeg: imp.alignDeg, pri: { clusterFt: imp.pri.clusterFt, padFt: imp.pri.padFt, p1Min: imp.pri.p1Min, p1Max: imp.pri.p1Max, open: imp.pri.open, setOpen: imp.pri.setOpen, zeroUntier: imp.pri.zeroUntier, envUntier: imp.pri.envUntier } })); } catch (e) {} }
     function impLoadParams() {
         try {
             const raw = GM_getValue(IMP_PARAMS_KEY, ''); if (!raw) return;
@@ -23061,6 +23061,7 @@
             if (typeof o.gapFt === 'number' && o.gapFt >= 0) imp.gapFt = o.gapFt;
             if (typeof o.paAssets === 'boolean') imp.env.paAssets = o.paAssets;
             if (typeof o.hvOn === 'boolean') imp.hv.on = o.hvOn;
+            if (typeof o.alignDeg === 'number' && o.alignDeg >= 0) imp.alignDeg = o.alignDeg;
             if (typeof o.hvEnv === 'boolean') imp.hv.useEnv = o.hvEnv;
             if (typeof o.paSizeFt === 'number' && o.paSizeFt >= 5) imp.env.paSizeFt = o.paSizeFt;
             if (typeof o.paMatchFt === 'number' && o.paMatchFt >= 0) imp.env.paMatchFt = o.paMatchFt;
@@ -24949,6 +24950,88 @@
         (imp.assetIndex || []).forEach(a => { if (approxMeters(p.lat, p.lng, a.centroid.lat, a.centroid.lng) > radiusM) return; out.push(a.ring.map(pr.to)); });
         return out;
     }
+    // ---- v4.433 ✏ straight line · rotation · alignment ----
+    function impNorm90(t) { const q = Math.PI / 2; return ((t % q) + q) % q; }
+    function impRingAngle(xy) {                       // orientation of the longest edge, radians in [0, 90°)
+        let best = 0, bl = -1;
+        for (let i = 0; i < xy.length; i++) { const a = xy[i], b = xy[(i + 1) % xy.length]; const l = Math.hypot(b.x - a.x, b.y - a.y); if (l > bl) { bl = l; best = Math.atan2(b.y - a.y, b.x - a.x); } }
+        return impNorm90(best);
+    }
+    function impNeighbourAngles(p, pr, radiusM) { return impNeighbourRings(p, pr, radiusM).filter(r => r.length >= 3).map(impRingAngle); }
+    // smallest rotation (mod 90°) that makes theta parallel to one of `angles`, if within tol; else null
+    function impSnapAngle(theta, angles, tolRad) {
+        const q = Math.PI / 2, t0 = impNorm90(theta); let best = null;
+        angles.forEach(a => { let d = a - t0; d = ((d + q / 2) % q + q) % q - q / 2; if (Math.abs(d) <= tolRad && (best == null || Math.abs(d) < Math.abs(best))) best = d; });
+        return best == null ? null : theta + best;
+    }
+    function impRotateXY(xy, c, dTheta) { const cs = Math.cos(dTheta), sn = Math.sin(dTheta); return xy.map(v => { const dx = v.x - c.x, dy = v.y - c.y; return { x: c.x + dx * cs - dy * sn, y: c.y + dx * sn + dy * cs }; }); }
+    function impCentroidXY(xy) { let x = 0, y = 0; xy.forEach(v => { x += v.x; y += v.y; }); return { x: x / xy.length, y: y / xy.length }; }
+    function impLineToRing(a, b, widthM) {
+        const pr = impProj(a.lat, a.lng); const A = pr.to(a), B = pr.to(b); const L = Math.hypot(B.x - A.x, B.y - A.y); if (L < 0.5) return null;
+        const ux = (B.x - A.x) / L, uy = (B.y - A.y) / L, nx = -uy, ny = ux, hw = widthM / 2;
+        return [{ x: A.x + nx * hw, y: A.y + ny * hw }, { x: B.x + nx * hw, y: B.y + ny * hw }, { x: B.x - nx * hw, y: B.y - ny * hw }, { x: A.x - nx * hw, y: A.y - ny * hw }].map(pr.from);
+    }
+    // the far end of a line, rotated about its start so the line runs parallel to a neighbour's edge (within alignDeg) — Alt = exactly where the cursor is
+    function impLineSnappedEnd(a, b, alt) {
+        if (alt || !(imp.alignDeg > 0)) return { ll: b, snapped: false };
+        const pr = impProj(a.lat, a.lng); const A = pr.to(a), B = pr.to(b); const th = Math.atan2(B.y - A.y, B.x - A.x), L = Math.hypot(B.x - A.x, B.y - A.y);
+        const sn = impSnapAngle(th, impNeighbourAngles({ lat: a.lat, lng: a.lng }, pr, 90), imp.alignDeg * Math.PI / 180);
+        if (sn == null || Math.abs(sn - th) < 1e-6) return { ll: b, snapped: false };
+        return { ll: pr.from({ x: A.x + L * Math.cos(sn), y: A.y + L * Math.sin(sn) }), snapped: true };
+    }
+    function impClearLine() { const map = getLeafletMap(); ['lineLayer', 'linePrev'].forEach(k => { if (imp[k]) { try { if (map) map.removeLayer(imp[k]); } catch (e) {} imp[k] = null; } }); imp.line = null; imp.lineStart = null; }
+    function impRenderLine(cursorLL, alt) {
+        const L = getLeafletL(), map = getLeafletMap(); if (!L || !map || !imp.line) return;
+        const a = imp.line.a; let b = null, snapped = false;
+        if (cursorLL) { const r = impLineSnappedEnd(a, cursorLL, alt); b = r.ll; snapped = r.snapped; }
+        imp.line.b = b; imp.line.snapped = snapped;
+        const lls = b ? [[a.lat, a.lng], [b.lat, b.lng]] : [[a.lat, a.lng], [a.lat, a.lng]];
+        try {
+            if (!imp.lineLayer) imp.lineLayer = L.polyline(lls, { renderer: impShapeRenderer(), color: '#ff5fff', weight: 2.5, opacity: 0.95, dashArray: '6,4', interactive: false }).addTo(map); else imp.lineLayer.setLatLngs(lls);
+            const ring = b ? impLineToRing(a, b, imp.shapeW * GEN_FT_TO_M) : null;
+            if (ring) {
+                const rl = ring.map(v => [v.lat, v.lng]); const col = snapped ? '#5fff5f' : impShapeColor;
+                if (!imp.linePrev) imp.linePrev = L.polygon(rl, { renderer: impShapeRenderer(), color: col, weight: 2, opacity: 0.9, fillColor: impShapeColor, fillOpacity: 0.15, interactive: false }).addTo(map);
+                else { imp.linePrev.setLatLngs(rl); imp.linePrev.setStyle({ color: col }); }
+            }
+        } catch (e) {}
+    }
+    function impLineFinish(cursorLL, alt) {
+        const a = imp.line && imp.line.a; let b = imp.line && imp.line.b;
+        if (a && cursorLL) b = impLineSnappedEnd(a, cursorLL, alt).ll;
+        const wasSnapped = !!(imp.line && imp.line.snapped);
+        impClearLine();
+        if (!a || !b) return;
+        imp.stroke = [a, b]; impShapeFinishStroke();
+        if (wasSnapped) impStatus(`${document.getElementById('aim-imp-result') ? document.getElementById('aim-imp-result').innerHTML : ''} · <span style="color:#5fff5f">aligned to a neighbour (±${imp.alignDeg}°)</span>`);
+    }
+    // rotation handle: a dot just above the held box (container px), hit-tested first
+    function impRotHandleLL(map, ring) {
+        const c = ringCentroid(ring); const cp = map.latLngToContainerPoint([c.lat, c.lng]); let R = 0;
+        ring.forEach(v => { try { R = Math.max(R, cp.distanceTo(map.latLngToContainerPoint([v.lat, v.lng]))); } catch (e) {} });
+        return map.containerPointToLatLng([cp.x, cp.y - R - 22]);
+    }
+    function impRotateHeld(dDeg, snapToNeighbours) {
+        const p = imp.shapeHeld; if (!p || !p.shape) return;
+        const pr = impProj(p.lat, p.lng); const xy = p.shape.map(pr.to), c = impCentroidXY(xy);
+        let out = impRotateXY(xy, c, dDeg * Math.PI / 180);
+        if (snapToNeighbours && imp.alignDeg > 0) { const th = impRingAngle(out); const sn = impSnapAngle(th, impNeighbourAngles(p, pr, 90).concat([0]), imp.alignDeg * Math.PI / 180); if (sn != null) out = impRotateXY(out, c, sn - th); }
+        p.shape = out.map(pr.from); impRenderHeldShape(); impMarkDirty();
+    }
+    // ⟂ Align: turn the held box parallel to the nearest neighbour's edge (no tolerance), then snap its position to the gap
+    function impAlignHeld() {
+        const p = imp.shapeHeld; if (!p || !p.shape) { impStatus('✏ hold a shaped dot first (click it), then ⟂ Align', '#ffb347'); return; }
+        const pr = impProj(p.lat, p.lng); const xy = p.shape.map(pr.to), c = impCentroidXY(xy);
+        const angles = impNeighbourAngles(p, pr, 90);
+        if (!angles.length) { impStatus('✏ no neighbouring outline or asset within 300 ft to align to', '#ffb347'); return; }
+        const th = impRingAngle(xy); const sn = impSnapAngle(th, angles, Math.PI / 4);
+        let out = sn == null ? xy : impRotateXY(xy, c, sn - th);
+        const sh = impSnapShift(out, impNeighbourRings(p, pr, 60), Math.max(imp.snapFt, 30) * GEN_FT_TO_M, imp.gapFt * GEN_FT_TO_M);
+        if (sh) out = out.map(q => ({ x: q.x + sh.dx, y: q.y + sh.dy }));
+        p.shape = out.map(pr.from); const cc = ringCentroid(p.shape); p.lat = cc.lat; p.lng = cc.lng;
+        try { impComputeDups(); } catch (e) {} impRefreshAfterSelChange(); impMarkDirty();
+        impStatus(`⟂ "${impEsc(p.name)}" turned ${sn == null ? '0' : Math.round(((sn - th) * 180 / Math.PI) * 10) / 10}° to run parallel to its neighbour${sh ? ` and moved ${Math.round(Math.hypot(sh.dx, sh.dy) / GEN_FT_TO_M * 10) / 10} ft to the ${imp.gapFt} ft gap` : ''}`);
+    }
     function impAssignShape(p, ring, how) {
         if (!ring || ring.length < 3) return;
         const c = ringCentroid(ring);
@@ -24991,6 +25074,7 @@
         let cp; try { cp = map.latLngToContainerPoint([ll.lat, ll.lng]); } catch (e) { return null; }
         const px = (v) => { try { return cp.distanceTo(map.latLngToContainerPoint([v.lat, v.lng])); } catch (e) { return Infinity; } };
         const n = p.shape.length;
+        try { if (px(impRotHandleLL(map, p.shape)) <= IMP_PICK_PX) return { p, i: -1, type: 'rotate' }; } catch (e) {}   // v4.433
         for (let i = 0; i < n; i++) if (px(p.shape[i]) <= IMP_PICK_PX) return { p, i, type: 'vert' };
         for (let i = 0; i < n; i++) { const v = p.shape[i], w = p.shape[(i + 1) % n]; if (px({ lat: (v.lat + w.lat) / 2, lng: (v.lng + w.lng) / 2 }) <= IMP_PICK_PX) return { p, i, type: 'mid' }; }
         // v4.374: anywhere along an edge drags that edge; anywhere inside moves the whole box
@@ -25045,6 +25129,7 @@
                 if (R.buf) R.buf.setLatLngs(impBufferRings(p.shape));
                 R.poly.setLatLngs(p.shape.map(v => [v.lat, v.lng]));
                 for (let i = 0; i < n; i++) { const v = p.shape[i], w = p.shape[(i + 1) % n]; R.verts[i].setLatLng([v.lat, v.lng]); if (R.mids[i]) R.mids[i].setLatLng([(v.lat + w.lat) / 2, (v.lng + w.lng) / 2]); }
+                if (R.rot) { const h = impRotHandleLL(map, p.shape), c = ringCentroid(p.shape); R.rot.setLatLng([h.lat, h.lng]); if (R.rotLine) R.rotLine.setLatLngs([[c.lat, c.lng], [h.lat, h.lng]]); }
             } catch (e) { impRenderHeldShape(); }
         });
     }
@@ -25069,6 +25154,11 @@
                     const d = L.circleMarker([v.lat, v.lng], { renderer: impShapeRenderer(), radius: 5, color: '#ffffff', weight: 1.5, fillColor: '#ff5fff', fillOpacity: 1, interactive: false }); d.addTo(map); imp.heldLayers.push(d); R.verts.push(d);
                     const m = L.circleMarker([(v.lat + w.lat) / 2, (v.lng + w.lng) / 2], { renderer: impShapeRenderer(), radius: 4.5, color: '#ffffff', weight: 1, fillColor: impShapeColor, fillOpacity: 1, interactive: false }); m.addTo(map); imp.heldLayers.push(m); R.mids.push(m);
                 }
+                try {                                                       // v4.433: rotation handle above the box
+                    const h = impRotHandleLL(map, p.shape); const c = ringCentroid(p.shape);
+                    R.rotLine = L.polyline([[c.lat, c.lng], [h.lat, h.lng]], { renderer: impShapeRenderer(), color: '#7adfe6', weight: 1, opacity: 0.6, dashArray: '2,3', interactive: false }); R.rotLine.addTo(map); imp.heldLayers.push(R.rotLine);
+                    R.rot = L.circleMarker([h.lat, h.lng], { renderer: impShapeRenderer(), radius: 6, color: '#7adfe6', weight: 2, fillColor: '#ffffff', fillOpacity: 1, interactive: false }); R.rot.addTo(map); imp.heldLayers.push(R.rot);
+                } catch (e) {}
             }
             imp.heldRefs = R;
         } catch (e) { imp.heldRefs = null; }
@@ -25208,15 +25298,16 @@
             }
             if (imp.mode === 'shape') {                                  // v4.367 ✏: CTRL+drag = stroke · click a dot = hold · ALT+click a dot = copy the held outline · corner/edge of the held outline = drag
                 let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
-                if (ev.ctrlKey || ev.metaKey) { ev.preventDefault(); ev.stopPropagation(); imp.stroke = [ll]; impRenderStroke(); return; }   // CTRL (Shift is Percepto's name reveal)
+                if (imp.line) { ev.preventDefault(); ev.stopPropagation(); impLineFinish(ll, ev.altKey); return; }   // v4.433: second click (CTRL or not) ends the straight line
+                if (ev.ctrlKey || ev.metaKey) { ev.preventDefault(); ev.stopPropagation(); imp.stroke = [ll]; imp.lineStart = { ll }; impRenderStroke(); return; }   // CTRL: click = straight line start · drag = freehand (Shift is Percepto's name reveal)
                 const t = impShapeTargetAt(map, ll);
-                if (t) { ev.preventDefault(); ev.stopPropagation(); const pr0 = impProj(t.p.lat, t.p.lng); imp.shapeEdit = { p: t.p, i: t.i, type: t.type, down: { x: ev.clientX, y: ev.clientY }, downLL: ll, moved: false, start: t.p.shape.map(v => ({ lat: v.lat, lng: v.lng })), pr: pr0, neigh: impNeighbourRings(t.p, pr0, 60) }; return; }   // v4.376: neighbours found ONCE per drag
+                if (t) { ev.preventDefault(); ev.stopPropagation(); const pr0 = impProj(t.p.lat, t.p.lng); imp.shapeEdit = { p: t.p, i: t.i, type: t.type, down: { x: ev.clientX, y: ev.clientY }, downLL: ll, downCP: (() => { try { return map.mouseEventToContainerPoint(ev); } catch (e) { return null; } })(), moved: false, start: t.p.shape.map(v => ({ lat: v.lat, lng: v.lng })), pr: pr0, neigh: impNeighbourRings(t.p, pr0, 60) }; return; }   // v4.376: neighbours found ONCE per drag
                 const p = impNearestStaged(map, ll, IMP_PICK_PX * 1.5);
                 if (ev.altKey) { ev.preventDefault(); ev.stopPropagation(); if (!imp.shapeHeld || !imp.shapeHeld.shape) { impStatus('✏ hold a shaped dot first (click it), then ALT+click the dots that should get the same outline', '#ffb347'); return; } if (!p) { impStatus('✏ no dot there', '#ffb347'); return; } if (p === imp.shapeHeld) return; impShapeClone(imp.shapeHeld, p, false); return; }
                 if (!p) return;                                              // empty map → pan
                 ev.preventDefault(); ev.stopPropagation();
                 imp.shapeHeld = p; impRenderAssetShapes(); impSyncUi();
-                impStatus(`✏ holding "${impEsc(p.name)}"${p.shape ? ` (${p.shape.length}-point outline) — drag inside = move the box · drag an edge = pull it · drag a corner = that corner · ALT+click other dots to copy this outline · Delete = back to a square` : ' — CTRL+drag a stroke across the asset: a line becomes a rectangle, a loop becomes the tightest box'}`);
+                impStatus(`✏ holding "${impEsc(p.name)}"${p.shape ? ` (${p.shape.length}-point outline) — drag inside = move the box · drag an edge = pull it · drag a corner = that corner · ALT+click other dots to copy this outline · Delete = back to a square` : ' — CTRL+click one end of the asset, click the other end: a straight line becomes a rectangle (CTRL+drag a loop = the tightest box); rotate with the cyan handle or [ ]; the tightest box'}`);
                 return;
             }
             if (!ev.altKey) return;                                      // every other tool: plain click stays free (pan / native edit)
@@ -25253,7 +25344,8 @@
                 try { if (map.latLngToContainerPoint([last.lat, last.lng]).distanceTo(map.latLngToContainerPoint([ll.lat, ll.lng])) < 3) return; } catch (e) {}
                 imp.stroke.push(ll); impRenderStroke(); return;
             }
-            if (imp.mode === 'shape' && imp.stroke && !(ev.buttons & 1)) { impShapeFinishStroke(); return; }
+            if (imp.mode === 'shape' && imp.stroke && !(ev.buttons & 1)) { imp._onUp(ev); return; }
+            if (imp.mode === 'shape' && imp.line && !imp.stroke) { let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; } impRenderLine(ll, ev.altKey); return; }   // v4.433: straight-line preview follows the cursor
             if (imp.mode === 'shape' && imp.shapeEdit) {                   // ✏ corner / edge drag on the held outline
                 const d = imp.shapeEdit;
                 if (!(ev.buttons & 1)) { imp._onUp(ev); return; }
@@ -25264,6 +25356,15 @@
                 const p = d.p, n = d.start.length, pr = d.pr;
                 const ring = d.start.map(v => ({ lat: v.lat, lng: v.lng }));
                 if (!d.downLL) d.downLL = ll;
+                if (d.type === 'rotate') {                                   // v4.433: turn the whole box about its centre; snaps parallel to a neighbour (or N/S) within alignDeg unless Alt
+                    let cp; try { cp = map.mouseEventToContainerPoint(ev); } catch (e) { return; }
+                    const c0 = ringCentroid(d.start); const ccp = map.latLngToContainerPoint([c0.lat, c0.lng]);
+                    const a0 = Math.atan2((d.downCP || cp).y - ccp.y, (d.downCP || cp).x - ccp.x), a1 = Math.atan2(cp.y - ccp.y, cp.x - ccp.x);
+                    const xy0 = d.start.map(pr.to), c = impCentroidXY(xy0);
+                    let out = impRotateXY(xy0, c, -(a1 - a0));                 // screen y points down → visual clockwise = negative in the metre frame
+                    if (!ev.altKey && imp.alignDeg > 0) { const th = impRingAngle(out); const sn = impSnapAngle(th, (d.neighAngles || (d.neighAngles = impNeighbourAngles(p, pr, 90))).concat([0]), imp.alignDeg * Math.PI / 180); d.aligned = sn != null; if (sn != null) out = impRotateXY(out, c, sn - th); }
+                    p.shape = out.map(pr.from); impUpdateHeldLive(); return;
+                }
                 if (d.type === 'vert') ring[d.i] = { lat: ll.lat, lng: ll.lng };
                 else if (d.type === 'move') {                                // v4.374: whole box follows the cursor, size and rotation untouched
                     const dl = ll.lat - d.downLL.lat, dg = ll.lng - d.downLL.lng;
@@ -25334,7 +25435,16 @@
             impRenderShapes();
         };
         imp._onUp = (ev) => {
-            if (imp.mode === 'shape' && imp.stroke) { ev.preventDefault(); ev.stopPropagation(); impShapeFinishStroke(); return; }
+            if (imp.mode === 'shape' && imp.stroke) {
+                ev.preventDefault(); ev.stopPropagation();
+                if (imp.stroke.length < 2 && imp.lineStart) {                 // v4.433: a CTRL+click, not a drag → straight-line mode: next click is the far end
+                    const a = imp.lineStart.ll; imp.stroke = null; impClearStrokeLayer(); imp.lineStart = null;
+                    imp.line = { a, b: null, snapped: false }; impRenderLine(null);
+                    impStatus(`✏ line started — move to the far end of the asset and click (CTRL or not) to finish · the box is that long × ${imp.shapeW} ft · turns <span style="color:#5fff5f">green</span> when it runs parallel to a neighbour (±${imp.alignDeg}°; Alt = exact) · Esc cancels`);
+                    return;
+                }
+                imp.lineStart = null; impShapeFinishStroke(); return;
+            }
             if (imp.mode === 'shape' && imp.shapeEdit) {
                 const d = imp.shapeEdit; imp.shapeEdit = null;
                 ev.preventDefault(); ev.stopPropagation();
@@ -25345,7 +25455,7 @@
                 const c = ringCentroid(d.p.shape); d.p.lat = c.lat; d.p.lng = c.lng;
                 try { impComputeDups(); } catch (e) {}
                 impRefreshAfterSelChange();
-                impStatus(`✏ "${impEsc(d.p.name)}" ${d.type === 'move' ? 'box moved (same size)' : (d.type === 'vert' ? 'corner moved' : 'edge pulled')}${ev.altKey ? ' · no snap' : ''}`);
+                impStatus(`✏ "${impEsc(d.p.name)}" ${d.type === 'rotate' ? `rotated${d.aligned ? ' · <span style="color:#5fff5f">parallel to a neighbour</span>' : ''}` : (d.type === 'move' ? 'box moved (same size)' : (d.type === 'vert' ? 'corner moved' : 'edge pulled'))}${ev.altKey ? ' · no snap' : ''}`);
                 return;
             }
             if (imp.mode === 'move' && imp.moveHeld) {
@@ -25373,6 +25483,15 @@
                 impStatus(`✏ "${impEsc(p.name)}" outline removed — it will be created as a ${impSizeFt} ft square again`);
                 return;
             }
+            if (imp.mode === 'shape' && imp.shapeHeld && imp.shapeHeld.shape && (k === '[' || k === ']')) {   // v4.433: rotate 1° (Alt = 15°) — no snapping, for the last nudge
+                const t = ev.target; if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+                ev.preventDefault(); ev.stopImmediatePropagation();
+                const step = (ev.altKey ? 15 : 1) * (k === ']' ? -1 : 1);
+                impRotateHeld(step, false);
+                const c = ringCentroid(imp.shapeHeld.shape); imp.shapeHeld.lat = c.lat; imp.shapeHeld.lng = c.lng;
+                impStatus(`✏ "${impEsc(imp.shapeHeld.name)}" turned ${Math.abs(step)}° ${k === ']' ? 'clockwise' : 'counter-clockwise'} · [ ] = 1°, Alt+[ ] = 15° · drag the cyan handle above the box to rotate freely · ⟂ Align = parallel to the nearest neighbour`);
+                return;
+            }
             if (imp.mode === 'move' && imp.moveHeld && (k === 'delete' || k === 'backspace' || (k === 'b' && ev.altKey))) {   // v4.345: drop the held point from the import
                 const t = ev.target; if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
                 ev.preventDefault(); ev.stopImmediatePropagation();
@@ -25386,7 +25505,7 @@
             }
             if (k === 'escape') {
                 ev.preventDefault(); ev.stopImmediatePropagation();
-                if (imp.mode === 'shape' && (imp.stroke || imp.shapeEdit)) { if (imp.shapeEdit) { imp.shapeEdit.p.shape = imp.shapeEdit.start; imp.shapeEdit = null; } imp.stroke = null; impClearStrokeLayer(); impRenderStaged(); impStatus('✏ cancelled'); }
+                if (imp.mode === 'shape' && (imp.stroke || imp.shapeEdit || imp.line)) { if (imp.shapeEdit) { imp.shapeEdit.p.shape = imp.shapeEdit.start; imp.shapeEdit = null; } imp.stroke = null; impClearStrokeLayer(); impClearLine(); impRenderStaged(); impStatus('✏ cancelled'); }
                 else if (imp.mode === 'shape' && imp.shapeHeld) { imp.shapeHeld = null; impRenderStaged(); impSyncUi(); impStatus('✏ released'); }
                 else if (imp.moveHeld) { const p = imp.moveHeld; if (p.orig && imp.moveDrag) { p.lat = p.orig.lat; p.lng = p.orig.lng; delete p.orig; } imp.moveHeld = null; imp.moveDrag = false; imp.moveDownPt = null; impRenderStaged(); impSyncUi(); impStatus('↔ put back'); }
                 else if (imp.editDrag) { impEndEditDrag(); }
@@ -25623,7 +25742,7 @@
     function impSetMode(mode) {
         if (mode && !impMasterEnabled) { showToast('Asset Importer is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
         if (imp.moveHeld && mode !== 'move') { imp.moveHeld = null; imp.moveDrag = false; imp.moveDownPt = null; try { impRenderStaged(); } catch (e) {} }
-        if (mode !== 'shape') { imp.shapeHeld = null; imp.stroke = null; imp.shapeEdit = null; impClearStrokeLayer(); }
+        if (mode !== 'shape') { imp.shapeHeld = null; imp.stroke = null; imp.shapeEdit = null; impClearStrokeLayer(); impClearLine(); }
         if (mode !== 'swap') imp.swap.pick = [];
         imp.mode = mode || null;
         if (imp.mode === 'shape' && !imp.secOpen.place) { imp.secOpen.place = true; impSaveParams(); }
@@ -25686,10 +25805,12 @@
             ${IMP_SEC_CLOSE}
             ${impSecOpenHtml('place')}
             <div id="aim-imp-placerow" style="display:none;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px;padding:6px 8px;background:rgba(255,95,255,0.05);border:1px dashed rgba(255,95,255,0.35);border-radius:3px">
-                <button id="aim-imp-outline" title="Draw the asset's real outline before it is created. Click a dot to hold it, then CTRL+drag a stroke across the asset: a straight stroke along the LONG side of the asset becomes a rectangle that long by the narrow-side width (default 15 ft); a loop becomes the tightest box around it. A red buffer ring (default 7.5 ft) shows around the outline you are holding; snapping holds the gap (default 15 ft) to the neighbour instead of touching it. With a shaped dot held, ALT+click other dots to give them the same outline (copies snap flush to neighbours). Drag anywhere INSIDE the held outline to move the whole box (size and angle kept); drag anywhere along an edge to pull it longer / shorter (it stays parallel); drag a corner to move just that corner — all snap to the gap from a neighbour, hold Alt for no snap. Click an edge midpoint dot to add a corner, right-click a corner to remove it; Delete = back to a plain square. Esc releases." style="background:rgba(195,155,211,0.12);color:#c39bd3;border:1px solid rgba(195,155,211,0.5);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px">✏ Shape</button>
+                <button id="aim-imp-outline" title="Draw the asset's real outline before it is created. Click a dot to hold it, then CTRL+click at one end of the asset's LONG side and click again at the other end: a straight line becomes a rectangle that long by the narrow-side width (default 15 ft); the preview turns green when it runs parallel to a neighbour. (CTRL+drag still works: a freehand loop becomes the tightest box around it.) Rotate: drag the cyan handle above the held box, or [ ] for 1° (Alt = 15°); ⟂ Align turns it parallel to the nearest neighbour. A red buffer ring (default 7.5 ft) shows around the outline you are holding; snapping holds the gap (default 15 ft) to the neighbour instead of touching it. With a shaped dot held, ALT+click other dots to give them the same outline (copies snap flush to neighbours). Drag anywhere INSIDE the held outline to move the whole box (size and angle kept); drag anywhere along an edge to pull it longer / shorter (it stays parallel); drag a corner to move just that corner — all snap to the gap from a neighbour, hold Alt for no snap. Click an edge midpoint dot to add a corner, right-click a corner to remove it; Delete = back to a plain square. Esc releases." style="background:rgba(195,155,211,0.12);color:#c39bd3;border:1px solid rgba(195,155,211,0.5);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px">✏ Shape</button>
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc" title="The NARROW side of the rectangle: draw the stroke along the LONG side of the asset and the box is that long by this wide">narrow side <input type="number" id="aim-imp-shapew" min="5" max="500" step="1" style="width:52px;${inCss}"> ft</label>
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#ff6b6b" title="Red band drawn this far outside AND inside the outline you are holding while ✏ Shape is on (the box's centre stays clear) — a neighbour closer than two of these = too close. Colour / opacity in the Control Panel.">buffer <input type="number" id="aim-imp-bufft" min="0" max="100" step="0.5" style="width:52px;${inCss}"> ft</label>
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc" title="Snapping holds THIS distance between an outline and its neighbour (0 = flush). Default 15 ft = two 7.5 ft buffers touching.">gap <input type="number" id="aim-imp-gapft" min="0" max="200" step="1" style="width:46px;${inCss}"> ft</label>
+                <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#7adfe6" title="While drawing a line or rotating, the box snaps parallel to a neighbouring outline / asset edge (or north) when within this many degrees — the preview turns green. 0 = never. Alt while drawing / rotating = exact.">align ± <input type="number" id="aim-imp-aligndeg" min="0" max="45" step="1" style="width:40px;${inCss}"> °</label>
+                <button id="aim-imp-align" title="Turn the held box parallel to the nearest neighbouring outline / asset (whatever the angle), then slide it to the gap distance. Fine nudges: [ and ] rotate 1° (Alt = 15°); drag the cyan handle above the box to rotate freely." style="${btnCss('122,223,230')}">⟂ Align held to neighbours</button>
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc" title="Corners / copies within this distance of a neighbouring outline snap flush to it (0 = never; hold Alt while dragging for no snap)">snap <input type="number" id="aim-imp-snapft" min="0" max="100" step="1" style="width:46px;${inCss}"> ft</label>
                 <span id="aim-imp-shape-note" style="color:#888;font-size:10px"></span>
                 <button id="aim-imp-move" title="Fix a point's location BEFORE it becomes an asset. Click a staged point to pick it up (it turns magenta), pan/zoom freely, click where it belongs to drop it — or just drag it. No Alt needed while this is on; clicking empty map still pans. Delete / Backspace while holding a point removes it from the import. Esc puts it back. Moved points keep a magenta ring; the square is created at the new spot." style="background:rgba(255,95,255,0.12);color:#ff5fff;border:1px solid rgba(255,95,255,0.5);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px">↔ Move point</button>
@@ -25781,6 +25902,8 @@
         const swEl = q('aim-imp-shapew'), snEl = q('aim-imp-snapft'), bfEl = q('aim-imp-bufft'), gpEl = q('aim-imp-gapft');
         swEl.value = imp.shapeW; snEl.value = imp.snapFt; bfEl.value = imp.bufFt; gpEl.value = imp.gapFt;
         swEl.onchange = () => { const v = parseFloat(swEl.value); if (isFinite(v) && v >= 5) { imp.shapeW = v; impSaveParams(); } };
+        const adEl = q('aim-imp-aligndeg'); adEl.value = imp.alignDeg; adEl.onchange = () => { const v = parseFloat(adEl.value); if (isFinite(v) && v >= 0 && v <= 45) { imp.alignDeg = v; impSaveParams(); } };
+        q('aim-imp-align').onclick = () => { try { impAlignHeld(); } catch (e) { console.warn(`${TAG} ⟂`, e); impStatus(`⟂ ${impEsc(e && e.message || e)}`, '#ff6060'); } };
         snEl.onchange = () => { const v = parseFloat(snEl.value); if (isFinite(v) && v >= 0) { imp.snapFt = v; impSaveParams(); } };
         bfEl.onchange = () => { const v = parseFloat(bfEl.value); if (isFinite(v) && v >= 0) { imp.bufFt = v; impSaveParams(); try { impRenderAssetShapes(); } catch (e) {} } };
         gpEl.onchange = () => { const v = parseFloat(gpEl.value); if (isFinite(v) && v >= 0) { imp.gapFt = v; impSaveParams(); } };

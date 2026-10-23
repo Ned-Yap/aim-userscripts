@@ -1,3 +1,7 @@
+## 2026-10-23 — ✏ Shape: straight-line draw · rotate · align to neighbours — Site Setup Tools latest v4.433 (latest only)
+
+- **v4.433** — **Straight line instead of freehand**: CTRL+click one end of the asset's long side, move, click the other end (CTRL or not). A dashed line and the rectangle it will make follow the cursor; the box is that long by the narrow-side width. CTRL+drag still works for a freehand loop. **Rotate the held box**: drag the cyan handle above it, or press `[` / `]` for 1° (Alt = 15°). **Align with neighbours**: while drawing a line or rotating, the box snaps parallel to a nearby outline or asset edge (or north) when within an editable tolerance (default 5°) and the preview turns green; Alt = exact. **⟂ Align held to neighbours** turns the held box parallel to its nearest neighbour whatever the angle, then slides it to the gap distance. Esc cancels a pending line.
+
 ## 2026-10-23 — 🏷 Bulk Rename for every entity type + 🔖 bulk asset Types — Site Setup Tools latest v4.431 → v4.432 (latest only)
 
 - **v4.432** — ⚡ Apply speed: the SUM table + queue UI were rebuilt on every progress tick (twice per entity), so on a big site each write sat behind seconds of main-thread work and a 179-edit run crawled at 10–15 s per edit. The progress modal still updates every tick; the table/queue redraw is throttled to once per 1.5 s + once at the end. One console timing line per run (`apply timing: … per-entity round-trip avg / max`) separates server time from UI time.
