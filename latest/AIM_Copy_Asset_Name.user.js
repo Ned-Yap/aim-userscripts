@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.434
+// @version      4.435
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.434';
+    const SCRIPT_VERSION = '4.435';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -23597,7 +23597,7 @@
             name: find(['name', 'pad_name', 'well name', 'asset name', 'asset', 'title', 'label'], /name/),
             type: find(['type', 'pad_type', 'asset_type', 'asset type', 'well_type', 'well type', 'production_method_name', 'production method', 'production_method', 'method', 'category', 'profiletype', 'v or h', 'designation', 'subtype', 'class', 'equipment', 'kind'], /type|method|categ|class|equip/),
             notes: find(['notes', 'note', 'description', 'comment', 'comments', 'remarks'], /note|desc|comment|remark/),   // v4.330 → asset notes (v4.345: seeds the Notes checklist)
-            extId: find(['external id', 'external_id', 'externalid', 'accounting id', 'accounting_id', 'battery_accounting_id', 'asset id', 'asset_id', 'cost center', 'cost_center'], /accounting|external|ext.?id|cost.?cent/),   // v4.434 → Percepto External ID (the client's accounting id)
+            extId: find(['external id', 'external_id', 'externalid', 'accounting id', 'accounting_id', 'asset accounting id', 'asset_accounting_id', 'asset id', 'asset_id', 'cost center', 'cost_center'], /^(?!.*battery)(?=.*(accounting|external|ext.?id|cost.?cent))/),   // v4.435: per-asset id only — a BATTERY_… id is shared by every well on the battery, never the guess   // v4.434 → Percepto External ID (the client's accounting id)
         };
     }
     // v4.345: Notes = any number of extra columns, each with a cleaned label, in
@@ -23622,6 +23622,7 @@
         const m = imp.mapping; if (!m) return [];
         if (!Array.isArray(m.notesCols)) m.notesCols = m.notes ? [{ col: m.notes, label: impCleanLabel(m.notes) }] : [];
         m.notesCols = m.notesCols.filter(c => c && imp.headers.includes(c.col));
+        if (!m._notesSeeded) { m._notesSeeded = true; const b = imp.headers.find(h => /battery.*account/i.test(h)); if (b && !m.notesCols.some(c => c.col === b)) m.notesCols.push({ col: b, label: 'Battery accounting id' }); }   // v4.435
         return m.notesCols;
     }
     const IMP_STAMP_RE = /^Imported by (.+?) on (\d{4}-\d{2}-\d{2} \d{2}:\d{2}) from (.+?)(?: · (created|updated) by import)?\s*$/m;
@@ -24429,6 +24430,70 @@
             GM_setValue(IMP_MAPPINGS_KEY, JSON.stringify(all));
         } catch (e) {}
     }
+    // ---- v4.435 🔁 REPLACE DATA FILE, KEEP MY WORK. The client re-sends the list with extra columns (or a
+    // corrected one); every moved / removed / shaped / ticked / reviewed point must survive. Snapshot the
+    // work per point, load the new file, then match each new row to its old point by name + ORIGINAL
+    // coordinates (API number as a fallback, then a unique name). Points with no row in the new file
+    // (Enverus fill-in, client-added rows) are appended as synthetic rows so nothing staged is lost. ----
+    function impWorkKey(name, lat, lng) { return `${impNormName(name)}|${Number(lat).toFixed(5)},${Number(lng).toFixed(5)}`; }
+    function impSnapshotWork() {
+        const m = imp.mapping || {};
+        const pts = imp.points.map(p => {
+            const o = { name: p.rawName || p.name, lat0: p.orig ? p.orig.lat : p.lat, lng0: p.orig ? p.orig.lng : p.lng, api: impEnvApiOf(p) || (p.env && p.env.api) || '', row: imp.rows[p.i] || {}, typeRaw: p.typeRaw, cur: { lat: p.lat, lng: p.lng } };
+            ['orig', 'removed', 'done', 'selManual', 'reviewed', 'env', 'src', 'thirdParty', 'rigWatch', 'pa', 'statusWas', 'shape', 'client'].forEach(k => { if (p[k] !== undefined && p[k] !== null && p[k] !== false) o[k] = p[k]; });
+            return o;
+        });
+        return { fileName: imp.fileName, headers: imp.headers.slice(), mapping: Object.assign({}, m, { notesCols: (m.notesCols || []).map(c => Object.assign({}, c)) }), pts, resp: imp.resp && imp.resp.rows ? imp.resp : null, pri: Object.assign({}, imp.pri), envState: { apiCol: imp.env.apiCol, notes: imp.env.notes, checkedAt: imp.env.checkedAt, summary: imp.env.summary, mainOp: imp.env.mainOp, missing: imp.env.missing, missingAt: imp.env.missingAt, missingOp: imp.env.missingOp, missingTotal: imp.env.missingTotal, paReview: imp.env.paReview }, hv: Object.assign({}, imp.hv), lastCreated: imp.lastCreated.slice(), lastUpdated: imp.lastUpdated.slice() };
+    }
+    function impSwapApplySnapshot() {
+        const S = imp.swapSnap; imp.swapSnap = null; if (!S) return;
+        const m = imp.mapping || {};
+        // index the NEW points three ways
+        const byKey = new Map(), byApi = new Map(), byName = new Map();
+        imp.points.forEach(p => { byKey.set(impWorkKey(p.rawName || p.name, p.lat, p.lng), p); const a = impEnvApiOf(p); if (a) { if (!byApi.has(a)) byApi.set(a, []); byApi.get(a).push(p); } const k = impNormName(p.rawName || p.name); if (!byName.has(k)) byName.set(k, []); byName.get(k).push(p); });
+        const used = new Set(); let matched = 0, appended = 0, byWhat = { key: 0, api: 0, name: 0 };
+        const apply = (p, o) => {
+            if (o.orig) { p.orig = o.orig; p.lat = o.cur.lat; p.lng = o.cur.lng; }
+            ['removed', 'done', 'selManual', 'reviewed', 'env', 'src', 'thirdParty', 'rigWatch', 'pa', 'statusWas', 'shape', 'client'].forEach(k => { if (o[k] !== undefined) p[k] = o[k]; });
+            if (o.removed) { p.done = true; p.sel = false; }
+            if (o.shape && !o.orig) { const c = ringCentroid(o.shape); p.lat = c.lat; p.lng = c.lng; }
+        };
+        const leftovers = [];
+        S.pts.forEach(o => {
+            let p = byKey.get(impWorkKey(o.name, o.lat0, o.lng0)); let how = 'key';
+            if (p && used.has(p)) p = null;
+            if (!p && o.api) { const c = (byApi.get(o.api) || []).filter(q => !used.has(q)); if (c.length === 1) { p = c[0]; how = 'api'; } }
+            if (!p) { const c = (byName.get(impNormName(o.name)) || []).filter(q => !used.has(q)); if (c.length === 1) { p = c[0]; how = 'name'; } }
+            if (p) { used.add(p); apply(p, o); matched++; byWhat[how]++; } else leftovers.push(o);
+        });
+        // rows that exist only in the OLD file / were staged from Enverus or the client response → append
+        leftovers.forEach(o => {
+            const row = {}; imp.headers.forEach(h => { row[h] = o.row[h] == null ? '' : o.row[h]; });
+            if (m.name && !row[m.name]) row[m.name] = o.name;
+            if (m.lat && !row[m.lat]) row[m.lat] = String(o.lat0); if (m.lng && !row[m.lng]) row[m.lng] = String(o.lng0);
+            if (m.type && !row[m.type] && o.typeRaw) row[m.type] = o.typeRaw;
+            imp.rows.push(row); const i = imp.rows.length - 1;
+            const p = { i, name: o.name, rawName: o.name, lat: o.lat0, lng: o.lng0, typeRaw: o.typeRaw || (m.type ? String(row[m.type] || '') : ''), notes: '', sel: false, dup: false, dupWhy: '', child: null, near: null, done: false };
+            apply(p, o); imp.points.push(p); appended++;
+        });
+        // carry the rest of the state the file load reset
+        if (S.resp) imp.resp = S.resp;
+        if (S.envState) { Object.assign(imp.env, S.envState); imp.env._guessed = !!imp.env.apiCol; if (!imp.env.apiCol) imp.env._guessed = false; }
+        if (S.pri) { ['on', 'oilCol', 'waterCol', 'blpdCol', 'priCol'].forEach(k => { if (k === 'on' || !S.pri[k] || imp.headers.includes(S.pri[k])) imp.pri[k] = S.pri[k]; }); imp.pri._guessed = true; }
+        if (S.hv) { imp.hv.on = S.hv.on; imp.hv.useEnv = S.hv.useEnv; if (S.hv.col && imp.headers.includes(S.hv.col)) { imp.hv.col = S.hv.col; imp.hv._guessed = true; } }
+        imp.lastCreated = S.lastCreated || imp.lastCreated; imp.lastUpdated = S.lastUpdated || imp.lastUpdated;
+        if (S.mapping && Array.isArray(S.mapping.notesCols)) { const keep = S.mapping.notesCols.filter(c => imp.headers.includes(c.col)); if (keep.length) { m.notesCols = keep; m._notesSeeded = false; impNotesCols(); } }
+        imp._rootCache = null;
+        impBuildAssetIndex(); impComputeDups(); impRecomputeSel();
+        impRenderStaged(); impRenderShapes(); impRenderAssetShapes(); impRenderTypeMapUi(); impRenderMappingUi();
+        try { impEnvSummarize(); impRenderEnvUi(); impRenderRespUi(); impRenderPriUi(); impRenderExtIdUi(); } catch (e) {}
+        impMarkDirty(); try { impSaveSession('swap'); } catch (e) {}
+        impSyncUi();
+        const moved = imp.points.filter(p => p.orig).length, shaped = imp.points.filter(p => p.shape).length, removed = imp.points.filter(p => p.removed).length;
+        const unmatched = S.pts.length - matched - appended;
+        impStatus(`🔁 <b>${impEsc(S.fileName || 'old file')}</b> → <b>${impEsc(imp.fileName)}</b>: ${matched} of ${S.pts.length} points carried over (${byWhat.key} by name + position · ${byWhat.api} by API · ${byWhat.name} by name) · ${appended} staged-only point${appended === 1 ? '' : 's'} appended (Enverus / client-added) · now ${moved} moved · ${shaped} with outlines · ${removed} removed${m.extId ? ` · 🆔 External ID = <b>${impEsc(m.extId)}</b>` : ' · <span style="color:#ffb347">pick the 🆔 External ID column under 2 · Data file › edit</span>'}${unmatched ? ` · <span style="color:#ff6060">${unmatched} could not be matched</span>` : ''}`, unmatched ? '#ffb347' : '#5fff5f');
+        console.log(`${TAG} 🔁 file swap: ${matched} matched (${JSON.stringify(byWhat)}), ${appended} appended, ${unmatched} unmatched`);
+    }
     function impHandleFile(file) {
         if (!file) return;
         const rd = new FileReader();
@@ -24458,6 +24523,10 @@
                 imp.mapping = impStoredMapping(parsed.headers) || (isKml
                     ? { name: 'name', lat: 'lat', lng: 'lng', type: impGuessMapping(parsed.headers).type }
                     : impGuessMapping(parsed.headers));
+                if (imp.swapSnap && imp.swapSnap.mapping) {                   // v4.435: keep the old column choices where the header still exists
+                    const om = imp.swapSnap.mapping, g = impGuessMapping(parsed.headers);
+                    ['name', 'lat', 'lng', 'type', 'extId'].forEach(k => { if (om[k] && parsed.headers.includes(om[k])) imp.mapping[k] = om[k]; else if (!imp.mapping[k] && g[k]) imp.mapping[k] = g[k]; });
+                }
                 impClearLayers(); impClearAssetLayers();
                 // v4.331: coordinates resolved → stage straight away (mapping row collapses to one line, "edit" reopens it)
                 const auto = !!(imp.mapping && imp.mapping.lat && imp.mapping.lng);
@@ -24465,6 +24534,7 @@
                 impRenderMappingUi();
                 if (auto) {
                     impBuildPoints();
+                    if (imp.swapSnap) { try { impSwapApplySnapshot(); } catch (e) { console.warn(`${TAG} 🔁 swap failed:`, e); impStatus(`🔁 carry-over failed: ${impEsc(e && e.message || e)} — the new file is loaded, the old work is still in the saved session (↻ Resume brings it back)`, '#ff6060'); imp.swapSnap = null; } }
                     if (kmlShapes.length) impStatus(`${document.getElementById('aim-imp-result') ? document.getElementById('aim-imp-result').innerHTML : ''} <span style="color:#ffb347">(file also carries ${kmlShapes.length} polygon(s) — load it again via ⬆ Shape to use them as the access shape)</span>`);
                 } else {
                     impStatus(`Loaded <b>${impEsc(file.name)}</b> — ${imp.rows.length} row(s). Pick the Latitude / Longitude columns, then ✓ Apply.`, '#ffb347');
@@ -24494,6 +24564,7 @@
         impResolveFileDuplicates();   // v4.363: battery + well sharing a name → "<name> BATTERY"; other repeats → "-DUP"
         if (m.pri && typeof m.pri === 'object' && !imp.pri._guessed) { ['oilCol', 'waterCol', 'blpdCol', 'priCol'].forEach(k => { imp.pri[k] = imp.headers.includes(m.pri[k]) ? m.pri[k] : null; }); if (typeof m.pri.on === 'boolean') imp.pri.on = m.pri.on; imp.pri._guessed = true; }
         imp._rootCache = null;
+        if (imp.swapSnap && imp._swapFromApply) { imp._swapFromApply = false; try { impSwapApplySnapshot(); } catch (e) { console.warn(`${TAG} 🔁 swap failed:`, e); imp.swapSnap = null; } }
         impStoreMapping(imp.headers, { name: m.name, lat: m.lat, lng: m.lng, type: m.type, extId: m.extId || null, notesCols: impNotesCols(), pri: { on: imp.pri.on, oilCol: imp.pri.oilCol, waterCol: imp.pri.waterCol, blpdCol: imp.pri.blpdCol, priCol: imp.pri.priCol } });
         impMarkDirty();
         imp.mapOpen = false;
@@ -25880,6 +25951,7 @@
             ${impSecOpenHtml('data')}
             <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px">
                 <button id="aim-imp-load" style="${btnCss('122,223,230')}">📂 Load CSV / KML</button>
+                <button id="aim-imp-swapfile" style="${btnCss('255,179,71')};display:none" title="The client re-sent the list (extra columns, corrections)? Load it HERE instead of 📂: every moved / removed / outlined / ticked / reviewed point, the Enverus results and the client-response work are carried over by matching rows on name + original coordinates (API number as fallback). Points that have no row in the new file (Enverus fill-in, client-added) are kept as extra rows. A snapshot is saved first — ↻ Resume brings the old state back if anything looks wrong.">🔁 Replace file (keep my work)</button>
                 <span style="color:#888;font-size:10px">or drag &amp; drop the file onto this panel</span>
                 <span style="flex:1"></span>
                 <button id="aim-imp-save" title="Save everything on this page — file, mapping, moved / removed points, boundaries — so you can pick up after a reload, a crash or a day off. Also saved automatically 3 s after any change and every few minutes (Control Panel → Asset Importer)." style="${btnCss('95,255,95')};display:none">💾 Save progress</button>
@@ -25960,6 +26032,15 @@
     }
     function impWirePanelControls(host) {
         const q = (id) => host.querySelector('#' + id);
+        q('aim-imp-swapfile').onclick = () => {
+            if (!imp.points.length) { impStatus('Nothing to keep yet — use 📂 Load', '#ffb347'); return; }
+            try { impSaveSession('pre-swap'); } catch (e) {}
+            imp.swapSnap = impSnapshotWork();
+            const inp = document.createElement('input'); inp.type = 'file'; inp.accept = '.csv,.txt,text/csv';
+            inp.onchange = () => { const f = inp.files && inp.files[0]; if (f) impHandleFile(f); else imp.swapSnap = null; };
+            inp.click();
+            impStatus(`🔁 pick the new file — ${imp.points.length} points' work will be carried over`);
+        };
         q('aim-imp-load').onclick = () => {
             const inp = document.createElement('input');
             inp.type = 'file';
@@ -26078,7 +26159,7 @@
         el.querySelectorAll('select[data-impmap]').forEach(s => {
             s.onchange = () => { if (!imp.mapping) imp.mapping = {}; imp.mapping[s.getAttribute('data-impmap')] = s.value || null; impRenderNotesCols(el); };
         });
-        el.querySelector('#aim-imp-applymap').onclick = () => { impBuildPoints(); };
+        el.querySelector('#aim-imp-applymap').onclick = () => { if (imp.swapSnap) imp._swapFromApply = true; impBuildPoints(); };
         impRenderNotesCols(el);
     }
     // v4.331: flag list — name duplicates (skipped unless included) + parent/child (inside / near an existing asset)
@@ -27378,6 +27459,7 @@
             }
             const fl = document.getElementById('aim-imp-file-label');
             if (fl) fl.textContent = imp.fileName ? `${imp.fileName} · ${live.length} staged · ${selN} selected` : 'no file loaded';
+            const swb = document.getElementById('aim-imp-swapfile'); if (swb) swb.style.display = imp.points.length ? '' : 'none';   // v4.435
             const sb = document.getElementById('aim-imp-save'), sn = document.getElementById('aim-imp-saved-note');
             if (sb) sb.style.display = imp.headers.length ? '' : 'none';
             if (sn) sn.textContent = !imp.headers.length ? '' : (imp.dirty ? 'unsaved changes — autosaves in a moment' : (imp.lastSavedAt ? `💾 saved ${impFmtWhen(imp.lastSavedAt)}` : ''));
