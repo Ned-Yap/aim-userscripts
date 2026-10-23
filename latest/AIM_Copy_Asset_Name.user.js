@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.436
+// @version      4.437
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.436';
+    const SCRIPT_VERSION = '4.437';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -25974,7 +25974,9 @@
                 <span id="aim-imp-shape-note" style="color:#888;font-size:10px"></span>
                 <button id="aim-imp-move" title="Fix a point's location BEFORE it becomes an asset. Click a staged point to pick it up (it turns magenta), pan/zoom freely, click where it belongs to drop it — or just drag it. No Alt needed while this is on; clicking empty map still pans. Delete / Backspace while holding a point removes it from the import. Esc puts it back. Moved points keep a magenta ring; the square is created at the new spot." style="background:rgba(255,95,255,0.12);color:#ff5fff;border:1px solid rgba(255,95,255,0.5);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px">↔ Move point</button>
                 <span id="aim-imp-move-note" style="color:#888;font-size:10px"></span>
-                <button id="aim-imp-resetmoves" style="display:none;background:transparent;color:#ffb347;border:1px solid rgba(255,179,71,0.45);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px" title="Put every moved point back where the file had it">↩ reset moved</button>
+                <button id="aim-imp-resetmoves" style="display:none;background:transparent;color:#ffb347;border:1px solid rgba(255,179,71,0.45);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px" title="Put every hand-moved point (without a drawn outline) back where the file had it, and restore removed points. Asks first. Outlined points are never touched. ↶ undo reset reverses it.">↩ reset moved…</button>
+                <button id="aim-imp-undoreset" style="display:none;background:rgba(95,255,95,0.12);color:#5fff5f;border:1px solid rgba(95,255,95,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px;font-weight:600" title="Reverse the last ↩ reset moved exactly">↶ undo reset</button>
+                <button id="aim-imp-recover" style="display:none;background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px" title="After a reset or a bad load: outlined points go back to the centre of their outline, client-corrected points back to the coordinate the client gave. Hand moves without an outline cannot be re-derived.">🩹 Recover positions</button>
             </div>
             <div id="aim-imp-flags" style="margin-bottom:8px"></div>
             <div id="aim-imp-swap"></div>
@@ -26079,12 +26081,37 @@
         gpEl.onchange = () => { const v = parseFloat(gpEl.value); if (isFinite(v) && v >= 0) { imp.gapFt = v; impSaveParams(); } };
         q('aim-imp-save').onclick = () => { impSaveSession('manual'); };
         q('aim-imp-resetmoves').onclick = () => {
-            let n = 0;
-            let r = 0;
-            imp.points.forEach(p => { if (p.orig) { p.lat = p.orig.lat; p.lng = p.orig.lng; delete p.orig; n++; } if (p.removed) { p.removed = false; p.done = false; r++; } });
+            // v4.437: hours of hand placement were lost to one stray click — confirm first, leave outlined points alone
+            // (their position IS the outline), and keep an undo of exactly what this reset changed.
+            const cands = imp.points.filter(p => (p.orig && !p.shape) || p.removed);
+            const nM = cands.filter(p => p.orig && !p.shape).length, nR = cands.filter(p => p.removed).length, nS = imp.points.filter(p => p.orig && p.shape).length;
+            if (!cands.length) { impStatus(`↩ nothing to reset${nS ? ` — ${nS} moved point${nS === 1 ? '' : 's'} have drawn outlines and are left alone` : ''}`, '#ffb347'); return; }
+            if (!confirm(`Put ${nM} moved point${nM === 1 ? '' : 's'} back at the file coordinates${nR ? ` and restore ${nR} removed point${nR === 1 ? '' : 's'}` : ''}?\n\n${nS ? `${nS} moved point(s) with a drawn outline are NOT touched.\n` : ''}This undoes hand placement. "↶ undo reset" right next to this button puts them back if you change your mind.`)) return;
+            imp.lastReset = cands.map(p => ({ i: p.i, lat: p.lat, lng: p.lng, orig: p.orig ? { lat: p.orig.lat, lng: p.orig.lng } : null, removed: !!p.removed }));
+            cands.forEach(p => { if (p.orig && !p.shape) { p.lat = p.orig.lat; p.lng = p.orig.lng; delete p.orig; } if (p.removed) { p.removed = false; p.done = false; } });
             imp.moveHeld = null; imp.moveDrag = false;
-            if (n || r) { try { impComputeDups(); } catch (e) {} impRefreshAfterSelChange(); }
-            impStatus(`↩ ${n} point(s) back at their file coordinates${r ? ` · ${r} removed point(s) restored` : ''}`);
+            try { impComputeDups(); } catch (e) {} impRefreshAfterSelChange();
+            impStatus(`↩ ${nM} point(s) back at their file coordinates${nR ? ` · ${nR} removed point(s) restored` : ''}${nS ? ` · ${nS} with outlines left alone` : ''} — <b>↶ undo reset</b> reverses this`);
+        };
+        q('aim-imp-undoreset').onclick = () => {
+            const R = imp.lastReset; if (!R || !R.length) { impStatus('↶ nothing to undo', '#ffb347'); return; }
+            const byI = new Map(imp.points.map(p => [p.i, p])); let k = 0;
+            R.forEach(o => { const p = byI.get(o.i); if (!p) return; p.lat = o.lat; p.lng = o.lng; if (o.orig) p.orig = o.orig; if (o.removed) { p.removed = true; p.done = true; p.sel = false; } k++; });
+            imp.lastReset = null;
+            try { impComputeDups(); } catch (e) {} impRefreshAfterSelChange();
+            impStatus(`↶ reset undone — ${k} point(s) back where you had them`, '#5fff5f');
+        };
+        // 🩹 positions that can be re-derived after a reset or a bad load: outlined points → their outline's centre;
+        // client-response points → the corrected coordinate the client gave (kept in their client record)
+        q('aim-imp-recover').onclick = () => {
+            let a = 0, b = 0;
+            imp.points.forEach(p => {
+                if (p.done) return;
+                if (p.shape && p.shape.length >= 3) { const c = ringCentroid(p.shape); if (Math.abs(c.lat - p.lat) > 1e-9 || Math.abs(c.lng - p.lng) > 1e-9) { if (!p.orig) p.orig = { lat: p.lat, lng: p.lng }; p.lat = c.lat; p.lng = c.lng; a++; } return; }
+                const cc = p.client && p.client.coords; if (cc && isFinite(cc.lat) && isFinite(cc.lng) && (Math.abs(cc.lat - p.lat) > 1e-9 || Math.abs(cc.lng - p.lng) > 1e-9)) { if (!p.orig) p.orig = { lat: p.lat, lng: p.lng }; p.lat = cc.lat; p.lng = cc.lng; b++; }
+            });
+            if (a || b) { try { impComputeDups(); } catch (e) {} impRefreshAfterSelChange(); }
+            impStatus(`🩹 ${a} outlined point${a === 1 ? '' : 's'} re-centred on ${a === 1 ? 'its' : 'their'} outline · ${b} client-corrected point${b === 1 ? '' : 's'} put back at the client's coordinate${!a && !b ? ' — nothing to recover this way (hand moves without an outline are not re-derivable)' : ''}`, a || b ? '#5fff5f' : '#ffb347');
         };
         q('aim-imp-shape').onclick = () => {
             const inp = document.createElement('input');
@@ -27459,6 +27486,8 @@
             const fl = document.getElementById('aim-imp-file-label');
             if (fl) fl.textContent = imp.fileName ? `${imp.fileName} · ${live.length} staged · ${selN} selected` : 'no file loaded';
             const swb = document.getElementById('aim-imp-swapfile'); if (swb) swb.style.display = imp.points.length ? '' : 'none';   // v4.435
+            const ur = document.getElementById('aim-imp-undoreset'); if (ur) ur.style.display = (imp.lastReset && imp.lastReset.length) ? '' : 'none';   // v4.437
+            const rc = document.getElementById('aim-imp-recover'); if (rc) rc.style.display = imp.points.some(p => !p.done && ((p.shape && p.shape.length >= 3 && (Math.abs(ringCentroid(p.shape).lat - p.lat) > 1e-9 || Math.abs(ringCentroid(p.shape).lng - p.lng) > 1e-9)) || (p.client && p.client.coords && (Math.abs(p.client.coords.lat - p.lat) > 1e-9 || Math.abs(p.client.coords.lng - p.lng) > 1e-9)))) ? '' : 'none';
             const sb = document.getElementById('aim-imp-save'), sn = document.getElementById('aim-imp-saved-note');
             if (sb) sb.style.display = imp.headers.length ? '' : 'none';
             if (sn) sn.textContent = !imp.headers.length ? '' : (imp.dirty ? 'unsaved changes — autosaves in a moment' : (imp.lastSavedAt ? `💾 saved ${impFmtWhen(imp.lastSavedAt)}` : ''));
@@ -27962,12 +27991,28 @@
             hv: { on: imp.hv.on, col: imp.hv.col, useEnv: imp.hv.useEnv },
             env: { apiCol: imp.env.apiCol, notes: imp.env.notes, checkedAt: imp.env.checkedAt, mismatchFt: imp.env.mismatchFt, missing: imp.env.missing, missingAt: imp.env.missingAt, missingOp: imp.env.missingOp, missingTotal: imp.env.missingTotal, paReview: imp.env.paReview },
             undo: { created: imp.lastCreated.slice(), updated: imp.lastUpdated.map(u => ({ id: u.id, name: u.name, before: u.before })) },   // v4.364: undo survives a reload
+            lastReset: imp.lastReset || null,   // v4.437
             resp: imp.resp.rows ? { rows: imp.resp.rows.map(r => Object.assign({}, r)), fileName: imp.resp.fileName, at: imp.resp.at, applied: imp.resp.applied, moves: imp.resp.moves.map(x => ({ id: x.id, name: x.name, from: x.from, to: x.to, why: x.why, look: x.look, force: !!x.force })), renames: imp.resp.renames, removeIds: imp.resp.removeIds, removeNames: imp.resp.removeNames } : null,
         };
         const json = JSON.stringify(data);
         const live = imp.points.filter(p => !p.done).length;
         const meta = { v: 1, savedAt: data.savedAt, fileName: imp.fileName, rows: imp.rows.length, live, moved: imp.points.filter(p => p.orig).length, removed: imp.points.filter(p => p.removed).length, created: imp.points.filter(p => p.done && !p.removed).length, shapes: imp.shapes.length, bytes: json.length, siteName: getCurrentSiteName() || '', undoCreated: imp.lastCreated.length, undoUpdated: imp.lastUpdated.length };
-        try { GM_setValue(IMP_SESSION_DATA + k, json); GM_setValue(IMP_SESSION_META + k, JSON.stringify(meta)); }
+        try {
+            // v4.437: keep history. ':prev' = whatever was saved last time (one step back); ':h1..h4' = a ring that
+            // advances only when the newest ring entry is ≥ 30 min old (so a mistake + autosave still leaves the
+            // state from up to ~2 hours ago). Each slot carries its own meta for the picker.
+            const prevJson = GM_getValue(IMP_SESSION_DATA + k, ''), prevMeta = GM_getValue(IMP_SESSION_META + k, '');
+            if (prevJson && prevJson !== json) {
+                GM_setValue(IMP_SESSION_DATA + k + ':prev', prevJson); GM_setValue(IMP_SESSION_META + k + ':prev', prevMeta);
+                let pm = null; try { pm = JSON.parse(prevMeta || 'null'); } catch (e) {}
+                let h1 = null; try { h1 = JSON.parse(GM_getValue(IMP_SESSION_META + k + ':h1', '') || 'null'); } catch (e) {}
+                if (pm && (!h1 || (Date.parse(pm.savedAt) - Date.parse(h1.savedAt)) >= 30 * 60 * 1000)) {
+                    for (let i = 4; i > 1; i--) { const a = GM_getValue(IMP_SESSION_DATA + k + ':h' + (i - 1), ''), b = GM_getValue(IMP_SESSION_META + k + ':h' + (i - 1), ''); if (a) { GM_setValue(IMP_SESSION_DATA + k + ':h' + i, a); GM_setValue(IMP_SESSION_META + k + ':h' + i, b); } }
+                    GM_setValue(IMP_SESSION_DATA + k + ':h1', prevJson); GM_setValue(IMP_SESSION_META + k + ':h1', prevMeta);
+                }
+            }
+            GM_setValue(IMP_SESSION_DATA + k, json); GM_setValue(IMP_SESSION_META + k, JSON.stringify(meta));
+        }
         catch (e) { console.warn(`${TAG} 📥 session save failed (${why}):`, e); impStatus(`💾 save failed: ${impEsc(e && e.message || e)}`, '#ff6060'); return false; }
         imp.dirty = false; imp.lastSavedAt = data.savedAt;
         clearTimeout(impAutosaveT);
@@ -27982,9 +28027,14 @@
         imp.dirty = false; imp.lastSavedAt = null;
         impRenderResumeUi(); impSyncUi();
     }
-    function impResumeSession() {
+    function impOlderSaves() {
+        const k = impSessionKey(); if (!k) return [];
+        return [':prev', ':h1', ':h2', ':h3', ':h4'].map(slot => { let m = null; try { m = JSON.parse(GM_getValue(IMP_SESSION_META + k + slot, '') || 'null'); } catch (e) {} return m ? { slot, meta: m } : null; }).filter(Boolean);
+    }
+    function impResumeSession(slot) {
         const k = impSessionKey(); if (!k) return;
-        let d; try { d = JSON.parse(GM_getValue(IMP_SESSION_DATA + k, '') || 'null'); } catch (e) { d = null; }
+        slot = slot || '';
+        let d; try { d = JSON.parse(GM_getValue(IMP_SESSION_DATA + k + slot, '') || 'null'); } catch (e) { d = null; }
         if (!d || d.v !== 1 || !Array.isArray(d.headers) || !Array.isArray(d.rows)) { impStatus('No usable saved session for this site', '#ffb347'); impDiscardSession(); return; }
         const hdr = d.headers;
         imp.fileName = d.fileName; imp.headers = hdr;
@@ -27998,6 +28048,7 @@
         if (d.hv) { imp.hv.on = d.hv.on !== false; imp.hv.col = d.hv.col || null; imp.hv.useEnv = d.hv.useEnv !== false; imp.hv._guessed = true; }
         if (d.pri) { Object.assign(imp.pri, { on: !!d.pri.on, oilCol: d.pri.oilCol || null, waterCol: d.pri.waterCol || null, blpdCol: d.pri.blpdCol || null, priCol: d.pri.priCol || null }); imp.pri._guessed = true; }
         if (d.env) { imp.env.apiCol = d.env.apiCol || null; imp.env.notes = d.env.notes !== false; imp.env.checkedAt = d.env.checkedAt || null; if (typeof d.env.mismatchFt === 'number') imp.env.mismatchFt = d.env.mismatchFt; if (Array.isArray(d.env.missing)) { imp.env.missing = d.env.missing; imp.env.missingAt = d.env.missingAt || null; imp.env.missingOp = d.env.missingOp || ''; imp.env.missingTotal = d.env.missingTotal || 0; imp.env.missingSel = new Set(); } if (d.env.paReview && Array.isArray(d.env.paReview.rows)) imp.env.paReview = d.env.paReview; imp.env._guessed = true; }
+        if (Array.isArray(d.lastReset)) imp.lastReset = d.lastReset;   // v4.437
         if (d.undo) { imp.lastCreated = Array.isArray(d.undo.created) ? d.undo.created.slice() : []; imp.lastUpdated = Array.isArray(d.undo.updated) ? d.undo.updated.filter(u => u && u.id != null && u.before) : []; console.log(`${TAG} 📥 resume: undo record ${imp.lastCreated.length} created / ${imp.lastUpdated.length} updated`); }
         if (d.resp && Array.isArray(d.resp.rows)) { Object.assign(imp.resp, { rows: d.resp.rows, fileName: d.resp.fileName, at: d.resp.at, applied: !!d.resp.applied, moves: d.resp.moves || [], renames: d.resp.renames || [], removeIds: d.resp.removeIds || [], removeNames: d.resp.removeNames || [], tab: null }); }
         else console.log(`${TAG} 📥 resume: no undo record in this session (saved by an older version or before any import)`);
@@ -28034,15 +28085,16 @@
         const el = document.getElementById('aim-imp-resume'); if (!el) return;
         const k = impSessionKey(); const m = k ? impSessionMeta(k) : null;
         const inMemory = imp.headers.length > 0;
-        if (!m || inMemory) { el.innerHTML = ''; el.style.display = 'none'; return; }
+        if (!m || (inMemory && !impOlderSaves().length)) { el.innerHTML = ''; el.style.display = 'none'; return; }   // v4.437: with a file loaded the banner stays when older saves exist
         el.style.display = '';
         el.innerHTML = `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:6px 8px;background:rgba(95,255,95,0.07);border:1px solid rgba(95,255,95,0.45);border-radius:3px;font-size:11px;color:#cfd6dc">
             <b style="color:#5fff5f">↻ Saved progress</b> <span>${impEsc(m.fileName || 'file')} · saved ${impEsc(impFmtWhen(m.savedAt))} · ${m.live} staged${m.moved ? ` · ${m.moved} moved` : ''}${m.removed ? ` · ${m.removed} removed` : ''}${m.created ? ` · ${m.created} created` : ''} · ${m.shapes} boundar${m.shapes === 1 ? 'y' : 'ies'} · ${(m.bytes / 1048576).toFixed(1)} MB${(m.undoCreated || m.undoUpdated) ? ` · <b style="color:#ffb347">undo: ${m.undoCreated || 0} created / ${m.undoUpdated || 0} updated</b>` : ''}</span>
             <span style="flex:1"></span>
+            ${(() => { const o = impOlderSaves(); return o.length ? `<select id="aim-imp-resume-slot" title="Older saves: 'one save back' is the state before the most recent save; the timed ones are kept roughly every 30 minutes" style="background:#1a1d23;border:1px solid rgba(95,255,95,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:10px"><option value="">latest save</option>${o.map(x => `<option value="${x.slot}">${x.slot === ':prev' ? 'one save back' : 'timed'} · ${impEsc(impFmtWhen(x.meta.savedAt))} · ${x.meta.moved || 0} moved · ${x.meta.live || 0} staged</option>`).join('')}</select>` : ''; })()}
             <button id="aim-imp-resume-go" style="background:rgba(95,255,95,0.18);color:#5fff5f;border:1px solid rgba(95,255,95,0.6);border-radius:3px;padding:3px 12px;cursor:pointer;font:inherit;font-size:11px;font-weight:600">↻ Resume</button>
             <button id="aim-imp-resume-drop" style="background:transparent;color:#ff8a80;border:1px solid rgba(255,90,90,0.45);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px">Discard</button>
         </div>`;
-        el.querySelector('#aim-imp-resume-go').onclick = () => { try { impResumeSession(); } catch (e) { console.warn(`${TAG} 📥 resume failed:`, e); impStatus(`Resume failed: ${impEsc(e && e.message || e)}`, '#ff6060'); } };
+        el.querySelector('#aim-imp-resume-go').onclick = () => { try { const sl = el.querySelector('#aim-imp-resume-slot'); if (imp.headers.length && !confirm(`Replace the work currently loaded with the ${sl && sl.value ? 'selected older' : 'latest'} save?\n\nThe current state is kept as 'one save back' first.`)) return; if (imp.headers.length) { try { impSaveSession('before-resume'); } catch (e) {} } impResumeSession(sl ? sl.value : ''); } catch (e) { console.warn(`${TAG} 📥 resume failed:`, e); impStatus(`Resume failed: ${impEsc(e && e.message || e)}`, '#ff6060'); } };
         el.querySelector('#aim-imp-resume-drop').onclick = () => { if (confirm(`Discard the saved import progress for this site (${m.fileName || 'file'}, saved ${impFmtWhen(m.savedAt)})?`)) impDiscardSession(); };
     }
     try { uwin().addEventListener('pagehide', () => { if (imp.dirty) { try { impSaveSession('pagehide'); } catch (e) {} } }, true); } catch (e) {}

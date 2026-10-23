@@ -1,3 +1,7 @@
+## 2026-10-23 — Reset guard · 🩹 Recover positions · older saves — Site Setup Tools latest v4.437 (latest only)
+
+- **v4.437** — after a stray click on ↩ reset moved wiped hours of placement: the button now **asks first**, **never touches outlined points** (their position is the outline), and gets its own **↶ undo reset**. **🩹 Recover positions** puts outlined points back on the centre of their outline and client-corrected points back at the coordinate the client gave. The saved session now keeps **older saves**: "one save back" plus a ring kept roughly every 30 minutes, selectable on the ↻ Saved progress banner (also while a file is loaded), so an autosave can no longer erase the state you had minutes ago.
+
 ## 2026-10-23 — 🆔 External ID = the client's accounting id — Site Setup Tools latest v4.434 → v4.436 (latest only)
 
 - **v4.436** — ✏ Shape: a freshly drawn outline now lands exactly where it was drawn. It used to slide to the 15 ft gap whenever a neighbour was within 10 ft of that gap, which looked like a jump after the second click. Position snapping still applies when you drag an edge, corner or the whole box, copy an outline with ALT+click, or press ⟂ Align.
