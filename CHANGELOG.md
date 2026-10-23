@@ -1,4 +1,6 @@
-## 2026-10-23 — 🏷 Bulk Rename for every entity type + 🔖 bulk asset Types — Site Setup Tools latest v4.431 (latest only)
+## 2026-10-23 — 🏷 Bulk Rename for every entity type + 🔖 bulk asset Types — Site Setup Tools latest v4.431 → v4.432 (latest only)
+
+- **v4.432** — ⚡ Apply speed: the SUM table + queue UI were rebuilt on every progress tick (twice per entity), so on a big site each write sat behind seconds of main-thread work and a 179-edit run crawled at 10–15 s per edit. The progress modal still updates every tick; the table/queue redraw is throttled to once per 1.5 s + once at the end. One console timing line per run (`apply timing: … per-entity round-trip avg / max`) separates server time from UI time.
 
 - **v4.431** — SUM **Bulk → 🏷 Rename** now covers every entity type: coloured type chips across the top (Asset · NFZ · FP · FFZ · Marker · Base · Safe, pre-lit from the SUM selection, Assets when nothing is selected), scope = all rows of the lit types or selected rows only, assets keep the root-only / roots-with-children / every-asset sub-scope. Flight paths rename once per path; duplicate names are blocked within the same entity type. New **🔖 Type (assets)** tab: set / prefix / suffix / find→replace / `{type}` template over asset types with the same preview, queued as normal subtype edits (server lowercases; new strings take the "Enter new type" path). Renames on NFZ / Marker / Base / Safe Zone need ⚡ Direct API at Apply — the preview says so and Apply refuses early without it (same rule shape as Bulk → Valid).
 

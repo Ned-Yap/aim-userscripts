@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.431
+// @version      4.432
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.431';
+    const SCRIPT_VERSION = '4.432';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -16529,6 +16529,13 @@
                 entities: auditEntries,
             };
             console.log(`${TAG} apply: audit log → window.__aim_ai_lastApplyLog`);
+            try {   // v4.432: one timing line per run — server round-trip per entity vs wall clock
+                const ds = auditEntries.map(a => a.durationMs).filter(d => typeof d === 'number');
+                if (ds.length) {
+                    const avg = Math.round(ds.reduce((x, y) => x + y, 0) / ds.length), max = Math.max(...ds);
+                    console.log(`${TAG} apply timing: ${ds.length} entities in ${Math.round((Date.now() - applyState.startTime) / 1000)} s wall · per-entity round-trip avg ${avg} ms, max ${max} ms${directApi ? ' · ⚡ pool' : ' · editor path'}`);
+                }
+            } catch (e) { console.warn(`${TAG} apply timing summary failed:`, e); }
             // v3.51: clear the sidebar search filter we left set from the
             // last entity's search. Otherwise the user reopens the sidebar
             // and sees just the last-edited entity, which is confusing.
@@ -36259,11 +36266,22 @@
                 warnings: pre.warnings,
                 onLaunch: (opts) => {
                     openApplyProgressModal(groups);
+                    // v4.432: the SUM table + queue UI used to be rebuilt on EVERY
+                    // progress tick (twice per entity). On a big site that is
+                    // seconds of main-thread work per write — the pooled POSTs
+                    // sat behind it and a 179-edit run crawled at 10–15 s per
+                    // edit (2026-10-23). The modal still updates every tick; the
+                    // table/queue redraw is throttled to once per 1.5 s + once at
+                    // the end.
+                    let uiLastAt = 0, uiTimer = null;
+                    const flushHeavyUi = () => { uiTimer = null; uiLastAt = Date.now(); refreshQueueUi(); redrawTable(); };
                     runApplyPipeline((st) => {
                         updateApplyProgressModal(st);
-                        refreshQueueUi();
-                        redrawTable();
+                        const wait = 1500 - (Date.now() - uiLastAt);
+                        if (wait <= 0) flushHeavyUi(); else if (!uiTimer) uiTimer = setTimeout(flushHeavyUi, wait);
                     }, opts).then(() => {
+                        if (uiTimer) { clearTimeout(uiTimer); uiTimer = null; }
+                        flushHeavyUi();
                         closeApplyProgressModal();
                         const failed = applyState.errors.length;
                         const ok = applyState.done;
