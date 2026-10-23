@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.420
+// @version      4.421
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.420';
+    const SCRIPT_VERSION = '4.421';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -258,6 +258,7 @@
     let gmtMasterEnabled = true;
     let gmtAltGate = false;         // CP toggle: require ALT+click to place (plain click stays free for Percepto)
     let impSizeFt = 55;             // created-asset square side ft, CP-editable (55 ft = field default since v4.330)
+    let impLabelsShift = true;      // v4.421: permanent entity name labels (NFZ names etc.) only while SHIFT is held — CP toggle
     let impShapeColor = '#c39bd3';  // v4.367: ✏ Shape — drawn asset polygons (Percepto asset purple), CP-editable
     let impShapeOpacity = 0.25;     // v4.367: fill opacity
     let impShapeFill = true;        // v4.367: filled or outline only
@@ -13183,6 +13184,7 @@
             try { if (imp.points.length) { impComputeDups(); impRenderStaged(); impSyncUi(); } } catch (e) {}
             return;
         }
+        if (id === 'imp-labels-shift') { const v = !!(msg.value !== undefined ? msg.value : msg.enabled); if (v === impLabelsShift) return; impLabelsShift = v; try { impSyncNameLabels(); } catch (e) {} return; }
         if (id === 'imp-shape-color' && typeof msg.value === 'string') { if (msg.value === impShapeColor) return; impShapeColor = msg.value; try { impRenderAssetShapes(); } catch (e) {} return; }
         if (id === 'imp-shape-opacity' && typeof msg.value === 'number') { if (msg.value === impShapeOpacity) return; impShapeOpacity = Math.max(0, Math.min(1, msg.value)); try { impRenderAssetShapes(); } catch (e) {} return; }
         if (id === 'imp-buf-color' && typeof msg.value === 'string') { if (msg.value === impBufColor) return; impBufColor = msg.value; try { impRenderAssetShapes(); } catch (e) {} return; }
@@ -13510,6 +13512,7 @@
                 { id: 'imp-dup-ft', label: 'Nearby flag radius (staged point within N ft of an existing asset, not overlapping it — informational)', type: 'number', min: 0, max: 1000, step: 5, default: 50, unit: 'ft' },
                 { id: 'imp-size-ft', label: 'Created-asset square size', type: 'number', min: 5, max: 2000, step: 5, default: 55, unit: 'ft' },
                 { id: 'imp-autosave-min', label: 'Autosave import progress every N minutes (0 = only on change / close)', type: 'number', min: 0, max: 60, step: 1, default: 3, unit: 'min' },
+                { id: 'imp-labels-shift', label: 'Entity name labels (NFZ names etc.) only while SHIFT is held — like Percepto\'s asset names', type: 'boolean', default: true },
                 { id: 'imp-shape-hdr', label: '✏ Shape — drawn asset outlines (before Create)', type: 'header' },
                 { id: 'imp-shape-color', label: 'Outline colour', type: 'color', default: '#c39bd3' },
                 { id: 'imp-shape-opacity', label: 'Fill opacity (0 = outline only)', type: 'number', min: 0, max: 1, step: 0.05, default: 0.25 },
@@ -25415,23 +25418,46 @@
     // pane) are hidden unless SHIFT is held — the same reveal Percepto uses elsewhere — so the
     // parent pad's name never sits on top of what you are tracing. Our own hover tip follows the
     // same rule. Removed the moment the mode ends. ----
+    // v4.421: Percepto's PERMANENT labels (NFZ names…) are Leaflet tooltips with options.permanent —
+    // tagged 'aim-perm-tip' as they are built (prototype patch, once per frame) so only THEY are
+    // hidden at all times unless SHIFT is held; hover tips (ours and Percepto's) are untouched.
+    function impPatchTooltips() {
+        const L = getLeafletL(); if (!L || !L.Tooltip || !L.Tooltip.prototype || L.Tooltip.prototype._aimPermPatched) return !!(L && L.Tooltip && L.Tooltip.prototype && L.Tooltip.prototype._aimPermPatched);
+        const proto = L.Tooltip.prototype, orig = proto._initLayout;
+        if (typeof orig !== 'function') return false;
+        proto._initLayout = function () { const r = orig.apply(this, arguments); try { if (this.options && this.options.permanent && this._container) this._container.classList.add('aim-perm-tip'); } catch (e) {} return r; };
+        proto._aimPermPatched = true;
+        // labels built before the patch: a permanent tooltip sits in the pane while nothing is hovered — tag what is there now
+        try { const map = getLeafletMap(); if (map) map.getContainer().querySelectorAll('.leaflet-tooltip-pane .leaflet-tooltip').forEach(t => t.classList.add('aim-perm-tip')); } catch (e) {}
+        console.log(`${TAG} 📥 permanent name labels tagged — hidden unless SHIFT (Control Panel toggle)`);
+        return true;
+    }
     function impSyncNameLabels() {
-        const want = (imp.mode === 'shape' || imp.mode === 'move') && !imp._shift;
+        impPatchTooltips();
+        const drawing = (imp.mode === 'shape' || imp.mode === 'move') && !imp._shift;
+        const perm = impLabelsShift && !imp._shift;
+        const want = drawing || perm;
         let doc = document; try { const map = getLeafletMap(); if (map) doc = map.getContainer().ownerDocument || document; } catch (e) {}
         const docs = doc === document ? [document] : [document, doc];
+        const css = (drawing ? '.leaflet-tooltip-pane{visibility:hidden!important} #aim-imp-hovertip{display:none!important} ' : '') + (perm ? '.leaflet-tooltip-pane .aim-perm-tip{visibility:hidden!important}' : '');
         docs.forEach(d => {
             let st = d.getElementById('aim-imp-hidelabels');
-            if (want && !st) { st = d.createElement('style'); st.id = 'aim-imp-hidelabels'; st.textContent = '.leaflet-tooltip-pane{visibility:hidden!important} #aim-imp-hovertip{display:none!important}'; (d.head || d.documentElement).appendChild(st); }
-            else if (!want && st) st.remove();
+            if (want) { if (!st) { st = d.createElement('style'); st.id = 'aim-imp-hidelabels'; (d.head || d.documentElement).appendChild(st); } if (st.textContent !== css) st.textContent = css; }
+            else if (st) st.remove();
         });
         if (want && !imp._shiftWired) {
             imp._shiftWired = true;
             const on = (ev) => { if (ev.key === 'Shift' && !imp._shift) { imp._shift = true; impSyncNameLabels(); } };
             const off = (ev) => { if (ev.key === 'Shift' && imp._shift) { imp._shift = false; impSyncNameLabels(); } };
             [window, uwin()].forEach(w => { try { w.addEventListener('keydown', on, true); w.addEventListener('keyup', off, true); w.addEventListener('blur', () => { if (imp._shift) { imp._shift = false; impSyncNameLabels(); } }); } catch (e) {} });
-            console.log(`${TAG} 📥 asset-name labels hidden while drawing — hold SHIFT to see them`);
+            console.log(`${TAG} 📥 name labels hidden — hold SHIFT to see them`);
         }
     }
+    // the map comes up after us: keep trying until Leaflet is there and the patch is in, then just re-sync on toggle / Shift
+    (function impLabelsBoot() {
+        let tries = 0;
+        const t = setInterval(() => { tries++; try { if (impPatchTooltips()) { clearInterval(t); impSyncNameLabels(); } } catch (e) { console.warn(`${TAG} 📥 label patch:`, e); } if (tries > 200) clearInterval(t); }, 1500);
+    })();
     function impSetMode(mode) {
         if (mode && !impMasterEnabled) { showToast('Asset Importer is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
         if (imp.moveHeld && mode !== 'move') { imp.moveHeld = null; imp.moveDrag = false; imp.moveDownPt = null; try { impRenderStaged(); } catch (e) {} }

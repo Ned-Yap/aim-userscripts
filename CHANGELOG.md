@@ -1,4 +1,6 @@
-## 2026-10-22 — 🩻 P&A assets: red ✕ for plugged ground, P&A ruleset, status review — Site Setup Tools latest v4.413 → v4.420 (latest only)
+## 2026-10-22 — 🩻 P&A assets: red ✕ for plugged ground, P&A ruleset, status review — Site Setup Tools latest v4.413 → v4.421 (latest only)
+
+- **v4.421** — **NFZ (and other permanent) name labels only while SHIFT is held**, at all times on the Site Setup map — the same reveal Percepto uses for asset names. Control Panel toggle under Site Setup Tools, on by default. Hover tips are untouched.
 
 - **v4.420** — fix: clicking a row in the missing list stopped zooming in v4.419 (the search box's guard matched the rows too).
 
