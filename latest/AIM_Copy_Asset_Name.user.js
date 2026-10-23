@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.416
+// @version      4.417
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.416';
+    const SCRIPT_VERSION = '4.417';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -23045,14 +23045,14 @@
     const IMP_SECTIONS = [
         // v4.416: `does` = what the step does to AIM, in the three verbs every button on the page uses:
         //   👁 shows (reads only) · ➕ stages (changes the map / the plan, nothing written) · ⚡ writes to AIM
-        { id: 'bounds', num: '1', title: 'Boundaries', color: '186,140,255', does: '👁 picks which points — nothing written' },
-        { id: 'data', num: '2', title: 'Data file', color: '122,223,230', does: '➕ stages points on the map — nothing written' },
-        { id: 'type', num: '3', title: 'Type & priority', color: '255,179,71', does: '➕ decides what step 7 will write — nothing written yet' },
-        { id: 'place', num: '4', title: 'Placement & flags', color: '255,95,255', does: '➕ fixes positions on the map · only 🔁 Swap writes' },
-        { id: 'env', num: '5', title: 'Well records (Enverus)', color: '255,214,102', does: '👁 checks · ➕ stages what is missing · 👁 report — nothing written' },
-        { id: 'resp', num: '6', title: 'Client response', color: '126,200,255', does: '➕ applies to the staged points · ⚡ 🏷 moves / renames and 🗑 removals write' },
-        { id: 'create', num: '7', title: 'Create / update', color: '95,255,95', does: '⚡ writes to AIM — the only step that creates assets' },
-        { id: 'adv', num: '', title: 'Advanced', color: '160,160,160', does: '👁 selection tools · ⚡ 🗑 delete mode writes' },
+        { id: 'bounds', num: '1', title: 'Boundaries', color: '186,140,255', does: '👁 picks points', doesLong: 'Picks which staged points are selected — nothing written' },
+        { id: 'data', num: '2', title: 'Data file', color: '122,223,230', does: '➕ stages points', doesLong: 'Stages the file\'s rows as points on the map — nothing written' },
+        { id: 'type', num: '3', title: 'Type & priority', color: '255,179,71', does: '➕ sets what 7 writes', doesLong: 'Decides the type, tier and notes step 7 will write — nothing written yet' },
+        { id: 'place', num: '4', title: 'Placement & flags', color: '255,95,255', does: '➕ map only · ⚡ Swap', doesLong: 'Fixes positions and outlines on the map (nothing written) — only 🔁 Swap names writes' },
+        { id: 'env', num: '5', title: 'Well records (Enverus)', color: '255,214,102', does: '👁 check · ➕ stage · 👁 report', doesLong: 'A checks the list, B stages what is missing (map only), C writes a report for the client — nothing written to AIM' },
+        { id: 'resp', num: '6', title: 'Client response', color: '126,200,255', does: '➕ staged · ⚡ 🏷 🗑', doesLong: '✔ applies the answers to the staged points (map only); ⚡ 🏷 moves / renames and 🗑 removals write to existing assets' },
+        { id: 'create', num: '7', title: 'Create / update', color: '95,255,95', does: '⚡ writes to AIM', doesLong: 'The only step that creates assets (and updates type + notes on name matches)' },
+        { id: 'adv', num: '', title: 'Advanced', color: '160,160,160', does: '👁 tools · ⚡ 🗑 delete', doesLong: 'Selection tools (nothing written) and the delete mode, which writes' },
     ];
     function impSecOpenHtml(id) {
         const d = IMP_SECTIONS.find(x => x.id === id);
@@ -23061,7 +23061,7 @@
                 <span data-impsecchev style="color:rgb(${d.color});width:10px;flex:none">▸</span>
                 ${d.num ? `<span style="display:inline-block;min-width:18px;height:18px;line-height:18px;text-align:center;border-radius:50%;background:rgba(${d.color},0.25);color:rgb(${d.color});font-size:10px;font-weight:700;flex:none">${d.num}</span>` : ''}
                 <b style="color:rgb(${d.color});flex:none">${d.title}</b>
-                ${d.does ? `<span style="flex:none;font-size:9.5px;padding:0 6px;border-radius:8px;background:${/⚡/.test(d.does) ? 'rgba(255,120,60,0.18)' : (/➕/.test(d.does) ? 'rgba(95,255,95,0.12)' : 'rgba(255,255,255,0.08)')};color:${/⚡/.test(d.does) ? '#ffb28a' : (/➕/.test(d.does) ? '#9fe8a0' : '#aab')};border:1px solid ${/⚡/.test(d.does) ? 'rgba(255,120,60,0.5)' : (/➕/.test(d.does) ? 'rgba(95,255,95,0.35)' : 'rgba(255,255,255,0.15)')}">${d.does}</span>` : ''}
+                ${d.does ? `<span title="${impEsc(d.doesLong || d.does)}" style="flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:9.5px;padding:0 6px;border-radius:8px;background:${/⚡/.test(d.does) ? 'rgba(255,120,60,0.18)' : (/➕/.test(d.does) ? 'rgba(95,255,95,0.12)' : 'rgba(255,255,255,0.08)')};color:${/⚡/.test(d.does) ? '#ffb28a' : (/➕/.test(d.does) ? '#9fe8a0' : '#aab')};border:1px solid ${/⚡/.test(d.does) ? 'rgba(255,120,60,0.5)' : (/➕/.test(d.does) ? 'rgba(95,255,95,0.35)' : 'rgba(255,255,255,0.15)')}">${d.does}</span>` : ''}
                 <span data-impsecsum="${id}" style="color:#8a949e;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0"></span>
             </button>
             <div data-impsecbody="${id}" style="display:none;padding:8px 10px 4px">`;
@@ -24523,17 +24523,20 @@
                 try { const cp = map.latLngToContainerPoint([p.lat, p.lng]); hoverIdx.push({ x: cp.x, y: cp.y, p }); } catch (e) {}
             } catch (e) {}
         }
-        // unstaged plugged candidates from the fill-in (ghost ✕; the staged ones draw above as points)
+        // v4.417: EVERY unstaged candidate from the fill-in whose status group is ticked is on the map —
+        // ✕ for plugged, a small hollow square for the rest (colour = status group) — so 'drilled, off
+        // our pads' is seen before it is staged. Staged ones draw above as ordinary points.
         try {
             impPaNormalizeCands();
-            const cands = (imp.env.missing || []).filter(x => x.pa && !x.staged && imp.env.missStatus.plugged);
+            const cands = (imp.env.missing || []).filter(x => !x.staged && imp.env.missStatus[x.group]);
             for (const x of cands) {
                 if (bounds && !bounds.contains([x.lat, x.lng])) continue;
                 if (drawn >= IMP_MAX_RENDER) break;
-                drawX(x.lat, x.lng, 4, { color: x.onPad ? '#ff6b6b' : '#ff2d2d', weight: 1.5, opacity: 0.55, dashArray: x.onPad ? '2,2' : null });
+                if (x.pa) drawX(x.lat, x.lng, 4, { color: x.onPad ? '#ff6b6b' : '#ff2d2d', weight: 1.5, opacity: 0.55, dashArray: x.onPad ? '2,2' : null });
+                else { const sq = L.polygon(impSquareLatLngs(map, x.lat, x.lng, 3.5), Object.assign({ color: IMP_CAND_COLORS[x.group] || '#fff', weight: 1.5, opacity: 0.8, fillColor: IMP_CAND_COLORS[x.group] || '#fff', fillOpacity: 0.25, interactive: false }, imp.renderer ? { renderer: imp.renderer } : {})); sq.addTo(map); imp.layers.push(sq); }
                 drawn++;
                 let pp = impCandHover.get(x);
-                if (!pp) { pp = { name: genCleanName(impPaName(x)), cand: x, env: x, pa: { label: x.paLabel, onPad: !!x.onPad }, typeRaw: impPaTypeFor(x.ours !== false, x.paLabel), thirdParty: x.ours === false }; impCandHover.set(x, pp); }
+                if (!pp) { pp = x.pa ? { name: genCleanName(impPaName(x)), cand: x, env: x, pa: { label: x.paLabel, onPad: !!x.onPad }, typeRaw: impPaTypeFor(x.ours !== false, x.paLabel), thirdParty: x.ours === false } : { name: x.name, cand: x, env: x, typeRaw: `${x.facility ? (x.facType || 'facility') : (x.status || '')} · not in the list`, thirdParty: x.ours === false }; impCandHover.set(x, pp); }
                 try { const cp = map.latLngToContainerPoint([x.lat, x.lng]); hoverIdx.push({ x: cp.x, y: cp.y, p: pp }); } catch (e) {}
             }
         } catch (e) { console.warn(`${TAG} 🩻 candidate ✕ render failed:`, e); }
@@ -24570,7 +24573,7 @@
     function impHoverText(p) {
         const bits = [];
         if (p.pa) bits.push(`🩻 ${p.pa.label || 'Plugged'} — flyable ground`);
-        if (p.cand) { bits.push(p.cand.onPad ? 'on our pad — shown only, never staged' : (imp.env.paAssets === false ? 'P&A staging off' : (imp.env.missingSel.has(p.cand.api) ? 'ticked to stage' : 'not ticked'))); }
+        if (p.cand) { bits.push(p.pa ? (p.cand.onPad ? 'on our pad — shown only, never staged' : (imp.env.paAssets === false ? 'P&A staging off' : (imp.env.missingSel.has(p.cand.api) ? 'ticked to stage' : 'not ticked'))) : `${p.cand.onPad ? 'on our pad' : 'off our pads'} · ${imp.env.missingSel.has(p.cand.api) ? 'ticked to stage' : 'not ticked'}`); }
         if (p.typeRaw) bits.push(p.typeRaw);
         if (imp.pri.on && p.pri) bits.push(p.pri.tier || 'no tier');
         if (p.dup) bits.push(imp.dupMode === 'update' ? 'update' : 'name match');
@@ -25375,6 +25378,27 @@
         imp.dragShape = null; imp.dragLast = null;
         imp.editDrag = null;
     }
+    // ---- v4.417: while ↔ Move / ✏ Shape are armed, Percepto's asset-name labels (Leaflet tooltip
+    // pane) are hidden unless SHIFT is held — the same reveal Percepto uses elsewhere — so the
+    // parent pad's name never sits on top of what you are tracing. Our own hover tip follows the
+    // same rule. Removed the moment the mode ends. ----
+    function impSyncNameLabels() {
+        const want = (imp.mode === 'shape' || imp.mode === 'move') && !imp._shift;
+        let doc = document; try { const map = getLeafletMap(); if (map) doc = map.getContainer().ownerDocument || document; } catch (e) {}
+        const docs = doc === document ? [document] : [document, doc];
+        docs.forEach(d => {
+            let st = d.getElementById('aim-imp-hidelabels');
+            if (want && !st) { st = d.createElement('style'); st.id = 'aim-imp-hidelabels'; st.textContent = '.leaflet-tooltip-pane{visibility:hidden!important} #aim-imp-hovertip{display:none!important}'; (d.head || d.documentElement).appendChild(st); }
+            else if (!want && st) st.remove();
+        });
+        if (want && !imp._shiftWired) {
+            imp._shiftWired = true;
+            const on = (ev) => { if (ev.key === 'Shift' && !imp._shift) { imp._shift = true; impSyncNameLabels(); } };
+            const off = (ev) => { if (ev.key === 'Shift' && imp._shift) { imp._shift = false; impSyncNameLabels(); } };
+            [window, uwin()].forEach(w => { try { w.addEventListener('keydown', on, true); w.addEventListener('keyup', off, true); w.addEventListener('blur', () => { if (imp._shift) { imp._shift = false; impSyncNameLabels(); } }); } catch (e) {} });
+            console.log(`${TAG} 📥 asset-name labels hidden while drawing — hold SHIFT to see them`);
+        }
+    }
     function impSetMode(mode) {
         if (mode && !impMasterEnabled) { showToast('Asset Importer is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
         if (imp.moveHeld && mode !== 'move') { imp.moveHeld = null; imp.moveDrag = false; imp.moveDownPt = null; try { impRenderStaged(); } catch (e) {} }
@@ -25392,6 +25416,7 @@
             impWire();
         } else impUnwire();
         impRenderShapes();   // ✎ vertex/midpoint dots appear only while Edit is armed
+        try { impSyncNameLabels(); } catch (e) { console.warn(`${TAG} 📥 name-label sync:`, e); }
         impSyncUi();
     }
     // ---- panel body (built in JS — the generator template just carries the container) ----
@@ -26047,6 +26072,12 @@
     }
     // red X geometry: a pixel-sized cross around a lat/lng (re-computed on every render, so it stays the same size at every zoom)
     const impCandHover = new WeakMap();   // candidate → hover pseudo-point (kept OFF the persisted candidate: no cycles in the session JSON)
+    const IMP_CAND_COLORS = { producing: '#5fff5f', drilled: '#7adfe6', inactive: '#ffb347', plugged: '#ff2d2d', facility: '#c39bd3' };
+    function impSquareLatLngs(map, lat, lng, px) {
+        const c = map.latLngToContainerPoint([lat, lng]);
+        const ll = (dx, dy) => map.containerPointToLatLng([c.x + dx, c.y + dy]);
+        return [ll(-px, -px), ll(px, -px), ll(px, px), ll(-px, px)];
+    }
     function impXLatLngs(map, lat, lng, px) {
         const c = map.latLngToContainerPoint([lat, lng]);
         const ll = (dx, dy) => map.containerPointToLatLng([c.x + dx, c.y + dy]);
@@ -26212,7 +26243,7 @@
             <div style="max-height:230px;overflow:auto;border:1px solid rgba(255,255,255,0.06);border-radius:3px;background:rgba(0,0,0,0.15)">${shown.map(row).join('') || '<div style="padding:6px;color:#888;font-size:10px">nothing in the ticked groups</div>'}</div>
             <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
                 <button data-impmiss-stage ${nSel ? '' : 'disabled'} style="background:rgba(95,255,95,0.15);color:#5fff5f;border:1px solid rgba(95,255,95,0.55);border-radius:3px;padding:4px 12px;cursor:pointer;font:inherit;font-size:11px;font-weight:600${nSel ? '' : ';opacity:0.45;cursor:default'}" title="Adds the ticked wells / facilities to the staged points on the map. Nothing is written until ⚡ Create in step 7.">➕ Stage ${nSel}${nPaSel ? ` (${nPaSel} as P&A)` : ''} — map only</button>
-                <span style="color:#888;font-size:10px">they join the staged points on the map · nothing is written until ✓ Create in step 7</span>
+                <span style="color:#888;font-size:10px">they join the staged points on the map · nothing is written until ⚡ Create in step 7 · on the map: ✕ = plugged, small squares = the other ticked groups (not staged yet)</span>
                 <span title="A staged well is an ordinary point: name = the Enverus well name, type 'H - WELL (Enverus)' / 'V - WELL (Enverus)' (change it in 3 · Type), notes carry a 'Source: added from Enverus' block and a dated 'Status recorded' line. Other operators' wells stage as '3RD PARTY WELL (operator)' obstacles." style="width:14px;height:14px;line-height:12px;text-align:center;border:1px solid rgba(122,223,230,0.5);border-radius:50%;color:#7adfe6;font-size:9px;font-weight:700;cursor:help">i</span>
             </div>
         </div>`;
@@ -26820,6 +26851,11 @@
             const sb = document.getElementById('aim-imp-save'), sn = document.getElementById('aim-imp-saved-note');
             if (sb) sb.style.display = imp.headers.length ? '' : 'none';
             if (sn) sn.textContent = !imp.headers.length ? '' : (imp.dirty ? 'unsaved changes — autosaves in a moment' : (imp.lastSavedAt ? `💾 saved ${impFmtWhen(imp.lastSavedAt)}` : ''));
+            // v4.417: the same state pinned in the sticky header next to Dry run
+            const hs = document.getElementById('aim-imp-headsave'), hn = document.getElementById('aim-imp-headsave-note'), hb = document.getElementById('aim-imp-headsave-btn');
+            if (hs) { hs.style.display = imp.headers.length ? 'flex' : 'none'; hs.dataset.genDisplay = 'flex'; }
+            if (hn) hn.innerHTML = !imp.headers.length ? '' : `${impEsc(imp.fileName || 'file')} · ${live.length} staged · ${selN} selected · ${imp.dirty ? '<span style="color:#ffb347">unsaved changes — autosaves in a moment</span>' : (imp.lastSavedAt ? `<span style="color:#5fff5f">💾 saved ${impEsc(impFmtWhen(imp.lastSavedAt))}</span>` : 'not saved yet')}`;
+            if (hb && !hb.onclick) hb.onclick = () => { impSaveSession('manual'); };
         } catch (e) {}
     }
     // ---- COMMIT: create-only, rides createAssetSquare (template clone, Lite
@@ -31667,6 +31703,7 @@
             </div>
             <div style="color:#888;font-size:11px">${xmlEscape(siteName)} · ${assets.length} asset${assets.length === 1 ? '' : 's'} (${eligibleCount} eligible)</div>
             <label data-gen-sec="tool" id="aim-gen-dryrow" style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;margin-top:8px;padding:5px 10px;border-radius:3px;background:rgba(95,255,95,0.08);border:1px solid rgba(95,255,95,0.4)"><input type="checkbox" id="aim-gen-dryrun" checked style="accent-color:#5fff5f"> <b id="aim-gen-drylabel" style="color:#5fff5f">🧪 Dry run — nothing is written</b> <span style="color:#888;font-size:10px">(every tool on this panel honors it)</span></label>
+            <div data-gen-sec="imp" id="aim-imp-headsave" style="display:none;align-items:center;gap:8px;font-size:11px;margin-top:6px;padding:3px 10px;border-radius:3px;background:rgba(95,255,95,0.05);border:1px solid rgba(95,255,95,0.25)"><span id="aim-imp-headsave-note" style="color:#9ad;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span><button id="aim-imp-headsave-btn" title="Save everything on this page — file, mapping, moved / removed points, outlines, boundaries — so you can pick up later, after a reload or sign-out. Autosaves run anyway; this is the 'right now' button." style="background:rgba(95,255,95,0.15);color:#5fff5f;border:1px solid rgba(95,255,95,0.5);border-radius:3px;padding:2px 10px;cursor:pointer;font:inherit;font-size:11px;font-weight:600">💾 Save progress</button></div>
             </div>
             <div id="aim-gen-help" style="display:none;margin-bottom:12px;padding:8px 10px;background:rgba(122,223,230,0.07);border:1px solid rgba(122,223,230,0.4);border-radius:4px;font-size:11px;color:#cfd6dc;line-height:1.5"></div>
             <div id="aim-gen-menu" data-gen-sec="menu">
