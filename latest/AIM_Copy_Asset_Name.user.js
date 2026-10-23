@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.418
+// @version      4.419
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.418';
+    const SCRIPT_VERSION = '4.419';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -24569,8 +24569,21 @@
             imp._onHoverLeave = () => impHideHoverTip();
             cont.addEventListener('mousemove', imp._onHover);
             cont.addEventListener('mouseleave', imp._onHoverLeave);
+            // v4.419: MIDDLE-click (wheel button) on a ✕ / square = open its row in the missing list
+            imp._onAux = (ev) => {
+                if (ev.button !== 1) return;
+                const idx = imp._hoverIdx || []; if (!idx.length) return;
+                const r = cont.getBoundingClientRect(); const x = ev.clientX - r.left, y = ev.clientY - r.top;
+                let best = null, bd = 144;
+                for (const h of idx) { const d2 = (h.x - x) * (h.x - x) + (h.y - y) * (h.y - y); if (d2 < bd) { bd = d2; best = h; } }
+                if (!best || !best.p.cand) return;
+                ev.preventDefault(); ev.stopPropagation();                       // no browser auto-scroll
+                if (ev.type === 'mousedown') impRevealCandidate(best.p.cand);
+            };
+            cont.addEventListener('mousedown', imp._onAux, true);
+            cont.addEventListener('auxclick', imp._onAux, true);
         } else if (!on && imp._onHover) {
-            try { cont.removeEventListener('mousemove', imp._onHover); cont.removeEventListener('mouseleave', imp._onHoverLeave); } catch (e) {}
+            try { cont.removeEventListener('mousemove', imp._onHover); cont.removeEventListener('mouseleave', imp._onHoverLeave); if (imp._onAux) { cont.removeEventListener('mousedown', imp._onAux, true); cont.removeEventListener('auxclick', imp._onAux, true); imp._onAux = null; } } catch (e) {}
             imp._onHover = null; imp._onHoverLeave = null; impHideHoverTip();
         }
     }
@@ -24592,6 +24605,21 @@
         if (!tip) { tip = document.createElement('div'); tip.id = 'aim-imp-hovertip'; tip.style.cssText = 'position:absolute;z-index:1200;pointer-events:none;background:#1f2228;color:#e6e6e6;border:1px solid rgba(122,223,230,0.6);border-radius:4px;padding:3px 7px;font:600 11px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;box-shadow:0 2px 8px rgba(0,0,0,0.6);white-space:nowrap;max-width:360px;overflow:hidden;text-overflow:ellipsis'; cont.appendChild(tip); }
         if (tip._p !== p) { tip._p = p; const sub = impHoverText(p); tip.innerHTML = `${impEsc(p.name)}${sub ? `<span style="color:#9ad;font-weight:400"> · ${impEsc(sub)}</span>` : ''}`; }
         tip.style.left = `${Math.round(x + 12)}px`; tip.style.top = `${Math.round(y - 28)}px`; tip.style.display = '';
+    }
+    function impRevealCandidate(x) {
+        const c = imp.env; if (!x) return;
+        c.missStatus[x.group] = true;
+        const padM = (imp.pri.padFt || 50) * GEN_FT_TO_M;
+        if (c.missOffPads && (x.inside || (x.nearFt != null && x.nearFt * GEN_FT_TO_M <= padM))) c.missOffPads = false;
+        c.missQuery = '';
+        impSetSection('env', true, false);
+        impRenderEnvUi();
+        const row = document.querySelector(`[data-impmiss-row="${CSS.escape(String(x.api))}"]`);
+        if (!row) { impStatus(`🔎 ${impEsc(x.name)} is not in the list right now`, '#ffb347'); return; }
+        try { row.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (e) { row.scrollIntoView(); }
+        row.style.transition = 'background 0.3s'; row.style.background = 'rgba(255,214,102,0.35)';
+        setTimeout(() => { row.style.background = ''; }, 1800);
+        impStatus(`🔎 ${impEsc(x.name)} — ${impEsc(x.status)} · ${x.staged ? 'already staged' : (c.missingSel.has(x.api) ? 'ticked to stage' : 'not ticked')}`);
     }
     function impHideHoverTip() { const map = getLeafletMap(); if (!map) return; const tip = map.getContainer().querySelector('#aim-imp-hovertip'); if (tip) { tip.style.display = 'none'; tip._p = null; } }
     function impEnsureMoveEnd(on) {
@@ -26222,7 +26250,7 @@
         const nPaSel = shown.filter(x => x.pa && c.missingSel.has(x.api) && !x.staged && impPaStageable(x)).length;
         const btnS = (attr, label, title) => `<button ${attr} title="${impEsc(title || '')}" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">${label}</button>`;
         const sBtn = (attr, label, title) => `<button ${attr} title="${impEsc(title || '')}" style="background:none;border:1px solid rgba(255,255,255,0.15);color:#9ad;border-radius:3px;padding:0 6px;cursor:pointer;font:inherit;font-size:10px">${label}</button>`;
-        const row = (x) => `<div data-impmiss-row="${x.api}" style="display:flex;align-items:center;gap:6px;padding:1px 4px;border-bottom:1px solid rgba(255,255,255,0.05);font-size:10.5px;color:${x.staged ? '#6f7a85' : '#cfd6dc'};cursor:pointer" onmouseover="this.style.background='rgba(255,255,255,0.05)'" onmouseout="this.style.background=''" title="click = zoom to it">
+        const row = (x) => `<div data-impmiss-row="${x.api}" data-impmiss-q="${impEsc(`${x.name} ${x.api} ${x.status} ${x.op || ''} ${x.type || ''} ${x.nearName || ''}${x.pa ? ' ' + impPaName(x) : ''}`.toLowerCase())}" style="display:flex;align-items:center;gap:6px;padding:1px 4px;border-bottom:1px solid rgba(255,255,255,0.05);font-size:10.5px;color:${x.staged ? '#6f7a85' : '#cfd6dc'};cursor:pointer" onmouseover="this.style.background='rgba(255,255,255,0.05)'" onmouseout="this.style.background=''" title="click = zoom to it">
             <input type="checkbox" data-impmiss-sel="${x.api}" ${x.staged || !impPaStageable(x) ? 'disabled' : (c.missingSel.has(x.api) ? 'checked' : '')} title="${x.pa && x.onPad ? 'on one of our pads — shown as a red ✕ only, never written to the site' : (x.pa && c.paAssets === false ? 'P&A staging is off (tick \'stage as P&A assets\')' : '')}" style="accent-color:#ffd666;margin:0;flex:none">
             ${x.pa ? `<span style="display:inline-block;width:9px;height:9px;flex:none;color:#ff2d2d;font-weight:900;font-size:11px;line-height:9px;text-align:center" title="${impEsc(x.status)}">✕</span>` : `<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${gcol[x.group]};flex:none" title="${impEsc(x.status)}"></span>`}
             <b style="flex:none;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${impEsc(x.pa ? genCleanName(impPaName(x)) : x.name)}</b>
@@ -26231,6 +26259,7 @@
         </div>`;
         el.innerHTML = `<div style="padding:6px 8px;background:rgba(255,255,255,0.03);border:1px dashed rgba(255,214,102,0.3);border-radius:3px">
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:4px;font-size:11px"><b style="color:#ffd666">${list.length}</b> <span style="color:#cfd6dc">not in the client's list</span> <span style="color:#888;font-size:10px">(${c.missingTotal || 0} inside the area · ${impEsc(c.missingAt || '')})</span>
+                <input type="search" data-impmiss-q value="${impEsc(c.missQuery || '')}" placeholder="🔍 search name · API · status · operator" style="flex:1;min-width:150px;max-width:300px;background:#1a1d23;border:1px solid rgba(255,214,102,0.45);color:#fff;padding:2px 6px;border-radius:3px;font:inherit;font-size:11px"><span data-impmiss-qn style="color:#888;font-size:10px"></span>
                 <span style="flex:1"></span>
                 ${sBtn('data-impmiss-all', 'tick all shown')} ${sBtn('data-impmiss-none', 'untick')}
                 ${btnS('data-impmiss-rep="sheets"', '📤 Sheets', 'The whole list with status, operator, nearest mapped asset')}${btnS('data-impmiss-rep="csv"', '⬇ CSV')}
@@ -26252,12 +26281,20 @@
                 <span title="A staged well is an ordinary point: name = the Enverus well name, type 'H - WELL (Enverus)' / 'V - WELL (Enverus)' (change it in 3 · Type), notes carry a 'Source: added from Enverus' block and a dated 'Status recorded' line. Other operators' wells stage as '3RD PARTY WELL (operator)' obstacles." style="width:14px;height:14px;line-height:12px;text-align:center;border:1px solid rgba(122,223,230,0.5);border-radius:50%;color:#7adfe6;font-size:9px;font-weight:700;cursor:help">i</span>
             </div>
         </div>`;
+        const applyQ = () => {
+            const q = String(c.missQuery || '').trim().toLowerCase(); let seen = 0;
+            el.querySelectorAll('[data-impmiss-row]').forEach(r => { const hit = !q || (r.getAttribute('data-impmiss-q') || '').includes(q); r.style.display = hit ? '' : 'none'; if (hit) seen++; });
+            const qn = el.querySelector('[data-impmiss-qn]'); if (qn) qn.textContent = q ? `${seen} of ${shown.length}` : '';
+        };
+        const qEl = el.querySelector('[data-impmiss-q]'); if (qEl) { qEl.oninput = () => { c.missQuery = qEl.value; applyQ(); }; qEl.onkeydown = (ev) => { ev.stopPropagation(); if (ev.key === 'Escape') { qEl.value = ''; c.missQuery = ''; applyQ(); } }; }
+        applyQ();
         el.onclick = (ev) => {
+            if (ev.target.closest('[data-impmiss-q]')) return;
             const g = ev.target.closest('[data-impmiss-g]'); if (g) { c.missStatus[g.getAttribute('data-impmiss-g')] = !!g.checked; impRenderMissingUi(host); impRenderStaged(); return; }
             const op = ev.target.closest('[data-impmiss-offpads]'); if (op) { c.missOffPads = !!op.checked; impRenderMissingUi(host); return; }
             const pa = ev.target.closest('[data-impmiss-pa]'); if (pa) { c.paAssets = !!pa.checked; impSaveParams(); list.forEach(x => { if (x.pa && !x.staged) { if (impPaStageable(x) && c.missStatus.plugged) c.missingSel.add(x.api); else c.missingSel.delete(x.api); } }); impRenderMissingUi(host); impRenderStaged(); return; }
             const cb = ev.target.closest('[data-impmiss-sel]'); if (cb) { const a = cb.getAttribute('data-impmiss-sel'); if (cb.checked) c.missingSel.add(a); else c.missingSel.delete(a); impRenderMissingUi(host); return; }
-            if (ev.target.closest('[data-impmiss-all]')) { shown.forEach(x => { if (!x.staged && impPaStageable(x)) c.missingSel.add(x.api); }); impRenderMissingUi(host); return; }
+            if (ev.target.closest('[data-impmiss-all]')) { const q = String(c.missQuery || '').trim().toLowerCase(); shown.forEach(x => { if (x.staged || !impPaStageable(x)) return; if (q) { const r = el.querySelector(`[data-impmiss-row="${CSS.escape(String(x.api))}"]`); if (r && r.style.display === 'none') return; } c.missingSel.add(x.api); }); impRenderMissingUi(host); return; }
             if (ev.target.closest('[data-impmiss-none]')) { c.missingSel.clear(); impRenderMissingUi(host); return; }
             const rp = ev.target.closest('[data-impmiss-rep]'); if (rp) { try { impExportMissing(rp.getAttribute('data-impmiss-rep')); } catch (e) { impStatus(`Export failed: ${impEsc(e && e.message || e)}`, '#ff6060'); } return; }
             const rg = ev.target.closest('[data-impmiss-rig]'); if (rg) { try { impExportRigWatch(rg.getAttribute('data-impmiss-rig')); } catch (e) { impStatus(`Export failed: ${impEsc(e && e.message || e)}`, '#ff6060'); } return; }

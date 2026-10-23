@@ -1,4 +1,6 @@
-## 2026-10-22 — 🩻 P&A assets: red ✕ for plugged ground, P&A ruleset, status review — Site Setup Tools latest v4.413 → v4.418 (latest only)
+## 2026-10-22 — 🩻 P&A assets: red ✕ for plugged ground, P&A ruleset, status review — Site Setup Tools latest v4.413 → v4.419 (latest only)
+
+- **v4.419** — **middle-click a ✕ or square on the map** (wheel button) and the missing list opens to that row, scrolled into view and flashed; filters that would hide it are lifted. **Search box** on the missing list: filters by name, API, status, operator or type as you type, keeps focus, Esc clears, "tick all shown" respects it.
 
 - **v4.418** — **h / v / d prefix on every well type** (3 · Type, on by default). The letter comes from, in order: the file's deviation column (guessed, e.g. WELL_DEVIATION_NAME), Enverus' trajectory for that API, the prefix the existing asset already carries. h = horizontal, v = vertical, d = directional (slanted, not horizontal — kept as its own letter). The result is matched against the site's existing subtypes case-insensitively, so a file value of `PUMPING ROD` on an update leaves `v - pumping rod` spelled exactly as it is and only corrects the wells where the records disagree. Unknown = type written as-is. Not applied to 3rd-party, facility or P&A types. The row shows live counts (h / v / d / unknown, and where each came from); 👁 Analyze's Type change tab uses the same rule; hovering a dot shows the letter and its source.
 
