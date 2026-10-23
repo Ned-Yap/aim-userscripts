@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.417
+// @version      4.418
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.417';
+    const SCRIPT_VERSION = '4.418';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -22992,6 +22992,7 @@
         env: { apiCol: null, open: false, notes: true, checkedAt: null, summary: null, running: false, opFilter: '', mismatchFt: 300, scope: 'selected', includeOurs: false,
             missing: null, missingAt: null, missingOp: '', missingSel: new Set(), missStatus: { producing: true, drilled: true, inactive: true, plugged: true, facility: true }, finding: false, missingFac: true,
             paAssets: true, paSizeFt: 100, paMatchFt: 250, paReview: null },   // v4.413: 🩻 plugged / retired → P&A assets (own size), status review (API match, location tolerance)   // v4.366: fill-in · facilities too   // v4.356: Enverus cross-check · v4.358: client review report
+        hv: { on: true, col: null, useEnv: true },     // v4.418: h - / v - / d - type prefix: file deviation column → Enverus trajectory → the asset's existing prefix
         pri: { on: false, open: false, oilCol: null, waterCol: null, blpdCol: null, priCol: null, clusterFt: 100, padFt: 50, p1Min: 250, p1Max: 1500, summary: null, zeroUntier: true, envUntier: true },   // v4.347: priority tiers · v4.357: zero-production / Enverus-dead wells get no tier
         advOpen: false,                             // v4.331: ▸ Advanced (subset tools + delete mode) expanded — GM-remembered
         secOpen: { bounds: true, data: true, type: false, place: false, env: false, resp: false, create: true, adv: false },   // v4.352: collapsible sections — GM-remembered
@@ -23013,7 +23014,7 @@
         lastDelete: null,                           // {siteID, when, entities:[full bodies]} — ↩ Undo batch source
         assetIndex: null,                           // cached [{id,name,clean,ring,bbox,centroid}] for dup-guard + delete select
     };
-    function impSaveParams() { try { GM_setValue(IMP_PARAMS_KEY, JSON.stringify({ radiusVal: imp.radiusVal, radiusUnit: imp.radiusUnit, includeDups: imp.includeDups, advOpen: imp.advOpen, keepShield: imp.keepShield, dupMode: imp.dupMode, secOpen: imp.secOpen, shapeW: imp.shapeW, snapFt: imp.snapFt, bufFt: imp.bufFt, gapFt: imp.gapFt, anaMovedFt: imp.ana.movedFt, paAssets: imp.env.paAssets, paSizeFt: imp.env.paSizeFt, paMatchFt: imp.env.paMatchFt, pri: { clusterFt: imp.pri.clusterFt, padFt: imp.pri.padFt, p1Min: imp.pri.p1Min, p1Max: imp.pri.p1Max, open: imp.pri.open, setOpen: imp.pri.setOpen, zeroUntier: imp.pri.zeroUntier, envUntier: imp.pri.envUntier } })); } catch (e) {} }
+    function impSaveParams() { try { GM_setValue(IMP_PARAMS_KEY, JSON.stringify({ radiusVal: imp.radiusVal, radiusUnit: imp.radiusUnit, includeDups: imp.includeDups, advOpen: imp.advOpen, keepShield: imp.keepShield, dupMode: imp.dupMode, secOpen: imp.secOpen, shapeW: imp.shapeW, snapFt: imp.snapFt, bufFt: imp.bufFt, gapFt: imp.gapFt, anaMovedFt: imp.ana.movedFt, paAssets: imp.env.paAssets, paSizeFt: imp.env.paSizeFt, paMatchFt: imp.env.paMatchFt, hvOn: imp.hv.on, hvEnv: imp.hv.useEnv, pri: { clusterFt: imp.pri.clusterFt, padFt: imp.pri.padFt, p1Min: imp.pri.p1Min, p1Max: imp.pri.p1Max, open: imp.pri.open, setOpen: imp.pri.setOpen, zeroUntier: imp.pri.zeroUntier, envUntier: imp.pri.envUntier } })); } catch (e) {} }
     function impLoadParams() {
         try {
             const raw = GM_getValue(IMP_PARAMS_KEY, ''); if (!raw) return;
@@ -23037,6 +23038,8 @@
             if (typeof o.anaMovedFt === 'number' && o.anaMovedFt >= 0) imp.ana.movedFt = o.anaMovedFt;
             if (typeof o.gapFt === 'number' && o.gapFt >= 0) imp.gapFt = o.gapFt;
             if (typeof o.paAssets === 'boolean') imp.env.paAssets = o.paAssets;
+            if (typeof o.hvOn === 'boolean') imp.hv.on = o.hvOn;
+            if (typeof o.hvEnv === 'boolean') imp.hv.useEnv = o.hvEnv;
             if (typeof o.paSizeFt === 'number' && o.paSizeFt >= 5) imp.env.paSizeFt = o.paSizeFt;
             if (typeof o.paMatchFt === 'number' && o.paMatchFt >= 0) imp.env.paMatchFt = o.paMatchFt;
         } catch (e) {}
@@ -24109,7 +24112,7 @@
         const byId = new Map(ents.map(e => [e.id, e]));
         const subCounts = impSiteSubtypes(); const siteSubs = [...subCounts.keys()];
         const defSub = impApplyShield([...subCounts.entries()].sort((a, b) => b[1] - a[1]).map(x => x[0])[0] || 'well-cluster');
-        const baseSub = (p) => { if (!imp.mapping || !imp.mapping.type) return p.dup && p.dupSubtype ? impApplyShield(impTierStrip(p.dupSubtype)) : (impApplyShield((imp.typeMap['__all__'] || '').trim() || defSub)); return impResolveSubtype(p.typeRaw || '', siteSubs).value || ''; };
+        const baseSub = (p) => { let v; if (!imp.mapping || !imp.mapping.type) v = p.dup && p.dupSubtype ? impApplyShield(impTierStrip(p.dupSubtype)) : (impApplyShield((imp.typeMap['__all__'] || '').trim() || defSub)); else v = impResolveSubtype(p.typeRaw || '', siteSubs).value || ''; return impApplyHv(p, v, siteSubs); };
         const R = { new: [], gone: [], moved: [], tier: [], type: [], prod: [], same: 0, n: pts.length, at: impNowStamp() };
         const inFile = new Set(imp.points.map(p => (genCleanName(p.name) || '').toLowerCase()).filter(Boolean));
         pts.forEach(p => {
@@ -24335,6 +24338,7 @@
                 }
                 imp.fileName = file.name;
                 imp.headers = parsed.headers;
+                imp.hv.col = null; imp.hv._guessed = false;        // v4.418: re-guess the deviation column for the new file
                 imp.rows = parsed.rows;
                 imp.lastSavedAt = null;
                 imp.pri._guessed = false; imp.pri.summary = null; imp._secAdvanced = false;
@@ -24575,6 +24579,7 @@
         if (p.pa) bits.push(`🩻 ${p.pa.label || 'Plugged'} — flyable ground`);
         if (p.cand) { bits.push(p.pa ? (p.cand.onPad ? 'on our pad — shown only, never staged' : (imp.env.paAssets === false ? 'P&A staging off' : (imp.env.missingSel.has(p.cand.api) ? 'ticked to stage' : 'not ticked'))) : `${p.cand.onPad ? 'on our pad' : 'off our pads'} · ${imp.env.missingSel.has(p.cand.api) ? 'ticked to stage' : 'not ticked'}`); }
         if (p.typeRaw) bits.push(p.typeRaw);
+        if (imp.hv.on && !p.cand && !p.pa) { const r = impHvOf(p); if (r.hv) bits.push(`${r.hv.toUpperCase()} (${r.src})`); }
         if (imp.pri.on && p.pri) bits.push(p.pri.tier || 'no tier');
         if (p.dup) bits.push(imp.dupMode === 'update' ? 'update' : 'name match');
         if (p.src === 'enverus') bits.push('from Enverus'); if (p.src === 'enverus-3p') bits.push('3rd party'); if (p.src === 'client') bits.push('from the client response');
@@ -26568,6 +26573,30 @@
     // site subtype ignoring case, else created as a new subtype on first commit.
     // Only a blank value needs a hand-picked subtype. An explicit entry in the
     // remembered typeMap still wins.
+    // ---- v4.418 H / V / D PREFIX. Site subtypes read "v - pumping rod" / "h - well"; the client's
+    // file says just "PUMPING ROD". The letter comes from, in order: the file's deviation column
+    // (WELL_DEVIATION_NAME: HORIZONTAL / VERTICAL / DIRECTIONAL), Enverus' Trajectory for that API,
+    // the prefix the existing asset already carries (name match). Directional (slanted, not
+    // horizontal) keeps its own letter. The result is matched case-insensitively against the
+    // site's subtypes so an update leaves "v - pumping rod" spelled exactly as it is. ----
+    const IMP_HV_RE = /^\s*([hvd])\s*[-–—:]\s*/i;
+    function impHvLetter(txt) { const t = String(txt || '').toUpperCase(); if (!t) return ''; if (/HORIZ|^H$|^HZ$/.test(t)) return 'h'; if (/DIRECT|DEVIAT|SLANT|^D$/.test(t)) return 'd'; if (/VERT|^V$/.test(t)) return 'v'; return ''; }
+    function impHvGuessCol(headers) { return (headers || []).find(h => /deviation|traject|h.?or.?v|hole.?profile|well.?profile|drill.?type/i.test(h)) || null; }
+    function impHvOf(p) {
+        const c = imp.hv; if (!c.on || !p) return { hv: '', src: '' };
+        if (c.col) { const v = (imp.rows[p.i] || {})[c.col]; const l = impHvLetter(v); if (l) return { hv: l, src: 'file' }; }
+        if (c.useEnv && p.env && p.env.found && p.env.traj) { const t = String(p.env.traj).toUpperCase(); const l = /HORIZ/.test(t) ? 'h' : impHvLetter(t); if (l) return { hv: l, src: 'enverus' }; }
+        if (p.dup && p.dupSubtype) { const m = String(p.dupSubtype).match(IMP_HV_RE); if (m) return { hv: m[1].toLowerCase(), src: 'existing' }; }
+        return { hv: '', src: '' };
+    }
+    function impApplyHv(p, subtype, siteSubs) {
+        if (!imp.hv.on || !subtype || !p || p.pa || p.thirdParty || (p.env && p.env.facility)) return subtype;
+        const { hv } = impHvOf(p); if (!hv) return subtype;
+        const base = String(subtype).replace(IMP_HV_RE, '').trim(); if (!base) return subtype;
+        const want = `${hv} - ${base}`;
+        const hit = (siteSubs || [...impSiteSubtypes().keys()]).find(st => st.toLowerCase() === want.toLowerCase());
+        return hit || `${hv} - ${base.toLowerCase()}`;
+    }
     function impResolveSubtype(raw, subtypes) {
         const key = (raw || '(blank)').toLowerCase();
         const mapped = (imp.typeMap[key] || '').trim();
@@ -26587,13 +26616,29 @@
         const dl = `<datalist id="aim-imp-subtype-list">${subtypes.map(s => `<option value="${impEsc(s)}"></option>`).join('')}</datalist>`;
         const inCss = 'background:#1a1d23;border:1px solid rgba(122,223,230,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px';
         const shieldRow = `<label style="display:flex;align-items:center;gap:6px;font-size:11px;color:#cfd6dc;margin-top:6px;cursor:pointer" title="Site subtypes often carry a shielding modifier (\"v - pumping rod - unsh\", \"Tank Battery Shielded\"). Untick to drop that modifier from every subtype this import writes — assets are just assets."><input type="checkbox" id="aim-imp-keepshield" ${imp.keepShield ? 'checked' : ''} style="accent-color:#7adfe6"> keep shielded / unshielded modifiers in subtypes <span style="color:#888;font-size:10px">(untick = "v - pumping rod - unsh" → "v - pumping rod")</span></label>`;
-        const wireShield = () => { const k = el.querySelector('#aim-imp-keepshield'); if (k) k.onchange = () => { imp.keepShield = k.checked; impSaveParams(); impRenderTypeMapUi(); impSyncUi(); }; };
+        // v4.418: h / v / d prefix rule — guessed column, live counts across the live points
+        if (!imp.hv.col && !imp.hv._guessed) { imp.hv.col = impHvGuessCol(imp.headers); imp.hv._guessed = true; }
+        const hvLive = imp.points.filter(p => !p.done && p.sel);
+        const hvN = { h: 0, v: 0, d: 0, none: 0, file: 0, enverus: 0, existing: 0 };
+        hvLive.forEach(p => { const r = impHvOf(p); if (r.hv) { hvN[r.hv]++; hvN[r.src]++; } else hvN.none++; });
+        const hvRow = `<div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;font-size:11px;color:#cfd6dc;margin-top:6px;padding:5px 8px;background:rgba(122,223,230,0.05);border-radius:3px">
+            <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer" title="Site subtypes read 'v - pumping rod' / 'h - well'. With this on, every well's type gets the letter in front: h = horizontal, v = vertical, d = directional (slanted, not horizontal). The letter comes from the file's deviation column, else Enverus' trajectory for that API, else the prefix the asset already has. Spelled like the site's existing subtype when one matches, so an update leaves 'v - pumping rod' exactly as it is."><input type="checkbox" id="aim-imp-hv-on" ${imp.hv.on ? 'checked' : ''} style="accent-color:#7adfe6"> <b style="color:#7adfe6">h / v / d prefix</b> on every well type</label>
+            <label style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:#cfd6dc">from column <select id="aim-imp-hv-col" style="max-width:170px;${inCss}"><option value="">— none —</option>${imp.headers.map(h => `<option value="${impEsc(h)}"${imp.hv.col === h ? ' selected' : ''}>${impEsc(h)}</option>`).join('')}</select></label>
+            <label style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:#cfd6dc;cursor:pointer" title="When the file has no answer for a well, use Enverus' trajectory (needs step 5 A to have run)"><input type="checkbox" id="aim-imp-hv-env" ${imp.hv.useEnv ? 'checked' : ''} style="accent-color:#ffd666;margin:0"> else Enverus trajectory</label>
+            <span style="color:#888;font-size:10px">${imp.hv.on ? `selected: <b style="color:#cfd6dc">${hvN.h} h</b> · <b style="color:#cfd6dc">${hvN.v} v</b> · <b style="color:#cfd6dc">${hvN.d} d</b>${hvN.none ? ` · <span style="color:#ffb347">${hvN.none} unknown (type left as-is)</span>` : ''} — from the file ${hvN.file} · Enverus ${hvN.enverus} · the existing asset ${hvN.existing}` : 'off — types are written as the file / table says'}</span>
+        </div>`;
+        const wireHv = () => {
+            const on = el.querySelector('#aim-imp-hv-on'); if (on) on.onchange = () => { imp.hv.on = on.checked; impSaveParams(); impMarkDirty(); impRenderTypeMapUi(); impSyncUi(); };
+            const col = el.querySelector('#aim-imp-hv-col'); if (col) col.onchange = () => { imp.hv.col = col.value || null; impMarkDirty(); impRenderTypeMapUi(); impSyncUi(); };
+            const env = el.querySelector('#aim-imp-hv-env'); if (env) env.onchange = () => { imp.hv.useEnv = env.checked; impSaveParams(); impMarkDirty(); impRenderTypeMapUi(); impSyncUi(); };
+        };
+        const wireShield = () => { wireHv(); const k = el.querySelector('#aim-imp-keepshield'); if (k) k.onchange = () => { imp.keepShield = k.checked; impSaveParams(); impRenderTypeMapUi(); impSyncUi(); }; };
         if (!imp.mapping || !imp.mapping.type) {
             const cur = impApplyShield(imp.typeMap['__all__'] || defSub);
             el.innerHTML = `<div style="padding:6px 8px;background:rgba(122,223,230,0.05);border:1px dashed rgba(122,223,230,0.3);border-radius:3px;font-size:11px;color:#cfd6dc">
                 No type column — subtype for ALL created assets:
                 <input id="aim-imp-sub-all" type="text" list="aim-imp-subtype-list" value="${impEsc(cur)}" style="${inCss};width:140px">${dl}
-                <span style="color:#888;font-size:10px">(site's existing subtypes suggested; a new value is created on the site)</span>${shieldRow}</div>`;
+                <span style="color:#888;font-size:10px">(site's existing subtypes suggested; a new value is created on the site)</span>${shieldRow}${hvRow}</div>`;
             el.querySelector('#aim-imp-sub-all').oninput = function () { imp.typeMap['__all__'] = this.value.trim(); impSaveTypeMap(); impSyncUi(); };
             wireShield();
             return;
@@ -26638,7 +26683,7 @@
         }).join('');
         el.innerHTML = `<div style="padding:6px 8px;background:rgba(122,223,230,0.05);border:1px dashed rgba(122,223,230,0.3);border-radius:3px">
             <div style="font-size:10px;color:#9ad;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px">Type — CSV value → Percepto subtype <span style="color:#cfd6dc;text-transform:none;letter-spacing:0">(${vals.size} value${vals.size === 1 ? '' : 's'})</span> <span style="color:#888;text-transform:none;letter-spacing:0">· the file's value is used as-is unless you change it; a changed value is remembered</span></div>
-            ${famBanners}<div style="max-height:${vals.size > 6 ? 200 : 999}px;overflow:auto;border:1px solid rgba(255,255,255,0.06);border-radius:3px;padding:0 6px;background:rgba(0,0,0,0.12)">${rows}</div>${dl}${shieldRow}</div>`;
+            ${famBanners}<div style="max-height:${vals.size > 6 ? 200 : 999}px;overflow:auto;border:1px solid rgba(255,255,255,0.06);border-radius:3px;padding:0 6px;background:rgba(0,0,0,0.12)">${rows}</div>${dl}${shieldRow}${hvRow}</div>`;
         wireShield();
         el.querySelectorAll('button[data-impfam]').forEach(b => b.onclick = () => {
             const base = b.getAttribute('data-impfam'); const inp = el.querySelector(`input[data-impfamname="${CSS.escape(base)}"]`);
@@ -26885,6 +26930,7 @@
             }
             // v4.347: on an UPDATE with no type column, keep the asset's own base type
             if (p.dup && imp.dupMode === 'update' && (!imp.mapping || !imp.mapping.type) && p.dupSubtype) v = impApplyShield(impTierStrip(p.dupSubtype));
+            v = impApplyHv(p, v, siteSubs);                                            // v4.418: h - / v - / d - from the file / Enverus / the existing asset
             return impTierPrefix(p, v);                                     // v4.347: "P1 - " prefix when tiers are on
         };
         const plan = targets.map(p => ({ p, subtype: subtypeFor(p), update: !!(p.dup && imp.dupMode === 'update' && p.dupId != null) }));
@@ -27337,6 +27383,7 @@
             shapes: imp.shapes.map(sh => sh.kind === 'circle' ? { id: sh.id, kind: 'circle', center: sh.center, radiusM: sh.radiusM, name: sh.name || '' } : { id: sh.id, kind: sh.kind, ring: sh.ring, handle: sh.handle, name: sh.name || '' }),
             shapeSeq: imp.shapeSeq,
             pri: { on: imp.pri.on, oilCol: imp.pri.oilCol, waterCol: imp.pri.waterCol, blpdCol: imp.pri.blpdCol, priCol: imp.pri.priCol },
+            hv: { on: imp.hv.on, col: imp.hv.col, useEnv: imp.hv.useEnv },
             env: { apiCol: imp.env.apiCol, notes: imp.env.notes, checkedAt: imp.env.checkedAt, mismatchFt: imp.env.mismatchFt, missing: imp.env.missing, missingAt: imp.env.missingAt, missingOp: imp.env.missingOp, missingTotal: imp.env.missingTotal, paReview: imp.env.paReview },
             undo: { created: imp.lastCreated.slice(), updated: imp.lastUpdated.map(u => ({ id: u.id, name: u.name, before: u.before })) },   // v4.364: undo survives a reload
             resp: imp.resp.rows ? { rows: imp.resp.rows.map(r => Object.assign({}, r)), fileName: imp.resp.fileName, at: imp.resp.at, applied: imp.resp.applied, moves: imp.resp.moves.map(x => ({ id: x.id, name: x.name, from: x.from, to: x.to, why: x.why, look: x.look, force: !!x.force })), renames: imp.resp.renames, removeIds: imp.resp.removeIds, removeNames: imp.resp.removeNames } : null,
@@ -27368,9 +27415,11 @@
         imp.rows = d.rows.map(arr => { const o = {}; hdr.forEach((h, i) => { o[h] = arr[i] == null ? '' : arr[i]; }); return o; });
         imp.mapping = d.mapping || impGuessMapping(hdr);
         imp.points = []; imp.assetSel.clear(); imp.assetManual.clear(); imp.invalid = 0;
+        imp.hv._guessed = false; imp.hv.col = null;
         imp.shapes = (d.shapes || []).map(sh => sh.kind === 'circle' ? { id: sh.id, kind: 'circle', center: sh.center, radiusM: sh.radiusM, name: sh.name || '' } : { id: sh.id, kind: sh.kind || 'lasso', ring: sh.ring, handle: sh.handle || ringCentroid(sh.ring), name: sh.name || '' });
         imp.shapeSeq = Math.max(d.shapeSeq || 1, ...imp.shapes.map(sh => sh.id + 1), 1);
         imp.mapOpen = false;
+        if (d.hv) { imp.hv.on = d.hv.on !== false; imp.hv.col = d.hv.col || null; imp.hv.useEnv = d.hv.useEnv !== false; imp.hv._guessed = true; }
         if (d.pri) { Object.assign(imp.pri, { on: !!d.pri.on, oilCol: d.pri.oilCol || null, waterCol: d.pri.waterCol || null, blpdCol: d.pri.blpdCol || null, priCol: d.pri.priCol || null }); imp.pri._guessed = true; }
         if (d.env) { imp.env.apiCol = d.env.apiCol || null; imp.env.notes = d.env.notes !== false; imp.env.checkedAt = d.env.checkedAt || null; if (typeof d.env.mismatchFt === 'number') imp.env.mismatchFt = d.env.mismatchFt; if (Array.isArray(d.env.missing)) { imp.env.missing = d.env.missing; imp.env.missingAt = d.env.missingAt || null; imp.env.missingOp = d.env.missingOp || ''; imp.env.missingTotal = d.env.missingTotal || 0; imp.env.missingSel = new Set(); } if (d.env.paReview && Array.isArray(d.env.paReview.rows)) imp.env.paReview = d.env.paReview; imp.env._guessed = true; }
         if (d.undo) { imp.lastCreated = Array.isArray(d.undo.created) ? d.undo.created.slice() : []; imp.lastUpdated = Array.isArray(d.undo.updated) ? d.undo.updated.filter(u => u && u.id != null && u.before) : []; console.log(`${TAG} 📥 resume: undo record ${imp.lastCreated.length} created / ${imp.lastUpdated.length} updated`); }
