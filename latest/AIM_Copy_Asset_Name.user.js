@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.437
+// @version      4.438
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.437';
+    const SCRIPT_VERSION = '4.438';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -6713,7 +6713,7 @@
                 pole_is_simple: true,
             };
             b.mountain_terrain_site = !!(siteCfg && siteCfg.mountain_terrain);
-            if (extra && typeof extra === 'object') Object.assign(b, extra);     // v4.434: e.g. { external_asset_id } — top-level fields the importer wants on the new asset
+            if (extra && typeof extra === 'object') { const ex = Object.assign({}, extra); if (ex.custom && typeof ex.custom === 'object') { Object.assign(b.custom, ex.custom); delete ex.custom; } Object.assign(b, ex); }   // v4.434/v4.438: extra fields (custom.* merged into custom)
             const r = await fetch('/map_objects/', {
                 method: 'POST', credentials: 'same-origin',
                 headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf },
@@ -23627,7 +23627,9 @@
     }
     const IMP_STAMP_RE = /^Imported by (.+?) on (\d{4}-\d{2}-\d{2} \d{2}:\d{2}) from (.+?)(?: · (created|updated) by import)?\s*$/m;
     // v4.434: the client's accounting id → Percepto's External ID (asset form field `external_asset_id`, 100 chars)
-    const IMP_EXT_FIELD = 'external_asset_id';
+    const IMP_EXT_FIELD = 'external_asset_id';   // v4.438: inside `custom` (real asset bodies: custom.external_asset_id), not top-level
+    function impExtOfEnt(e) { const c = e && e.custom; return String(c && c[IMP_EXT_FIELD] != null ? c[IMP_EXT_FIELD] : '').trim(); }
+    function impSetExtOnBody(body, v) { if (!body.custom || typeof body.custom !== 'object') body.custom = {}; body.custom[IMP_EXT_FIELD] = v; }
     function impExtIdOf(p) { const m = imp.mapping; if (!m || !m.extId || !p) return ''; const v = (imp.rows[p.i] || {})[m.extId]; return String(v == null ? '' : v).trim().slice(0, 100); }
     function impComposeNotes(p, when, how) {
         const r = imp.rows[p.i] || {};
@@ -24231,7 +24233,7 @@
         live.forEach(p => {
             if (R.scope === 'selected' && !p.sel) return;
             const e = byId.get(p.dupId); if (!e) return;
-            const want = impExtIdOf(p), have = String(e[IMP_EXT_FIELD] == null ? '' : e[IMP_EXT_FIELD]).trim();
+            const want = impExtIdOf(p), have = impExtOfEnt(e);
             const row = { p, e, name: e.name || p.name, want, have };
             if (!want) R.none.push(row); else if (!have) R.set.push(row); else if (have !== want) R.change.push(row); else R.same.push(row);
         });
@@ -24284,7 +24286,7 @@
         for (let i = 0; i < todo.length; i++) {
             const x = todo[i]; impStatus(`🆔 ${i + 1}/${todo.length} — "${impEsc(x.name)}" → ${impEsc(x.want)}…`);
             try {
-                const body = buildWriteBody(x.e, siteCfg); body[IMP_EXT_FIELD] = x.want;
+                const body = buildWriteBody(x.e, siteCfg); impSetExtOnBody(body, x.want);
                 const rr = await fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) });
                 if (rr.status === 200) { ok++; done.push({ id: x.e.id, name: x.name, before: JSON.parse(JSON.stringify(x.e)), want: x.want }); }
                 else { fail++; const t = await rr.text(); console.warn(`${TAG} 🆔 "${x.name}" ${rr.status} ${t.slice(0, 200)}`); if (rr.status === 403) { impStatus(`ABORTED at ${i + 1}/${todo.length} — server 403`, '#ff6060'); break; } }
@@ -24293,8 +24295,8 @@
         }
         try { await fetchMapObjects(sid, true); } catch (e) {}
         const after = new Map(((mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || []).map(e => [e.id, e]));
-        const confirmed = done.filter(d => String((after.get(d.id) || {})[IMP_EXT_FIELD] || '') === d.want).length;
-        const echoed = done.some(d => after.get(d.id) && after.get(d.id)[IMP_EXT_FIELD] !== undefined);
+        const confirmed = done.filter(d => impExtOfEnt(after.get(d.id)) === d.want).length;
+        const echoed = done.some(d => after.get(d.id) && after.get(d.id).custom && after.get(d.id).custom[IMP_EXT_FIELD] !== undefined);
         imp.lastUpdated = imp.lastUpdated.concat(done.map(d => ({ id: d.id, name: d.name, before: d.before })));
         imp._rootCache = null; impBuildAssetIndex(); impComputeDups(); impRefreshAfterSelChange();
         try { impSaveSession('import'); } catch (e) {}
@@ -25950,6 +25952,7 @@
             ${impSecOpenHtml('data')}
             <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px">
                 <button id="aim-imp-load" style="${btnCss('122,223,230')}">📂 Load CSV / KML</button>
+                <button id="aim-imp-loadsession" style="${btnCss('95,255,95')}" title="Load a saved importer session (.json) — e.g. one recovered from disk or exported on another machine. Replaces the loaded work after a confirm; the current state is kept as 'one save back'.">⬆ Load saved session (.json)</button>
                 <button id="aim-imp-swapfile" style="${btnCss('255,179,71')};display:none" title="The client re-sent the list (extra columns, corrections)? Load it HERE instead of 📂: every moved / removed / outlined / ticked / reviewed point, the Enverus results and the client-response work are carried over by matching rows on name + original coordinates (API number as fallback). Points that have no row in the new file (Enverus fill-in, client-added) are kept as extra rows. A snapshot is saved first — ↻ Resume brings the old state back if anything looks wrong.">🔁 Replace file (keep my work)</button>
                 <span style="color:#888;font-size:10px">or drag &amp; drop the file onto this panel</span>
                 <span style="flex:1"></span>
@@ -26033,6 +26036,7 @@
     }
     function impWirePanelControls(host) {
         const q = (id) => host.querySelector('#' + id);
+        q('aim-imp-loadsession').onclick = () => { const inp = document.createElement('input'); inp.type = 'file'; inp.accept = '.json,application/json'; inp.onchange = () => { const f = inp.files && inp.files[0]; if (f) impLoadSessionFile(f); }; inp.click(); };
         q('aim-imp-swapfile').onclick = () => {
             if (!imp.points.length) { impStatus('Nothing to keep yet — use 📂 Load', '#ffb347'); return; }
             try { impSaveSession('pre-swap'); } catch (e) {}
@@ -27586,7 +27590,7 @@
                 if (!body.custom || typeof body.custom !== 'object') body.custom = {};
                 body.custom.poi_type_str = x.subtype;
                 body.custom.new_poi_type_str = knownSubs.has(x.subtype) ? '' : x.subtype;
-                if (x.ext) body[IMP_EXT_FIELD] = x.ext;                       // v4.434: External ID from the file (left as it was when the file has none)
+                if (x.ext) impSetExtOnBody(body, x.ext);                     // v4.434/v4.438: External ID (custom.external_asset_id) from the file; left as it was when the file has none
                 let st = 0, raw = '';
                 try { const rr = await fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) }); st = rr.status; raw = await rr.text(); }
                 catch (e) { raw = String(e && e.message || e); }
@@ -27599,7 +27603,7 @@
                 continue;
             }
             impStatus(`creating ${i + 1}/${plan.length} — "${impEsc(x.name)}"…`);
-            const r = await createAssetSquare(sid, x.p.lat, x.p.lng, impPointSizeFt(x.p), x.name, x.subtype, !knownSubs.has(x.subtype), x.notes || '', x.p.shape || (x.p.pa ? assetTrianglePoints(x.p.lat, x.p.lng, impPointSizeFt(x.p)) : null), x.ext ? { [IMP_EXT_FIELD]: x.ext } : null);   // v4.413: P&A size · v4.416: P&A = triangle unless an outline was drawn
+            const r = await createAssetSquare(sid, x.p.lat, x.p.lng, impPointSizeFt(x.p), x.name, x.subtype, !knownSubs.has(x.subtype), x.notes || '', x.p.shape || (x.p.pa ? assetTrianglePoints(x.p.lat, x.p.lng, impPointSizeFt(x.p)) : null), x.ext ? { custom: { [IMP_EXT_FIELD]: x.ext } } : null);   // v4.413: P&A size · v4.416: P&A = triangle unless an outline was drawn
             if (r && r.ok) {
                 ok++; created.push({ id: r.id, name: x.name, point: x.p, ext: x.ext });
                 knownSubs.add(x.subtype);
@@ -27621,7 +27625,7 @@
         const afterById = new Map(after.map(e => [e.id, e]));
         const updVerified = updated.filter(u => { const e = afterById.get(u.id); return e && e.custom && String(e.custom.poi_type_str || '') === u.subtype && String(e.description || '') === u.notes; });
         // v4.434: did the External ID land? (also tells us if the server ignores / renames the field)
-        const extWanted = created.filter(c => c.ext && byId.has(c.id)), extOk = extWanted.filter(c => String((afterById.get(c.id) || {})[IMP_EXT_FIELD] || '') === c.ext).length;
+        const extWanted = created.filter(c => c.ext && byId.has(c.id)), extOk = extWanted.filter(c => impExtOfEnt(afterById.get(c.id)) === c.ext).length;
         const extNote = extWanted.length ? ` · 🆔 External ID ${extOk}/${extWanted.length} confirmed${extOk < extWanted.length ? ` <span style="color:#ff6060">(server did not echo the field for ${extWanted.length - extOk} — check 🆔 below)</span>` : ''}` : '';
         imp.lastUpdated = updated.map(u => ({ id: u.id, name: u.name, before: u.before }));
         imp._rootCache = null;
@@ -28026,6 +28030,26 @@
         try { GM_deleteValue(IMP_SESSION_DATA + k); GM_deleteValue(IMP_SESSION_META + k); } catch (e) {}
         imp.dirty = false; imp.lastSavedAt = null;
         impRenderResumeUi(); impSyncUi();
+    }
+    // v4.438: load a session file (e.g. one recovered from disk) into the saved slot and resume it
+    function impLoadSessionFile(file) {
+        const rd = new FileReader();
+        rd.onload = () => {
+            try {
+                const d = JSON.parse(String(rd.result || ''));
+                if (!d || d.v !== 1 || !Array.isArray(d.headers) || !Array.isArray(d.rows) || !Array.isArray(d.points)) { impStatus('That is not an importer session file', '#ff6060'); return; }
+                const k = impSessionKey(); if (!k) { impStatus('Open a site first', '#ff6060'); return; }
+                if (imp.headers.length && !confirm(`Replace the work currently loaded with the session in "${file.name}" (saved ${impFmtWhen(d.savedAt)}, ${d.points.filter(o => o.orig).length} moved · ${d.points.filter(o => o.shape).length} outlines)?\n\nThe current state is kept as 'one save back' first.`)) return;
+                if (imp.headers.length) { try { impSaveSession('before-file-load'); } catch (e) {} }
+                const json = JSON.stringify(d);
+                const meta = { v: 1, savedAt: d.savedAt, fileName: d.fileName, rows: d.rows.length, live: d.points.length, moved: d.points.filter(o => o.orig).length, removed: d.points.filter(o => o.removed).length, created: d.points.filter(o => o.created).length, shapes: (d.shapes || []).length, bytes: json.length, siteName: getCurrentSiteName() || '', undoCreated: (d.undo && d.undo.created || []).length, undoUpdated: (d.undo && d.undo.updated || []).length, loadedFrom: file.name };
+                GM_setValue(IMP_SESSION_DATA + k, json); GM_setValue(IMP_SESSION_META + k, JSON.stringify(meta));
+                impResumeSession('');
+                impStatus(`${document.getElementById('aim-imp-result') ? document.getElementById('aim-imp-result').innerHTML : ''} · <b style="color:#5fff5f">loaded from ${impEsc(file.name)}</b>`);
+            } catch (e) { console.warn(`${TAG} 📥 session file:`, e); impStatus(`Session file failed: ${impEsc(e && e.message || e)}`, '#ff6060'); }
+        };
+        rd.onerror = () => impStatus('File read failed', '#ff6060');
+        rd.readAsText(file);
     }
     function impOlderSaves() {
         const k = impSessionKey(); if (!k) return [];

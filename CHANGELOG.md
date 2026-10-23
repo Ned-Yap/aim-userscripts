@@ -1,4 +1,6 @@
-## 2026-10-23 — Reset guard · 🩹 Recover positions · older saves — Site Setup Tools latest v4.437 (latest only)
+## 2026-10-23 — Reset guard · 🩹 Recover positions · older saves — Site Setup Tools latest v4.437 → v4.438 (latest only)
+
+- **v4.438** — **⬆ Load saved session (.json)** next to 📂 Load: brings a session file (for example one recovered from disk) into the saved slot and resumes it; confirms first and keeps the current state as 'one save back'. **External ID fix**: real asset bodies carry it as `custom.external_asset_id`, not a top-level field — create, update, backfill and the verify step now all use that.
 
 - **v4.437** — after a stray click on ↩ reset moved wiped hours of placement: the button now **asks first**, **never touches outlined points** (their position is the outline), and gets its own **↶ undo reset**. **🩹 Recover positions** puts outlined points back on the centre of their outline and client-corrected points back at the coordinate the client gave. The saved session now keeps **older saves**: "one save back" plus a ring kept roughly every 30 minutes, selectable on the ↻ Saved progress banner (also while a file is loaded), so an autosave can no longer erase the state you had minutes ago.
 
