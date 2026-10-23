@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.421
+// @version      4.422
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.421';
+    const SCRIPT_VERSION = '4.422';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -13512,7 +13512,7 @@
                 { id: 'imp-dup-ft', label: 'Nearby flag radius (staged point within N ft of an existing asset, not overlapping it — informational)', type: 'number', min: 0, max: 1000, step: 5, default: 50, unit: 'ft' },
                 { id: 'imp-size-ft', label: 'Created-asset square size', type: 'number', min: 5, max: 2000, step: 5, default: 55, unit: 'ft' },
                 { id: 'imp-autosave-min', label: 'Autosave import progress every N minutes (0 = only on change / close)', type: 'number', min: 0, max: 60, step: 1, default: 3, unit: 'min' },
-                { id: 'imp-labels-shift', label: 'Entity name labels (NFZ names etc.) only while SHIFT is held — like Percepto\'s asset names', type: 'boolean', default: true },
+                { id: 'imp-labels-shift', label: 'Percepto entity name labels (NFZ / FFZ names on hover) only while SHIFT is held — like the asset names', type: 'boolean', default: true },
                 { id: 'imp-shape-hdr', label: '✏ Shape — drawn asset outlines (before Create)', type: 'header' },
                 { id: 'imp-shape-color', label: 'Outline colour', type: 'color', default: '#c39bd3' },
                 { id: 'imp-shape-opacity', label: 'Fill opacity (0 = outline only)', type: 'number', min: 0, max: 1, step: 0.05, default: 0.25 },
@@ -25425,12 +25425,33 @@
         const L = getLeafletL(); if (!L || !L.Tooltip || !L.Tooltip.prototype || L.Tooltip.prototype._aimPermPatched) return !!(L && L.Tooltip && L.Tooltip.prototype && L.Tooltip.prototype._aimPermPatched);
         const proto = L.Tooltip.prototype, orig = proto._initLayout;
         if (typeof orig !== 'function') return false;
-        proto._initLayout = function () { const r = orig.apply(this, arguments); try { if (this.options && this.options.permanent && this._container) this._container.classList.add('aim-perm-tip'); } catch (e) {} return r; };
+        proto._initLayout = function () {
+            const r = orig.apply(this, arguments);
+            try {
+                if (!this._container) return r;
+                if (this.options && this.options.permanent) this._container.classList.add('aim-perm-tip');
+                // v4.422: Percepto's HOVER labels too — the source polygon carries a CSS-variable stroke
+                // (var(--color-red) = NFZ, var(--color-green) = FFZ …) or the text is exactly an entity name on this site.
+                // Our own tooltips use literal colours and richer text, so they are left alone.
+                const src = this._source, path = src && src._path;
+                const stroke = (path && path.getAttribute) ? (path.getAttribute('stroke') || '') : '';
+                let ent = /^var\(--/.test(stroke) || /^(#ff0000|red|#00ff00|lime|#ffffff|white)$/i.test(stroke);
+                if (!ent && typeof this._content === 'string') { const txt = this._content.replace(/<[^>]+>/g, '').trim(); if (txt && impEntityNames().has(txt)) ent = true; }
+                if (ent) this._container.classList.add('aim-ent-tip');
+            } catch (e) {}
+            return r;
+        };
         proto._aimPermPatched = true;
         // labels built before the patch: a permanent tooltip sits in the pane while nothing is hovered — tag what is there now
         try { const map = getLeafletMap(); if (map) map.getContainer().querySelectorAll('.leaflet-tooltip-pane .leaflet-tooltip').forEach(t => t.classList.add('aim-perm-tip')); } catch (e) {}
         console.log(`${TAG} 📥 permanent name labels tagged — hidden unless SHIFT (Control Panel toggle)`);
         return true;
+    }
+    let impEntNamesCache = { sid: null, n: -1, set: new Set() };
+    function impEntityNames() {
+        const sid = getCurrentSiteID(); const ents = (sid && mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+        if (impEntNamesCache.sid !== sid || impEntNamesCache.n !== ents.length) { impEntNamesCache = { sid, n: ents.length, set: new Set(ents.map(e => String(e && e.name || '').trim()).filter(Boolean)) }; }
+        return impEntNamesCache.set;
     }
     function impSyncNameLabels() {
         impPatchTooltips();
@@ -25439,7 +25460,7 @@
         const want = drawing || perm;
         let doc = document; try { const map = getLeafletMap(); if (map) doc = map.getContainer().ownerDocument || document; } catch (e) {}
         const docs = doc === document ? [document] : [document, doc];
-        const css = (drawing ? '.leaflet-tooltip-pane{visibility:hidden!important} #aim-imp-hovertip{display:none!important} ' : '') + (perm ? '.leaflet-tooltip-pane .aim-perm-tip{visibility:hidden!important}' : '');
+        const css = (drawing ? '.leaflet-tooltip-pane{visibility:hidden!important} #aim-imp-hovertip{display:none!important} ' : '') + (perm ? '.leaflet-tooltip-pane .aim-perm-tip, .leaflet-tooltip-pane .aim-ent-tip{visibility:hidden!important}' : '');
         docs.forEach(d => {
             let st = d.getElementById('aim-imp-hidelabels');
             if (want) { if (!st) { st = d.createElement('style'); st.id = 'aim-imp-hidelabels'; (d.head || d.documentElement).appendChild(st); } if (st.textContent !== css) st.textContent = css; }
