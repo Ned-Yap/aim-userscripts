@@ -1,4 +1,6 @@
-## 2026-10-23 — Reset guard · 🩹 Recover positions · older saves — Site Setup Tools latest v4.437 → v4.439 (latest only)
+## 2026-10-23 — Reset guard · 🩹 Recover positions · older saves — Site Setup Tools latest v4.437 → v4.440 (latest only)
+
+- **v4.440** — console hook `__aimImpRecenter()` = the 🩹 Recover positions repair (dots back to the centre of their outlines / the client's coordinate), for when the console is quicker than the button.
 
 - **v4.439** — ↩ reset moved is out of the Placement row: it lives in Advanced under a "Danger zone" label and makes you type RESET before it does anything. ↶ undo reset still reverses it.
 

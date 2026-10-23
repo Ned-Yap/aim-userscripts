@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.439
+// @version      4.440
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.439';
+    const SCRIPT_VERSION = '4.440';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -26109,6 +26109,7 @@
         };
         // 🩹 positions that can be re-derived after a reset or a bad load: outlined points → their outline's centre;
         // client-response points → the corrected coordinate the client gave (kept in their client record)
+        try { uwin().__aimImpRecenter = () => { const b = document.getElementById('aim-imp-recover'); if (b) { b.onclick(); return 'done — see the importer status line'; } return 'open the Asset Import page first'; }; } catch (e) {}   // v4.440: console hook for the same repair
         q('aim-imp-recover').onclick = () => {
             let a = 0, b = 0;
             imp.points.forEach(p => {
