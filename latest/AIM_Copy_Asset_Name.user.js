@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.426
+// @version      4.427
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.426';
+    const SCRIPT_VERSION = '4.427';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -24434,7 +24434,18 @@
             const nmM = impMatchAsset(p.name);          // #309 tiered: exact → ignoring punctuation → whole-token containment
             const nm = nmM ? nmM.a : null;
             // ONLY a name match is a duplicate (skipped unless included).
-            if (nm) { p.dup = true; p.dupWhy = nmM.why; p.dupTier = nmM.tier; p.dupAmbiguous = nmM.ambiguous; p.dupId = nm.id; p.dupSubtype = nm.subtype || ''; } else { p.dupId = null; p.dupSubtype = ''; p.dupTier = 0; p.dupAmbiguous = false; }
+            p.matchNote = '';
+            // v4.427 GUARD on tier-3 (token containment): a -DUP row must stay its own asset, and a well whose
+            // only extra tokens on the matched asset are BATTERY / TANK is a NEW well, not an update of the battery.
+            let guarded = '';
+            if (nmM && nmM.tier === 3) {
+                if (/-DUP\d*$/i.test(p.name)) guarded = `-DUP row kept separate (would have updated "${nm.name}")`;
+                else {
+                    const st = impNameTokens(p.name), at = nm.tokens || [];
+                    if (at.length > st.length && impTokensContain(at, st)) { const extra = at.filter(t => !st.includes(t)); if (extra.length && extra.every(t => /^(battery|batt|tank|tanks|tb)$/.test(t)) && !/BATTERY|TANK/i.test(p.typeRaw || '')) guarded = `not matched to the battery "${nm.name}" — a well, created as new`; }
+                }
+            }
+            if (nm && !guarded) { p.dup = true; p.dupWhy = nmM.why; p.dupTier = nmM.tier; p.dupAmbiguous = nmM.ambiguous; p.dupId = nm.id; p.dupSubtype = nm.subtype || ''; } else { p.dupId = null; p.dupSubtype = ''; p.dupTier = 0; p.dupAmbiguous = false; if (guarded) p.matchNote = guarded; }
             // v4.332: two informational flags, never skipped —
             //   child = the square this point would become (Size ft) overlaps an
             //           existing asset, partially or fully (parent/child);
@@ -24598,6 +24609,7 @@
         if (p.src === 'enverus') bits.push('from Enverus'); if (p.src === 'enverus-3p') bits.push('3rd party'); if (p.src === 'client') bits.push('from the client response');
         if (p.env && p.env.found && p.env.status) bits.push(p.env.status.toLowerCase());
         if (p.shape) bits.push('outline drawn'); if (p.orig) bits.push('moved');
+        if (p.matchNote) bits.push(`⚠ ${p.matchNote}`); if (p.dup && p.dupAmbiguous) bits.push('⚠ ambiguous match — blocks Create');
         return bits.join(' · ');
     }
     function impShowHoverTip(cont, x, y, p) {
@@ -26798,13 +26810,15 @@
         if (p.dup && p.dupSubtype) { const m = String(p.dupSubtype).match(IMP_HV_RE); if (m) return { hv: m[1].toLowerCase(), src: 'existing' }; }
         return { hv: '', src: '' };
     }
+    // v4.427 format (user): `P3 - H - Pumping Jack` — tier first, then the letter in CAPS, then the
+    // base in Title Case (short all-caps acronyms kept). Applied whenever the rule is on, letter or not.
+    const IMP_KEEP_CAPS = /^(SWD|ESP|VRU|LACT|H2S|GEM|GM|AGL|UNSH|SH|TB|CTB|WH|PJ|ID)$/;
+    function impTitleCase(str) { return String(str || '').trim().split(/\s+/).map(w => IMP_KEEP_CAPS.test(w.toUpperCase()) && w.length <= 4 ? w.toUpperCase() : (w.length ? w[0].toUpperCase() + w.slice(1).toLowerCase() : w)).join(' '); }
     function impApplyHv(p, subtype, siteSubs) {
         if (!imp.hv.on || !subtype || !p || p.pa || p.thirdParty || (p.env && p.env.facility)) return subtype;
-        const { hv } = impHvOf(p); if (!hv) return subtype;
-        const base = String(subtype).replace(IMP_HV_RE, '').trim(); if (!base) return subtype;
-        const want = `${hv} - ${base}`;
-        const hit = (siteSubs || [...impSiteSubtypes().keys()]).find(st => st.toLowerCase() === want.toLowerCase());
-        return hit || `${hv} - ${base.toLowerCase()}`;
+        const { hv } = impHvOf(p);
+        const base = impTitleCase(String(subtype).replace(IMP_HV_RE, '').trim()); if (!base) return subtype;
+        return hv ? `${hv.toUpperCase()} - ${base}` : base;
     }
     function impResolveSubtype(raw, subtypes) {
         const key = (raw || '(blank)').toLowerCase();
@@ -26831,7 +26845,7 @@
         const hvN = { h: 0, v: 0, d: 0, none: 0, file: 0, enverus: 0, existing: 0 };
         hvLive.forEach(p => { const r = impHvOf(p); if (r.hv) { hvN[r.hv]++; hvN[r.src]++; } else hvN.none++; });
         const hvRow = `<div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;font-size:11px;color:#cfd6dc;margin-top:6px;padding:5px 8px;background:rgba(122,223,230,0.05);border-radius:3px">
-            <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer" title="Site subtypes read 'v - pumping rod' / 'h - well'. With this on, every well's type gets the letter in front: h = horizontal, v = vertical, d = directional (slanted, not horizontal). The letter comes from the file's deviation column, else Enverus' trajectory for that API, else the prefix the asset already has. Spelled like the site's existing subtype when one matches, so an update leaves 'v - pumping rod' exactly as it is."><input type="checkbox" id="aim-imp-hv-on" ${imp.hv.on ? 'checked' : ''} style="accent-color:#7adfe6"> <b style="color:#7adfe6">h / v / d prefix</b> on every well type</label>
+            <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer" title="Types are written as 'P3 - H - Pumping Jack': tier first, then the letter (H = horizontal, V = vertical, D = directional — slanted, not horizontal), then the base in Title Case. The letter comes from the file's deviation column, else Enverus' trajectory for that API, else the prefix the asset already has. An existing 'v - pumping rod' becomes 'V - Pumping Rod' on update."><input type="checkbox" id="aim-imp-hv-on" ${imp.hv.on ? 'checked' : ''} style="accent-color:#7adfe6"> <b style="color:#7adfe6">H / V / D prefix</b> + Title Case on every well type (P3 - H - Pumping Jack)</label>
             <label style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:#cfd6dc">from column <select id="aim-imp-hv-col" style="max-width:170px;${inCss}"><option value="">— none —</option>${imp.headers.map(h => `<option value="${impEsc(h)}"${imp.hv.col === h ? ' selected' : ''}>${impEsc(h)}</option>`).join('')}</select></label>
             <label style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:#cfd6dc;cursor:pointer" title="When the file has no answer for a well, use Enverus' trajectory (needs step 5 A to have run)"><input type="checkbox" id="aim-imp-hv-env" ${imp.hv.useEnv ? 'checked' : ''} style="accent-color:#ffd666;margin:0"> else Enverus trajectory</label>
             <span style="color:#888;font-size:10px">${imp.hv.on ? `selected: <b style="color:#cfd6dc">${hvN.h} h</b> · <b style="color:#cfd6dc">${hvN.v} v</b> · <b style="color:#cfd6dc">${hvN.d} d</b>${hvN.none ? ` · <span style="color:#ffb347">${hvN.none} unknown (type left as-is)</span>` : ''} — from the file ${hvN.file} · Enverus ${hvN.enverus} · the existing asset ${hvN.existing}` : 'off — types are written as the file / table says'}</span>
@@ -27120,6 +27134,10 @@
         const sid = genState.siteID;
         if (!sid || String(sid) !== String(getCurrentSiteID())) { showToast('Site changed — reopen the generator', 'rgba(255,96,96,0.55)'); return; }
         const targets = imp.points.filter(p => !p.done && p.sel && (!p.dup || imp.dupMode !== 'skip'));
+        // v4.427: an ambiguous name match (several assets contain the name) never writes blind
+        const amb = imp.dupMode === 'update' ? targets.filter(p => p.dup && p.dupAmbiguous) : [];
+        if (amb.length) { impStatus(`BLOCKED — <b>${amb.length}</b> name match${amb.length === 1 ? '' : 'es'} ${amb.length === 1 ? 'is' : 'are'} ambiguous (the name fits several assets): ${impEsc(amb.slice(0, 8).map(p => `${p.name} → ${p.dupWhy.replace(/^⚠ ambiguous: /, '')}`).join(' · '))}${amb.length > 8 ? ' …' : ''}. Rename the row or the asset so one matches exactly, or set "name matches" to skip.`, '#ff6060'); return; }
+        const guardedN = imp.points.filter(p => !p.done && p.sel && p.matchNote).length;
         const skippedDups = imp.points.filter(p => !p.done && p.sel && p.dup && imp.dupMode === 'skip').length;
         if (!targets.length) { impStatus(`Nothing to create — select staged points first${skippedDups ? ` (${skippedDups} selected point(s) match existing names; set "name matches" to update or copy)` : ''}`, '#ffb347'); return; }
         if (imp.pri.on) { try { impComputePriority(); } catch (e) { impStatus(`Priority compute failed: ${impEsc(e && e.message || e)}`, '#ff6060'); return; } }
@@ -27147,7 +27165,7 @@
         const dry = (() => { try { return !!document.getElementById('aim-gen-dryrun').checked; } catch (e) { return true; } })();
         const nUpd = plan.filter(x => x.update).length, nCre = plan.length - nUpd;
         const nPa = plan.filter(x => x.p.pa).length;
-        if (dry) { impStatus(`DRY RUN — would create <b>${nCre}</b> asset(s) (${impSizeFt}×${impSizeFt} ft squares${nPa ? `, 🩻 ${nPa} P&A as ${imp.env.paSizeFt} ft triangles` : ''})${nUpd ? ` and UPDATE type + notes on <b>${nUpd}</b> existing` : ''}${skippedDups ? `, skipping ${skippedDups} name match(es)` : ''}${imp.pri.on ? ` · tiers ON (${plan.filter(x => /^P[1-3] - /.test(x.subtype)).length} prefixed)` : ''}: ${impEsc(plan.slice(0, 12).map(x => `${x.update ? '↻ ' : ''}${x.p.name} [${x.subtype}]`).join(' · '))}${plan.length > 12 ? ' …' : ''}. Untick Dry run to write.`); return; }
+        if (dry) { impStatus(`DRY RUN — would create <b>${nCre}</b> asset(s) (${impSizeFt}×${impSizeFt} ft squares${nPa ? `, 🩻 ${nPa} P&A as ${imp.env.paSizeFt} ft triangles` : ''})${guardedN ? ` · ${guardedN} near-match${guardedN === 1 ? '' : 'es'} set aside as NEW (battery wrapper / -DUP — hover the dot)` : ''}${nUpd ? ` and UPDATE type + notes on <b>${nUpd}</b> existing` : ''}${skippedDups ? `, skipping ${skippedDups} name match(es)` : ''}${imp.pri.on ? ` · tiers ON (${plan.filter(x => /^P[1-3] - /.test(x.subtype)).length} prefixed)` : ''}: ${impEsc(plan.slice(0, 12).map(x => `${x.update ? '↻ ' : ''}${x.p.name} [${x.subtype}]`).join(' · '))}${plan.length > 12 ? ' …' : ''}. Untick Dry run to write.`); return; }
         if (plan.length > IMP_BIG_BATCH) {
             const ack = (() => { try { return !!document.getElementById('aim-imp-biggate-ack').checked; } catch (e) { return false; } })();
             if (!ack) { impStatus(`BLOCKED — <b>${plan.length}</b> assets is more than ${IMP_BIG_BATCH} in one run. Narrow the selection with a boundary KML, or tick "I understand the risk" under the Create button to proceed anyway.`, '#ff6060'); return; }
