@@ -1,4 +1,6 @@
-## 2026-10-23 — Reset guard · 🩹 Recover positions · older saves — Site Setup Tools latest v4.437 → v4.440 (latest only)
+## 2026-10-23 — Reset guard · 🩹 Recover positions · older saves — Site Setup Tools latest v4.437 → v4.441 (latest only)
+
+- **v4.441** — label watcher: never tags a whole Leaflet pane (it did once when the tooltip pane held a single NFZ label, which would have hidden every hover tip until Shift).
 
 - **v4.440** — console hook `__aimImpRecenter()` = the 🩹 Recover positions repair (dots back to the centre of their outlines / the client's coordinate), for when the console is quicker than the button.
 
