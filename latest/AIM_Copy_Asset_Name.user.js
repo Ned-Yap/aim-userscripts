@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.435
+// @version      4.436
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.435';
+    const SCRIPT_VERSION = '4.436';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -25212,12 +25212,11 @@
             imp.points.forEach(q => { if (q.done || q.shape) return; const d = approxMeters(c.lat, c.lng, q.lat, q.lng); if (d < bd) { bd = d; p = q; } });
             if (!p || bd > 150 * GEN_FT_TO_M) { impStatus('✏ no unshaped dot within 150 ft of that shape — click a dot first, then CTRL+drag', '#ffb347'); impRenderStaged(); return; }
         }
-        // snap the new outline flush to neighbours (always on for a fresh stroke)
-        const pr = impProj(p.lat, p.lng); const xy = ring.map(pr.to);
-        const sh = impSnapShift(xy, impNeighbourRings(p, pr, 60), imp.snapFt * GEN_FT_TO_M, imp.gapFt * GEN_FT_TO_M);
-        const snapped = sh ? xy.map(q => pr.from({ x: q.x + sh.dx, y: q.y + sh.dy })) : ring;
+        // v4.436: a freshly drawn outline lands EXACTLY where it was drawn — no position snap (it used to slide to
+        // the 15 ft gap when a neighbour was within reach, which read as a jump). The angle alignment is already in
+        // the preview (green). Position snapping still applies to edge / corner / box drags, copies and ⟂ Align.
         imp.shapeHeld = p;
-        impAssignShape(p, snapped, sh ? `outline (snapped to a ${imp.gapFt} ft gap from a neighbour)` : 'outline');
+        impAssignShape(p, ring, 'outline (as drawn)');
     }
     function impShapeClone(src, dst, noSnap) {
         if (!src.shape) return;

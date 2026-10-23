@@ -1,4 +1,6 @@
-## 2026-10-23 — 🆔 External ID = the client's accounting id — Site Setup Tools latest v4.434 → v4.435 (latest only)
+## 2026-10-23 — 🆔 External ID = the client's accounting id — Site Setup Tools latest v4.434 → v4.436 (latest only)
+
+- **v4.436** — ✏ Shape: a freshly drawn outline now lands exactly where it was drawn. It used to slide to the 15 ft gap whenever a neighbour was within 10 ft of that gap, which looked like a jump after the second click. Position snapping still applies when you drag an edge, corner or the whole box, copy an outline with ALT+click, or press ⟂ Align.
 
 - **v4.435** — **🔁 Replace file (keep my work)**, next to 📂 Load: the client re-sent the list with extra columns? Load it here and every moved / removed / outlined / ticked / reviewed point, the Enverus results and the client-response work are carried over by matching rows on name + original coordinates (API number, then a unique name, as fallbacks); points with no row in the new file (Enverus fill-in, client-added) are kept as extra rows; the old column choices are kept where the header still exists. A session snapshot is saved first, so ↻ Resume brings the old state back. Verified offline on the real Diamondback files: 11,807 of 11,808 points carried, 107 moves intact. The 🆔 External ID guess now **never picks a BATTERY_… column** (that id is shared by every well on the battery) — pick the per-asset column yourself if the header is unusual. When the file has a battery accounting id it is **ticked into the notes** by default.
 
