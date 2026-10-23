@@ -1,4 +1,6 @@
-## 2026-10-22 — 🩻 P&A assets: red ✕ for plugged ground, P&A ruleset, status review — Site Setup Tools latest v4.413 → v4.419 (latest only)
+## 2026-10-22 — 🩻 P&A assets: red ✕ for plugged ground, P&A ruleset, status review — Site Setup Tools latest v4.413 → v4.420 (latest only)
+
+- **v4.420** — fix: clicking a row in the missing list stopped zooming in v4.419 (the search box's guard matched the rows too).
 
 - **v4.419** — **middle-click a ✕ or square on the map** (wheel button) and the missing list opens to that row, scrolled into view and flashed; filters that would hide it are lifted. **Search box** on the missing list: filters by name, API, status, operator or type as you type, keeps focus, Esc clears, "tick all shown" respects it.
 

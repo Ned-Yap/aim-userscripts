@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.419
+// @version      4.420
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.419';
+    const SCRIPT_VERSION = '4.420';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -26250,7 +26250,7 @@
         const nPaSel = shown.filter(x => x.pa && c.missingSel.has(x.api) && !x.staged && impPaStageable(x)).length;
         const btnS = (attr, label, title) => `<button ${attr} title="${impEsc(title || '')}" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">${label}</button>`;
         const sBtn = (attr, label, title) => `<button ${attr} title="${impEsc(title || '')}" style="background:none;border:1px solid rgba(255,255,255,0.15);color:#9ad;border-radius:3px;padding:0 6px;cursor:pointer;font:inherit;font-size:10px">${label}</button>`;
-        const row = (x) => `<div data-impmiss-row="${x.api}" data-impmiss-q="${impEsc(`${x.name} ${x.api} ${x.status} ${x.op || ''} ${x.type || ''} ${x.nearName || ''}${x.pa ? ' ' + impPaName(x) : ''}`.toLowerCase())}" style="display:flex;align-items:center;gap:6px;padding:1px 4px;border-bottom:1px solid rgba(255,255,255,0.05);font-size:10.5px;color:${x.staged ? '#6f7a85' : '#cfd6dc'};cursor:pointer" onmouseover="this.style.background='rgba(255,255,255,0.05)'" onmouseout="this.style.background=''" title="click = zoom to it">
+        const row = (x) => `<div data-impmiss-row="${x.api}" data-impmiss-hay="${impEsc(`${x.name} ${x.api} ${x.status} ${x.op || ''} ${x.type || ''} ${x.nearName || ''}${x.pa ? ' ' + impPaName(x) : ''}`.toLowerCase())}" style="display:flex;align-items:center;gap:6px;padding:1px 4px;border-bottom:1px solid rgba(255,255,255,0.05);font-size:10.5px;color:${x.staged ? '#6f7a85' : '#cfd6dc'};cursor:pointer" onmouseover="this.style.background='rgba(255,255,255,0.05)'" onmouseout="this.style.background=''" title="click = zoom to it">
             <input type="checkbox" data-impmiss-sel="${x.api}" ${x.staged || !impPaStageable(x) ? 'disabled' : (c.missingSel.has(x.api) ? 'checked' : '')} title="${x.pa && x.onPad ? 'on one of our pads — shown as a red ✕ only, never written to the site' : (x.pa && c.paAssets === false ? 'P&A staging is off (tick \'stage as P&A assets\')' : '')}" style="accent-color:#ffd666;margin:0;flex:none">
             ${x.pa ? `<span style="display:inline-block;width:9px;height:9px;flex:none;color:#ff2d2d;font-weight:900;font-size:11px;line-height:9px;text-align:center" title="${impEsc(x.status)}">✕</span>` : `<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${gcol[x.group]};flex:none" title="${impEsc(x.status)}"></span>`}
             <b style="flex:none;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${impEsc(x.pa ? genCleanName(impPaName(x)) : x.name)}</b>
@@ -26283,7 +26283,7 @@
         </div>`;
         const applyQ = () => {
             const q = String(c.missQuery || '').trim().toLowerCase(); let seen = 0;
-            el.querySelectorAll('[data-impmiss-row]').forEach(r => { const hit = !q || (r.getAttribute('data-impmiss-q') || '').includes(q); r.style.display = hit ? '' : 'none'; if (hit) seen++; });
+            el.querySelectorAll('[data-impmiss-row]').forEach(r => { const hit = !q || (r.getAttribute('data-impmiss-hay') || '').includes(q); r.style.display = hit ? '' : 'none'; if (hit) seen++; });
             const qn = el.querySelector('[data-impmiss-qn]'); if (qn) qn.textContent = q ? `${seen} of ${shown.length}` : '';
         };
         const qEl = el.querySelector('[data-impmiss-q]'); if (qEl) { qEl.oninput = () => { c.missQuery = qEl.value; applyQ(); }; qEl.onkeydown = (ev) => { ev.stopPropagation(); if (ev.key === 'Escape') { qEl.value = ''; c.missQuery = ''; applyQ(); } }; }
