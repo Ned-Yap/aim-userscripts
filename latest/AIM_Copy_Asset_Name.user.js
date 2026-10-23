@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.438
+// @version      4.439
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.438';
+    const SCRIPT_VERSION = '4.439';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -26090,13 +26090,15 @@
             const cands = imp.points.filter(p => (p.orig && !p.shape) || p.removed);
             const nM = cands.filter(p => p.orig && !p.shape).length, nR = cands.filter(p => p.removed).length, nS = imp.points.filter(p => p.orig && p.shape).length;
             if (!cands.length) { impStatus(`↩ nothing to reset${nS ? ` — ${nS} moved point${nS === 1 ? '' : 's'} have drawn outlines and are left alone` : ''}`, '#ffb347'); return; }
-            if (!confirm(`Put ${nM} moved point${nM === 1 ? '' : 's'} back at the file coordinates${nR ? ` and restore ${nR} removed point${nR === 1 ? '' : 's'}` : ''}?\n\n${nS ? `${nS} moved point(s) with a drawn outline are NOT touched.\n` : ''}This undoes hand placement. "↶ undo reset" right next to this button puts them back if you change your mind.`)) return;
+            const typed = prompt(`This puts ${nM} hand-moved point${nM === 1 ? '' : 's'} back at the FILE coordinates${nR ? ` and restores ${nR} removed point${nR === 1 ? '' : 's'}` : ''} — it undoes hand placement.${nS ? `\n${nS} point(s) with a drawn outline are not touched.` : ''}\n\nType RESET to continue:`);
+            if (typed === null || typed.trim().toUpperCase() !== 'RESET') { impStatus('↩ reset cancelled — nothing changed', '#5fff5f'); return; }
             imp.lastReset = cands.map(p => ({ i: p.i, lat: p.lat, lng: p.lng, orig: p.orig ? { lat: p.orig.lat, lng: p.orig.lng } : null, removed: !!p.removed }));
             cands.forEach(p => { if (p.orig && !p.shape) { p.lat = p.orig.lat; p.lng = p.orig.lng; delete p.orig; } if (p.removed) { p.removed = false; p.done = false; } });
             imp.moveHeld = null; imp.moveDrag = false;
             try { impComputeDups(); } catch (e) {} impRefreshAfterSelChange();
             impStatus(`↩ ${nM} point(s) back at their file coordinates${nR ? ` · ${nR} removed point(s) restored` : ''}${nS ? ` · ${nS} with outlines left alone` : ''} — <b>↶ undo reset</b> reverses this`);
         };
+        try { const adv = q('aim-imp-adv'), rb = q('aim-imp-resetmoves'); if (adv && rb) { const wrap = document.createElement('div'); wrap.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px;padding:6px 8px;border:1px dashed rgba(255,179,71,0.4);border-radius:3px;font-size:10px;color:#888'; wrap.innerHTML = '<b style="color:#ffb347">Danger zone</b> <span>undoes hand placement for every moved point without an outline · asks you to type RESET · ↶ undo reset reverses it</span>'; wrap.appendChild(rb); adv.appendChild(wrap); } } catch (e) {}   // v4.439: out of the everyday row
         q('aim-imp-undoreset').onclick = () => {
             const R = imp.lastReset; if (!R || !R.length) { impStatus('↶ nothing to undo', '#ffb347'); return; }
             const byI = new Map(imp.points.map(p => [p.i, p])); let k = 0;

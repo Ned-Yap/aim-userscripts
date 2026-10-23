@@ -1,4 +1,6 @@
-## 2026-10-23 — Reset guard · 🩹 Recover positions · older saves — Site Setup Tools latest v4.437 → v4.438 (latest only)
+## 2026-10-23 — Reset guard · 🩹 Recover positions · older saves — Site Setup Tools latest v4.437 → v4.439 (latest only)
+
+- **v4.439** — ↩ reset moved is out of the Placement row: it lives in Advanced under a "Danger zone" label and makes you type RESET before it does anything. ↶ undo reset still reverses it.
 
 - **v4.438** — **⬆ Load saved session (.json)** next to 📂 Load: brings a session file (for example one recovered from disk) into the saved slot and resumes it; confirms first and keeps the current state as 'one save back'. **External ID fix**: real asset bodies carry it as `custom.external_asset_id`, not a top-level field — create, update, backfill and the verify step now all use that.
 
