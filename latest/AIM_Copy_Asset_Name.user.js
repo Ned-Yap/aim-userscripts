@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.422
+// @version      4.423
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.422';
+    const SCRIPT_VERSION = '4.423';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -25460,7 +25460,7 @@
         const want = drawing || perm;
         let doc = document; try { const map = getLeafletMap(); if (map) doc = map.getContainer().ownerDocument || document; } catch (e) {}
         const docs = doc === document ? [document] : [document, doc];
-        const css = (drawing ? '.leaflet-tooltip-pane{visibility:hidden!important} #aim-imp-hovertip{display:none!important} ' : '') + (perm ? '.leaflet-tooltip-pane .aim-perm-tip, .leaflet-tooltip-pane .aim-ent-tip{visibility:hidden!important}' : '');
+        const css = (drawing ? '.leaflet-tooltip-pane{visibility:hidden!important} #aim-imp-hovertip{display:none!important} ' : '') + (perm ? '.aim-perm-tip, .aim-ent-tip{visibility:hidden!important}' : '');
         docs.forEach(d => {
             let st = d.getElementById('aim-imp-hidelabels');
             if (want) { if (!st) { st = d.createElement('style'); st.id = 'aim-imp-hidelabels'; (d.head || d.documentElement).appendChild(st); } if (st.textContent !== css) st.textContent = css; }
@@ -25475,9 +25475,51 @@
         }
     }
     // the map comes up after us: keep trying until Leaflet is there and the patch is in, then just re-sync on toggle / Shift
+    // v4.423: DOM-level net, independent of how Percepto builds the label — any small element that
+    // appears (or changes) in the map's document whose text is exactly an entity name on this site is
+    // tagged aim-ent-tip. Works for Leaflet tooltips, React portals, anything. Entity names come from
+    // the site fetch (triggered here once per site if nothing has fetched yet).
+    let impLabelObs = null, impLabelObsDoc = null, impLabelFetchSid = null;
+    function impTagLabelEl(el) {
+        if (!el || el.nodeType !== 1 || el.classList.contains('aim-ent-tip')) return false;
+        if (el.closest && el.closest('#aim-imp-hovertip, [id^="aim-"], .aim-imp-sec')) return false;   // never our own UI
+        const txt = (el.textContent || '').trim(); if (!txt || txt.length > 120 || el.childElementCount > 3) return false;
+        if (!impEntityNames().has(txt)) return false;
+        el.classList.add('aim-ent-tip');
+        console.log(`${TAG} 📥 entity label tagged: "${txt}" <${el.tagName.toLowerCase()} class="${el.className}">`);
+        return true;
+    }
+    function impEnsureLabelObserver() {
+        const map = getLeafletMap(); if (!map) return false;
+        const doc = map.getContainer().ownerDocument || document;
+        const sid = getCurrentSiteID();
+        if (sid && impLabelFetchSid !== sid && !(mapObjectsBySite[sid] && mapObjectsBySite[sid].entities)) { impLabelFetchSid = sid; try { fetchMapObjects(sid).catch(() => {}); } catch (e) {} }
+        if (impLabelObs && impLabelObsDoc === doc) return true;
+        if (impLabelObs) { try { impLabelObs.disconnect(); } catch (e) {} }
+        impLabelObsDoc = doc;
+        impLabelObs = new MutationObserver((recs) => {
+            if (!impLabelsShift) return;
+            try {
+                for (const r of recs) {
+                    const cands = [];
+                    r.addedNodes.forEach(nd => { if (nd.nodeType === 1) cands.push(nd); else if (nd.parentElement) cands.push(nd.parentElement); });
+                    if (r.type === 'characterData' && r.target.parentElement) cands.push(r.target.parentElement);
+                    for (let c of cands) { for (let up = 0; c && up < 3; up++, c = c.parentElement) { if (impTagLabelEl(c)) break; } }
+                }
+            } catch (e) {}
+        });
+        impLabelObs.observe(doc.body, { childList: true, subtree: true, characterData: true });
+        try { doc.querySelectorAll('.leaflet-tooltip, .leaflet-tooltip-pane *').forEach(impTagLabelEl); } catch (e) {}
+        console.log(`${TAG} 📥 entity-label watcher on ${doc === document ? 'this frame' : 'the map frame'}`);
+        return true;
+    }
     (function impLabelsBoot() {
         let tries = 0;
-        const t = setInterval(() => { tries++; try { if (impPatchTooltips()) { clearInterval(t); impSyncNameLabels(); } } catch (e) { console.warn(`${TAG} 📥 label patch:`, e); } if (tries > 200) clearInterval(t); }, 1500);
+        const t = setInterval(() => {
+            tries++;
+            try { impPatchTooltips(); if (impEnsureLabelObserver()) { impSyncNameLabels(); } } catch (e) { console.warn(`${TAG} 📥 label watcher:`, e); }
+            if (tries > 400) clearInterval(t);
+        }, 1500);
     })();
     function impSetMode(mode) {
         if (mode && !impMasterEnabled) { showToast('Asset Importer is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }

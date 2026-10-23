@@ -1,4 +1,6 @@
-## 2026-10-22 — 🩻 P&A assets: red ✕ for plugged ground, P&A ruleset, status review — Site Setup Tools latest v4.413 → v4.422 (latest only)
+## 2026-10-22 — 🩻 P&A assets: red ✕ for plugged ground, P&A ruleset, status review — Site Setup Tools latest v4.413 → v4.423 (latest only)
+
+- **v4.423** — entity name labels: DOM-level watcher — any small element appearing in the map document whose text is exactly an entity name on the site is hidden unless SHIFT is held, however Percepto builds it. Console logs each label it catches.
 
 - **v4.422** — the NFZ name was Percepto's HOVER label, not a permanent one: now Percepto's entity hover labels (source polygon with a CSS-variable stroke, or text equal to an entity name on the site) are hidden unless SHIFT is held too. Our own hover tips (Map Styler lines, pins, the importer's dot tip) are untouched.
 
