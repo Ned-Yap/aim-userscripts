@@ -1,4 +1,6 @@
-## 2026-10-22 — Name-match guard + `P3 - H - Pumping Jack` type format — Site Setup Tools latest v4.427 (latest only)
+## 2026-10-22 — Name-match guard + `P3 - H - Pumping Jack` type format — Site Setup Tools latest v4.427 → v4.428 (latest only)
+
+- **v4.428** — fix: the Map Entities list emptied a moment after load — the name-label watcher (v4.423) was hiding its rows, since each row is an entity name. The watcher now only tags elements inside the Leaflet map container or floating elements outside it, never anything in a list, panel, form or menu.
 
 - **v4.427** — **Guard on the new tiered name matching** (#309): a token-containment match (tier 3) no longer counts as an update when the staged row is a `-DUP` row (it stays its own asset) or when the only extra words on the matched asset are BATTERY / TANK and the row is a well (a new well whose battery is already mapped is created, not written over the battery). Those rows say why on hover and are counted in the dry run. An **ambiguous** match (the name fits several assets) **blocks ⚡ Create** with the list, until the row or the asset is renamed to match exactly or "name matches" is set to skip. **Type format is now `P3 - H - Pumping Jack`**: tier first, then the H / V / D letter in caps, then the base in Title Case (short acronyms like SWD, ESP, UNSH kept). An existing `v - pumping rod` becomes `V - Pumping Rod` on update.
 

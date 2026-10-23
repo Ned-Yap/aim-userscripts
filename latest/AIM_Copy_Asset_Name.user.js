@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.427
+// @version      4.428
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.427';
+    const SCRIPT_VERSION = '4.428';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -25493,6 +25493,11 @@
     function impTagLabelEl(el) {
         if (!el || el.nodeType !== 1 || el.classList.contains('aim-ent-tip')) return false;
         if (el.closest && el.closest('#aim-imp-hovertip, [id^="aim-"], .aim-imp-sec')) return false;   // never our own UI
+        // v4.428: a map LABEL only — inside the Leaflet container, or a floating element outside it. Never the
+        // Map Entities list, search results, forms, buttons or anything laid out in a panel (those rows are entity names too).
+        if (/^(INPUT|TEXTAREA|SELECT|BUTTON|A|OPTION|LI|TD|TH|LABEL)$/.test(el.tagName)) return false;
+        if (el.closest && el.closest('ul, ol, table, form, [role="list"], [role="listbox"], [role="menu"], [role="dialog"], .ant-select, .ant-dropdown, .ant-modal, .ant-form, [class*="entit"], [class*="sidebar"], [class*="side-bar"], [class*="panel"], [class*="list"], [class*="menu"], [class*="header"]')) return false;
+        if (!(el.closest && el.closest('.leaflet-container'))) { let pos = ''; try { pos = el.ownerDocument.defaultView.getComputedStyle(el).position; } catch (e) {} if (pos !== 'absolute' && pos !== 'fixed') return false; }
         const txt = (el.textContent || '').trim(); if (!txt || txt.length > 120 || el.childElementCount > 3) return false;
         if (!impEntityNames().has(txt)) return false;
         el.classList.add('aim-ent-tip');
