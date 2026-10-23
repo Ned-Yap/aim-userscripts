@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.424
+// @version      4.425
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.424';
+    const SCRIPT_VERSION = '4.425';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -25457,7 +25457,7 @@
         impPatchTooltips();
         try { impNfzTipArm(!!imp._shift && impLabelsShift); } catch (e) {}
         const drawing = (imp.mode === 'shape' || imp.mode === 'move') && !imp._shift;
-        const perm = impLabelsShift && !imp._shift;
+        const perm = impLabelsShift;                                            // v4.425: Percepto's plate stays hidden even with Shift — ours is the only one
         const want = drawing || perm;
         let doc = document; try { const map = getLeafletMap(); if (map) doc = map.getContainer().ownerDocument || document; } catch (e) {}
         const docs = doc === document ? [document] : [document, doc];
@@ -25518,13 +25518,16 @@
     // everything — Percepto's Shift reveal switches its hover label to the asset underneath after a
     // moment, and the user wants the NFZ name to win. Rings come from the site's /map_objects/ (type 4).
     let impNfzTipEl = null, impNfzTipRaf = null, impNfzTipCont = null;
-    function impNfzIndex() {
+    function impNfzIndex(type) {
+        type = type || 4;
         const sid = getCurrentSiteID(); const ents = (sid && mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
-        if (!imp._nfzIdx || imp._nfzIdx.sid !== sid || imp._nfzIdx.n !== ents.length) {
-            const list = ents.filter(e => e && e.type === 4).map(e => { const ring = entityCoords(e); if (!ring || ring.length < 3) return null; let la0 = Infinity, lo0 = Infinity, la1 = -Infinity, lo1 = -Infinity; ring.forEach(v => { la0 = Math.min(la0, v.lat); lo0 = Math.min(lo0, v.lng); la1 = Math.max(la1, v.lat); lo1 = Math.max(lo1, v.lng); }); return { name: e.name || '', ring, la0, lo0, la1, lo1 }; }).filter(Boolean);
-            imp._nfzIdx = { sid, n: ents.length, list };
+        if (!imp._nfzIdx) imp._nfzIdx = {};
+        const k = String(type);
+        if (!imp._nfzIdx[k] || imp._nfzIdx[k].sid !== sid || imp._nfzIdx[k].n !== ents.length) {
+            const list = ents.filter(e => e && e.type === type).map(e => { const ring = entityCoords(e); if (!ring || ring.length < 3) return null; let la0 = Infinity, lo0 = Infinity, la1 = -Infinity, lo1 = -Infinity; ring.forEach(v => { la0 = Math.min(la0, v.lat); lo0 = Math.min(lo0, v.lng); la1 = Math.max(la1, v.lat); lo1 = Math.max(lo1, v.lng); }); return { name: e.name || '', ring, la0, lo0, la1, lo1 }; }).filter(Boolean);
+            imp._nfzIdx[k] = { sid, n: ents.length, list };
         }
-        return imp._nfzIdx.list;
+        return imp._nfzIdx[k].list;
     }
     function impNfzTipMove(ev) {
         if (impNfzTipRaf) return;
@@ -25533,11 +25536,13 @@
             const map = getLeafletMap(); if (!map || !imp._shift) { impNfzTipHide(); return; }
             const cont = map.getContainer(); const r = cont.getBoundingClientRect(); const x = ev.clientX - r.left, y = ev.clientY - r.top;
             let ll; try { ll = map.containerPointToLatLng([x, y]); } catch (e) { impNfzTipHide(); return; }
-            const hits = impNfzIndex().filter(z => ll.lat >= z.la0 && ll.lat <= z.la1 && ll.lng >= z.lo0 && ll.lng <= z.lo1 && pointInPolygon(ll.lat, ll.lng, z.ring));
+            const inside = (z) => ll.lat >= z.la0 && ll.lat <= z.la1 && ll.lng >= z.lo0 && ll.lng <= z.lo1 && pointInPolygon(ll.lat, ll.lng, z.ring);
+            let hits = impNfzIndex(4).filter(inside), isNfz = true;                 // NFZ wins; otherwise the asset under the cursor (Percepto's own Shift reveal, re-made)
+            if (!hits.length) { hits = impNfzIndex(3).filter(inside); isNfz = false; }
             if (!hits.length) { impNfzTipHide(); return; }
-            if (!impNfzTipEl || impNfzTipEl.ownerDocument !== cont.ownerDocument) { impNfzTipHide(); impNfzTipEl = cont.ownerDocument.createElement('div'); impNfzTipEl.id = 'aim-imp-nfztip'; impNfzTipEl.style.cssText = 'position:absolute;z-index:2000;pointer-events:none;background:#2a1416;color:#ffb3ad;border:1.5px solid #ff5555;border-radius:4px;padding:3px 8px;font:700 12px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;box-shadow:0 2px 10px rgba(0,0,0,0.7);white-space:nowrap'; cont.appendChild(impNfzTipEl); }
+            if (!impNfzTipEl || impNfzTipEl.ownerDocument !== cont.ownerDocument) { impNfzTipHide(); impNfzTipEl = cont.ownerDocument.createElement('div'); impNfzTipEl.id = 'aim-imp-nfztip'; impNfzTipEl.style.cssText = 'position:absolute;z-index:2000;pointer-events:none;background:#4b4b4b;color:#fff;border-radius:4px;padding:5px 12px;font:500 15px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;box-shadow:0 2px 10px rgba(0,0,0,0.5);white-space:nowrap'; cont.appendChild(impNfzTipEl); }
             const txt = hits.map(h => h.name).join('  ·  ');
-            if (impNfzTipEl.textContent !== txt) impNfzTipEl.textContent = txt;
+            if (impNfzTipEl.textContent !== txt) { impNfzTipEl.textContent = txt; impNfzTipEl.style.color = isNfz ? '#ffb3ad' : '#fff'; }
             impNfzTipEl.style.left = `${Math.round(x + 14)}px`; impNfzTipEl.style.top = `${Math.round(y - 34)}px`; impNfzTipEl.style.display = '';
         });
     }

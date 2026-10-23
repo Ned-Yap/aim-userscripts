@@ -1,4 +1,6 @@
-## 2026-10-22 — 🩻 P&A assets: red ✕ for plugged ground, P&A ruleset, status review — Site Setup Tools latest v4.413 → v4.424 (latest only)
+## 2026-10-22 — 🩻 P&A assets: red ✕ for plugged ground, P&A ruleset, status review — Site Setup Tools latest v4.413 → v4.425 (latest only)
+
+- **v4.425** — one nameplate: Percepto's entity hover plate stays hidden even with SHIFT; while SHIFT is held our plate shows the NFZ under the cursor (NFZ wins), or the asset when not over an NFZ. Grey like Percepto's, NFZ names tinted red.
 
 - **v4.424** — while SHIFT is held, the NFZ under the cursor gets our own red label drawn above everything, so the NFZ name wins even after Percepto's Shift reveal switches its hover to the asset underneath. Several NFZs stacked = all names.
 
