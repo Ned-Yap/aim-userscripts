@@ -1,3 +1,7 @@
+## 2026-10-23 — Flags list workflow: ↩ per row · click holds the dot · ✓ = next · Moved far — Site Setup Tools latest v4.442 (latest only)
+
+- **v4.442** — the Placement flags list now drives the drawing loop. **Click a row** = zoom to it AND hold its dot in the armed tool (✏ Shape or ↔ Move), releasing whatever was held before — so a drag can no longer land on the box you finished a minute ago. **Tick a row** = release the held dot and, with "✓ = next" on (default), hold the next unreviewed row's dot and zoom to it, ready to draw. **↩ on every row** undoes that one point's last change (outline move, redraw, rotate, ↔ move), one step at a time; ALT+click puts it back at the file coordinates as a plain square. Every outline / position change now keeps a per-point history (10 steps, 3 saved). New **↔ Moved far** tab: any box or dot more than 500 ft (editable) from where the well really is — the Enverus pin, else the client's coordinate, else the file coordinate — sorted by distance, click = zoom to both, ↩ to fix. A ✋ marks the row you are holding.
+
 ## 2026-10-23 — Reset guard · 🩹 Recover positions · older saves — Site Setup Tools latest v4.437 → v4.441 (latest only)
 
 - **v4.441** — label watcher: never tags a whole Leaflet pane (it did once when the tooltip pane held a single NFZ label, which would have hidden every hover tip until Shift).

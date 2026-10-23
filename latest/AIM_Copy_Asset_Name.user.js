@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.441
+// @version      4.442
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.441';
+    const SCRIPT_VERSION = '4.442';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -23004,7 +23004,8 @@
         target: 'staged',                           // 'staged' | 'assets' (🗑 delete mode)
         mode: null,                                 // null | 'circle' | 'lasso' | 'pick' | 'edit' | 'move'
         moveHeld: null, moveDrag: false, moveDownPt: null,   // v4.344: ↔ Move point — the staged point being carried
-        shapeHeld: null, stroke: null, strokeLayer: null, assetShapeLayers: [], heldLayers: [], shapeEdit: null, shapeW: 15, snapFt: 10, bufFt: 7.5, gapFt: 15, line: null, lineStart: null, lineLayer: null, linePrev: null, alignDeg: 5,   // v4.433: two-click line + align tolerance   // v4.367: ✏ Shape · v4.373: W = the NARROW side (15 ft), buffer 7.5 ft each side, snap keeps a 15 ft gap
+        shapeHeld: null, stroke: null, strokeLayer: null, assetShapeLayers: [], heldLayers: [], shapeEdit: null, shapeW: 15, snapFt: 10, bufFt: 7.5, gapFt: 15, line: null, lineStart: null, lineLayer: null, linePrev: null, alignDeg: 5,   // v4.433: two-click line + align tolerance
+        farFt: 500, flagAdvance: true,              // v4.442: 'Moved far' threshold · check a flag row → hold the next one   // v4.367: ✏ Shape · v4.373: W = the NARROW side (15 ft), buffer 7.5 ft each side, snap keeps a 15 ft gap
         radiusVal: 3, radiusUnit: 'mi', includeDups: false,   // v4.343: 3 mi = the usual base reach circle
         keepShield: true,                           // v4.343: keep "- unsh" / "shielded" modifiers in subtypes (off = strip them)
         dupMode: 'update',                          // v4.347: name matches an existing asset → 'skip' | 'update' (type + notes only) | 'copy' (create "-N")
@@ -23037,7 +23038,7 @@
         lastDelete: null,                           // {siteID, when, entities:[full bodies]} — ↩ Undo batch source
         assetIndex: null,                           // cached [{id,name,clean,ring,bbox,centroid}] for dup-guard + delete select
     };
-    function impSaveParams() { try { GM_setValue(IMP_PARAMS_KEY, JSON.stringify({ radiusVal: imp.radiusVal, radiusUnit: imp.radiusUnit, includeDups: imp.includeDups, advOpen: imp.advOpen, keepShield: imp.keepShield, dupMode: imp.dupMode, secOpen: imp.secOpen, shapeW: imp.shapeW, snapFt: imp.snapFt, bufFt: imp.bufFt, gapFt: imp.gapFt, anaMovedFt: imp.ana.movedFt, paAssets: imp.env.paAssets, paSizeFt: imp.env.paSizeFt, paMatchFt: imp.env.paMatchFt, hvOn: imp.hv.on, hvEnv: imp.hv.useEnv, alignDeg: imp.alignDeg, pri: { clusterFt: imp.pri.clusterFt, padFt: imp.pri.padFt, p1Min: imp.pri.p1Min, p1Max: imp.pri.p1Max, open: imp.pri.open, setOpen: imp.pri.setOpen, zeroUntier: imp.pri.zeroUntier, envUntier: imp.pri.envUntier } })); } catch (e) {} }
+    function impSaveParams() { try { GM_setValue(IMP_PARAMS_KEY, JSON.stringify({ radiusVal: imp.radiusVal, radiusUnit: imp.radiusUnit, includeDups: imp.includeDups, advOpen: imp.advOpen, keepShield: imp.keepShield, dupMode: imp.dupMode, secOpen: imp.secOpen, shapeW: imp.shapeW, snapFt: imp.snapFt, bufFt: imp.bufFt, gapFt: imp.gapFt, anaMovedFt: imp.ana.movedFt, paAssets: imp.env.paAssets, paSizeFt: imp.env.paSizeFt, paMatchFt: imp.env.paMatchFt, hvOn: imp.hv.on, hvEnv: imp.hv.useEnv, alignDeg: imp.alignDeg, farFt: imp.farFt, flagAdvance: imp.flagAdvance, pri: { clusterFt: imp.pri.clusterFt, padFt: imp.pri.padFt, p1Min: imp.pri.p1Min, p1Max: imp.pri.p1Max, open: imp.pri.open, setOpen: imp.pri.setOpen, zeroUntier: imp.pri.zeroUntier, envUntier: imp.pri.envUntier } })); } catch (e) {} }
     function impLoadParams() {
         try {
             const raw = GM_getValue(IMP_PARAMS_KEY, ''); if (!raw) return;
@@ -23063,6 +23064,8 @@
             if (typeof o.paAssets === 'boolean') imp.env.paAssets = o.paAssets;
             if (typeof o.hvOn === 'boolean') imp.hv.on = o.hvOn;
             if (typeof o.alignDeg === 'number' && o.alignDeg >= 0) imp.alignDeg = o.alignDeg;
+            if (typeof o.farFt === 'number' && o.farFt >= 0) imp.farFt = o.farFt;
+            if (typeof o.flagAdvance === 'boolean') imp.flagAdvance = o.flagAdvance;
             if (typeof o.hvEnv === 'boolean') imp.hv.useEnv = o.hvEnv;
             if (typeof o.paSizeFt === 'number' && o.paSizeFt >= 5) imp.env.paSizeFt = o.paSizeFt;
             if (typeof o.paMatchFt === 'number' && o.paMatchFt >= 0) imp.env.paMatchFt = o.paMatchFt;
@@ -25174,6 +25177,7 @@
     }
     function impRotateHeld(dDeg, snapToNeighbours) {
         const p = imp.shapeHeld; if (!p || !p.shape) return;
+        impPushHist(p);
         const pr = impProj(p.lat, p.lng); const xy = p.shape.map(pr.to), c = impCentroidXY(xy);
         let out = impRotateXY(xy, c, dDeg * Math.PI / 180);
         if (snapToNeighbours && imp.alignDeg > 0) { const th = impRingAngle(out); const sn = impSnapAngle(th, impNeighbourAngles(p, pr, 90).concat([0]), imp.alignDeg * Math.PI / 180); if (sn != null) out = impRotateXY(out, c, sn - th); }
@@ -25185,6 +25189,7 @@
         const pr = impProj(p.lat, p.lng); const xy = p.shape.map(pr.to), c = impCentroidXY(xy);
         const angles = impNeighbourAngles(p, pr, 90);
         if (!angles.length) { impStatus('✏ no neighbouring outline or asset within 300 ft to align to', '#ffb347'); return; }
+        impPushHist(p);
         const th = impRingAngle(xy); const sn = impSnapAngle(th, angles, Math.PI / 4);
         let out = sn == null ? xy : impRotateXY(xy, c, sn - th);
         const sh = impSnapShift(out, impNeighbourRings(p, pr, 60), Math.max(imp.snapFt, 30) * GEN_FT_TO_M, imp.gapFt * GEN_FT_TO_M);
@@ -25193,8 +25198,56 @@
         try { impComputeDups(); } catch (e) {} impRefreshAfterSelChange(); impMarkDirty();
         impStatus(`⟂ "${impEsc(p.name)}" turned ${sn == null ? '0' : Math.round(((sn - th) * 180 / Math.PI) * 10) / 10}° to run parallel to its neighbour${sh ? ` and moved ${Math.round(Math.hypot(sh.dx, sh.dy) / GEN_FT_TO_M * 10) / 10} ft to the ${imp.gapFt} ft gap` : ''}`);
     }
+    // ---- v4.442 per-point history: every outline / position change pushes the previous state, so one row's
+    // accidental move can be undone on its own (↩ in the flags list). Last 10 in memory, last 3 in the session. ----
+    function impPushHist(p) {
+        if (!p) return;
+        const h = p.hist || (p.hist = []);
+        h.push({ shape: p.shape ? p.shape.map(v => ({ lat: v.lat, lng: v.lng })) : null, lat: p.lat, lng: p.lng, orig: p.orig ? { lat: p.orig.lat, lng: p.orig.lng } : null, at: Date.now() });
+        if (h.length > 10) h.splice(0, h.length - 10);
+    }
+    function impUndoPoint(p, toFile) {
+        if (!p) return '';
+        let what = '';
+        if (toFile) {
+            impPushHist(p);
+            if (p.orig) { p.lat = p.orig.lat; p.lng = p.orig.lng; delete p.orig; }
+            p.shape = null; what = 'back at the file coordinates as a plain square';
+        } else if (p.hist && p.hist.length) {
+            const h = p.hist.pop();
+            p.shape = h.shape; p.lat = h.lat; p.lng = h.lng; if (h.orig) p.orig = h.orig; else delete p.orig;
+            what = `last change undone (${p.hist.length} more step${p.hist.length === 1 ? '' : 's'} behind it)`;
+        } else if (p.orig) { p.lat = p.orig.lat; p.lng = p.orig.lng; delete p.orig; what = 'back at the file coordinates'; }
+        else return '';
+        if (imp.shapeHeld === p) impRenderAssetShapes();
+        try { impComputeDups(); } catch (e) {} impRefreshAfterSelChange();
+        return what;
+    }
+    // hold a point in whatever tool is armed (✏ Shape or ↔ Move), releasing the one held before
+    function impHoldPoint(p) {
+        if (!p || p.done) return false;
+        if (imp.mode === 'shape') { imp.shapeHeld = p; imp.stroke = null; imp.shapeEdit = null; impClearStrokeLayer(); impClearLine(); impRenderAssetShapes(); impSyncUi(); return true; }
+        if (imp.mode === 'move') { imp.moveHeld = p; imp.moveDrag = false; imp.moveDownPt = null; imp.moveFrom = { lat: p.lat, lng: p.lng }; impRenderStaged(); impSyncUi(); return true; }
+        return false;
+    }
+    function impReleaseHeld() {
+        let did = false;
+        if (imp.shapeHeld) { imp.shapeHeld = null; impRenderAssetShapes(); did = true; }
+        if (imp.moveHeld) { imp.moveHeld = null; imp.moveDrag = false; imp.moveDownPt = null; impRenderStaged(); did = true; }
+        if (did) impSyncUi();
+        return did;
+    }
+    // where the well really is, best source first: Enverus surface location → the client's corrected coordinate → the file coordinate
+    function impFarRef(p) {
+        if (p.env && p.env.found && isFinite(p.env.lat) && isFinite(p.env.lng)) return { lat: p.env.lat, lng: p.env.lng, src: 'the Enverus pin' };
+        if (p.client && p.client.coords && isFinite(p.client.coords.lat)) return { lat: p.client.coords.lat, lng: p.client.coords.lng, src: "the client's coordinate" };
+        if (p.orig) return { lat: p.orig.lat, lng: p.orig.lng, src: 'the file coordinate' };
+        return null;
+    }
+    function impFarFt(p) { const r = impFarRef(p); if (!r) return 0; return Math.round(approxMeters(p.lat, p.lng, r.lat, r.lng) / GEN_FT_TO_M); }
     function impAssignShape(p, ring, how) {
         if (!ring || ring.length < 3) return;
+        impPushHist(p);
         const c = ringCentroid(ring);
         if (!p.orig) p.orig = { lat: p.lat, lng: p.lng };
         p.shape = ring; p.lat = c.lat; p.lng = c.lng;
@@ -25338,6 +25391,8 @@
         if (Math.abs(p.lat - p.orig.lat) < 1e-9 && Math.abs(p.lng - p.orig.lng) < 1e-9) delete p.orig;   // dropped back exactly where it started
     }
     function impFinishMove(p) {
+        if (imp.moveFrom && (Math.abs(imp.moveFrom.lat - p.lat) > 1e-9 || Math.abs(imp.moveFrom.lng - p.lng) > 1e-9)) { const cur = { lat: p.lat, lng: p.lng, orig: p.orig }; p.lat = imp.moveFrom.lat; p.lng = imp.moveFrom.lng; p.orig = imp.moveFrom.orig || undefined; if (!p.orig) delete p.orig; impPushHist(p); p.lat = cur.lat; p.lng = cur.lng; if (cur.orig) p.orig = cur.orig; }   // v4.442: history
+        imp.moveFrom = null;
         imp.moveHeld = null; imp.moveDrag = false; imp.moveDownPt = null;
         try { impComputeDups(); } catch (e) {}
         impRefreshAfterSelChange();
@@ -25452,7 +25507,7 @@
                 const p = impNearestStaged(map, ll, IMP_PICK_PX * 1.5);
                 if (!p) { if (ev.altKey) { ev.preventDefault(); ev.stopPropagation(); impStatus('↔ no staged point there — click closer to a dot', '#ffb347'); } return; }
                 ev.preventDefault(); ev.stopPropagation();
-                imp.moveHeld = p; imp.moveDrag = false; imp.moveDownPt = { x: ev.clientX, y: ev.clientY };
+                imp.moveHeld = p; imp.moveDrag = false; imp.moveDownPt = { x: ev.clientX, y: ev.clientY }; imp.moveFrom = { lat: p.lat, lng: p.lng, orig: p.orig ? { lat: p.orig.lat, lng: p.orig.lng } : null };
                 impRenderStaged(); impSyncUi();
                 return;
             }
@@ -25612,6 +25667,7 @@
                     if (d.type === 'mid') { const n = d.p.shape.length, v = d.p.shape[d.i], w = d.p.shape[(d.i + 1) % n]; d.p.shape.splice(d.i + 1, 0, { lat: (v.lat + w.lat) / 2, lng: (v.lng + w.lng) / 2 }); impRenderHeldShape(); impMarkDirty(); impStatus(`✏ point added — ${d.p.shape.length} points · drag it where it belongs`); }
                     return;
                 }
+                { const cur = d.p.shape; d.p.shape = d.start; impPushHist(d.p); d.p.shape = cur; }   // v4.442: the pre-drag outline is the undo step
                 const c = ringCentroid(d.p.shape); d.p.lat = c.lat; d.p.lng = c.lng;
                 try { impComputeDups(); } catch (e) {}
                 impRefreshAfterSelChange();
@@ -25639,6 +25695,7 @@
                 const t = ev.target; if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
                 ev.preventDefault(); ev.stopImmediatePropagation();
                 const p = imp.shapeHeld; if (!p.shape) return;
+                impPushHist(p);
                 p.shape = null; try { impComputeDups(); } catch (e) {} impRefreshAfterSelChange();
                 impStatus(`✏ "${impEsc(p.name)}" outline removed — it will be created as a ${impSizeFt} ft square again`);
                 return;
@@ -27013,13 +27070,15 @@
             { id: 'off', label: '📍 Off pad', color: '#ffb347', items: sel.filter(p => p.pri && p.pri.off > 0) },
             { id: 'same', label: 'Same name in file', color: '#ff9d00', items: sel.filter(p => p.fileDup && p.fileDup.kind === 'same') },
             { id: 'env', label: '🛢 Enverus', color: '#ffd666', items: sel.filter(p => impEnvFlagged(p)) },
-            { id: 'rev', label: '✓ Reviewed', color: '#5fff5f', items: sel.filter(p => p.reviewed && (p.dup || p.child || p.near || (p.pri && p.pri.off > 0) || impEnvFlagged(p) || (p.fileDup && p.fileDup.kind === 'same'))) },
+            { id: 'far', label: `↔ Moved far`, color: '#ff5fff', items: sel.filter(p => (p.orig || p.shape) && impFarFt(p) > imp.farFt) },   // v4.442: a box / dot far from where the well really is
+            { id: 'rev', label: '✓ Reviewed', color: '#5fff5f', items: sel.filter(p => p.reviewed && (p.dup || p.child || p.near || (p.pri && p.pri.off > 0) || impEnvFlagged(p) || (p.fileDup && p.fileDup.kind === 'same') || ((p.orig || p.shape) && impFarFt(p) > imp.farFt))) },
         ];
     }
-    function impFlagKind(p) { return p.dup ? 'dup' : (p.child ? 'child' : (p.near ? 'near' : ((p.pri && p.pri.off > 0) ? 'off' : (impEnvFlagged(p) ? 'env' : ((p.fileDup && p.fileDup.kind === 'same') ? 'same' : 'dup'))))); }
+    function impFlagKind(p) { return ((p.orig || p.shape) && impFarFt(p) > imp.farFt) ? 'far' : (p.dup ? 'dup' : (p.child ? 'child' : (p.near ? 'near' : ((p.pri && p.pri.off > 0) ? 'off' : (impEnvFlagged(p) ? 'env' : ((p.fileDup && p.fileDup.kind === 'same') ? 'same' : 'dup')))))); }
     function impFlagShort(tab, p) {
         const ft = (v) => `${Math.round(v)} ft`;
-        if (tab === 'rev') { const k = impFlagKind(p); const lbl = { dup: 'name match', child: 'parent/child', near: 'nearby', off: 'off pad', env: 'Enverus', same: 'same name' }[k]; return `${lbl} · ${impFlagShort(k, p)}`; }
+        if (tab === 'rev') { const k = impFlagKind(p); const lbl = { dup: 'name match', child: 'parent/child', near: 'nearby', off: 'off pad', env: 'Enverus', same: 'same name', far: 'moved far' }[k]; return `${lbl} · ${impFlagShort(k, p)}`; }
+        if (tab === 'far') { const r = impFarRef(p); return `${p.shape ? 'box' : 'dot'} is ${impFarFt(p).toLocaleString()} ft from ${r ? r.src : '?'} — ↩ undoes its last change`; }
         if (tab === 'env') return impEnvShort(p);
         if (tab === 'same') { const f = p.fileDup; return `${f.n} rows share "${p.rawName || p.name}" → created as "${p.name}" · ${f.others.map(o => `${o.typeRaw || 'row'} ${Math.round(approxMeters(p.lat, p.lng, o.lat, o.lng) / GEN_FT_TO_M).toLocaleString()} ft away`).join(', ')}`; }
         if (tab === 'dup') return `${imp.dupMode === 'update' ? '→ update type + notes' : (imp.dupMode === 'copy' ? '→ copy -N' : '→ skipped')}${p.pri && p.pri.off > 0 ? ` · client coord ${ft(p.pri.off)} off` : ' · on its polygon'}`;
@@ -27058,6 +27117,18 @@
         impPulsePoints(pts, label);
         setTimeout(() => { try { impRenderStaged(); } catch (e) {} }, 350);
     }
+    // v4.442: click a flag row = zoom to it AND hold its dot in the armed tool (releasing the one held before)
+    function impFocusFlagRow(p, tab) {
+        const extra = [];
+        if (p.dup && p.dupId != null) { const a = (imp.assetIndex || []).find(x => x.id === p.dupId); if (a && a.centroid) extra.push({ lat: a.centroid.lat, lng: a.centroid.lng, name: `${p.name} (existing asset)` }); }
+        if (tab && tab.id === 'far') { const r = impFarRef(p); if (r) extra.push({ lat: r.lat, lng: r.lng, name: `${p.name} — ${r.src}` }); }
+        if (tab && tab.extra) extra.push(...tab.extra(p));
+        impReleaseHeld();
+        impZoomToPoints([p].concat(extra), p.name);
+        const held = impHoldPoint(p);
+        impStatus(`🔎 ${impEsc(p.name)} — ${impEsc(impFlagShort(tab ? tab.id : impFlagKind(p), p))}${held ? ` · <b style="color:#ff5fff">holding it</b> — ${imp.mode === 'shape' ? 'CTRL+click to draw its outline' : 'click where it belongs'}` : ''}`);
+        try { impRenderFlagsUi(imp.points.filter(q => !q.done)); } catch (e) {}
+    }
     function impRenderFlagsUi(live) {
         const el = document.getElementById('aim-imp-flags');
         if (!el) return;
@@ -27071,7 +27142,7 @@
         tabs.forEach(t => { t.extra = t.id === 'env' ? (p => (p.env && p.env.found && isFinite(p.env.lat)) ? [{ lat: p.env.lat, lng: p.env.lng, name: `${p.name} (Enverus)` }] : []) : (t.id === 'same' ? (p => (p.fileDup && p.fileDup.others ? p.fileDup.others.map(o => ({ lat: o.lat, lng: o.lng, name: o.name })) : [])) : null); });
         if (!imp.flagTab || !tabs.find(t => t.id === imp.flagTab && (t.items.length || t.id === 'rev'))) imp.flagTab = (tabs.find(t => t.items.length) || tabs[0]).id;
         const tab = tabs.find(t => t.id === imp.flagTab);
-        const items = tab.items.slice().sort((x, y) => (tab.id === 'rev' ? 0 : (x.reviewed === y.reviewed ? 0 : (x.reviewed ? 1 : -1))) || (tab.id === 'off' ? (y.pri.off - x.pri.off) : 0) || x.name.localeCompare(y.name));
+        const items = tab.items.slice().sort((x, y) => (tab.id === 'rev' ? 0 : (x.reviewed === y.reviewed ? 0 : (x.reviewed ? 1 : -1))) || (tab.id === 'off' ? (y.pri.off - x.pri.off) : 0) || (tab.id === 'far' ? (impFarFt(y) - impFarFt(x)) : 0) || x.name.localeCompare(y.name));
         const shown = (imp.flagHideReviewed && tab.id !== 'rev') ? items.filter(p => !p.reviewed) : items;
         const CAP = 600;
         const rev = tab.items.filter(p => p.reviewed).length;
@@ -27081,7 +27152,8 @@
             ${imp.pri.on && p.pri && p.pri.tier ? `<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${IMP_TIER_COLORS[p.pri.tier]};flex:none" title="${p.pri.tier}"></span>` : ''}
             <b style="flex:none;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;${p.reviewed ? 'text-decoration:line-through' : ''}">${impEsc(p.name)}</b>
             <span style="color:#8a949e;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${impEsc(impFlagShort(tab.id, p))}</span>
-            ${p.orig ? '<span title="moved" style="color:#ff5fff;flex:none">↔</span>' : ''}
+            ${p.orig ? '<span title="moved" style="color:#ff5fff;flex:none">↔</span>' : ''}${(imp.shapeHeld === p || imp.moveHeld === p) ? '<span title="held right now" style="color:#ff5fff;flex:none;font-weight:700">✋</span>' : ''}
+            <button data-impflagundo="${p.i}" title="Undo this point's last change (outline move, redraw, rotate, ↔ move) — one step at a time · ALT+click = back to the file coordinates as a plain square" style="flex:none;background:none;border:1px solid rgba(255,179,71,0.45);color:#ffb347;border-radius:3px;padding:0 5px;cursor:pointer;font:inherit;font-size:10px;${(p.hist && p.hist.length) || p.orig || p.shape ? '' : 'opacity:0.3;cursor:default'}">↩</button>
             <span data-impflaginfo="${p.i}" title="${impEsc(impFlagDetails(p))}" style="flex:none;width:14px;height:14px;line-height:12px;text-align:center;border:1px solid rgba(122,223,230,0.5);border-radius:50%;color:#7adfe6;font-size:9px;font-weight:700;cursor:help">i</span>
         </div>`;
         el.innerHTML = `<div style="padding:6px 8px;background:rgba(255,255,255,0.03);border:1px dashed rgba(122,223,230,0.25);border-radius:3px;font-size:11px">
@@ -27090,6 +27162,8 @@
                 ${tabs.map(chip).join('')}
                 <span style="flex:1"></span>
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:#9ad;cursor:pointer"><input type="checkbox" data-impflaghide ${imp.flagHideReviewed ? 'checked' : ''} style="accent-color:#5fff5f;margin:0"> hide reviewed</label>
+                <label style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:#ff5fff;cursor:pointer" title="Ticking a row releases the dot you are holding and holds the NEXT row's dot (zoomed to it) so you can draw straight away"><input type="checkbox" data-impflagadv ${imp.flagAdvance ? 'checked' : ''} style="accent-color:#ff5fff;margin:0"> ✓ = next</label>
+                ${tab.id === 'far' ? `<label style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:#ff5fff" title="A box or dot farther than this from where the well really is (Enverus pin, else the client's coordinate, else the file) is listed here">over <input type="number" data-impflagfar value="${imp.farFt}" min="0" step="50" style="width:56px;background:#1a1d23;border:1px solid rgba(255,95,255,0.45);color:#fff;padding:1px 4px;border-radius:3px;font:inherit;font-size:10px;text-align:right"> ft</label>` : ''}
                 <button data-imp-flags="sheets" title="Copy every flagged point as a table (Flag · Name · Existing asset · Detail · Reviewed · Type · Lat · Lng) — paste into Google Sheets / Excel" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">📤 Sheets</button>
                 <button data-imp-flags="csv" title="Download the same table as a CSV" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">⬇ CSV</button>
             </div>
@@ -27099,7 +27173,7 @@
                 <span style="flex:1"></span>
                 <button data-impflagall="1" style="background:none;border:1px solid rgba(255,255,255,0.15);color:#9ad;border-radius:3px;padding:0 6px;cursor:pointer;font:inherit;font-size:10px" title="Mark every row shown in this tab as reviewed">✓ all shown</button>
                 <button data-impflagnone="1" style="background:none;border:1px solid rgba(255,255,255,0.15);color:#9ad;border-radius:3px;padding:0 6px;cursor:pointer;font:inherit;font-size:10px" title="Clear reviewed on this tab">clear</button>
-                <span style="color:#666">click a row = zoom · ⓘ = details</span>
+                <span style="color:#666">click a row = zoom + hold its dot · ↩ = undo that point · ⓘ = details</span>
             </div>
             <div data-impflaglist style="max-height:230px;overflow:auto;border:1px solid rgba(255,255,255,0.06);border-radius:3px;background:rgba(0,0,0,0.15)">
                 ${shown.slice(0, CAP).map(row).join('') || `<div style="padding:6px;color:#5fff5f;font-size:10px">${tab.id === 'rev' ? 'nothing reviewed yet' : `✓ all ${tab.items.length} reviewed`}</div>`}
@@ -27113,14 +27187,30 @@
             const tb = ev.target.closest('[data-impflagtab]');
             if (tb) { imp.flagTab = tb.getAttribute('data-impflagtab'); impRenderFlagsUi(live); return; }
             if (ev.target.closest('[data-impflaghide]')) { imp.flagHideReviewed = !!ev.target.checked; impRenderFlagsUi(live); return; }
+            if (ev.target.closest('[data-impflagadv]')) { imp.flagAdvance = !!ev.target.checked; impSaveParams(); return; }
+            if (ev.target.closest('[data-impflagfar]')) return;
+            const ub = ev.target.closest('[data-impflagundo]');
+            if (ub) { const p = byI.get(ub.getAttribute('data-impflagundo')); if (p) { const what = impUndoPoint(p, ev.altKey); impStatus(what ? `↩ "${impEsc(p.name)}" ${what}` : `↩ "${impEsc(p.name)}" has no change to undo`, what ? '#5fff5f' : '#ffb347'); if (imp.shapeHeld === p || imp.moveHeld === p) impZoomToPoints([p], p.name); } return; }
             if (ev.target.closest('[data-impflagall]')) { shown.forEach(p => { p.reviewed = true; }); impMarkDirty(); impRenderFlagsUi(live); impSecSummaries(); return; }
             if (ev.target.closest('[data-impflagnone]')) { tab.items.forEach(p => { p.reviewed = false; }); impMarkDirty(); impRenderFlagsUi(live); impSecSummaries(); return; }
             const cb = ev.target.closest('[data-impflagrev]');
-            if (cb) { const p = byI.get(cb.getAttribute('data-impflagrev')); if (p) { p.reviewed = !!cb.checked; impMarkDirty(); impRenderFlagsUi(live); impSecSummaries(); } return; }
+            if (cb) {
+                const p = byI.get(cb.getAttribute('data-impflagrev')); if (!p) return;
+                p.reviewed = !!cb.checked; impMarkDirty();
+                let nxt = null;
+                if (p.reviewed) {                                              // v4.442: release what you hold; with ✓ = next, hold the next unreviewed row and zoom to it
+                    impReleaseHeld();
+                    if (imp.flagAdvance) { const idx = shown.indexOf(p); const after = shown.slice(idx + 1).concat(shown.slice(0, idx)); nxt = after.find(q => !q.reviewed && !q.done) || null; }
+                }
+                impRenderFlagsUi(live); impSecSummaries();
+                if (nxt) { impFocusFlagRow(nxt, tab); try { const r2 = el.querySelector(`[data-impflagrow="${nxt.i}"]`); if (r2) r2.scrollIntoView({ block: 'nearest' }); } catch (e) {} }
+                return;
+            }
             if (ev.target.closest('[data-impflaginfo]')) return;
             const r = ev.target.closest('[data-impflagrow]');
-            if (r) { const p = byI.get(r.getAttribute('data-impflagrow')); if (p) { const extra = []; if (p.dup && p.dupId != null) { const a = (imp.assetIndex || []).find(x => x.id === p.dupId); if (a && a.centroid) extra.push({ lat: a.centroid.lat, lng: a.centroid.lng, name: `${p.name} (existing asset)` }); } if (tab.extra) extra.push(...tab.extra(p)); impZoomToPoints([p].concat(extra), p.name); impStatus(`🔎 ${impEsc(p.name)} — ${impEsc(impFlagShort(tab.id, p))}`); } }
+            if (r) { const p = byI.get(r.getAttribute('data-impflagrow')); if (p) impFocusFlagRow(p, tab); }
         };
+        const farEl = el.querySelector('[data-impflagfar]'); if (farEl) farEl.onchange = function () { const v = parseFloat(this.value); if (isFinite(v) && v >= 0) { imp.farFt = v; impSaveParams(); impRenderFlagsUi(live); } };
     }
     // v4.342: flagged points as a table — rich HTML + TSV on the clipboard
     // (Sheets / Excel paste) or a CSV download. One row per flag; a point that
@@ -27988,6 +28078,7 @@
                 if (p.thirdParty) o.tp = true;
                 if (p.rigWatch) o.rw = true;
                 if (p.pa) o.pa = p.pa;
+                if (p.hist && p.hist.length) o.hist = p.hist.slice(-3);
                 if (p.statusWas) o.sw = p.statusWas;
                 if (p.shape && p.shape.length >= 3) o.shape = p.shape;
                 if (p.client) o.client = p.client;
@@ -28096,6 +28187,7 @@
             if (o.tp) p.thirdParty = true;
             if (o.rw) p.rigWatch = true;
             if (o.pa) { p.pa = o.pa; if (!p.typeRaw) p.typeRaw = impPaTypeFor(!(o.tp), o.pa.label); }
+            if (Array.isArray(o.hist)) p.hist = o.hist;
             if (o.sw) p.statusWas = o.sw;
             if (Array.isArray(o.shape) && o.shape.length >= 3) p.shape = o.shape;
             if (o.client) p.client = o.client;
