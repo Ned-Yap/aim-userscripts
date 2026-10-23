@@ -1,4 +1,6 @@
-## 2026-10-22 — Name-match guard + `P3 - H - Pumping Jack` type format — Site Setup Tools latest v4.427 → v4.428 (latest only)
+## 2026-10-22 — Name-match guard + `P3 - H - Pumping Jack` type format — Site Setup Tools latest v4.427 → v4.429 (latest only)
+
+- **v4.429** — while ↔ Move / ✏ Shape are armed, Percepto's entity polygons and markers ignore the mouse, so picking up a dot that sits inside an NFZ no longer opens the NFZ's native editor. Hold SHIFT to click through to Percepto as usual. The tools end, everything is clickable again.
 
 - **v4.428** — fix: the Map Entities list emptied a moment after load — the name-label watcher (v4.423) was hiding its rows, since each row is an entity name. The watcher now only tags elements inside the Leaflet map container or floating elements outside it, never anything in a list, panel, form or menu.
 
