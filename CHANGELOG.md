@@ -1,3 +1,8 @@
+## 2026-10-22 — 🏷 Bulk Rename + importer SMART name matching — Site Setup Tools latest v4.426 (latest only)
+
+- **v4.426** — SUM **Bulk → 🏷 Rename**: prefix (default `Pad - `) / suffix / find→replace / `{name}` template over root assets (pads), roots with children, or the selected rows. Live before→after preview; already-matching names skipped (a second run never makes `Pad - Pad - X`); duplicate or empty results blocked. Queues through the normal name-edit queue → Apply (dry run / ⚡ Direct-API / verify / rollback). Child assets keep their names — Percepto re-points them at the renamed parent. Only the typed text is cleaned to name characters; existing names are kept as-is.
+- **v4.426** — 📥 Importer matches existing assets in tiers, each only when the previous found nothing: exact name → exact ignoring punctuation/case (`Pad-X` = `Pad X`) → whole-token containment (`X` ⊂ `Pad - X`, never `Jack 1` ⊂ `Jack 10`). Several containment candidates → flagged ⚠ ambiguous with the alternatives listed. A client rename keeps the asset's wrapper (`Pad - X` + `Y` → `Pad - Y`). Fixes `X` being re-imported beside `Pad - X`.
+
 ## 2026-10-22 — 🩻 P&A assets: red ✕ for plugged ground, P&A ruleset, status review — Site Setup Tools latest v4.413 → v4.425 (latest only)
 
 - **v4.425** — one nameplate: Percepto's entity hover plate stays hidden even with SHIFT; while SHIFT is held our plate shows the NFZ under the cursor (NFZ wins), or the asset when not over an NFZ. Grey like Percepto's, NFZ names tinted red.

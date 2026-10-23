@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.425
+// @version      4.426
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.425';
+    const SCRIPT_VERSION = '4.426';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -23923,8 +23923,7 @@
     }
     function impRespAssetFor(r, p) {
         if (p && p.dup && p.dupId != null) return (imp.assetIndex || []).find(a => a.id === p.dupId) || null;
-        const k = (genCleanName(r.name) || '').toLowerCase();
-        return (imp.assetIndex || []).find(a => a.clean === k) || null;
+        return impFindAssetByName(r.name);   // #309 tiered matcher
     }
     // cross-reference every coordinate the client gave with the Enverus pin we already have (cross-check) — > 300 ft = look
     function impRespCrossRef() {
@@ -23983,7 +23982,7 @@
             if (r.action === 'rename') {
                 r.renames.forEach(x => {
                     const q = imp.points.find(z => !z.done && impEnvApiOf(z) === x.api) || null;
-                    if (q) { const from = q.name; q.name = x.name; setClient(q, r, { renamedFrom: from, renamedTo: x.name }); nRenamed++; const aa = (imp.assetIndex || []).find(z => z.clean === (genCleanName(from) || '').toLowerCase() || z.clean === (genCleanName(q.rawName || from) || '').toLowerCase()); if (aa) renames.push({ id: aa.id, from: aa.name, to: genCleanName(x.name) || x.name }); }
+                    if (q) { const from = q.name; q.name = x.name; setClient(q, r, { renamedFrom: from, renamedTo: x.name }); nRenamed++; const aa = impFindAssetByName(from) || impFindAssetByName(q.rawName || from); if (aa) renames.push({ id: aa.id, from: aa.name, to: impCarryWrap(aa.name, from, genCleanName(x.name) || x.name) }); }
                 });
                 return;
             }
@@ -24418,7 +24417,7 @@
             if (!ring || ring.length < 3) return null;
             let la0 = Infinity, lo0 = Infinity, la1 = -Infinity, lo1 = -Infinity;
             ring.forEach(p => { la0 = Math.min(la0, p.lat); lo0 = Math.min(lo0, p.lng); la1 = Math.max(la1, p.lat); lo1 = Math.max(lo1, p.lng); });
-            return { id: e.id, name: e.name || '', clean: (genCleanName(e.name || '') || '').toLowerCase(), subtype: (e.custom && e.custom.poi_type_str) ? String(e.custom.poi_type_str).trim() : '', ring, bbox: { la0, lo0, la1, lo1 }, centroid: ringCentroid(ring) };
+            return { id: e.id, name: e.name || '', clean: (genCleanName(e.name || '') || '').toLowerCase(), norm: impNormName(e.name || ''), tokens: impNameTokens(e.name || ''), subtype: (e.custom && e.custom.poi_type_str) ? String(e.custom.poi_type_str).trim() : '', ring, bbox: { la0, lo0, la1, lo1 }, centroid: ringCentroid(ring) };
         }).filter(Boolean);
     }
     function impComputeDups() {
@@ -24430,14 +24429,12 @@
         if (!imp.assetIndex) impBuildAssetIndex();
         const dupM = Math.max(0, impDupFt) * GEN_FT_TO_M;
         const dLat = (dupM / 111320) * 1.05;
-        const byName = new Map();
-        imp.assetIndex.forEach(a => { if (a.clean) byName.set(a.clean, a); });
         imp.points.forEach(p => {
             p.dup = false; p.dupWhy = ''; p.child = null; p.near = null;
-            const clean = (genCleanName(p.name) || '').toLowerCase();
-            const nm = clean && byName.get(clean);
+            const nmM = impMatchAsset(p.name);          // #309 tiered: exact → ignoring punctuation → whole-token containment
+            const nm = nmM ? nmM.a : null;
             // ONLY a name match is a duplicate (skipped unless included).
-            if (nm) { p.dup = true; p.dupWhy = `name matches existing asset "${nm.name}"`; p.dupId = nm.id; p.dupSubtype = nm.subtype || ''; } else { p.dupId = null; p.dupSubtype = ''; }
+            if (nm) { p.dup = true; p.dupWhy = nmM.why; p.dupTier = nmM.tier; p.dupAmbiguous = nmM.ambiguous; p.dupId = nm.id; p.dupSubtype = nm.subtype || ''; } else { p.dupId = null; p.dupSubtype = ''; p.dupTier = 0; p.dupAmbiguous = false; }
             // v4.332: two informational flags, never skipped —
             //   child = the square this point would become (Size ft) overlaps an
             //           existing asset, partially or fully (parent/child);
@@ -26514,6 +26511,51 @@
         return rows;
     }
     function impNormName(v) { return String(v || '').toUpperCase().replace(/[^A-Z0-9]+/g, ' ').replace(/\s+/g, ' ').trim(); }
+    // #309 SMART name matching (tiers documented above). Shared by the duplicate check,
+    // the client-response lookups and the client-rename lookup.
+    function impNameTokens(s) { return impNormName(s).toLowerCase().split(' ').filter(Boolean); }
+    function impTokensContain(hay, needle) {
+        if (!needle.length || needle.length > hay.length) return false;
+        outer: for (let i = 0; i + needle.length <= hay.length; i++) {
+            for (let j = 0; j < needle.length; j++) if (hay[i + j] !== needle[j]) continue outer;
+            return true;
+        }
+        return false;
+    }
+    // → { a: assetIndex entry, tier: 1|2|3, others: [alternatives], ambiguous, why } | null
+    function impMatchAsset(rawName) {
+        const idx = imp.assetIndex || [];
+        const clean = (genCleanName(rawName) || '').toLowerCase();
+        if (!clean) return null;
+        const exact = idx.find(a => a.clean === clean);
+        if (exact) return { a: exact, tier: 1, others: [], ambiguous: false, why: `name matches existing asset "${exact.name}"` };
+        const norm = impNormName(rawName);
+        const t2 = idx.filter(a => a.norm && a.norm === norm);
+        if (t2.length) return { a: t2[0], tier: 2, others: t2.slice(1), ambiguous: t2.length > 1, why: `${t2.length > 1 ? '⚠ ambiguous: ' : ''}name matches existing asset "${t2[0].name}" ignoring punctuation / case${impMatchAlts(t2)}` };
+        const tok = impNameTokens(rawName);
+        if (!tok.length) return null;
+        const t3 = idx.filter(a => a.tokens.length && (impTokensContain(a.tokens, tok) || impTokensContain(tok, a.tokens)))
+            .sort((x, y) => (Math.abs(x.tokens.length - tok.length) - Math.abs(y.tokens.length - tok.length)) || x.name.localeCompare(y.name));
+        if (!t3.length) return null;
+        const best = t3[0];
+        const dir = best.tokens.length >= tok.length ? `is contained in existing asset "${best.name}"` : `contains existing asset "${best.name}"`;
+        return { a: best, tier: 3, others: t3.slice(1), ambiguous: t3.length > 1, why: `${t3.length > 1 ? '⚠ ambiguous: ' : ''}name ${dir}${impMatchAlts(t3)}` };
+    }
+    function impMatchAlts(list) {
+        if (list.length < 2) return '';
+        const rest = list.slice(1);
+        return ` · also ${rest.slice(0, 3).map(z => `"${z.name}"`).join(', ')}${rest.length > 3 ? ` +${rest.length - 3} more` : ''}`;
+    }
+    function impFindAssetByName(rawName) { const m = impMatchAsset(rawName); return m ? m.a : null; }
+    // Client renamed "X" → "Y" but the site holds "Pad - X" (or "X BATTERY"): carry the wrapper → "Pad - Y".
+    // Falls back to the plain new name when the old name is not a literal part of the existing one.
+    function impCarryWrap(existingName, oldName, newName) {
+        const ex = String(existingName || ''), o = genCleanName(oldName), n = String(newName || '');
+        if (!o || (genCleanName(ex) || '').toLowerCase() === o.toLowerCase()) return n;
+        const i = ex.toLowerCase().indexOf(o.toLowerCase());
+        if (i < 0) return n;
+        return (ex.slice(0, i) + n + ex.slice(i + o.length)).replace(/\s+/g, ' ').trim();
+    }
     // v4.363: the client's list reuses names. Percepto needs one name per asset
     // and we match on name, so: a battery + a well sharing a name → the battery
     // becomes "<name> BATTERY" (what we told the client); any other repeat → the
@@ -34367,6 +34409,20 @@
         attachBulkPopover(validBtn, (anchor, onClose) => buildBulkValidatePopover(anchor, onClose));
         if (!LITE) optsRow.appendChild(validBtn);       // Bulk → Valid — write, CSM-only
 
+        // --- Bulk → 🏷 Rename button (feature #309) ---
+        // Mass prefix / suffix / find→replace / template rename of ASSET names
+        // (default scope: root assets = pads, e.g. "Pad - "). Queues one name
+        // edit per asset via queueNameEdit → the same Apply rails as an inline
+        // rename (dry run / ⚡ Direct-API / verify / rollback). Children are
+        // untouched: Percepto re-points parent_asset_name on a parent rename.
+        const renameBtn = document.createElement('button');
+        renameBtn.type = 'button';
+        renameBtn.textContent = 'Bulk → 🏷 Rename';
+        renameBtn.title = 'Prefix / suffix / find→replace asset names in bulk (root assets by default, e.g. "Pad - "); queues name edits for Apply';
+        renameBtn.style.cssText = bulkBtnStyle;
+        attachBulkPopover(renameBtn, (anchor, onClose) => buildBulkRenamePopover(anchor, onClose));
+        if (!LITE) optsRow.appendChild(renameBtn);      // Bulk → Rename — write, CSM-only
+
         // --- v4.197: Bulk → 🗑 Delete button ---
         // Mass-delete selected FFZs / FPs / NFZs behind the super-confirm
         // modal (auto-backup + ack + 5s hold-slider). See the bulk-delete
@@ -34394,6 +34450,263 @@
         // type filter, preview the count, then queue one validated edit per
         // entity. FP rows are per-segment in the table, so we DEDUPE by
         // entity id and queue once per flight path.
+        // Popover: pick an operation (prefix / suffix / find→replace / template),
+        // a scope (root assets / root assets with children / selected rows) and
+        // preview every before → after with its verdict before queueing. Rails:
+        //   • only the text WE insert is cleaned to Percepto's name characters
+        //     (A-Z 0-9 space - _); the existing name is kept verbatim;
+        //   • "skip already matching" (default on) so a second run never yields
+        //     "Pad - Pad - X";
+        //   • duplicate names are BLOCKED (Percepto needs unique names per site)
+        //     — checked against every asset's current/pending name AND within
+        //     the batch itself; empty results blocked too;
+        //   • nothing is written here — queueNameEdit + Apply do the writing.
+        function buildBulkRenamePopover(anchor, onClose) {
+            const NAME_OK_RX = /^[A-Za-z0-9 _-]*$/;
+            const PREVIEW_MAX = 300;
+            // Like genCleanName but WITHOUT the trim — an operand such as "Pad - "
+            // must keep its trailing space. The final name is trimmed/collapsed.
+            const cleanOperand = (s) => String(s == null ? '' : s).replace(/[^A-Za-z0-9 _-]+/g, ' ').replace(/\s+/g, ' ');
+            const finalName = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+
+            const pop = document.createElement('div');
+            pop.style.cssText = 'position:fixed;background:#1f2228;border:1px solid rgba(255,213,79,0.55);border-radius:5px;box-shadow:0 4px 16px rgba(0,0,0,0.5);padding:12px 14px;z-index:99999;font-size:12px;color:#e6e6e6;min-width:480px;max-width:640px';
+            const title = document.createElement('div');
+            title.style.cssText = 'color:#ffd54f;font-weight:700;font-size:13px;margin-bottom:8px';
+            title.textContent = '🏷  Bulk Rename Assets';
+            pop.appendChild(title);
+            const help = document.createElement('div');
+            help.style.cssText = 'color:#888;font-size:10px;margin-bottom:10px;line-height:1.4';
+            help.textContent = 'Builds a new name for every asset in scope and queues it as a normal name edit — commit with Apply (dry run / ⚡ Direct-API / rollback as usual). Child assets keep their names; Percepto re-points them at a renamed parent. Only the text you type is cleaned to Percepto name characters (A-Z 0-9 space - _); the existing name is kept as-is.';
+            pop.appendChild(help);
+
+            const mkRadio = (group, val, label, col, checked) => {
+                const l = document.createElement('label');
+                l.style.cssText = 'display:flex;align-items:center;gap:5px;cursor:pointer;color:' + (col || '#ddd');
+                const r = document.createElement('input');
+                r.type = 'radio'; r.name = group; r.value = val; r.checked = !!checked;
+                r.style.cssText = 'accent-color:#ffd54f;cursor:pointer';
+                l.appendChild(r); l.appendChild(document.createTextNode(label));
+                return { l, r };
+            };
+            const mkInput = (placeholder, value, width) => {
+                const i = document.createElement('input');
+                i.type = 'text'; i.placeholder = placeholder; i.value = value || '';
+                i.style.cssText = 'background:#14161a;color:#e6e6e6;border:1px solid rgba(255,255,255,0.18);border-radius:3px;padding:3px 6px;font:inherit;font-size:11px;width:' + (width || '160px');
+                i.spellcheck = false;
+                return i;
+            };
+
+            // --- Operation ---
+            const opRow = document.createElement('div');
+            opRow.style.cssText = 'display:flex;align-items:center;gap:12px;margin-bottom:8px;flex-wrap:wrap';
+            const opPrefix = mkRadio('aim-ai-bulk-ren-op', 'prefix', 'Prefix', '#ffd54f', true);
+            const opSuffix = mkRadio('aim-ai-bulk-ren-op', 'suffix', 'Suffix');
+            const opReplace = mkRadio('aim-ai-bulk-ren-op', 'replace', 'Find → Replace');
+            const opTemplate = mkRadio('aim-ai-bulk-ren-op', 'template', 'Template');
+            [opPrefix, opSuffix, opReplace, opTemplate].forEach(o => opRow.appendChild(o.l));
+            pop.appendChild(opRow);
+
+            const inRow = document.createElement('div');
+            inRow.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap;min-height:26px';
+            const textIn = mkInput('text to add', 'Pad - ', '180px');
+            const findIn = mkInput('find (case-sensitive)', '', '150px');
+            const replIn = mkInput('replace with', '', '150px');
+            const tplIn = mkInput('{name} = current name', 'Pad - {name}', '260px');
+            const arrow = document.createElement('span'); arrow.textContent = '→'; arrow.style.color = '#888';
+            inRow.appendChild(textIn); inRow.appendChild(findIn); inRow.appendChild(arrow); inRow.appendChild(replIn); inRow.appendChild(tplIn);
+            pop.appendChild(inRow);
+            const showInputs = () => {
+                const op = currentOp();
+                textIn.style.display = (op === 'prefix' || op === 'suffix') ? '' : 'none';
+                findIn.style.display = replIn.style.display = arrow.style.display = (op === 'replace') ? '' : 'none';
+                tplIn.style.display = (op === 'template') ? '' : 'none';
+            };
+            const currentOp = () => opSuffix.r.checked ? 'suffix' : (opReplace.r.checked ? 'replace' : (opTemplate.r.checked ? 'template' : 'prefix'));
+
+            // --- Scope ---
+            const selAssetCount = allRows.filter(r => r.type === 3 && r.entity && sumPanelState.selectedIds.has(r._rowKey)).length;
+            const scopeRow = document.createElement('div');
+            scopeRow.style.cssText = 'display:flex;flex-direction:column;gap:4px;margin-bottom:8px';
+            const scRoot = mkRadio('aim-ai-bulk-ren-scope', 'root', 'Root assets — not a child of another asset (pads)', '#ddd', true);
+            const scRootKids = mkRadio('aim-ai-bulk-ren-scope', 'rootKids', 'Root assets that already have children');
+            const scSel = mkRadio('aim-ai-bulk-ren-scope', 'sel', `Selected rows only (${selAssetCount} asset${selAssetCount === 1 ? '' : 's'} selected — any depth)`);
+            scSel.r.disabled = selAssetCount === 0;
+            if (selAssetCount === 0) scSel.l.style.opacity = '0.5';
+            [scRoot, scRootKids, scSel].forEach(o => scopeRow.appendChild(o.l));
+            pop.appendChild(scopeRow);
+            const currentScope = () => scSel.r.checked ? 'sel' : (scRootKids.r.checked ? 'rootKids' : 'root');
+
+            const skipLbl = document.createElement('label');
+            skipLbl.style.cssText = 'display:flex;align-items:center;gap:6px;cursor:pointer;color:#ccc;margin-bottom:10px';
+            const skipCb = document.createElement('input');
+            skipCb.type = 'checkbox'; skipCb.checked = true; skipCb.style.cssText = 'accent-color:#ffd54f;cursor:pointer';
+            skipLbl.appendChild(skipCb);
+            skipLbl.appendChild(document.createTextNode('Skip assets whose name already matches (already prefixed / suffixed / nothing to replace)'));
+            pop.appendChild(skipLbl);
+
+            // --- Preview ---
+            const counters = document.createElement('div');
+            counters.style.cssText = 'font-size:11px;color:#bbb;margin-bottom:6px;line-height:1.5';
+            pop.appendChild(counters);
+            const tblWrap = document.createElement('div');
+            tblWrap.style.cssText = 'max-height:260px;overflow:auto;border:1px solid rgba(255,255,255,0.10);border-radius:3px;margin-bottom:10px;background:#15171b';
+            pop.appendChild(tblWrap);
+
+            // Build the plan: one item per unique asset in scope with its verdict.
+            //   queue → will be queued · skip → already matches (noop) ·
+            //   dup → blocked, name taken · empty → blocked, result empty · bad → blocked, template invalid
+            const compute = () => {
+                const op = currentOp(), scope = currentScope();
+                const text = cleanOperand(textIn.value);
+                const find = String(findIn.value || '');
+                const repl = cleanOperand(replIn.value);
+                const tpl = String(tplIn.value || '');
+                const tplOk = tpl.includes('{name}');
+                const tplParts = tplOk ? tpl.split('{name}').map(cleanOperand) : null;
+
+                const seen = new Set();
+                const items = [];
+                allRows.forEach(r => {
+                    if (!r.entity || r.type !== 3) return;
+                    if (seen.has(r.entity.id)) return;
+                    if (scope === 'sel') {
+                        if (!sumPanelState.selectedIds.has(r._rowKey)) return;
+                    } else {
+                        // nestDepth null = tree had no node for it (treated as root).
+                        if (r.nestDepth !== 0 && r.nestDepth !== null) return;
+                        if (scope === 'rootKids' && !(r.childCount > 0)) return;
+                    }
+                    seen.add(r.entity.id);
+                    items.push(r);
+                });
+
+                // Every asset's EFFECTIVE name (pending rename wins) → owner id, for the uniqueness check.
+                const taken = new Map();
+                allRows.forEach(r => {
+                    if (!r.entity || r.type !== 3) return;
+                    const p = getPendingName(r.entity.id);
+                    const nm = finalName(p ? p.newValue : (r.entity.name || '')).toLowerCase();
+                    if (nm && !taken.has(nm)) taken.set(nm, r.entity.id);
+                });
+
+                const plan = items.map(r => {
+                    const cur = (r.entity.name || '').trim();
+                    let out = cur, noop = false, bad = '';
+                    if (op === 'prefix') { out = text + cur; noop = !text || cur.startsWith(text.trim()) && text.trim() !== ''; }
+                    else if (op === 'suffix') { out = cur + text; noop = !text || cur.endsWith(text.trim()) && text.trim() !== ''; }
+                    else if (op === 'replace') { out = find ? cur.split(find).join(repl) : cur; noop = !find || !cur.includes(find); }
+                    else { if (!tplParts) { bad = 'template needs {name}'; } else { out = tplParts.join(cur); const pre = tplParts[0].trim(), post = tplParts[tplParts.length - 1].trim(); noop = finalName(out) === cur || (!!pre && cur.startsWith(pre)) || (!!post && cur.endsWith(post)); } }
+                    out = finalName(out);
+                    const pending = !!getPendingName(r.entity.id);
+                    let status = 'queue';
+                    if (bad) status = 'bad';
+                    else if (noop || out === cur) status = skipCb.checked || out === cur ? 'skip' : 'queue';
+                    else if (!out) status = 'empty';
+                    return { r, cur, out, status, pending, oddChars: !NAME_OK_RX.test(out) };
+                });
+                // Uniqueness: against the site (minus self) and within the batch.
+                const batchCount = new Map();
+                plan.forEach(p => { if (p.status === 'queue') batchCount.set(p.out.toLowerCase(), (batchCount.get(p.out.toLowerCase()) || 0) + 1); });
+                plan.forEach(p => {
+                    if (p.status !== 'queue') return;
+                    const k = p.out.toLowerCase();
+                    const owner = taken.get(k);
+                    if ((owner !== undefined && owner !== p.r.entity.id) || batchCount.get(k) > 1) p.status = 'dup';
+                });
+                return { plan, op, scope, bad: !tplOk && op === 'template' };
+            };
+
+            const STATUS_META = {
+                queue: { label: 'queue', col: '#5fff5f' },
+                skip: { label: 'skip · already matches', col: '#888' },
+                dup: { label: '⛔ name taken', col: '#ff5555' },
+                empty: { label: '⛔ empty result', col: '#ff5555' },
+                bad: { label: '⛔ template needs {name}', col: '#ff5555' },
+            };
+            const refreshPreview = () => {
+                showInputs();
+                const { plan } = compute();
+                const n = (s) => plan.filter(p => p.status === s).length;
+                const odd = plan.filter(p => p.status === 'queue' && p.oddChars).length;
+                const pend = plan.filter(p => p.status === 'queue' && p.pending).length;
+                if (plan.length === 0) {
+                    counters.innerHTML = '⚠️ No assets in scope.';
+                    tblWrap.innerHTML = '';
+                    return;
+                }
+                const bits = [`Will queue <strong style="color:#ffd54f">${n('queue')}</strong> rename${n('queue') === 1 ? '' : 's'} of ${plan.length} in scope`];
+                if (n('skip')) bits.push(`${n('skip')} already matching`);
+                if (n('dup')) bits.push(`<span style="color:#ff5555">⛔ ${n('dup')} blocked — name already taken</span>`);
+                if (n('empty')) bits.push(`<span style="color:#ff5555">⛔ ${n('empty')} blocked — empty result</span>`);
+                if (n('bad')) bits.push(`<span style="color:#ff5555">⛔ template must contain {name}</span>`);
+                if (odd) bits.push(`<span style="color:#ffb347">⚠ ${odd} keep characters outside A-Z 0-9 space - _ (from the original name)</span>`);
+                if (pend) bits.push(`<span style="color:#ffb347">${pend} replace an already-queued rename</span>`);
+                counters.innerHTML = bits.join(' · ');
+
+                tblWrap.innerHTML = '';
+                const tbl = document.createElement('table');
+                tbl.style.cssText = 'width:100%;border-collapse:collapse;font-size:11px';
+                const order = { dup: 0, empty: 0, bad: 0, queue: 1, skip: 2 };
+                const sorted = plan.slice().sort((a, b) => (order[a.status] - order[b.status]) || a.cur.localeCompare(b.cur));
+                sorted.slice(0, PREVIEW_MAX).forEach(p => {
+                    const tr = document.createElement('tr');
+                    tr.style.cssText = 'border-bottom:1px solid rgba(255,255,255,0.06)';
+                    const c1 = document.createElement('td'); c1.style.cssText = 'padding:2px 6px;color:#aaa;white-space:nowrap;max-width:220px;overflow:hidden;text-overflow:ellipsis'; c1.textContent = p.cur; c1.title = p.cur;
+                    const c2 = document.createElement('td'); c2.style.cssText = 'padding:2px 4px;color:#666'; c2.textContent = '→';
+                    const c3 = document.createElement('td'); c3.style.cssText = 'padding:2px 6px;color:' + (p.status === 'queue' ? '#ffd54f' : '#777') + ';white-space:nowrap;max-width:240px;overflow:hidden;text-overflow:ellipsis'; c3.textContent = p.status === 'skip' ? p.cur : p.out; c3.title = p.out;
+                    const c4 = document.createElement('td'); c4.style.cssText = 'padding:2px 6px;white-space:nowrap;text-align:right;color:' + STATUS_META[p.status].col; c4.textContent = STATUS_META[p.status].label + (p.status === 'queue' && p.pending ? ' (replaces queued)' : '');
+                    tr.appendChild(c1); tr.appendChild(c2); tr.appendChild(c3); tr.appendChild(c4);
+                    tbl.appendChild(tr);
+                });
+                tblWrap.appendChild(tbl);
+                if (sorted.length > PREVIEW_MAX) {
+                    const more = document.createElement('div');
+                    more.style.cssText = 'padding:4px 6px;color:#888;font-size:10px';
+                    more.textContent = `… ${sorted.length - PREVIEW_MAX} more not shown (all are queued)`;
+                    tblWrap.appendChild(more);
+                }
+            };
+            [opPrefix, opSuffix, opReplace, opTemplate, scRoot, scRootKids, scSel].forEach(o => { o.r.onchange = refreshPreview; });
+            [textIn, findIn, replIn, tplIn].forEach(i => { i.oninput = refreshPreview; });
+            skipCb.onchange = refreshPreview;
+            // Hotkeys must not fire while typing in the popover (capture-phase listeners upstream).
+            pop.addEventListener('keydown', (e) => { e.stopPropagation(); }, true);
+            refreshPreview();
+
+            const btnRow = document.createElement('div');
+            btnRow.style.cssText = 'display:flex;justify-content:flex-end;gap:8px';
+            const cancelBtn = document.createElement('button');
+            cancelBtn.type = 'button';
+            cancelBtn.textContent = 'Cancel';
+            cancelBtn.style.cssText = 'background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px';
+            cancelBtn.onclick = onClose;
+            const queueBtn = document.createElement('button');
+            queueBtn.type = 'button';
+            queueBtn.textContent = 'Queue renames';
+            queueBtn.title = 'Queues one name edit per asset — nothing is written until Apply';
+            queueBtn.style.cssText = 'background:rgba(255,213,79,0.18);color:#ffd54f;border:1px solid rgba(255,213,79,0.55);border-radius:3px;padding:5px 14px;cursor:pointer;font:inherit;font-size:11px;font-weight:600';
+            queueBtn.onclick = () => {
+                const { plan, op, scope } = compute();
+                const todo = plan.filter(p => p.status === 'queue');
+                const blocked = plan.filter(p => p.status === 'dup' || p.status === 'empty' || p.status === 'bad').length;
+                if (todo.length === 0) { showToast('Nothing to queue — check the preview', 'rgba(255,82,82,0.6)'); return; }
+                let queued = 0;
+                todo.forEach(p => {
+                    try { if (queueNameEdit(p.r.entity, p.out)) queued++; }
+                    catch (e) { console.error(`${TAG} 🏷 rename: queue failed for "${p.cur}" → "${p.out}":`, e); }
+                });
+                console.log(`${TAG} 🏷 rename: queued ${queued}/${todo.length} (${op}, scope ${scope}) · ${plan.length - todo.length - blocked} skipped · ${blocked} blocked`);
+                showToast(`Queued ${queued} rename${queued === 1 ? '' : 's'}${blocked ? ` · ${blocked} blocked (see preview)` : ''} — hit Apply to commit`, 'rgba(255,213,79,0.7)');
+                onClose();
+                redrawTable();
+            };
+            btnRow.appendChild(cancelBtn);
+            btnRow.appendChild(queueBtn);
+            pop.appendChild(btnRow);
+            return pop;
+        }
+
         function buildBulkValidatePopover(anchor, onClose) {
             const pop = document.createElement('div');
             pop.style.cssText = 'position:fixed;background:#1f2228;border:1px solid rgba(255,213,79,0.55);border-radius:5px;box-shadow:0 4px 16px rgba(0,0,0,0.5);padding:12px 14px;z-index:99999;font-size:12px;color:#e6e6e6;min-width:320px';
