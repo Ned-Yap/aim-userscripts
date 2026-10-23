@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.440
+// @version      4.441
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.440';
+    const SCRIPT_VERSION = '4.441';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -25813,6 +25813,7 @@
         if (!el || el.nodeType !== 1 || el.classList.contains('aim-ent-tip')) return false;
         if (el.namespaceURI && el.namespaceURI.indexOf('svg') !== -1) return false;               // SVG: Leaflet vectors, icons
         if (/^(INPUT|TEXTAREA|SELECT|BUTTON|A|OPTION|LI|TD|TH|LABEL|SCRIPT|STYLE|IMG|CANVAS)$/.test(el.tagName)) return false;
+        if (el.classList.contains('leaflet-pane') || el.classList.contains('leaflet-container') || el.classList.contains('leaflet-map-pane')) return false;   // v4.441: never a whole pane (it once matched when the tooltip pane held a single NFZ label)
         if (el.childElementCount > 3) return false;
         const txt = impSmallText(el); if (!txt || txt.length > 120) return false;
         if (!impEntityNames().has(txt)) return false;
