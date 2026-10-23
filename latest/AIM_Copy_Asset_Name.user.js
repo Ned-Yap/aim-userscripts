@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.429
+// @version      4.430
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.429';
+    const SCRIPT_VERSION = '4.430';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -25492,16 +25492,38 @@
     // tagged aim-ent-tip. Works for Leaflet tooltips, React portals, anything. Entity names come from
     // the site fetch (triggered here once per site if nothing has fetched yet).
     let impLabelObs = null, impLabelObsDoc = null, impLabelFetchSid = null;
+    // v4.430: this runs for EVERY DOM mutation in the map frame, so the order of the checks is the whole
+    // cost. Before: a long selector match, textContent of whatever container the 3-level walk-up landed
+    // on, and getComputedStyle (a forced style recalc INSIDE the observer callback) on every added node
+    // outside the map — the app crawled all morning. Now: tag / size / bounded text / name lookup first
+    // (all O(1)-ish, no layout), and the selectors + computed style only for the rare element whose
+    // text IS an entity name on this site.
+    function impSmallText(el) {
+        // text of a small element; null when it holds more than a dozen nodes (never a label)
+        let budget = 16, out = '';
+        const walk = (n) => {
+            for (let c = n.firstChild; c; c = c.nextSibling) {
+                if (--budget < 0) return false;
+                if (c.nodeType === 3) out += c.nodeValue;
+                else if (c.nodeType === 1 && !walk(c)) return false;
+            }
+            return true;
+        };
+        return walk(el) ? out.trim() : null;
+    }
     function impTagLabelEl(el) {
         if (!el || el.nodeType !== 1 || el.classList.contains('aim-ent-tip')) return false;
+        if (el.namespaceURI && el.namespaceURI.indexOf('svg') !== -1) return false;               // SVG: Leaflet vectors, icons
+        if (/^(INPUT|TEXTAREA|SELECT|BUTTON|A|OPTION|LI|TD|TH|LABEL|SCRIPT|STYLE|IMG|CANVAS)$/.test(el.tagName)) return false;
+        if (el.childElementCount > 3) return false;
+        const txt = impSmallText(el); if (!txt || txt.length > 120) return false;
+        if (!impEntityNames().has(txt)) return false;
+        // ---- from here on only for text that is exactly an entity name (rare) ----
         if (el.closest && el.closest('#aim-imp-hovertip, [id^="aim-"], .aim-imp-sec')) return false;   // never our own UI
         // v4.428: a map LABEL only — inside the Leaflet container, or a floating element outside it. Never the
         // Map Entities list, search results, forms, buttons or anything laid out in a panel (those rows are entity names too).
-        if (/^(INPUT|TEXTAREA|SELECT|BUTTON|A|OPTION|LI|TD|TH|LABEL)$/.test(el.tagName)) return false;
         if (el.closest && el.closest('ul, ol, table, form, [role="list"], [role="listbox"], [role="menu"], [role="dialog"], .ant-select, .ant-dropdown, .ant-modal, .ant-form, [class*="entit"], [class*="sidebar"], [class*="side-bar"], [class*="panel"], [class*="list"], [class*="menu"], [class*="header"]')) return false;
         if (!(el.closest && el.closest('.leaflet-container'))) { let pos = ''; try { pos = el.ownerDocument.defaultView.getComputedStyle(el).position; } catch (e) {} if (pos !== 'absolute' && pos !== 'fixed') return false; }
-        const txt = (el.textContent || '').trim(); if (!txt || txt.length > 120 || el.childElementCount > 3) return false;
-        if (!impEntityNames().has(txt)) return false;
         el.classList.add('aim-ent-tip');
         console.log(`${TAG} 📥 entity label tagged: "${txt}" <${el.tagName.toLowerCase()} class="${el.className}">`);
         return true;
@@ -25516,6 +25538,7 @@
         impLabelObsDoc = doc;
         impLabelObs = new MutationObserver((recs) => {
             if (!impLabelsShift) return;
+            if (!impEntityNames().size) return;                                          // v4.430: nothing can match yet
             try {
                 for (const r of recs) {
                     const cands = [];

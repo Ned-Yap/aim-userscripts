@@ -1,3 +1,7 @@
+## 2026-10-23 — perf: name-label watcher made cheap — Site Setup Tools latest v4.430 (latest only)
+
+- **v4.430** — **fix: the whole app crawled** since v4.423. The entity name-label watcher runs for every DOM change in the map frame, and per added node it was matching a long selector list, reading the text of whatever container it walked up to, and calling `getComputedStyle` (a forced style recalc inside the observer callback). Now the cheap checks come first (tag, size, a bounded text read, entity-name lookup) and the selectors / computed style only run for an element whose text is exactly an entity name. Behaviour unchanged; SVG elements and batches before the site's names are loaded are skipped outright.
+
 ## 2026-10-22 — Name-match guard + `P3 - H - Pumping Jack` type format — Site Setup Tools latest v4.427 → v4.429 (latest only)
 
 - **v4.429** — while ↔ Move / ✏ Shape are armed, Percepto's entity polygons and markers ignore the mouse, so picking up a dot that sits inside an NFZ no longer opens the NFZ's native editor. Hold SHIFT to click through to Percepto as usual. The tools end, everything is clickable again.
