@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.433
+// @version      4.434
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.433';
+    const SCRIPT_VERSION = '4.434';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -6671,7 +6671,7 @@
             return false;
         }
     }
-    async function createAssetSquare(sid, lat, lng, sizeFt, name, subtype, subtypeIsNew, notes, customPoints) {
+    async function createAssetSquare(sid, lat, lng, sizeFt, name, subtype, subtypeIsNew, notes, customPoints, extra) {
         if (liteBlockedWrite('create asset')) return { ok: false, error: 'Read-only in Lite mode.' };
         try {
             const csrf = getCsrfToken();
@@ -6713,6 +6713,7 @@
                 pole_is_simple: true,
             };
             b.mountain_terrain_site = !!(siteCfg && siteCfg.mountain_terrain);
+            if (extra && typeof extra === 'object') Object.assign(b, extra);     // v4.434: e.g. { external_asset_id } — top-level fields the importer wants on the new asset
             const r = await fetch('/map_objects/', {
                 method: 'POST', credentials: 'same-origin',
                 headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf },
@@ -23464,7 +23465,7 @@
             if (pr) impZoomToPad(pr.getAttribute('data-impri-pad'));
         };
         if (c.on) impRenderPriSummary();
-        const rerun = () => { impComputePriority(); impRenderPriUi(); impRenderStaged(); impSyncUi(); impMarkDirty(); impStoreMapping(imp.headers, { name: imp.mapping.name, lat: imp.mapping.lat, lng: imp.mapping.lng, type: imp.mapping.type, notesCols: impNotesCols(), pri: { on: c.on, oilCol: c.oilCol, waterCol: c.waterCol, blpdCol: c.blpdCol, priCol: c.priCol } }); };
+        const rerun = () => { impComputePriority(); impRenderPriUi(); impRenderStaged(); impSyncUi(); impMarkDirty(); impStoreMapping(imp.headers, { name: imp.mapping.name, lat: imp.mapping.lat, lng: imp.mapping.lng, type: imp.mapping.type, extId: imp.mapping.extId || null, notesCols: impNotesCols(), pri: { on: c.on, oilCol: c.oilCol, waterCol: c.waterCol, blpdCol: c.blpdCol, priCol: c.priCol } }); };
         el.querySelector('#aim-imp-pri-hdr').onclick = () => { c.open = !c.open; impSaveParams(); impRenderPriUi(); };
         const stg = el.querySelector('[data-impri-settings-toggle]'); if (stg) stg.onclick = () => { c.setOpen = !setOpen; impSaveParams(); impRenderPriUi(); };
         el.querySelector('input[data-impri-on]').onchange = function () { c.on = this.checked; rerun(); };
@@ -23596,6 +23597,7 @@
             name: find(['name', 'pad_name', 'well name', 'asset name', 'asset', 'title', 'label'], /name/),
             type: find(['type', 'pad_type', 'asset_type', 'asset type', 'well_type', 'well type', 'production_method_name', 'production method', 'production_method', 'method', 'category', 'profiletype', 'v or h', 'designation', 'subtype', 'class', 'equipment', 'kind'], /type|method|categ|class|equip/),
             notes: find(['notes', 'note', 'description', 'comment', 'comments', 'remarks'], /note|desc|comment|remark/),   // v4.330 → asset notes (v4.345: seeds the Notes checklist)
+            extId: find(['external id', 'external_id', 'externalid', 'accounting id', 'accounting_id', 'battery_accounting_id', 'asset id', 'asset_id', 'cost center', 'cost_center'], /accounting|external|ext.?id|cost.?cent/),   // v4.434 → Percepto External ID (the client's accounting id)
         };
     }
     // v4.345: Notes = any number of extra columns, each with a cleaned label, in
@@ -23623,6 +23625,9 @@
         return m.notesCols;
     }
     const IMP_STAMP_RE = /^Imported by (.+?) on (\d{4}-\d{2}-\d{2} \d{2}:\d{2}) from (.+?)(?: · (created|updated) by import)?\s*$/m;
+    // v4.434: the client's accounting id → Percepto's External ID (asset form field `external_asset_id`, 100 chars)
+    const IMP_EXT_FIELD = 'external_asset_id';
+    function impExtIdOf(p) { const m = imp.mapping; if (!m || !m.extId || !p) return ''; const v = (imp.rows[p.i] || {})[m.extId]; return String(v == null ? '' : v).trim().slice(0, 100); }
     function impComposeNotes(p, when, how) {
         const r = imp.rows[p.i] || {};
         const dateStr = String(when).slice(0, 10);
@@ -24214,6 +24219,87 @@
         ];
         impExportTable(rows, cols, how, 'list-vs-site', 'change');
     }
+    // ---- v4.434 🆔 EXTERNAL ID BACKFILL — assets ALREADY on the site (matched by name, unambiguous) whose
+    // External ID is empty or differs from the file's accounting id. Writes that ONE field (type, notes,
+    // shape untouched). Dry run honoured; before-bodies banked for ↩ Undo; verify by refetch. ----
+    function impExtIdPlan() {
+        const live = imp.points.filter(p => !p.done && p.dup && !p.dupAmbiguous && p.dupId != null);
+        const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+        const byId = new Map(ents.map(e => [e.id, e]));
+        const R = { set: [], change: [], same: [], none: [], scope: imp.extScope === 'all' ? 'all' : 'selected' };
+        live.forEach(p => {
+            if (R.scope === 'selected' && !p.sel) return;
+            const e = byId.get(p.dupId); if (!e) return;
+            const want = impExtIdOf(p), have = String(e[IMP_EXT_FIELD] == null ? '' : e[IMP_EXT_FIELD]).trim();
+            const row = { p, e, name: e.name || p.name, want, have };
+            if (!want) R.none.push(row); else if (!have) R.set.push(row); else if (have !== want) R.change.push(row); else R.same.push(row);
+        });
+        return R;
+    }
+    function impRenderExtIdUi() {
+        const el = document.getElementById('aim-imp-extid'); if (!el) return;
+        if (!imp.points.length) { el.innerHTML = ''; return; }
+        const m = imp.mapping || {};
+        const inCss = 'background:#1a1d23;border:1px solid rgba(122,223,230,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px';
+        if (!m.extId) {
+            el.innerHTML = `<div style="padding:6px 8px;background:rgba(255,179,71,0.05);border:1px dashed rgba(255,179,71,0.4);border-radius:3px;font-size:11px;color:#cfd6dc"><b style="color:#ffb347">🆔 External ID</b> <span style="color:#888;font-size:10px">no column mapped — pick the client's accounting-id column under 2 · Data file › edit (🆔 External ID) and it is written on every create / update; this box then backfills the assets already on the site</span></div>`;
+            return;
+        }
+        const R = impExtIdPlan(); const todo = R.set.length + R.change.length;
+        const row = (x, col) => `<div data-impext-id="${x.e.id}" style="display:flex;align-items:center;gap:6px;padding:1px 4px;border-bottom:1px solid rgba(255,255,255,0.05);font-size:10.5px;color:#cfd6dc;cursor:pointer" onmouseover="this.style.background='rgba(255,255,255,0.05)'" onmouseout="this.style.background=''" title="click = zoom"><span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${col};flex:none"></span><b style="flex:none;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${impEsc(x.name)}</b><span style="color:#8a949e;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${x.have ? `<s>${impEsc(x.have)}</s> → ` : 'empty → '}<b style="color:#cfd6dc">${impEsc(x.want)}</b></span></div>`;
+        el.innerHTML = `<div style="padding:6px 8px;background:rgba(122,223,230,0.04);border:1px dashed rgba(122,223,230,0.3);border-radius:3px;margin-bottom:6px;font-size:11px;color:#cfd6dc">
+            <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:4px">
+                <b style="color:#7adfe6">🆔 External ID on assets already on the site</b>
+                <span style="color:#888;font-size:10px">column <b style="color:#cfd6dc">${impEsc(m.extId)}</b> · name matches only · writes that one field, nothing else</span>
+                <select data-impext-scope style="${inCss}"><option value="selected"${R.scope === 'selected' ? ' selected' : ''}>selected points</option><option value="all"${R.scope === 'all' ? ' selected' : ''}>whole file</option></select>
+                <span style="flex:1"></span>
+                <span style="color:#5fff5f">${R.same.length} already right</span> · <span style="color:#7adfe6">${R.set.length} empty → set</span> · <span style="color:#ffb347">${R.change.length} different → change</span>${R.none.length ? ` · <span style="color:#888">${R.none.length} no id in the file</span>` : ''}
+            </div>
+            ${todo ? `<div style="max-height:160px;overflow:auto;border:1px solid rgba(255,255,255,0.06);border-radius:3px;background:rgba(0,0,0,0.15)">${R.change.map(x => row(x, '#ffb347')).join('')}${R.set.map(x => row(x, '#7adfe6')).join('')}</div>` : ''}
+            <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
+                <button data-impext-write ${todo ? '' : 'disabled'} style="${btnCss('255,120,60')};font-weight:600${todo ? '' : ';opacity:0.45;cursor:default'}" title="WRITES to AIM: sets External ID on these existing assets. Type, notes, shape and position are not touched. Honours Dry run; backup + ↩ Undo last import.">⚡ Write ${todo} External ID${todo === 1 ? '' : 's'}</button>
+                <span style="color:#888;font-size:10px">${todo ? 'new points get theirs at ⚡ Create automatically — this is for the ones created before the column was mapped' : (R.same.length ? '✓ every matched asset already carries the file\'s id' : 'nothing matched by name in this scope')}</span>
+            </div>
+        </div>`;
+        el.querySelector('[data-impext-scope]').onchange = function () { imp.extScope = this.value === 'all' ? 'all' : 'selected'; impRenderExtIdUi(); };
+        el.querySelectorAll('[data-impext-id]').forEach(r => r.onclick = () => { const id = Number(r.getAttribute('data-impext-id')); const x = R.set.concat(R.change).find(y => y.e.id === id); if (!x) return; const c = ringCentroid(entityCoords(x.e) || []); if (c) impZoomToPoints([{ lat: c.lat, lng: c.lng, name: x.name }], x.name); });
+        const wb = el.querySelector('[data-impext-write]'); if (wb) wb.onclick = () => impExtIdWrite().catch(e => { console.warn(`${TAG} 🆔`, e); impStatus(`🆔 ${impEsc(e && e.message || e)}`, '#ff6060'); });
+    }
+    async function impExtIdWrite() {
+        if (liteBlockedWrite('write External IDs')) return;
+        const sid = genState.siteID;
+        try { await fetchMapObjects(sid, true); } catch (e) {}
+        impBuildAssetIndex(); impComputeDups();
+        const R = impExtIdPlan(); const todo = R.change.concat(R.set);
+        if (!todo.length) { impStatus('🆔 nothing to write', '#5fff5f'); impRenderExtIdUi(); return; }
+        const dry = (() => { try { return !!document.getElementById('aim-gen-dryrun').checked; } catch (e) { return true; } })();
+        if (dry) { impStatus(`DRY RUN — would set External ID on <b>${todo.length}</b> existing asset(s): ${impEsc(todo.slice(0, 10).map(x => `${x.name} → ${x.want}`).join(' · '))}${todo.length > 10 ? ' …' : ''}. Untick Dry run to write.`); return; }
+        const csrf = getCsrfToken(); if (!csrf) { impStatus('No CSRF token — make one native save anywhere in Percepto first, then retry', '#ff6060'); return; }
+        let siteCfg = null; try { siteCfg = await fetchSiteConfig(sid); } catch (e) {}
+        if (!siteCfg) { impStatus('Could not read the site config — nothing written', '#ff6060'); return; }
+        if (!confirm(`Set External ID on ${todo.length} existing asset(s) from column "${imp.mapping.extId}"?\n\nOnly that field changes. ↩ Undo last import puts the previous values back.`)) return;
+        try { downloadJSONFile(`external-ids-${sid}-${Date.now()}.json`, JSON.stringify({ site: sid, at: new Date().toISOString(), column: imp.mapping.extId, changes: todo.map(x => ({ id: x.e.id, name: x.name, before: x.have, after: x.want })), before: todo.map(x => x.e) }, null, 1)); } catch (e) {}
+        let ok = 0, fail = 0; const done = [];
+        for (let i = 0; i < todo.length; i++) {
+            const x = todo[i]; impStatus(`🆔 ${i + 1}/${todo.length} — "${impEsc(x.name)}" → ${impEsc(x.want)}…`);
+            try {
+                const body = buildWriteBody(x.e, siteCfg); body[IMP_EXT_FIELD] = x.want;
+                const rr = await fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) });
+                if (rr.status === 200) { ok++; done.push({ id: x.e.id, name: x.name, before: JSON.parse(JSON.stringify(x.e)), want: x.want }); }
+                else { fail++; const t = await rr.text(); console.warn(`${TAG} 🆔 "${x.name}" ${rr.status} ${t.slice(0, 200)}`); if (rr.status === 403) { impStatus(`ABORTED at ${i + 1}/${todo.length} — server 403`, '#ff6060'); break; } }
+            } catch (e) { fail++; console.warn(`${TAG} 🆔 "${x.name}"`, e); }
+            await sleep(DELETE_GAP_MS);
+        }
+        try { await fetchMapObjects(sid, true); } catch (e) {}
+        const after = new Map(((mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || []).map(e => [e.id, e]));
+        const confirmed = done.filter(d => String((after.get(d.id) || {})[IMP_EXT_FIELD] || '') === d.want).length;
+        const echoed = done.some(d => after.get(d.id) && after.get(d.id)[IMP_EXT_FIELD] !== undefined);
+        imp.lastUpdated = imp.lastUpdated.concat(done.map(d => ({ id: d.id, name: d.name, before: d.before })));
+        imp._rootCache = null; impBuildAssetIndex(); impComputeDups(); impRefreshAfterSelChange();
+        try { impSaveSession('import'); } catch (e) {}
+        impRenderExtIdUi();
+        impStatus(`🆔 DONE: <b>${ok}</b> written${fail ? ` · <span style="color:#ff6060">${fail} failed</span>` : ''} · verify ${confirmed}/${done.length} read back${!echoed && done.length ? ' · <b style="color:#ff6060">the server did not return the field at all — the API name may differ from "' + IMP_EXT_FIELD + '"; open one asset in Percepto to check, and tell me</b>' : ''} · ↩ Undo last import reverts`, fail || confirmed < done.length ? '#ffb347' : '#5fff5f');
+    }
     function impRenderImportsUi() {
         const el = document.getElementById('aim-imp-imports'); if (!el) return;
         let groups = []; try { groups = impScanImports(); } catch (e) { console.warn(`${TAG} 📥 import scan failed:`, e); }
@@ -24309,7 +24395,7 @@
             <div style="margin-top:6px;font-size:10px;color:#888">Stamp: <b style="color:#cfd6dc">Imported by ${impEsc(impAuthor() || 'AIM user')}</b> on &lt;date time&gt; from ${impEsc(imp.fileName || 'file')} <a href="#" data-impnauthor="1" style="color:#7adfe6;margin-left:4px">${impAuthor() ? 'change name' : 'set your name'}</a></div>
             ${preview ? `<details style="margin-top:4px"><summary style="cursor:pointer;color:#9ad;font-size:10px">preview — first point (${preview.length} / 2000 chars)</summary><pre style="margin:4px 0 0;padding:6px 8px;background:#1a1d23;border-radius:3px;font:inherit;font-size:10px;color:#cfd6dc;white-space:pre-wrap;max-height:220px;overflow:auto">${impEsc(preview)}</pre></details>` : ''}
         </div>`;
-        const save = () => { impStoreMapping(imp.headers, { name: m.name, lat: m.lat, lng: m.lng, type: m.type, notesCols: impNotesCols() }); impRenderNotesCols(host); };
+        const save = () => { impStoreMapping(imp.headers, { name: m.name, lat: m.lat, lng: m.lng, type: m.type, extId: m.extId || null, notesCols: impNotesCols() }); impRenderNotesCols(host); };
         el.querySelectorAll('input[data-impncol]').forEach(cb => cb.onchange = () => {
             const h = cb.getAttribute('data-impncol'); const cur = impNotesCols();
             if (cb.checked) { if (!cur.some(c => c.col === h)) cur.push({ col: h, label: impCleanLabel(h) }); }
@@ -24408,7 +24494,7 @@
         impResolveFileDuplicates();   // v4.363: battery + well sharing a name → "<name> BATTERY"; other repeats → "-DUP"
         if (m.pri && typeof m.pri === 'object' && !imp.pri._guessed) { ['oilCol', 'waterCol', 'blpdCol', 'priCol'].forEach(k => { imp.pri[k] = imp.headers.includes(m.pri[k]) ? m.pri[k] : null; }); if (typeof m.pri.on === 'boolean') imp.pri.on = m.pri.on; imp.pri._guessed = true; }
         imp._rootCache = null;
-        impStoreMapping(imp.headers, { name: m.name, lat: m.lat, lng: m.lng, type: m.type, notesCols: impNotesCols(), pri: { on: imp.pri.on, oilCol: imp.pri.oilCol, waterCol: imp.pri.waterCol, blpdCol: imp.pri.blpdCol, priCol: imp.pri.priCol } });
+        impStoreMapping(imp.headers, { name: m.name, lat: m.lat, lng: m.lng, type: m.type, extId: m.extId || null, notesCols: impNotesCols(), pri: { on: imp.pri.on, oilCol: imp.pri.oilCol, waterCol: imp.pri.waterCol, blpdCol: imp.pri.blpdCol, priCol: imp.pri.priCol } });
         impMarkDirty();
         imp.mapOpen = false;
         impRenderMappingUi();
@@ -24420,6 +24506,7 @@
         impRenderTypeMapUi();
         try { impRenderEnvUi(); } catch (e) {}
         imp.ana.result = null; try { impRenderAnalyzeUi(); } catch (e) {}
+        try { impRenderExtIdUi(); } catch (e) {}
         const dupN = imp.points.filter(p => p.dup).length, childN = imp.points.filter(p => p.child).length, nearN = imp.points.filter(p => p.near).length;
         impStatus(`Staged <b>${imp.points.length}</b> point(s), all selected`
             + (imp.invalid ? ` · <span style="color:#ffb347">${imp.invalid} row(s) skipped (bad/missing coordinates)</span>` : '')
@@ -24624,6 +24711,7 @@
         if (p.cand) { bits.push(p.pa ? (p.cand.onPad ? 'on our pad — shown only, never staged' : (imp.env.paAssets === false ? 'P&A staging off' : (imp.env.missingSel.has(p.cand.api) ? 'ticked to stage' : 'not ticked'))) : `${p.cand.onPad ? 'on our pad' : 'off our pads'} · ${imp.env.missingSel.has(p.cand.api) ? 'ticked to stage' : 'not ticked'}`); }
         if (p.typeRaw) bits.push(p.typeRaw);
         if (imp.hv.on && !p.cand && !p.pa) { const r = impHvOf(p); if (r.hv) bits.push(`${r.hv.toUpperCase()} (${r.src})`); }
+        if (!p.cand) { const x = impExtIdOf(p); if (x) bits.push(`🆔 ${x}`); }
         if (imp.pri.on && p.pri) bits.push(p.pri.tier || 'no tier');
         if (p.dup) bits.push(imp.dupMode === 'update' ? 'update' : 'name match');
         if (p.src === 'enverus') bits.push('from Enverus'); if (p.src === 'enverus-3p') bits.push('3rd party'); if (p.src === 'client') bits.push('from the client response');
@@ -25838,6 +25926,7 @@
                 <button id="aim-imp-commit" style="${btnCss('255,120,60')};font-weight:600" title="WRITES to AIM: creates the selected staged points as real assets (updates type + notes on name matches). Honours Dry run. A backup manifest downloads first; ↩ Undo reverts exactly this run.">⚡ Create selected</button>
                 <button id="aim-imp-undocreate" style="${btnCss('255,179,71')}" title="WRITES to AIM: deletes exactly the assets the most recent import created (this session) and puts updated ones back. Each delete rides Delete Guard's undo ring when installed.">↩ Undo last import</button>
             </div>
+            <div id="aim-imp-extid" style="margin-top:6px"></div>
             <div id="aim-imp-analyze" style="margin-top:6px"></div>
             <div id="aim-imp-imports" style="margin-top:6px"></div>
             ${IMP_SEC_CLOSE}
@@ -25863,6 +25952,7 @@
         impRenderResumeUi();
         try { impRenderImportsUi(); } catch (e) {}
         try { impRenderAnalyzeUi(); } catch (e) {}
+        try { impRenderExtIdUi(); } catch (e) {}
         try { impRenderRespUi(); } catch (e) {}
         try { impRenderSwapUi(); } catch (e) {}
         impAutosaveTimer();
@@ -25970,7 +26060,7 @@
         if (!imp.mapOpen && imp.points.length && m.lat && m.lng) {
             const part = (k, label) => `${label}=<b style="color:#cfd6dc">${impEsc(m[k] || '—')}</b>`;
             const nc = impNotesCols();
-            el.innerHTML = `<div style="font-size:10px;color:#7a8794;padding:2px 0">Columns: ${part('name', 'Name')} · ${part('type', 'Type')} · ${part('lat', 'Lat')} · ${part('lng', 'Lng')} · Notes=<b style="color:#cfd6dc">original name${nc.length ? ` + ${nc.length} column${nc.length === 1 ? '' : 's'}` : ''} + stamp</b> <a href="#" id="aim-imp-mapedit" style="color:#7adfe6;margin-left:6px">edit</a></div>`;
+            el.innerHTML = `<div style="font-size:10px;color:#7a8794;padding:2px 0">Columns: ${part('name', 'Name')} · ${part('type', 'Type')} · ${part('lat', 'Lat')} · ${part('lng', 'Lng')} · ${part('extId', '🆔 External ID')} · Notes=<b style="color:#cfd6dc">original name${nc.length ? ` + ${nc.length} column${nc.length === 1 ? '' : 's'}` : ''} + stamp</b> <a href="#" id="aim-imp-mapedit" style="color:#7adfe6;margin-left:6px">edit</a></div>`;
             el.querySelector('#aim-imp-mapedit').onclick = (ev) => { ev.preventDefault(); imp.mapOpen = true; impRenderMappingUi(); };
             return;
         }
@@ -25981,7 +26071,7 @@
                 <select data-impmap="${key}" style="max-width:130px;background:#1a1d23;border:1px solid rgba(122,223,230,0.45);color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px">${opts}</select></label>`;
         };
         el.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:6px 8px;background:rgba(122,223,230,0.05);border:1px dashed rgba(122,223,230,0.3);border-radius:3px">
-            ${sel('name', 'Name', true)} ${sel('lat', 'Lat', false)} ${sel('lng', 'Lng', false)} ${sel('type', 'Type', true)}
+            ${sel('name', 'Name', true)} ${sel('lat', 'Lat', false)} ${sel('lng', 'Lng', false)} ${sel('type', 'Type', true)} <span title="Written into Percepto's 'External ID' field on every created / updated asset — the client's accounting id, so their systems and ours agree on which asset is which">${sel('extId', '🆔 External ID', true)}</span>
             <button id="aim-imp-applymap" style="background:rgba(95,255,95,0.15);color:#5fff5f;border:1px solid rgba(95,255,95,0.55);border-radius:3px;padding:4px 12px;cursor:pointer;font:inherit;font-size:11px;font-weight:600">✓ Apply</button>
             <div id="aim-imp-notescols" style="flex-basis:100%"></div>
         </div>`;
@@ -27334,10 +27424,12 @@
         };
         const plan = targets.map(p => ({ p, subtype: subtypeFor(p), update: !!(p.dup && imp.dupMode === 'update' && p.dupId != null) }));
         if (missing.size) { impStatus(`BLOCKED — rows with a blank type: pick a subtype for <b>${impEsc([...missing].join(' · '))}</b> in the Type table above.`, '#ff6060'); return; }
+        plan.forEach(x => { x.ext = impExtIdOf(x.p); });
+        const nExt = plan.filter(x => x.ext).length;
         const dry = (() => { try { return !!document.getElementById('aim-gen-dryrun').checked; } catch (e) { return true; } })();
         const nUpd = plan.filter(x => x.update).length, nCre = plan.length - nUpd;
         const nPa = plan.filter(x => x.p.pa).length;
-        if (dry) { impStatus(`DRY RUN — would create <b>${nCre}</b> asset(s) (${impSizeFt}×${impSizeFt} ft squares${nPa ? `, 🩻 ${nPa} P&A as ${imp.env.paSizeFt} ft triangles` : ''})${guardedN ? ` · ${guardedN} near-match${guardedN === 1 ? '' : 'es'} set aside as NEW (battery wrapper / -DUP — hover the dot)` : ''}${nUpd ? ` and UPDATE type + notes on <b>${nUpd}</b> existing` : ''}${skippedDups ? `, skipping ${skippedDups} name match(es)` : ''}${imp.pri.on ? ` · tiers ON (${plan.filter(x => /^P[1-3] - /.test(x.subtype)).length} prefixed)` : ''}: ${impEsc(plan.slice(0, 12).map(x => `${x.update ? '↻ ' : ''}${x.p.name} [${x.subtype}]`).join(' · '))}${plan.length > 12 ? ' …' : ''}. Untick Dry run to write.`); return; }
+        if (dry) { impStatus(`DRY RUN — would create <b>${nCre}</b> asset(s) (${impSizeFt}×${impSizeFt} ft squares${nPa ? `, 🩻 ${nPa} P&A as ${imp.env.paSizeFt} ft triangles` : ''})${imp.mapping && imp.mapping.extId ? ` · 🆔 External ID on ${nExt}/${plan.length}` : ' · <span style="color:#ffb347">no External ID column mapped</span>'}${guardedN ? ` · ${guardedN} near-match${guardedN === 1 ? '' : 'es'} set aside as NEW (battery wrapper / -DUP — hover the dot)` : ''}${nUpd ? ` and UPDATE type + notes on <b>${nUpd}</b> existing` : ''}${skippedDups ? `, skipping ${skippedDups} name match(es)` : ''}${imp.pri.on ? ` · tiers ON (${plan.filter(x => /^P[1-3] - /.test(x.subtype)).length} prefixed)` : ''}: ${impEsc(plan.slice(0, 12).map(x => `${x.update ? '↻ ' : ''}${x.p.name} [${x.subtype}]`).join(' · '))}${plan.length > 12 ? ' …' : ''}. Untick Dry run to write.`); return; }
         if (plan.length > IMP_BIG_BATCH) {
             const ack = (() => { try { return !!document.getElementById('aim-imp-biggate-ack').checked; } catch (e) { return false; } })();
             if (!ack) { impStatus(`BLOCKED — <b>${plan.length}</b> assets is more than ${IMP_BIG_BATCH} in one run. Narrow the selection with a boundary KML, or tick "I understand the risk" under the Create button to proceed anyway.`, '#ff6060'); return; }
@@ -27360,7 +27452,7 @@
         };
         const stamp = impNowStamp();
         const byIdEnt = new Map(ents.map(e => [e.id, e]));
-        plan.forEach(x => { x.name = x.update ? (byIdEnt.get(x.p.dupId) || {}).name || x.p.name : uniq(x.p.name); x.notes = impComposeNotes(x.p, stamp, x.update ? 'update' : 'create'); });   // v4.345: notes = original name + chosen columns + who/when/file · v4.365: stamp says created / updated
+        plan.forEach(x => { x.name = x.update ? (byIdEnt.get(x.p.dupId) || {}).name || x.p.name : uniq(x.p.name); x.notes = impComposeNotes(x.p, stamp, x.update ? 'update' : 'create'); x.ext = impExtIdOf(x.p); });   // v4.434: + External ID   // v4.345: notes = original name + chosen columns + who/when/file · v4.365: stamp says created / updated
         let siteCfg = null;
         if (nUpd) { try { siteCfg = await fetchSiteConfig(sid); } catch (e) {} if (!siteCfg) { impStatus('Could not read the site config (mountain-terrain flag) — updates refused, nothing written', '#ff6060'); return; } }
         // backup manifest BEFORE any write (rollback = delete the created ids / re-POST the updated bodies)
@@ -27384,6 +27476,7 @@
                 if (!body.custom || typeof body.custom !== 'object') body.custom = {};
                 body.custom.poi_type_str = x.subtype;
                 body.custom.new_poi_type_str = knownSubs.has(x.subtype) ? '' : x.subtype;
+                if (x.ext) body[IMP_EXT_FIELD] = x.ext;                       // v4.434: External ID from the file (left as it was when the file has none)
                 let st = 0, raw = '';
                 try { const rr = await fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) }); st = rr.status; raw = await rr.text(); }
                 catch (e) { raw = String(e && e.message || e); }
@@ -27396,9 +27489,9 @@
                 continue;
             }
             impStatus(`creating ${i + 1}/${plan.length} — "${impEsc(x.name)}"…`);
-            const r = await createAssetSquare(sid, x.p.lat, x.p.lng, impPointSizeFt(x.p), x.name, x.subtype, !knownSubs.has(x.subtype), x.notes || '', x.p.shape || (x.p.pa ? assetTrianglePoints(x.p.lat, x.p.lng, impPointSizeFt(x.p)) : null));   // v4.413: P&A size · v4.416: P&A = triangle unless an outline was drawn
+            const r = await createAssetSquare(sid, x.p.lat, x.p.lng, impPointSizeFt(x.p), x.name, x.subtype, !knownSubs.has(x.subtype), x.notes || '', x.p.shape || (x.p.pa ? assetTrianglePoints(x.p.lat, x.p.lng, impPointSizeFt(x.p)) : null), x.ext ? { [IMP_EXT_FIELD]: x.ext } : null);   // v4.413: P&A size · v4.416: P&A = triangle unless an outline was drawn
             if (r && r.ok) {
-                ok++; created.push({ id: r.id, name: x.name, point: x.p });
+                ok++; created.push({ id: r.id, name: x.name, point: x.p, ext: x.ext });
                 knownSubs.add(x.subtype);
                 x.p.done = true; x.p.sel = false;
             } else {
@@ -27417,12 +27510,15 @@
         imp.lastCreated = verified.map(c => c.id);
         const afterById = new Map(after.map(e => [e.id, e]));
         const updVerified = updated.filter(u => { const e = afterById.get(u.id); return e && e.custom && String(e.custom.poi_type_str || '') === u.subtype && String(e.description || '') === u.notes; });
+        // v4.434: did the External ID land? (also tells us if the server ignores / renames the field)
+        const extWanted = created.filter(c => c.ext && byId.has(c.id)), extOk = extWanted.filter(c => String((afterById.get(c.id) || {})[IMP_EXT_FIELD] || '') === c.ext).length;
+        const extNote = extWanted.length ? ` · 🆔 External ID ${extOk}/${extWanted.length} confirmed${extOk < extWanted.length ? ` <span style="color:#ff6060">(server did not echo the field for ${extWanted.length - extOk} — check 🆔 below)</span>` : ''}` : '';
         imp.lastUpdated = updated.map(u => ({ id: u.id, name: u.name, before: u.before }));
         imp._rootCache = null;
         impBuildAssetIndex(); impComputeDups(); impRefreshAfterSelChange();
         try { impSaveSession('import'); } catch (e) {}   // v4.364: the undo record is on disk before the user can reload
         try { impRenderImportsUi(); } catch (e) {}
-        if (!aborted) impStatus(`DONE: <b>${ok}</b> created${nUpd ? ` · <b>${updOk}/${nUpd}</b> updated (type + notes)` : ''}${fail ? ` · <span style="color:#ff6060">${fail} FAILED (kept staged + selected)</span>` : ''}${skippedDups ? ` · ${skippedDups} name match(es) skipped` : ''} · verify ${verified.length}/${created.length} created present${nUpd ? `, ${updVerified.length}/${updated.length} updates match` : ''} · reload to edit them natively`, (fail || updVerified.length !== updated.length) ? '#ffb347' : '#5fff5f');
+        if (!aborted) impStatus(`DONE: <b>${ok}</b> created${nUpd ? ` · <b>${updOk}/${nUpd}</b> updated (type + notes)` : ''}${fail ? ` · <span style="color:#ff6060">${fail} FAILED (kept staged + selected)</span>` : ''}${skippedDups ? ` · ${skippedDups} name match(es) skipped` : ''} · verify ${verified.length}/${created.length} created present${nUpd ? `, ${updVerified.length}/${updated.length} updates match` : ''}${extNote} · reload to edit them natively`, (fail || updVerified.length !== updated.length) ? '#ffb347' : '#5fff5f');
         showToast(fail ? `Import: ${ok} created, ${updOk} updated, ${fail} FAILED — see the importer panel` : `✓ ${ok} created${updOk ? `, ${updOk} updated` : ''}`, fail ? 'rgba(255,96,96,0.55)' : undefined);
     }
     // Undo THIS import: delete exactly the ids the last commit created.
