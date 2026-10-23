@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.430
+// @version      4.431
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.430';
+    const SCRIPT_VERSION = '4.431';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -14326,6 +14326,7 @@
             arcIndex: null,
             isFfz: entity.type === 16,
             isAsset: entity.type === 3,
+            entityType: entity.type,     // #309: runApplyPipeline needs it — NFZ / GM / Base / Safe renames are Direct-API only
             field: 'name',
             oldValue: current,
             newValue,
@@ -16343,6 +16344,17 @@
             applyState.running = false;
             applyState.errors = [{ entityName: '(Bulk → Valid)', reason: 'Validation flips need ⚡ Direct API — enable the Direct API checkbox and re-run.' }];
             showToast('Bulk → Valid needs ⚡ Direct API enabled', 'rgba(255,82,82,0.7)');
+            try { onProgress(applyState); } catch (e) {}
+            return;
+        }
+        // #309: the editor path can only rename assets / FFZs / FPs (it drives their
+        // sidebar editors). A queued name edit on an NFZ / Marker / Base / Safe Zone
+        // REQUIRES ⚡ Direct API — refuse early, same shape as the Validation rule.
+        const nonUiRename = groups.some(g => g.edits.some(e => e.field === 'name' && typeof e.entityType === 'number' && ![3, 15, 16].includes(e.entityType)));
+        if (nonUiRename && !directApi) {
+            applyState.running = false;
+            applyState.errors = [{ entityName: '(Bulk → 🏷 Rename)', reason: 'Renaming NFZs / Markers / Base / Safe Zones needs ⚡ Direct API — enable the Direct API checkbox and re-run.' }];
+            showToast('NFZ / Marker / Base / Safe renames need ⚡ Direct API enabled', 'rgba(255,82,82,0.7)');
             try { onProgress(applyState); } catch (e) {}
             return;
         }
@@ -34466,7 +34478,7 @@
         const renameBtn = document.createElement('button');
         renameBtn.type = 'button';
         renameBtn.textContent = 'Bulk → 🏷 Rename';
-        renameBtn.title = 'Prefix / suffix / find→replace asset names in bulk (root assets by default, e.g. "Pad - "); queues name edits for Apply';
+        renameBtn.title = 'Bulk names for any entity type (prefix / suffix / find→replace / template — root assets by default, e.g. "Pad - ") + bulk asset TYPES; queues edits for Apply';
         renameBtn.style.cssText = bulkBtnStyle;
         attachBulkPopover(renameBtn, (anchor, onClose) => buildBulkRenamePopover(anchor, onClose));
         if (!LITE) optsRow.appendChild(renameBtn);      // Bulk → Rename — write, CSM-only
@@ -34498,42 +34510,112 @@
         // type filter, preview the count, then queue one validated edit per
         // entity. FP rows are per-segment in the table, so we DEDUPE by
         // entity id and queue once per flight path.
-        // Popover: pick an operation (prefix / suffix / find→replace / template),
-        // a scope (root assets / root assets with children / selected rows) and
-        // preview every before → after with its verdict before queueing. Rails:
-        //   • only the text WE insert is cleaned to Percepto's name characters
-        //     (A-Z 0-9 space - _); the existing name is kept verbatim;
-        //   • "skip already matching" (default on) so a second run never yields
-        //     "Pad - Pad - X";
-        //   • duplicate names are BLOCKED (Percepto needs unique names per site)
-        //     — checked against every asset's current/pending name AND within
-        //     the batch itself; empty results blocked too;
-        //   • nothing is written here — queueNameEdit + Apply do the writing.
+        // Popover: 🏷 Name / 🔖 Type tabs over ONE chip row + scope + live preview.
+        //   Name tab — prefix / suffix / find→replace / {name} template across ANY
+        //              entity type (chips: Asset · NFZ · FP · FFZ · Marker · Base ·
+        //              Safe); flight paths once per path (table rows are per
+        //              segment); duplicates BLOCKED within the same entity type
+        //              (checked against current + pending names AND the batch).
+        //   Type tab — assets only (only assets carry a type): set / prefix /
+        //              suffix / find→replace / {type} template over
+        //              custom.poi_type_str; queues via queueSubtypeEdit (server
+        //              lowercases; NEW type strings take the "Enter new type"
+        //              path as usual).
+        // Chips pre-light from the SUM selection (Assets when nothing is selected).
+        // Only the text WE insert is cleaned to name characters; existing values
+        // stay verbatim. "Skip already matching" (default on) so a second run
+        // never yields "Pad - Pad - X". Nothing is written here — the Apply
+        // queue does the writing. Name edits on NFZ / Marker / Base / Safe need
+        // ⚡ Direct API (the editor path can't open those) — runApplyPipeline
+        // refuses early with a clear message, like Bulk → Valid.
         function buildBulkRenamePopover(anchor, onClose) {
             const NAME_OK_RX = /^[A-Za-z0-9 _-]*$/;
             const PREVIEW_MAX = 300;
+            const UI_NAME_TYPES = new Set([3, 15, 16]);     // the editor path can rename these without Direct API
+            const Y = '#ffd54f';
             // Like genCleanName but WITHOUT the trim — an operand such as "Pad - "
-            // must keep its trailing space. The final name is trimmed/collapsed.
+            // must keep its trailing space. The final value is trimmed/collapsed.
             const cleanOperand = (s) => String(s == null ? '' : s).replace(/[^A-Za-z0-9 _-]+/g, ' ').replace(/\s+/g, ' ');
-            const finalName = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+            const tidy = (s) => String(s == null ? '' : s).replace(/\s+/g, ' ');
+            const finalVal = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+            let tab = 'name';
 
             const pop = document.createElement('div');
-            pop.style.cssText = 'position:fixed;background:#1f2228;border:1px solid rgba(255,213,79,0.55);border-radius:5px;box-shadow:0 4px 16px rgba(0,0,0,0.5);padding:12px 14px;z-index:99999;font-size:12px;color:#e6e6e6;min-width:480px;max-width:640px';
+            pop.style.cssText = 'position:fixed;background:#1f2228;border:1px solid rgba(255,213,79,0.55);border-radius:5px;box-shadow:0 4px 16px rgba(0,0,0,0.5);padding:12px 14px;z-index:99999;font-size:12px;color:#e6e6e6;min-width:520px;max-width:680px';
             const title = document.createElement('div');
-            title.style.cssText = 'color:#ffd54f;font-weight:700;font-size:13px;margin-bottom:8px';
-            title.textContent = '🏷  Bulk Rename Assets';
+            title.style.cssText = 'color:' + Y + ';font-weight:700;font-size:13px;margin-bottom:8px';
+            title.textContent = '🏷  Bulk Rename / Type';
             pop.appendChild(title);
+
+            // --- Tabs ---
+            const tabRow = document.createElement('div');
+            tabRow.style.cssText = 'display:flex;gap:4px;margin-bottom:8px;border-bottom:1px solid rgba(255,255,255,0.10)';
+            const mkTab = (id, label) => {
+                const b = document.createElement('button');
+                b.type = 'button'; b.textContent = label; b.dataset.aiRenTab = id;
+                b.style.cssText = 'background:transparent;border:none;border-bottom:2px solid transparent;color:#aaa;padding:4px 10px;cursor:pointer;font:inherit;font-size:12px;font-weight:600';
+                b.onclick = () => { tab = id; refreshAll(); };
+                return b;
+            };
+            const tabName = mkTab('name', '🏷 Name');
+            const tabType = mkTab('type', '🔖 Type (assets)');
+            tabRow.appendChild(tabName); tabRow.appendChild(tabType);
+            pop.appendChild(tabRow);
+            const paintTabs = () => {
+                [tabName, tabType].forEach(b => {
+                    const on = b.dataset.aiRenTab === tab;
+                    b.style.color = on ? Y : '#aaa';
+                    b.style.borderBottomColor = on ? Y : 'transparent';
+                });
+            };
+
             const help = document.createElement('div');
             help.style.cssText = 'color:#888;font-size:10px;margin-bottom:10px;line-height:1.4';
-            help.textContent = 'Builds a new name for every asset in scope and queues it as a normal name edit — commit with Apply (dry run / ⚡ Direct-API / rollback as usual). Child assets keep their names; Percepto re-points them at a renamed parent. Only the text you type is cleaned to Percepto name characters (A-Z 0-9 space - _); the existing name is kept as-is.';
             pop.appendChild(help);
+            const HELP = {
+                name: 'Builds a new name for every entity in scope and queues it as a normal name edit — commit with Apply (dry run / ⚡ Direct-API / rollback as usual). Child assets keep their names; Percepto re-points them at a renamed parent. Only the text you type is cleaned to name characters (A-Z 0-9 space - _); the existing name is kept as-is. NFZ / Marker / Base / Safe renames need ⚡ Direct API at Apply.',
+                type: 'Builds a new TYPE for every asset in scope and queues it as a normal subtype edit — commit with Apply. Only assets carry a type. The server stores types lowercase, so the preview shows what will be kept; a type string the site has never seen takes the "Enter new type" path as usual.',
+            };
+
+            // --- Entity-type chips (coloured like the SUM table) ---
+            const chipRow = document.createElement('div');
+            chipRow.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px';
+            const typesPresent = Array.from(new Set(allRows.filter(r => r.entity).map(r => r.type))).sort((a, b) => typeReg(a).sortPrio - typeReg(b).sortPrio);
+            const selTypes = new Set(allRows.filter(r => r.entity && sumPanelState.selectedIds.has(r._rowKey)).map(r => r.type));
+            const lit = new Set(selTypes.size ? Array.from(selTypes) : [3]);
+            if (selTypes.size === 0 && !typesPresent.includes(3) && typesPresent.length) { lit.clear(); lit.add(typesPresent[0]); }
+            const chips = typesPresent.map(t => {
+                const reg = typeReg(t);
+                const b = document.createElement('button');
+                b.type = 'button'; b.dataset.aiRenType = String(t);
+                b.textContent = `${reg.short} · ${reg.long}`;
+                b.title = `${reg.long}s — click to include / exclude`;
+                b.onclick = () => {
+                    if (tab === 'type') return;
+                    if (lit.has(t)) lit.delete(t); else lit.add(t);
+                    refreshAll();
+                };
+                chipRow.appendChild(b);
+                return { t, b, reg };
+            });
+            pop.appendChild(chipRow);
+            const paintChips = () => {
+                chips.forEach(({ t, b, reg }) => {
+                    const allowed = tab === 'name' || t === 3;
+                    const on = allowed && (tab === 'type' ? true : lit.has(t));
+                    b.disabled = !allowed;
+                    b.style.cssText = `border-radius:12px;padding:2px 10px;font:inherit;font-size:11px;font-weight:600;cursor:${allowed ? 'pointer' : 'default'};`
+                        + `color:${on ? '#111' : reg.color};background:${on ? reg.color : 'transparent'};border:1px solid ${reg.color};opacity:${allowed ? 1 : 0.25}`;
+                });
+            };
+            const litTypes = () => tab === 'type' ? [3] : Array.from(lit);
 
             const mkRadio = (group, val, label, col, checked) => {
                 const l = document.createElement('label');
                 l.style.cssText = 'display:flex;align-items:center;gap:5px;cursor:pointer;color:' + (col || '#ddd');
                 const r = document.createElement('input');
                 r.type = 'radio'; r.name = group; r.value = val; r.checked = !!checked;
-                r.style.cssText = 'accent-color:#ffd54f;cursor:pointer';
+                r.style.cssText = 'accent-color:' + Y + ';cursor:pointer';
                 l.appendChild(r); l.appendChild(document.createTextNode(label));
                 return { l, r };
             };
@@ -34545,52 +34627,85 @@
                 return i;
             };
 
+            // --- Scope ---
+            const selCount = allRows.filter(r => r.entity && sumPanelState.selectedIds.has(r._rowKey)).length;
+            const scopeRow = document.createElement('div');
+            scopeRow.style.cssText = 'display:flex;align-items:center;gap:14px;margin-bottom:6px;flex-wrap:wrap';
+            const scAll = mkRadio('aim-ai-bulk-ren-scope', 'all', 'All rows of the lit types', '#ddd', true);
+            const scSel = mkRadio('aim-ai-bulk-ren-scope', 'sel', `Selected rows only (${selCount} selected)`);
+            scSel.r.disabled = selCount === 0;
+            if (selCount === 0) scSel.l.style.opacity = '0.5';
+            scopeRow.appendChild(scAll.l); scopeRow.appendChild(scSel.l);
+            pop.appendChild(scopeRow);
+            const currentScope = () => scSel.r.checked ? 'sel' : 'all';
+
+            // Asset sub-scope — the pad/parent rule (#273 nesting): roots by default.
+            const astRow = document.createElement('div');
+            astRow.style.cssText = 'display:flex;align-items:center;gap:14px;margin:0 0 8px 18px;flex-wrap:wrap;font-size:11px';
+            const astLbl = document.createElement('span'); astLbl.textContent = 'Assets:'; astLbl.style.color = '#888';
+            const astRoot = mkRadio('aim-ai-bulk-ren-ast', 'root', 'root only — not a child (pads)', '#ddd', true);
+            const astKids = mkRadio('aim-ai-bulk-ren-ast', 'kids', 'roots with children');
+            const astAll = mkRadio('aim-ai-bulk-ren-ast', 'any', 'every asset (children too)');
+            astRow.appendChild(astLbl); [astRoot, astKids, astAll].forEach(o => astRow.appendChild(o.l));
+            pop.appendChild(astRow);
+            const currentAst = () => astKids.r.checked ? 'kids' : (astAll.r.checked ? 'any' : 'root');
+
             // --- Operation ---
             const opRow = document.createElement('div');
             opRow.style.cssText = 'display:flex;align-items:center;gap:12px;margin-bottom:8px;flex-wrap:wrap';
-            const opPrefix = mkRadio('aim-ai-bulk-ren-op', 'prefix', 'Prefix', '#ffd54f', true);
+            const opSet = mkRadio('aim-ai-bulk-ren-op', 'set', 'Set to', Y);
+            const opPrefix = mkRadio('aim-ai-bulk-ren-op', 'prefix', 'Prefix', Y, true);
             const opSuffix = mkRadio('aim-ai-bulk-ren-op', 'suffix', 'Suffix');
             const opReplace = mkRadio('aim-ai-bulk-ren-op', 'replace', 'Find → Replace');
             const opTemplate = mkRadio('aim-ai-bulk-ren-op', 'template', 'Template');
-            [opPrefix, opSuffix, opReplace, opTemplate].forEach(o => opRow.appendChild(o.l));
+            [opSet, opPrefix, opSuffix, opReplace, opTemplate].forEach(o => opRow.appendChild(o.l));
             pop.appendChild(opRow);
+            const currentOp = () => opSet.r.checked ? 'set' : (opSuffix.r.checked ? 'suffix' : (opReplace.r.checked ? 'replace' : (opTemplate.r.checked ? 'template' : 'prefix')));
 
             const inRow = document.createElement('div');
             inRow.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap;min-height:26px';
             const textIn = mkInput('text to add', 'Pad - ', '180px');
+            const setIn = mkInput('type to set', '', '220px');
             const findIn = mkInput('find (case-sensitive)', '', '150px');
             const replIn = mkInput('replace with', '', '150px');
             const tplIn = mkInput('{name} = current name', 'Pad - {name}', '260px');
             const arrow = document.createElement('span'); arrow.textContent = '→'; arrow.style.color = '#888';
-            inRow.appendChild(textIn); inRow.appendChild(findIn); inRow.appendChild(arrow); inRow.appendChild(replIn); inRow.appendChild(tplIn);
+            // Observed site types feed the Set box as suggestions.
+            const dl = document.createElement('datalist');
+            const dlId = 'aim-ai-bulk-ren-types-' + Date.now();
+            dl.id = dlId; setIn.setAttribute('list', dlId);
+            try { observedSubtypesForSite(getCurrentSiteID()).forEach(s => { const o = document.createElement('option'); o.value = s; dl.appendChild(o); }); }
+            catch (e) { console.warn(`${TAG} 🏷 rename: observed types unavailable:`, e); }
+            inRow.appendChild(textIn); inRow.appendChild(setIn); inRow.appendChild(findIn); inRow.appendChild(arrow); inRow.appendChild(replIn); inRow.appendChild(tplIn); inRow.appendChild(dl);
             pop.appendChild(inRow);
+            // Remember what the user typed per tab so switching tabs doesn't clobber it.
+            const tplMemo = { name: 'Pad - {name}', type: 'P3 - {type}' };
+            const textMemo = { name: 'Pad - ', type: 'P3 - ' };
+            let lastTab = 'name';
+            const syncTabInputs = () => {
+                if (lastTab === tab) return;
+                tplMemo[lastTab] = tplIn.value; textMemo[lastTab] = textIn.value;
+                tplIn.value = tplMemo[tab]; textIn.value = textMemo[tab];
+                tplIn.placeholder = tab === 'name' ? '{name} = current name' : '{type} = current type';
+                if (tab === 'name' && opSet.r.checked) opPrefix.r.checked = true;
+                lastTab = tab;
+            };
             const showInputs = () => {
                 const op = currentOp();
+                opSet.l.style.display = tab === 'type' ? '' : 'none';
                 textIn.style.display = (op === 'prefix' || op === 'suffix') ? '' : 'none';
+                setIn.style.display = op === 'set' ? '' : 'none';
                 findIn.style.display = replIn.style.display = arrow.style.display = (op === 'replace') ? '' : 'none';
                 tplIn.style.display = (op === 'template') ? '' : 'none';
+                astRow.style.display = (litTypes().includes(3) && currentScope() === 'all') ? '' : 'none';
             };
-            const currentOp = () => opSuffix.r.checked ? 'suffix' : (opReplace.r.checked ? 'replace' : (opTemplate.r.checked ? 'template' : 'prefix'));
-
-            // --- Scope ---
-            const selAssetCount = allRows.filter(r => r.type === 3 && r.entity && sumPanelState.selectedIds.has(r._rowKey)).length;
-            const scopeRow = document.createElement('div');
-            scopeRow.style.cssText = 'display:flex;flex-direction:column;gap:4px;margin-bottom:8px';
-            const scRoot = mkRadio('aim-ai-bulk-ren-scope', 'root', 'Root assets — not a child of another asset (pads)', '#ddd', true);
-            const scRootKids = mkRadio('aim-ai-bulk-ren-scope', 'rootKids', 'Root assets that already have children');
-            const scSel = mkRadio('aim-ai-bulk-ren-scope', 'sel', `Selected rows only (${selAssetCount} asset${selAssetCount === 1 ? '' : 's'} selected — any depth)`);
-            scSel.r.disabled = selAssetCount === 0;
-            if (selAssetCount === 0) scSel.l.style.opacity = '0.5';
-            [scRoot, scRootKids, scSel].forEach(o => scopeRow.appendChild(o.l));
-            pop.appendChild(scopeRow);
-            const currentScope = () => scSel.r.checked ? 'sel' : (scRootKids.r.checked ? 'rootKids' : 'root');
 
             const skipLbl = document.createElement('label');
             skipLbl.style.cssText = 'display:flex;align-items:center;gap:6px;cursor:pointer;color:#ccc;margin-bottom:10px';
             const skipCb = document.createElement('input');
-            skipCb.type = 'checkbox'; skipCb.checked = true; skipCb.style.cssText = 'accent-color:#ffd54f;cursor:pointer';
+            skipCb.type = 'checkbox'; skipCb.checked = true; skipCb.style.cssText = 'accent-color:' + Y + ';cursor:pointer';
             skipLbl.appendChild(skipCb);
-            skipLbl.appendChild(document.createTextNode('Skip assets whose name already matches (already prefixed / suffixed / nothing to replace)'));
+            skipLbl.appendChild(document.createTextNode('Skip rows whose value already matches (already prefixed / suffixed / nothing to replace)'));
             pop.appendChild(skipLbl);
 
             // --- Preview ---
@@ -34601,110 +34716,134 @@
             tblWrap.style.cssText = 'max-height:260px;overflow:auto;border:1px solid rgba(255,255,255,0.10);border-radius:3px;margin-bottom:10px;background:#15171b';
             pop.appendChild(tblWrap);
 
-            // Build the plan: one item per unique asset in scope with its verdict.
-            //   queue → will be queued · skip → already matches (noop) ·
-            //   dup → blocked, name taken · empty → blocked, result empty · bad → blocked, template invalid
+            // Build the plan: one item per unique entity in scope with its verdict.
+            //   queue → will be queued · skip → already matches (noop) · notype → asset has no
+            //   type yet (nothing to prefix/replace) · dup → blocked, name taken within the
+            //   type · empty → blocked, result empty · bad → blocked, template lacks its token
             const compute = () => {
-                const op = currentOp(), scope = currentScope();
-                const text = cleanOperand(textIn.value);
+                const isName = tab === 'name';
+                const op = currentOp(), scope = currentScope(), ast = currentAst();
+                const prep = isName ? cleanOperand : tidy;
+                const text = prep(textIn.value);
+                const setVal = finalVal(tidy(setIn.value));
                 const find = String(findIn.value || '');
-                const repl = cleanOperand(replIn.value);
+                const repl = prep(replIn.value);
+                const token = isName ? '{name}' : '{type}';
                 const tpl = String(tplIn.value || '');
-                const tplOk = tpl.includes('{name}');
-                const tplParts = tplOk ? tpl.split('{name}').map(cleanOperand) : null;
+                const tplOk = tpl.includes(token);
+                const tplParts = tplOk ? tpl.split(token).map(prep) : null;
+                const types = new Set(litTypes());
+                const eq = isName ? ((a, b) => a === b) : ((a, b) => a.toLowerCase() === b.toLowerCase());
+                const starts = isName ? ((a, b) => a.startsWith(b)) : ((a, b) => a.toLowerCase().startsWith(b.toLowerCase()));
+                const ends = isName ? ((a, b) => a.endsWith(b)) : ((a, b) => a.toLowerCase().endsWith(b.toLowerCase()));
 
                 const seen = new Set();
                 const items = [];
                 allRows.forEach(r => {
-                    if (!r.entity || r.type !== 3) return;
+                    if (!r.entity || !types.has(r.type)) return;
                     if (seen.has(r.entity.id)) return;
                     if (scope === 'sel') {
                         if (!sumPanelState.selectedIds.has(r._rowKey)) return;
-                    } else {
+                    } else if (r.type === 3 && ast !== 'any') {
                         // nestDepth null = tree had no node for it (treated as root).
                         if (r.nestDepth !== 0 && r.nestDepth !== null) return;
-                        if (scope === 'rootKids' && !(r.childCount > 0)) return;
+                        if (ast === 'kids' && !(r.childCount > 0)) return;
                     }
                     seen.add(r.entity.id);
                     items.push(r);
                 });
 
-                // Every asset's EFFECTIVE name (pending rename wins) → owner id, for the uniqueness check.
+                const curOf = (e) => isName ? (e.name || '').trim() : finalVal((e.custom && e.custom.poi_type_str) || '');
+                // Every entity's EFFECTIVE name (pending rename wins) → owner id, keyed by TYPE, for the uniqueness check.
                 const taken = new Map();
-                allRows.forEach(r => {
-                    if (!r.entity || r.type !== 3) return;
+                if (isName) allRows.forEach(r => {
+                    if (!r.entity) return;
                     const p = getPendingName(r.entity.id);
-                    const nm = finalName(p ? p.newValue : (r.entity.name || '')).toLowerCase();
-                    if (nm && !taken.has(nm)) taken.set(nm, r.entity.id);
+                    const nm = finalVal(p ? p.newValue : (r.entity.name || '')).toLowerCase();
+                    const k = r.type + '|' + nm;
+                    if (nm && !taken.has(k)) taken.set(k, r.entity.id);
                 });
 
                 const plan = items.map(r => {
-                    const cur = (r.entity.name || '').trim();
-                    let out = cur, noop = false, bad = '';
-                    if (op === 'prefix') { out = text + cur; noop = !text || cur.startsWith(text.trim()) && text.trim() !== ''; }
-                    else if (op === 'suffix') { out = cur + text; noop = !text || cur.endsWith(text.trim()) && text.trim() !== ''; }
+                    const cur = curOf(r.entity);
+                    let out = cur, noop = false, bad = '', notype = false;
+                    if (!isName && !cur && op !== 'set') notype = true;
+                    else if (op === 'set') { out = setVal; noop = !!setVal && eq(out, cur); }
+                    else if (op === 'prefix') { out = text + cur; noop = !text.trim() || starts(cur, text.trim()); }
+                    else if (op === 'suffix') { out = cur + text; noop = !text.trim() || ends(cur, text.trim()); }
                     else if (op === 'replace') { out = find ? cur.split(find).join(repl) : cur; noop = !find || !cur.includes(find); }
-                    else { if (!tplParts) { bad = 'template needs {name}'; } else { out = tplParts.join(cur); const pre = tplParts[0].trim(), post = tplParts[tplParts.length - 1].trim(); noop = finalName(out) === cur || (!!pre && cur.startsWith(pre)) || (!!post && cur.endsWith(post)); } }
-                    out = finalName(out);
-                    const pending = !!getPendingName(r.entity.id);
+                    else if (!tplParts) bad = `template needs ${token}`;
+                    else { out = tplParts.join(cur); const pre = tplParts[0].trim(), post = tplParts[tplParts.length - 1].trim(); noop = eq(finalVal(out), cur) || (!!pre && starts(cur, pre)) || (!!post && ends(cur, post)); }
+                    out = finalVal(out);
+                    if (!isName) out = out.toLowerCase();     // server keeps poi_type_str lowercase
+                    const pending = isName ? !!getPendingName(r.entity.id) : !!getPendingSubtype(r.entity.id);
                     let status = 'queue';
                     if (bad) status = 'bad';
-                    else if (noop || out === cur) status = skipCb.checked || out === cur ? 'skip' : 'queue';
+                    else if (notype) status = 'notype';
+                    else if (noop || eq(out, cur)) status = (skipCb.checked || eq(out, cur)) ? 'skip' : 'queue';
                     else if (!out) status = 'empty';
-                    return { r, cur, out, status, pending, oddChars: !NAME_OK_RX.test(out) };
+                    return { r, cur, out, status, pending, oddChars: isName && !NAME_OK_RX.test(out) };
                 });
-                // Uniqueness: against the site (minus self) and within the batch.
-                const batchCount = new Map();
-                plan.forEach(p => { if (p.status === 'queue') batchCount.set(p.out.toLowerCase(), (batchCount.get(p.out.toLowerCase()) || 0) + 1); });
-                plan.forEach(p => {
-                    if (p.status !== 'queue') return;
-                    const k = p.out.toLowerCase();
-                    const owner = taken.get(k);
-                    if ((owner !== undefined && owner !== p.r.entity.id) || batchCount.get(k) > 1) p.status = 'dup';
-                });
-                return { plan, op, scope, bad: !tplOk && op === 'template' };
+                if (isName) {
+                    // Uniqueness: against the site (minus self) and within the batch, per entity type.
+                    const batchCount = new Map();
+                    plan.forEach(p => { if (p.status === 'queue') { const k = p.r.type + '|' + p.out.toLowerCase(); batchCount.set(k, (batchCount.get(k) || 0) + 1); } });
+                    plan.forEach(p => {
+                        if (p.status !== 'queue') return;
+                        const k = p.r.type + '|' + p.out.toLowerCase();
+                        const owner = taken.get(k);
+                        if ((owner !== undefined && owner !== p.r.entity.id) || batchCount.get(k) > 1) p.status = 'dup';
+                    });
+                }
+                return { plan, op, scope, isName, types: Array.from(types) };
             };
 
             const STATUS_META = {
                 queue: { label: 'queue', col: '#5fff5f' },
                 skip: { label: 'skip · already matches', col: '#888' },
+                notype: { label: 'skip · no type yet', col: '#888' },
                 dup: { label: '⛔ name taken', col: '#ff5555' },
                 empty: { label: '⛔ empty result', col: '#ff5555' },
-                bad: { label: '⛔ template needs {name}', col: '#ff5555' },
+                bad: { label: '⛔ template needs its token', col: '#ff5555' },
             };
             const refreshPreview = () => {
-                showInputs();
-                const { plan } = compute();
+                const { plan, isName } = compute();
                 const n = (s) => plan.filter(p => p.status === s).length;
                 const odd = plan.filter(p => p.status === 'queue' && p.oddChars).length;
                 const pend = plan.filter(p => p.status === 'queue' && p.pending).length;
+                const needDirect = isName ? plan.filter(p => p.status === 'queue' && !UI_NAME_TYPES.has(p.r.type)).length : 0;
                 if (plan.length === 0) {
-                    counters.innerHTML = '⚠️ No assets in scope.';
+                    counters.innerHTML = isName ? '⚠️ No entities in scope — light a type chip above.' : '⚠️ No assets in scope.';
                     tblWrap.innerHTML = '';
                     return;
                 }
-                const bits = [`Will queue <strong style="color:#ffd54f">${n('queue')}</strong> rename${n('queue') === 1 ? '' : 's'} of ${plan.length} in scope`];
+                const what = isName ? 'rename' : 'type change';
+                const bits = [`Will queue <strong style="color:${Y}">${n('queue')}</strong> ${what}${n('queue') === 1 ? '' : 's'} of ${plan.length} in scope`];
                 if (n('skip')) bits.push(`${n('skip')} already matching`);
+                if (n('notype')) bits.push(`${n('notype')} without a type yet`);
                 if (n('dup')) bits.push(`<span style="color:#ff5555">⛔ ${n('dup')} blocked — name already taken</span>`);
                 if (n('empty')) bits.push(`<span style="color:#ff5555">⛔ ${n('empty')} blocked — empty result</span>`);
-                if (n('bad')) bits.push(`<span style="color:#ff5555">⛔ template must contain {name}</span>`);
+                if (n('bad')) bits.push(`<span style="color:#ff5555">⛔ template must contain ${isName ? '{name}' : '{type}'}</span>`);
                 if (odd) bits.push(`<span style="color:#ffb347">⚠ ${odd} keep characters outside A-Z 0-9 space - _ (from the original name)</span>`);
-                if (pend) bits.push(`<span style="color:#ffb347">${pend} replace an already-queued rename</span>`);
+                if (pend) bits.push(`<span style="color:#ffb347">${pend} replace an already-queued edit</span>`);
+                if (needDirect) bits.push(`<span style="color:#ffb347">⚡ ${needDirect} need Direct API at Apply (NFZ / Marker / Base / Safe)</span>`);
                 counters.innerHTML = bits.join(' · ');
 
                 tblWrap.innerHTML = '';
                 const tbl = document.createElement('table');
                 tbl.style.cssText = 'width:100%;border-collapse:collapse;font-size:11px';
-                const order = { dup: 0, empty: 0, bad: 0, queue: 1, skip: 2 };
-                const sorted = plan.slice().sort((a, b) => (order[a.status] - order[b.status]) || a.cur.localeCompare(b.cur));
+                const order = { dup: 0, empty: 0, bad: 0, queue: 1, skip: 2, notype: 2 };
+                const sorted = plan.slice().sort((a, b) => (order[a.status] - order[b.status]) || (typeReg(a.r.type).sortPrio - typeReg(b.r.type).sortPrio) || a.cur.localeCompare(b.cur));
                 sorted.slice(0, PREVIEW_MAX).forEach(p => {
+                    const reg = typeReg(p.r.type);
                     const tr = document.createElement('tr');
                     tr.style.cssText = 'border-bottom:1px solid rgba(255,255,255,0.06)';
-                    const c1 = document.createElement('td'); c1.style.cssText = 'padding:2px 6px;color:#aaa;white-space:nowrap;max-width:220px;overflow:hidden;text-overflow:ellipsis'; c1.textContent = p.cur; c1.title = p.cur;
+                    const c0 = document.createElement('td'); c0.style.cssText = 'padding:2px 6px;font-weight:700;color:' + reg.color + ';white-space:nowrap'; c0.textContent = reg.short;
+                    const c1 = document.createElement('td'); c1.style.cssText = 'padding:2px 6px;color:#aaa;white-space:nowrap;max-width:220px;overflow:hidden;text-overflow:ellipsis'; c1.textContent = isName ? p.cur : (p.r.entity.name || '') + '  ·  ' + (p.cur || '(no type)'); c1.title = c1.textContent;
                     const c2 = document.createElement('td'); c2.style.cssText = 'padding:2px 4px;color:#666'; c2.textContent = '→';
-                    const c3 = document.createElement('td'); c3.style.cssText = 'padding:2px 6px;color:' + (p.status === 'queue' ? '#ffd54f' : '#777') + ';white-space:nowrap;max-width:240px;overflow:hidden;text-overflow:ellipsis'; c3.textContent = p.status === 'skip' ? p.cur : p.out; c3.title = p.out;
+                    const c3 = document.createElement('td'); c3.style.cssText = 'padding:2px 6px;color:' + (p.status === 'queue' ? Y : '#777') + ';white-space:nowrap;max-width:240px;overflow:hidden;text-overflow:ellipsis'; c3.textContent = (p.status === 'skip' || p.status === 'notype') ? p.cur : p.out; c3.title = p.out;
                     const c4 = document.createElement('td'); c4.style.cssText = 'padding:2px 6px;white-space:nowrap;text-align:right;color:' + STATUS_META[p.status].col; c4.textContent = STATUS_META[p.status].label + (p.status === 'queue' && p.pending ? ' (replaces queued)' : '');
-                    tr.appendChild(c1); tr.appendChild(c2); tr.appendChild(c3); tr.appendChild(c4);
+                    tr.appendChild(c0); tr.appendChild(c1); tr.appendChild(c2); tr.appendChild(c3); tr.appendChild(c4);
                     tbl.appendChild(tr);
                 });
                 tblWrap.appendChild(tbl);
@@ -34715,12 +34854,13 @@
                     tblWrap.appendChild(more);
                 }
             };
-            [opPrefix, opSuffix, opReplace, opTemplate, scRoot, scRootKids, scSel].forEach(o => { o.r.onchange = refreshPreview; });
-            [textIn, findIn, replIn, tplIn].forEach(i => { i.oninput = refreshPreview; });
+            const refreshAll = () => { syncTabInputs(); paintTabs(); paintChips(); help.textContent = HELP[tab]; showInputs(); refreshPreview(); };
+            [opSet, opPrefix, opSuffix, opReplace, opTemplate, scAll, scSel, astRoot, astKids, astAll].forEach(o => { o.r.onchange = refreshAll; });
+            [textIn, setIn, findIn, replIn, tplIn].forEach(i => { i.oninput = refreshPreview; });
             skipCb.onchange = refreshPreview;
             // Hotkeys must not fire while typing in the popover (capture-phase listeners upstream).
             pop.addEventListener('keydown', (e) => { e.stopPropagation(); }, true);
-            refreshPreview();
+            refreshAll();
 
             const btnRow = document.createElement('div');
             btnRow.style.cssText = 'display:flex;justify-content:flex-end;gap:8px';
@@ -34731,21 +34871,22 @@
             cancelBtn.onclick = onClose;
             const queueBtn = document.createElement('button');
             queueBtn.type = 'button';
-            queueBtn.textContent = 'Queue renames';
-            queueBtn.title = 'Queues one name edit per asset — nothing is written until Apply';
-            queueBtn.style.cssText = 'background:rgba(255,213,79,0.18);color:#ffd54f;border:1px solid rgba(255,213,79,0.55);border-radius:3px;padding:5px 14px;cursor:pointer;font:inherit;font-size:11px;font-weight:600';
+            queueBtn.textContent = 'Queue edits';
+            queueBtn.title = 'Queues one edit per entity — nothing is written until Apply';
+            queueBtn.style.cssText = 'background:rgba(255,213,79,0.18);color:' + Y + ';border:1px solid rgba(255,213,79,0.55);border-radius:3px;padding:5px 14px;cursor:pointer;font:inherit;font-size:11px;font-weight:600';
             queueBtn.onclick = () => {
-                const { plan, op, scope } = compute();
+                const { plan, op, scope, isName, types } = compute();
                 const todo = plan.filter(p => p.status === 'queue');
                 const blocked = plan.filter(p => p.status === 'dup' || p.status === 'empty' || p.status === 'bad').length;
                 if (todo.length === 0) { showToast('Nothing to queue — check the preview', 'rgba(255,82,82,0.6)'); return; }
                 let queued = 0;
                 todo.forEach(p => {
-                    try { if (queueNameEdit(p.r.entity, p.out)) queued++; }
+                    try { if (isName ? queueNameEdit(p.r.entity, p.out) : queueSubtypeEdit(p.r.entity, p.out)) queued++; }
                     catch (e) { console.error(`${TAG} 🏷 rename: queue failed for "${p.cur}" → "${p.out}":`, e); }
                 });
-                console.log(`${TAG} 🏷 rename: queued ${queued}/${todo.length} (${op}, scope ${scope}) · ${plan.length - todo.length - blocked} skipped · ${blocked} blocked`);
-                showToast(`Queued ${queued} rename${queued === 1 ? '' : 's'}${blocked ? ` · ${blocked} blocked (see preview)` : ''} — hit Apply to commit`, 'rgba(255,213,79,0.7)');
+                const needDirect = isName && todo.some(p => !UI_NAME_TYPES.has(p.r.type));
+                console.log(`${TAG} 🏷 rename: queued ${queued}/${todo.length} ${isName ? 'name' : 'type'} edits (${op}, scope ${scope}, types ${types.map(t => typeReg(t).short).join('/')}) · ${plan.length - todo.length - blocked} skipped · ${blocked} blocked${needDirect ? ' · needs ⚡ Direct API' : ''}`);
+                showToast(`Queued ${queued} ${isName ? 'rename' : 'type change'}${queued === 1 ? '' : 's'}${blocked ? ` · ${blocked} blocked (see preview)` : ''} — hit Apply${needDirect ? ' with ⚡ Direct API' : ''} to commit`, 'rgba(255,213,79,0.7)');
                 onClose();
                 redrawTable();
             };
