@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.415
+// @version      4.416
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.415';
+    const SCRIPT_VERSION = '4.416';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -6507,6 +6507,17 @@
     // local approximation — at pad scale (tens–hundreds of ft) the error
     // is sub-inch. 4 corners, no closing duplicate — matches how Percepto
     // stores polygon rings (coords list open, WKT closes it server-side).
+    // v4.416: P&A assets are TRIANGLES (3 vertices, apex north) so they read as 'not a normal asset' at a glance
+    function assetTrianglePoints(lat, lng, sizeFt) {
+        const sideM = sizeFt / M_TO_FT, h = sideM * Math.sqrt(3) / 2;
+        const mLat = 1 / 111320, mLng = 1 / (111320 * Math.cos(lat * Math.PI / 180));
+        return [
+            { lat: lat + (2 * h / 3) * mLat, lng },                                   // apex (north)
+            { lat: lat - (h / 3) * mLat, lng: lng + (sideM / 2) * mLng },             // SE
+            { lat: lat - (h / 3) * mLat, lng: lng - (sideM / 2) * mLng },             // SW
+        ];
+    }
+    function impFootprint(p, sizeFt) { return (p && p.shape && p.shape.length >= 3) ? p.shape : (p && p.pa ? assetTrianglePoints(p.lat, p.lng, sizeFt) : assetSquarePoints(p.lat, p.lng, sizeFt)); }
     function assetSquarePoints(lat, lng, sizeFt) {
         const halfM = (sizeFt / 2) / M_TO_FT;
         const dLat = halfM / 111320;
@@ -23032,14 +23043,16 @@
     }
     // v4.352: section chrome — numbered, collapsible, one-line live summary in the header
     const IMP_SECTIONS = [
-        { id: 'bounds', num: '1', title: 'Boundaries', color: '186,140,255' },
-        { id: 'data', num: '2', title: 'Data file', color: '122,223,230' },
-        { id: 'type', num: '3', title: 'Type & priority', color: '255,179,71' },
-        { id: 'place', num: '4', title: 'Placement & flags', color: '255,95,255' },
-        { id: 'env', num: '5', title: 'Well records (Enverus)', color: '255,214,102' },
-        { id: 'resp', num: '6', title: 'Client response', color: '126,200,255' },
-        { id: 'create', num: '7', title: 'Create / update', color: '95,255,95' },
-        { id: 'adv', num: '', title: 'Advanced', color: '160,160,160' },
+        // v4.416: `does` = what the step does to AIM, in the three verbs every button on the page uses:
+        //   👁 shows (reads only) · ➕ stages (changes the map / the plan, nothing written) · ⚡ writes to AIM
+        { id: 'bounds', num: '1', title: 'Boundaries', color: '186,140,255', does: '👁 picks which points — nothing written' },
+        { id: 'data', num: '2', title: 'Data file', color: '122,223,230', does: '➕ stages points on the map — nothing written' },
+        { id: 'type', num: '3', title: 'Type & priority', color: '255,179,71', does: '➕ decides what step 7 will write — nothing written yet' },
+        { id: 'place', num: '4', title: 'Placement & flags', color: '255,95,255', does: '➕ fixes positions on the map · only 🔁 Swap writes' },
+        { id: 'env', num: '5', title: 'Well records (Enverus)', color: '255,214,102', does: '👁 checks · ➕ stages what is missing · 👁 report — nothing written' },
+        { id: 'resp', num: '6', title: 'Client response', color: '126,200,255', does: '➕ applies to the staged points · ⚡ 🏷 moves / renames and 🗑 removals write' },
+        { id: 'create', num: '7', title: 'Create / update', color: '95,255,95', does: '⚡ writes to AIM — the only step that creates assets' },
+        { id: 'adv', num: '', title: 'Advanced', color: '160,160,160', does: '👁 selection tools · ⚡ 🗑 delete mode writes' },
     ];
     function impSecOpenHtml(id) {
         const d = IMP_SECTIONS.find(x => x.id === id);
@@ -23048,6 +23061,7 @@
                 <span data-impsecchev style="color:rgb(${d.color});width:10px;flex:none">▸</span>
                 ${d.num ? `<span style="display:inline-block;min-width:18px;height:18px;line-height:18px;text-align:center;border-radius:50%;background:rgba(${d.color},0.25);color:rgb(${d.color});font-size:10px;font-weight:700;flex:none">${d.num}</span>` : ''}
                 <b style="color:rgb(${d.color});flex:none">${d.title}</b>
+                ${d.does ? `<span style="flex:none;font-size:9.5px;padding:0 6px;border-radius:8px;background:${/⚡/.test(d.does) ? 'rgba(255,120,60,0.18)' : (/➕/.test(d.does) ? 'rgba(95,255,95,0.12)' : 'rgba(255,255,255,0.08)')};color:${/⚡/.test(d.does) ? '#ffb28a' : (/➕/.test(d.does) ? '#9fe8a0' : '#aab')};border:1px solid ${/⚡/.test(d.does) ? 'rgba(255,120,60,0.5)' : (/➕/.test(d.does) ? 'rgba(95,255,95,0.35)' : 'rgba(255,255,255,0.15)')}">${d.does}</span>` : ''}
                 <span data-impsecsum="${id}" style="color:#8a949e;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0"></span>
             </button>
             <div data-impsecbody="${id}" style="display:none;padding:8px 10px 4px">`;
@@ -23719,7 +23733,7 @@
                 <button data-impswap-find ${hasEnv ? '' : 'disabled'} style="${btn('195,155,211', hasEnv ? '' : ';opacity:0.45;cursor:default')}" title="${hasEnv ? 'Scan every name match that has an Enverus pin' : 'Run the 🛢 cross-check first'}">⟳ Find</button>
                 <button data-impswap-pick style="${btn('195,155,211')}" title="ALT+click two existing assets on the map to add a pair by hand">${imp.mode === 'swap' ? `✋ ON — ALT+click ${S.pick.length ? 'the second asset' : 'the first asset'} · Esc=off` : '✋ Pick two'}</button>
                 <span style="flex:1"></span>
-                ${S.pairs.length ? `<button data-impswap-apply ${nOn ? '' : 'disabled'} style="${btn('95,255,95', ';font-weight:600' + (nOn ? '' : ';opacity:0.45;cursor:default'))}">🔁 Swap names for ${nOn} pair${nOn === 1 ? '' : 's'}</button>` : ''}
+                ${S.pairs.length ? `<button data-impswap-apply ${nOn ? '' : 'disabled'} style="${btn('255,120,60', ';font-weight:600' + (nOn ? '' : ';opacity:0.45;cursor:default'))}" title="WRITES to AIM: renames both assets of each ticked pair (three renames through a temporary name). Honours Dry run; ↩ undo swaps reverses it.">⚡ Swap names for ${nOn} pair${nOn === 1 ? '' : 's'}</button>` : ''}
                 ${S.lastSwaps.length ? `<button data-impswap-undo style="${btn('255,179,71')}">↩ undo ${S.lastSwaps.length} swap${S.lastSwaps.length === 1 ? '' : 's'}</button>` : ''}
             </div>
             ${S.pairs.length ? `<div style="font-size:10px;color:#888;margin-bottom:3px">⇄ mutual (safe to swap) · → one-way (look first) · ✋ picked by hand · tick the ones to swap · ${impEsc(S.at || '')}</div><div style="max-height:170px;overflow:auto;border:1px solid rgba(255,255,255,0.06);border-radius:3px;background:rgba(0,0,0,0.15)">${S.pairs.map(row).join('')}</div>` : (S.at ? '<div style="font-size:10px;color:#5fff5f">✓ no mislabeled pairs found among the name matches with an Enverus pin</div>' : '')}
@@ -24057,15 +24071,15 @@
                 <button id="aim-imp-resp-load" style="${btn('126,200,255')}">📬 Load the client's response (xlsx / csv)</button>
                 <span style="color:#888;font-size:10px">${R.rows ? `${impEsc(R.fileName)} · ${R.rows.length} rows · read ${impEsc(R.at)}` : 'the review sheet they sent back, with their answers in the "Diamondback response" / "Correct coordinates" / "Needs internal confirmation?" columns'}</span>
                 <span style="flex:1"></span>
-                ${R.rows ? `<button id="aim-imp-resp-apply" ${R.applied ? 'disabled' : ''} style="${btn('95,255,95', ';font-weight:600' + (R.applied ? ';opacity:0.45;cursor:default' : ''))}">${R.applied ? '✔ applied to staged' : '✔ Apply to the staged points'}</button>` : ''}
+                ${R.rows ? `<button id="aim-imp-resp-apply" ${R.applied ? 'disabled' : ''} style="${btn('95,255,95', ';font-weight:600' + (R.applied ? ';opacity:0.45;cursor:default' : ''))}" title="Changes the staged points on the map only (moves, added rows, statuses, renames) — nothing is written until step 7, or 🏷 / 🗑 below for existing assets.">${R.applied ? '➕ applied to the staged points' : '➕ Apply to the staged points (map only)'}</button>` : ''}
             </div>
             ${R.rows ? `<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:4px">${order.map(chip).join('')}</div>
             <div style="font-size:10px;color:#888;margin-bottom:3px">${impEsc(IMP_RESP_LABEL[R.tab])} · click a row to zoom · ⓘ = their full answer · ⏳ = waiting on their internal confirmation (never applied) · ⚠ = look before trusting${skipped ? ` · <b style="color:#ffb347">${skipped}</b> row${skipped === 1 ? '' : 's'} will not be applied automatically` : ''}</div>
             <div style="max-height:220px;overflow:auto;border:1px solid rgba(255,255,255,0.06);border-radius:3px;background:rgba(0,0,0,0.15)">${rows.map((r, i) => row(r, i)).join('') || '<div style="padding:6px;color:#888;font-size:10px">none</div>'}</div>
             ${R.applied ? `<div style="margin-top:8px;padding-top:6px;border-top:1px dashed rgba(126,200,255,0.3)">
                 <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center"><b style="color:#7ec8ff">🏷 Changes to EXISTING assets on the site</b><span style="color:#888;font-size:10px">${R.moves.length} move${R.moves.length === 1 ? '' : 's'} (polygon slid to the corrected coordinate, shape kept) · ${R.renames.length} rename${R.renames.length === 1 ? '' : 's'} (same id, missions unaffected) · ${R.removeIds.length} to delete (sold / inactive per the client)</span><span style="flex:1"></span>
-                    ${(R.moves.length || R.renames.length) ? `<button id="aim-imp-resp-site" style="${btn('255,179,71', ';font-weight:600')}">🏷 Apply moves + renames to the site</button>` : ''}
-                    ${R.removeIds.length ? `<button id="aim-imp-resp-del" style="${btn('255,85,85', ';font-weight:600')}">🗑 Select the ${R.removeIds.length} for Bulk → Delete</button>` : ''}
+                    ${(R.moves.length || R.renames.length) ? `<button id="aim-imp-resp-site" style="${btn('255,120,60', ';font-weight:600')}" title="WRITES to AIM: slides the existing asset polygons to the corrected coordinates and renames the renamed ones. Honours Dry run; backup + undo.">⚡ 🏷 Apply moves + renames to the site</button>` : ''}
+                    ${R.removeIds.length ? `<button id="aim-imp-resp-del" style="${btn('255,85,85', ';font-weight:600')}" title="Hands the removed assets to the standard Bulk → Delete (its own confirm + 5 s hold + Delete Guard backups). Nothing is deleted until you confirm there.">⚡ 🗑 Select the ${R.removeIds.length} for Bulk → Delete</button>` : ''}
                 </div>
                 <div data-impresp-sitenote style="font-size:10.5px;color:#9ad;line-height:1.5;margin-top:4px;min-height:14px">${(() => { let dry = true; try { dry = !!document.getElementById('aim-gen-dryrun').checked; } catch (e) {} return dry ? '🧪 Dry run is ON (header): the button only lists what it would do. Untick Dry run to write.' : '<b style="color:#ff6060">LIVE</b>: the button writes to the site (backup first, undo available).'; })()}</div>
                 ${R.moves.length ? `<div style="max-height:150px;overflow:auto;margin-top:4px;border:1px solid rgba(255,255,255,0.06);border-radius:3px;background:rgba(0,0,0,0.15)">${R.moves.map((x, i) => `<div data-impresp-move="${i}" style="display:flex;gap:6px;align-items:center;padding:1px 4px;border-bottom:1px solid rgba(255,255,255,0.05);font-size:10.5px;color:#cfd6dc;cursor:pointer" title="click = zoom (both spots pulse)"><span style="color:${x.look && !x.force ? '#ff5252' : '#ffb347'};flex:none">${x.look && !x.force ? '⚠' : '↔'}</span><b style="flex:none">${impEsc(x.name)}</b><span style="color:#8a949e;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${Math.round(approxMeters(x.from.lat, x.from.lng, x.to.lat, x.to.lng) / GEN_FT_TO_M).toLocaleString()} ft · ${impEsc(x.why)}${x.look ? (x.force ? ' · <b style="color:#ffb347">you cleared the flag — will move</b>' : ' · held back: the client coordinate is far from the Enverus pin for this API — zoom, look, then tick to move anyway') : ''}</span>${x.look ? `<label style="display:inline-flex;align-items:center;gap:3px;flex:none;color:#ffb347" title="Include this move even though the client coordinate disagrees with Enverus"><input type="checkbox" data-impresp-force="${i}" ${x.force ? 'checked' : ''} style="accent-color:#ffb347;margin:0"> move anyway</label>` : ''}</div>`).join('')}</div>` : ''}
@@ -24147,10 +24161,10 @@
         const row = (x, i) => `<div data-impana-row="${i}" style="display:flex;align-items:center;gap:6px;padding:1px 4px;border-bottom:1px solid rgba(255,255,255,0.05);font-size:10.5px;color:#cfd6dc;cursor:pointer" onmouseover="this.style.background='rgba(255,255,255,0.05)'" onmouseout="this.style.background=''" title="click = zoom"><span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${cat.color};flex:none"></span><b style="flex:none;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${impEsc(x.name)}</b><span style="color:#8a949e;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${impEsc(x.detail)}</span></div>`;
         el.innerHTML = `<div style="padding:6px 8px;background:rgba(122,223,230,0.04);border:1px dashed rgba(122,223,230,0.3);border-radius:3px;margin-bottom:6px">
             <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:4px;font-size:11px">
-                <b style="color:#7adfe6">📊 Analyze — what this list would change</b><span style="color:#888;font-size:10px">read-only; run it on a new quarterly list before Create</span>
+                <b style="color:#7adfe6">📊 Analyze — what this list would change</b><span style="color:#888;font-size:10px">👁 shows only · run it on a new quarterly list before ⚡ Create</span>
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:#cfd6dc">moved over <input type="number" data-impana-ft value="${A.movedFt}" min="0" step="50" style="width:56px;${inCss};text-align:right"> ft</label>
                 <select data-impana-scope style="${inCss}"><option value="selected"${A.scope === 'selected' ? ' selected' : ''}>selected points</option><option value="all"${A.scope === 'all' ? ' selected' : ''}>whole file</option></select>
-                <button data-impana-run style="background:rgba(122,223,230,0.15);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:3px 12px;cursor:pointer;font:inherit;font-size:11px;font-weight:600">⟳ Analyze</button>
+                <button data-impana-run style="background:rgba(122,223,230,0.15);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:3px 12px;cursor:pointer;font:inherit;font-size:11px;font-weight:600" title="Reads only — compares the list with the site and lists what step 7 would change.">👁 Analyze</button>
                 <span style="flex:1"></span>
                 ${R ? `<span style="color:#888;font-size:10px">${impEsc(R.at)} · ${R.same} unchanged</span><button data-impana-rep="sheets" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">📤 Sheets</button><button data-impana-rep="csv" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">⬇ CSV</button>` : ''}
             </div>
@@ -24421,7 +24435,7 @@
             //   child = the square this point would become (Size ft) overlaps an
             //           existing asset, partially or fully (parent/child);
             //   near  = no overlap, but within the radius of one (nearby).
-            const sq = (p.shape && p.shape.length >= 3) ? p.shape : assetSquarePoints(p.lat, p.lng, impPointSizeFt(p));   // v4.367: a drawn outline is what will be created · v4.413: P&A size for plugged
+            const sq = impFootprint(p, impPointSizeFt(p));   // v4.367: a drawn outline is what will be created · v4.413: P&A size · v4.416: P&A = triangle
             let sla0 = Infinity, sla1 = -Infinity, slo0 = Infinity, slo1 = -Infinity; sq.forEach(v => { sla0 = Math.min(sla0, v.lat); sla1 = Math.max(sla1, v.lat); slo0 = Math.min(slo0, v.lng); slo1 = Math.max(slo1, v.lng); });
             const halfLat = Math.max(sla1 - p.lat, p.lat - sla0) * 1.05, halfLng = Math.max(slo1 - p.lng, p.lng - slo0) * 1.05;
             const dLng = dLat / Math.max(0.2, Math.cos(p.lat * Math.PI / 180));
@@ -25389,8 +25403,9 @@
         const inCss = 'background:#1a1d23;border:1px solid rgba(122,223,230,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px;text-align:right';
         host.innerHTML = `
             <div style="font-size:11px;color:#7adfe6;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">📥 Asset Importer — <span id="aim-imp-file-label" style="text-transform:none;letter-spacing:0">${impEsc(imp.fileName || 'no file loaded')}</span></div>
-            <div id="aim-imp-result" style="font-size:11px;color:#9ad;line-height:1.5;margin-bottom:6px;padding:5px 8px;background:rgba(122,223,230,0.05);border-radius:3px;min-height:16px">Boundaries first, then the data file. Points stage on the map (nothing is written); each section below collapses — its header always shows where it stands.</div>
+            <div id="aim-imp-result" style="font-size:11px;color:#9ad;line-height:1.5;margin-bottom:6px;padding:5px 8px;background:rgba(122,223,230,0.05);border-radius:3px;min-height:16px">Boundaries first, then the data file. Steps 1–6 only stage things on the map; step 7 is the one that writes. Each header shows what the step does and where it stands.</div>
             <div id="aim-imp-render-note" style="font-size:10px;color:#7a8794;margin-bottom:6px"></div>
+            <div id="aim-imp-legend" style="display:flex;flex-wrap:wrap;gap:6px 12px;align-items:center;margin-bottom:6px;padding:5px 8px;border:1px solid rgba(255,255,255,0.08);border-radius:3px;font-size:10px;color:#cfd6dc" title="Every button on this page starts with one of these three. Only the ⚡ ones change anything in AIM, and every one of them honours the Dry run tick in the header."><b style="color:#aab">Every button says what it does:</b> <span><b style="color:#aab">👁 shows</b> — reads only</span> <span><b style="color:#9fe8a0">➕ stages</b> — changes the map / the plan, nothing written</span> <span><b style="color:#ffb28a">⚡ writes to AIM</b> — ✓ Create · 🏷 Apply · 🔁 Swap · 🗑 Delete · ↩ Undo, all under Dry run</span></div>
             <div style="display:flex;flex-wrap:wrap;gap:4px;align-items:center;margin-bottom:8px;font-size:10px;color:#888">jump: ${IMP_SECTIONS.map(d => `<button data-impsecjump="${d.id}" style="background:transparent;border:1px solid rgba(${d.color},0.45);color:rgb(${d.color});border-radius:10px;padding:1px 8px;cursor:pointer;font:inherit;font-size:10px">${d.num ? d.num + ' ' : ''}${d.title}</button>`).join('')}</div>
             <div id="aim-imp-resume" style="display:none;margin-bottom:8px"></div>
             ${impSecOpenHtml('bounds')}
@@ -25451,10 +25466,10 @@
                     <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;color:#ffb3ad;margin-top:4px"><input type="checkbox" id="aim-imp-biggate-ack" style="accent-color:#ff5555"> I understand the risk — create them anyway</label>
                 </div>
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc" title="Square side of each created asset — same shape ➕ Create asset uses. Reshape in Percepto afterwards (auto-reshape is feature #251).">Size <input type="number" id="aim-imp-size" min="5" max="2000" step="5" style="width:52px;${inCss}"> ft</label>
-                <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#ff8a80" title="Square side for 🩻 P&A assets (plugged / expired / cancelled / retired wells and facilities staged from the fill-in) — bigger than a wellhead on purpose so the ✕ reads at a glance. ↔ Move and ✏ Shape still apply.">P&A size <input type="number" id="aim-imp-pasize" min="5" max="2000" step="5" style="width:52px;background:#1a1d23;border:1px solid rgba(255,138,128,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px"> ft</label>
+                <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#ff8a80" title="Side of the TRIANGLE a 🩻 P&A asset becomes (plugged / expired / cancelled / retired wells and facilities from the fill-in) — three corners instead of four so it never passes for a normal asset. ↔ Move and ✏ Shape still apply.">P&A size <input type="number" id="aim-imp-pasize" min="5" max="2000" step="5" style="width:52px;background:#1a1d23;border:1px solid rgba(255,138,128,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px"> ft</label>
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#ffd400" title="What happens to a staged point whose NAME matches an asset already on this site. Update = rewrite that asset's TYPE and NOTES from this file, never its shape or position (the quarterly re-run). Copy = create a second asset named …-2. Skip = leave it alone. Points merely inside / near an existing asset are only flagged and always created.">name matches <select id="aim-imp-dupmode" style="background:#1a1d23;border:1px solid rgba(255,212,0,0.45);color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px"><option value="update">update type + notes</option><option value="skip">skip</option><option value="copy">create a copy (-N)</option></select></label>
-                <button id="aim-imp-commit" style="${btnCss('95,255,95')};font-weight:600">✓ Create selected</button>
-                <button id="aim-imp-undocreate" style="${btnCss('255,179,71')}" title="Delete exactly the assets the most recent import created (this session). Each delete rides Delete Guard's undo ring when installed.">↩ Undo last import</button>
+                <button id="aim-imp-commit" style="${btnCss('255,120,60')};font-weight:600" title="WRITES to AIM: creates the selected staged points as real assets (updates type + notes on name matches). Honours Dry run. A backup manifest downloads first; ↩ Undo reverts exactly this run.">⚡ Create selected</button>
+                <button id="aim-imp-undocreate" style="${btnCss('255,179,71')}" title="WRITES to AIM: deletes exactly the assets the most recent import created (this session) and puts updated ones back. Each delete rides Delete Guard's undo ring when installed.">↩ Undo last import</button>
             </div>
             <div id="aim-imp-analyze" style="margin-top:6px"></div>
             <div id="aim-imp-imports" style="margin-top:6px"></div>
@@ -25468,7 +25483,7 @@
             </div>
             <div id="aim-imp-delrow" style="display:none;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px;padding-top:8px;border-top:1px dashed rgba(255,85,85,0.35)">
                 <label style="display:inline-flex;align-items:center;gap:5px;font-size:11px;color:#ff8a80;font-weight:600" title="Flip the ⭕/🖊/☝ tools to select EXISTING site assets instead of staged points. Deleting requires the ack + slide-and-hold ceremony and rides Delete Guard's 24h undo ring."><input type="checkbox" id="aim-imp-delmode" style="accent-color:#ff5555"> 🗑 Delete mode — select existing assets</label>
-                <button id="aim-imp-delete" style="${btnCss('255,85,85')};font-weight:600;display:none">🗑 Delete selected…</button>
+                <button id="aim-imp-delete" style="${btnCss('255,85,85')};font-weight:600;display:none">⚡ 🗑 Delete selected…</button>
                 <button id="aim-imp-undodel" style="${btnCss('255,179,71')};display:none" title="Re-create the assets from the most recent bulk delete's bank (create-only — they come back with NEW ids; mission references do NOT rebind).">↩ Undo delete batch</button>
             </div>
             </div>
@@ -25921,7 +25936,7 @@
             </div>
             <div style="max-height:200px;overflow:auto;border:1px solid rgba(255,255,255,0.06);border-radius:3px;background:rgba(0,0,0,0.15)">${shown.map((r) => row(r, rows.indexOf(r))).join('') || `<div style="padding:6px;color:#5fff5f;font-size:10px">✓ every status matches what the notes recorded${moved.length ? '' : ' and every Enverus point sits within tolerance'}</div>`}</div>
             <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
-                <button data-impparev-stage ${changed.filter(r => !r.staged).length ? '' : 'disabled'} style="background:rgba(255,138,128,0.15);color:#ff8a80;border:1px solid rgba(255,138,128,0.55);border-radius:3px;padding:4px 12px;cursor:pointer;font:inherit;font-size:11px;font-weight:600${changed.filter(r => !r.staged).length ? '' : ';opacity:0.45;cursor:default'}">↻ Stage ${changed.filter(r => !r.staged).length} status update${changed.filter(r => !r.staged).length === 1 ? '' : 's'}</button>
+                <button data-impparev-stage ${changed.filter(r => !r.staged).length ? '' : 'disabled'} style="background:rgba(255,138,128,0.15);color:#ff8a80;border:1px solid rgba(255,138,128,0.55);border-radius:3px;padding:4px 12px;cursor:pointer;font:inherit;font-size:11px;font-weight:600${changed.filter(r => !r.staged).length ? '' : ';opacity:0.45;cursor:default'}" title="Stages a name-matched update per changed asset. Nothing is written until ⚡ Create in step 7 (type + notes only).">➕ Stage ${changed.filter(r => !r.staged).length} status update${changed.filter(r => !r.staged).length === 1 ? '' : 's'} — map only</button>
                 <span style="color:#888;font-size:10px">a staged update keeps the asset's name, shape and position; ✓ Create rewrites its TYPE (P&A Asset - &lt;status&gt; when plugged, the well / 3rd-party type otherwise) and NOTES with a fresh "Status recorded" date. Nothing is written until ✓ Create.</span>
             </div>
         </div>`;
@@ -26097,7 +26112,7 @@
             <div style="color:#888;font-size:10px">Three steps, one button each. The well records come from Enverus (key set once per computer, under ⚙ settings).</div>
             ${stepHdr('A', 'Check the list against the well records', 'status · type · operator · location for every well in the list')}
             <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
-                ${btnP('data-impenv-run', c.running ? '⏳ checking…' : `🛢 Check ${withApi} ${c.scope === 'all' ? 'wells in the whole file' : 'selected wells'}`, c.running || !ready)}
+                ${btnP('data-impenv-run', c.running ? '⏳ checking…' : `👁 Check ${withApi} ${c.scope === 'all' ? 'wells in the whole file' : 'selected wells'}`, c.running || !ready)}
                 ${S ? `${pill('producing', S.producing, '#5fff5f')} ${pill('inactive', S.inactive, '#ffb347')} ${pill('✕ plugged', S.plugged, '#ff5252')} ${S.other ? pill('other', S.other, '#9ad') : ''} ${S.notFound ? pill('not found', S.notFound, '#ff8a80') : ''} <span style="color:#888;font-size:10px">${S.found} / ${S.withApi} found · ${impEsc(c.checkedAt || '')}${S.mainOp ? ` · mostly <b style="color:#cfd6dc">${impEsc(S.mainOp)}</b>` : ''}${S.otherOp ? ` · <span style="color:#ffb347">${S.otherOp} under another operator</span>` : ''}${S.far ? ` · <span style="color:#ffb347">${S.far} more than 100 ft off</span>` : ''}</span>`
                     : `<span style="color:#888;font-size:10px">${!key ? '<span style="color:#ff6060">set the key under ⚙ settings</span>' : (!c.apiCol ? '<span style="color:#ffb347">pick the API-number column under ⚙ settings</span>' : `${withApi} wells · about ${mins} min`)}${selN - withApi ? ` · ${selN - withApi} rows without an API number (batteries etc.) are skipped` : ''}</span>`}
                 ${S ? `<span style="flex:1"></span>${btnS('data-impenv-rep="sheets"', '📤 Sheets', 'One row per well: status, type, operator, dates, location vs the list')}${btnS('data-impenv-rep="csv"', '⬇ CSV')}` : ''}
@@ -26110,7 +26125,7 @@
                 <label style="${lbl}" title="Adds an 'Enverus' block (status · type · trajectory · operator · dates · API · checked date) to each checked asset's notes on Create / update"><input type="checkbox" data-impenv-notes ${c.notes ? 'checked' : ''} style="accent-color:#ffd666;margin:0"> write the result into each asset's notes</label>`)}
             ${stepHdr('B', 'Find what the list is missing', 'wells and facilities inside your boundaries that are not in the file')}
             <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
-                ${btnP('data-impenv-find', c.finding ? '⏳ searching…' : '🔍 Find missing', c.finding || !key)}
+                ${btnP('data-impenv-find', c.finding ? '⏳ searching…' : '👁 Find missing', c.finding || !key)}
                 <span style="color:#888;font-size:10px">${!S ? 'run step A first — it learns the operator and the counties' : `${imp.shapes.length ? `inside your ${imp.shapes.length} boundar${imp.shapes.length === 1 ? 'y' : 'ies'}` : 'no boundary — around the selected points (¼ mi)'} · <b style="color:#cfd6dc">${impEsc(c.missingAll ? 'every operator' : (c.missingOp || c.mainOp || '?'))}</b>${c.missingFac !== false ? ' · facilities too' : ''}`}</span>
             </div>
             ${gear('b', !!set.b, `
@@ -26121,7 +26136,7 @@
             <div data-impenv-pareview style="margin-top:4px"></div>
             ${stepHdr('C', 'Report for the client', 'what they need to go check — written for a non-technical reader')}
             <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
-                ${btnP('data-impenv-review="sheets"', '📋 Report for Sheets', false)} ${btnS('data-impenv-review="csv"', '⬇ CSV')}
+                ${btnP('data-impenv-review="sheets"', '👁 📋 Report for Sheets', false)} ${btnS('data-impenv-review="csv"', '⬇ CSV')}
                 <span data-impenv-review-note style="color:#888;font-size:10px"></span>
             </div>
             ${gear('c', !!set.c, `
@@ -26196,7 +26211,7 @@
             </div>` : ''}
             <div style="max-height:230px;overflow:auto;border:1px solid rgba(255,255,255,0.06);border-radius:3px;background:rgba(0,0,0,0.15)">${shown.map(row).join('') || '<div style="padding:6px;color:#888;font-size:10px">nothing in the ticked groups</div>'}</div>
             <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
-                <button data-impmiss-stage ${nSel ? '' : 'disabled'} style="background:rgba(95,255,95,0.15);color:#5fff5f;border:1px solid rgba(95,255,95,0.55);border-radius:3px;padding:4px 12px;cursor:pointer;font:inherit;font-size:11px;font-weight:600${nSel ? '' : ';opacity:0.45;cursor:default'}">➕ Stage ${nSel}${nPaSel ? ` (${nPaSel} as P&A)` : ''}</button>
+                <button data-impmiss-stage ${nSel ? '' : 'disabled'} style="background:rgba(95,255,95,0.15);color:#5fff5f;border:1px solid rgba(95,255,95,0.55);border-radius:3px;padding:4px 12px;cursor:pointer;font:inherit;font-size:11px;font-weight:600${nSel ? '' : ';opacity:0.45;cursor:default'}" title="Adds the ticked wells / facilities to the staged points on the map. Nothing is written until ⚡ Create in step 7.">➕ Stage ${nSel}${nPaSel ? ` (${nPaSel} as P&A)` : ''} — map only</button>
                 <span style="color:#888;font-size:10px">they join the staged points on the map · nothing is written until ✓ Create in step 7</span>
                 <span title="A staged well is an ordinary point: name = the Enverus well name, type 'H - WELL (Enverus)' / 'V - WELL (Enverus)' (change it in 3 · Type), notes carry a 'Source: added from Enverus' block and a dated 'Status recorded' line. Other operators' wells stage as '3RD PARTY WELL (operator)' obstacles." style="width:14px;height:14px;line-height:12px;text-align:center;border:1px solid rgba(122,223,230,0.5);border-radius:50%;color:#7adfe6;font-size:9px;font-weight:700;cursor:help">i</span>
             </div>
@@ -26779,7 +26794,7 @@
                 const upd = imp.dupMode === 'update' ? dupsIn : 0;
                 const n = live.filter(p => p.sel && (!p.dup || imp.dupMode !== 'skip')).length;
                 const cre = n - upd;
-                cb.textContent = `✓ ${cre ? `Create ${cre}` : ''}${cre && upd ? ' + ' : ''}${upd ? `update ${upd}` : ''}${!cre && !upd ? 'Create 0' : ''} asset${(cre + upd) === 1 ? '' : 's'}${(dupsIn && imp.dupMode === 'skip') ? ` (${dupsIn} name match${dupsIn === 1 ? '' : 'es'} skipped)` : ''}`;
+                cb.textContent = `⚡ ${cre ? `Create ${cre}` : ''}${cre && upd ? ' + ' : ''}${upd ? `update ${upd}` : ''}${!cre && !upd ? 'Create 0' : ''} asset${(cre + upd) === 1 ? '' : 's'} in AIM${(dupsIn && imp.dupMode === 'skip') ? ` (${dupsIn} name match${dupsIn === 1 ? '' : 'es'} skipped)` : ''}`;
                 const gate = document.getElementById('aim-imp-biggate'), gateN = document.getElementById('aim-imp-biggate-n'), gateAck = document.getElementById('aim-imp-biggate-ack');
                 if (gate) {
                     const big = n > IMP_BIG_BATCH;
@@ -26841,7 +26856,7 @@
         const dry = (() => { try { return !!document.getElementById('aim-gen-dryrun').checked; } catch (e) { return true; } })();
         const nUpd = plan.filter(x => x.update).length, nCre = plan.length - nUpd;
         const nPa = plan.filter(x => x.p.pa).length;
-        if (dry) { impStatus(`DRY RUN — would create <b>${nCre}</b> asset(s) (${impSizeFt}×${impSizeFt} ft squares${nPa ? `, 🩻 ${nPa} P&A at ${imp.env.paSizeFt} ft` : ''})${nUpd ? ` and UPDATE type + notes on <b>${nUpd}</b> existing` : ''}${skippedDups ? `, skipping ${skippedDups} name match(es)` : ''}${imp.pri.on ? ` · tiers ON (${plan.filter(x => /^P[1-3] - /.test(x.subtype)).length} prefixed)` : ''}: ${impEsc(plan.slice(0, 12).map(x => `${x.update ? '↻ ' : ''}${x.p.name} [${x.subtype}]`).join(' · '))}${plan.length > 12 ? ' …' : ''}. Untick Dry run to write.`); return; }
+        if (dry) { impStatus(`DRY RUN — would create <b>${nCre}</b> asset(s) (${impSizeFt}×${impSizeFt} ft squares${nPa ? `, 🩻 ${nPa} P&A as ${imp.env.paSizeFt} ft triangles` : ''})${nUpd ? ` and UPDATE type + notes on <b>${nUpd}</b> existing` : ''}${skippedDups ? `, skipping ${skippedDups} name match(es)` : ''}${imp.pri.on ? ` · tiers ON (${plan.filter(x => /^P[1-3] - /.test(x.subtype)).length} prefixed)` : ''}: ${impEsc(plan.slice(0, 12).map(x => `${x.update ? '↻ ' : ''}${x.p.name} [${x.subtype}]`).join(' · '))}${plan.length > 12 ? ' …' : ''}. Untick Dry run to write.`); return; }
         if (plan.length > IMP_BIG_BATCH) {
             const ack = (() => { try { return !!document.getElementById('aim-imp-biggate-ack').checked; } catch (e) { return false; } })();
             if (!ack) { impStatus(`BLOCKED — <b>${plan.length}</b> assets is more than ${IMP_BIG_BATCH} in one run. Narrow the selection with a boundary KML, or tick "I understand the risk" under the Create button to proceed anyway.`, '#ff6060'); return; }
@@ -26869,7 +26884,7 @@
         if (nUpd) { try { siteCfg = await fetchSiteConfig(sid); } catch (e) {} if (!siteCfg) { impStatus('Could not read the site config (mountain-terrain flag) — updates refused, nothing written', '#ff6060'); return; } }
         // backup manifest BEFORE any write (rollback = delete the created ids / re-POST the updated bodies)
         const manifest = { site: sid, at: new Date().toISOString(), file: imp.fileName, sizeFt: impSizeFt,
-            creates: plan.filter(x => !x.update).map(x => ({ name: x.name, subtype: x.subtype, lat: x.p.lat, lng: x.p.lng, notes: x.notes, movedFrom: x.p.orig || null, shape: x.p.shape || null, sizeFt: impPointSizeFt(x.p), pa: x.p.pa || null })),
+            creates: plan.filter(x => !x.update).map(x => ({ name: x.name, subtype: x.subtype, lat: x.p.lat, lng: x.p.lng, notes: x.notes, movedFrom: x.p.orig || null, shape: x.p.shape || (x.p.pa ? assetTrianglePoints(x.p.lat, x.p.lng, impPointSizeFt(x.p)) : null), sizeFt: impPointSizeFt(x.p), pa: x.p.pa || null })),
             updates: plan.filter(x => x.update).map(x => ({ id: x.p.dupId, name: x.name, after: { subtype: x.subtype, notes: x.notes }, before: byIdEnt.get(x.p.dupId) || null })) };
         try { localStorage.setItem(`aim_imp_commit_backup:${sid}`, JSON.stringify(manifest)); } catch (e) {}
         try { downloadJSONFile(`asset-import-${sid}-${Date.now()}.json`, JSON.stringify(manifest, null, 1)); } catch (e) { impStatus('backup manifest download failed (localStorage stash still written)'); }
@@ -26900,7 +26915,7 @@
                 continue;
             }
             impStatus(`creating ${i + 1}/${plan.length} — "${impEsc(x.name)}"…`);
-            const r = await createAssetSquare(sid, x.p.lat, x.p.lng, impPointSizeFt(x.p), x.name, x.subtype, !knownSubs.has(x.subtype), x.notes || '', x.p.shape || null);   // v4.413: P&A points use their own size
+            const r = await createAssetSquare(sid, x.p.lat, x.p.lng, impPointSizeFt(x.p), x.name, x.subtype, !knownSubs.has(x.subtype), x.notes || '', x.p.shape || (x.p.pa ? assetTrianglePoints(x.p.lat, x.p.lng, impPointSizeFt(x.p)) : null));   // v4.413: P&A size · v4.416: P&A = triangle unless an outline was drawn
             if (r && r.ok) {
                 ok++; created.push({ id: r.id, name: x.name, point: x.p });
                 knownSubs.add(x.subtype);
