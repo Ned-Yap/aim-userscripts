@@ -1,4 +1,6 @@
-## 2026-10-23 — 🚫 AVOID - 3rd Party Pad — Site Setup Tools latest v4.444 (latest only)
+## 2026-10-23 — 🚫 AVOID - 3rd Party Pad — Site Setup Tools latest v4.444 → v4.445 (latest only)
+
+- **v4.445** — fill-in candidates (✕ and squares) are drawn before the staged dots, for every status group, with their own cap — the 4,000-dot viewport cap could hide them entirely when zoomed out on a big site.
 
 - **v4.444** — other operators' wells and facilities from the fill-in are now staged as type **AVOID - 3rd Party Pad** (facilities: `AVOID - 3rd Party Pad (battery)` etc.), editable under 5 · B ⚙ settings, and named **AVOID - <Enverus well name>** so the warning reads on the map label. The operator and the full record stay in the notes. Never tiered, never H/V-prefixed, and — closing a real hole — **never name-matched to one of the client's assets** (a third-party well sharing a name used to count as an update of ours; it is now flagged and created as its own AVOID asset).
 

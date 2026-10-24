@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.444
+// @version      4.445
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.444';
+    const SCRIPT_VERSION = '4.445';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -24699,6 +24699,23 @@
         // v4.413: red ✕ = plugged / expired / cancelled / retired (staged points AND the unstaged
         // Enverus candidates, so the ones on our pads that never get written are still seen)
         const drawX = (lat, lng, px, opts) => { const x = L.polyline(impXLatLngs(map, lat, lng, px), Object.assign({ interactive: false, lineCap: 'round' }, opts, imp.renderer ? { renderer: imp.renderer } : {})); x.addTo(map); imp.layers.push(x); };
+        // v4.417/v4.445: EVERY unstaged candidate from the fill-in is on the map, drawn FIRST with its own cap so the 4,000-dot viewport cap can never hide them —
+        // ✕ for plugged, a small hollow square for the rest (colour = status group) — so 'drilled, off
+        // our pads' is seen before it is staged. Staged ones draw above as ordinary points.
+        try {
+            impPaNormalizeCands();
+            const cands = (imp.env.missing || []).filter(x => !x.staged); let gDrawn = 0;
+            for (const x of cands) {
+                if (bounds && !bounds.contains([x.lat, x.lng])) continue;
+                if (gDrawn >= 3000) break;
+                if (x.pa) drawX(x.lat, x.lng, 4, { color: x.onPad ? '#ff6b6b' : '#ff2d2d', weight: 1.5, opacity: 0.55, dashArray: x.onPad ? '2,2' : null });
+                else { const sq = L.polygon(impSquareLatLngs(map, x.lat, x.lng, 3.5), Object.assign({ color: IMP_CAND_COLORS[x.group] || '#fff', weight: 1.5, opacity: 0.8, fillColor: IMP_CAND_COLORS[x.group] || '#fff', fillOpacity: 0.25, interactive: false }, imp.renderer ? { renderer: imp.renderer } : {})); sq.addTo(map); imp.layers.push(sq); }
+                gDrawn++;
+                let pp = impCandHover.get(x);
+                if (!pp) { pp = x.pa ? { name: genCleanName(impPaName(x)), cand: x, env: x, pa: { label: x.paLabel, onPad: !!x.onPad }, typeRaw: impPaTypeFor(x.ours !== false, x.paLabel), thirdParty: x.ours === false } : { name: x.name, cand: x, env: x, typeRaw: `${x.facility ? (x.facType || 'facility') : (x.status || '')} · not in the list`, thirdParty: x.ours === false }; impCandHover.set(x, pp); }
+                try { const cp = map.latLngToContainerPoint([x.lat, x.lng]); hoverIdx.push({ x: cp.x, y: cp.y, p: pp }); } catch (e) {}
+            }
+        } catch (e) { console.warn(`${TAG} 🩻 candidate ✕ render failed:`, e); }
         for (const p of live) {
             if (bounds && !bounds.contains([p.lat, p.lng])) { culled++; continue; }
             if (drawn >= IMP_MAX_RENDER) { culled++; continue; }
@@ -24724,23 +24741,6 @@
                 try { const cp = map.latLngToContainerPoint([p.lat, p.lng]); hoverIdx.push({ x: cp.x, y: cp.y, p }); } catch (e) {}
             } catch (e) {}
         }
-        // v4.417: EVERY unstaged candidate from the fill-in whose status group is ticked is on the map —
-        // ✕ for plugged, a small hollow square for the rest (colour = status group) — so 'drilled, off
-        // our pads' is seen before it is staged. Staged ones draw above as ordinary points.
-        try {
-            impPaNormalizeCands();
-            const cands = (imp.env.missing || []).filter(x => !x.staged && imp.env.missStatus[x.group]);
-            for (const x of cands) {
-                if (bounds && !bounds.contains([x.lat, x.lng])) continue;
-                if (drawn >= IMP_MAX_RENDER) break;
-                if (x.pa) drawX(x.lat, x.lng, 4, { color: x.onPad ? '#ff6b6b' : '#ff2d2d', weight: 1.5, opacity: 0.55, dashArray: x.onPad ? '2,2' : null });
-                else { const sq = L.polygon(impSquareLatLngs(map, x.lat, x.lng, 3.5), Object.assign({ color: IMP_CAND_COLORS[x.group] || '#fff', weight: 1.5, opacity: 0.8, fillColor: IMP_CAND_COLORS[x.group] || '#fff', fillOpacity: 0.25, interactive: false }, imp.renderer ? { renderer: imp.renderer } : {})); sq.addTo(map); imp.layers.push(sq); }
-                drawn++;
-                let pp = impCandHover.get(x);
-                if (!pp) { pp = x.pa ? { name: genCleanName(impPaName(x)), cand: x, env: x, pa: { label: x.paLabel, onPad: !!x.onPad }, typeRaw: impPaTypeFor(x.ours !== false, x.paLabel), thirdParty: x.ours === false } : { name: x.name, cand: x, env: x, typeRaw: `${x.facility ? (x.facType || 'facility') : (x.status || '')} · not in the list`, thirdParty: x.ours === false }; impCandHover.set(x, pp); }
-                try { const cp = map.latLngToContainerPoint([x.lat, x.lng]); hoverIdx.push({ x: cp.x, y: cp.y, p: pp }); } catch (e) {}
-            }
-        } catch (e) { console.warn(`${TAG} 🩻 candidate ✕ render failed:`, e); }
         imp._hoverIdx = hoverIdx; impEnsureHover(true);
         const capEl = document.getElementById('aim-imp-render-note');
         if (capEl) capEl.textContent = culled ? `${drawn} of ${live.length} staged points drawn in this view (${culled} off-screen / over the ${IMP_MAX_RENDER} render cap — zoom/pan to see them)` : '';
