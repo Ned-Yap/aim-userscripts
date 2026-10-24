@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.443
+// @version      4.444
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.443';
+    const SCRIPT_VERSION = '4.444';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -23015,7 +23015,7 @@
         swap: { pairs: [], pick: [], at: null, lastSwaps: [] },               // 🔁 mislabeled wellheads
         env: { apiCol: null, open: false, notes: true, checkedAt: null, summary: null, running: false, opFilter: '', mismatchFt: 300, scope: 'selected', includeOurs: false,
             missing: null, missingAt: null, missingOp: '', missingSel: new Set(), missStatus: { producing: true, drilled: true, inactive: true, plugged: true, facility: true }, finding: false, missingFac: true,
-            paAssets: true, paSizeFt: 100, paMatchFt: 250, paReview: null },   // v4.413: 🩻 plugged / retired → P&A assets (own size), status review (API match, location tolerance)   // v4.366: fill-in · facilities too   // v4.356: Enverus cross-check · v4.358: client review report
+            paAssets: true, paSizeFt: 100, paMatchFt: 250, paReview: null, thirdType: 'AVOID - 3rd Party Pad' },   // v4.444: one searchable type for every other operator's well / facility   // v4.413: 🩻 plugged / retired → P&A assets (own size), status review (API match, location tolerance)   // v4.366: fill-in · facilities too   // v4.356: Enverus cross-check · v4.358: client review report
         hv: { on: true, col: null, useEnv: true },     // v4.418: h - / v - / d - type prefix: file deviation column → Enverus trajectory → the asset's existing prefix
         pri: { on: false, open: false, oilCol: null, waterCol: null, blpdCol: null, priCol: null, clusterFt: 100, padFt: 50, p1Min: 250, p1Max: 1500, summary: null, zeroUntier: true, envUntier: true },   // v4.347: priority tiers · v4.357: zero-production / Enverus-dead wells get no tier
         advOpen: false,                             // v4.331: ▸ Advanced (subset tools + delete mode) expanded — GM-remembered
@@ -23038,7 +23038,7 @@
         lastDelete: null,                           // {siteID, when, entities:[full bodies]} — ↩ Undo batch source
         assetIndex: null,                           // cached [{id,name,clean,ring,bbox,centroid}] for dup-guard + delete select
     };
-    function impSaveParams() { try { GM_setValue(IMP_PARAMS_KEY, JSON.stringify({ radiusVal: imp.radiusVal, radiusUnit: imp.radiusUnit, includeDups: imp.includeDups, advOpen: imp.advOpen, keepShield: imp.keepShield, dupMode: imp.dupMode, secOpen: imp.secOpen, shapeW: imp.shapeW, snapFt: imp.snapFt, bufFt: imp.bufFt, gapFt: imp.gapFt, anaMovedFt: imp.ana.movedFt, paAssets: imp.env.paAssets, paSizeFt: imp.env.paSizeFt, paMatchFt: imp.env.paMatchFt, hvOn: imp.hv.on, hvEnv: imp.hv.useEnv, alignDeg: imp.alignDeg, farFt: imp.farFt, flagAdvance: imp.flagAdvance, flagDir: imp.flagDir, pri: { clusterFt: imp.pri.clusterFt, padFt: imp.pri.padFt, p1Min: imp.pri.p1Min, p1Max: imp.pri.p1Max, open: imp.pri.open, setOpen: imp.pri.setOpen, zeroUntier: imp.pri.zeroUntier, envUntier: imp.pri.envUntier } })); } catch (e) {} }
+    function impSaveParams() { try { GM_setValue(IMP_PARAMS_KEY, JSON.stringify({ radiusVal: imp.radiusVal, radiusUnit: imp.radiusUnit, includeDups: imp.includeDups, advOpen: imp.advOpen, keepShield: imp.keepShield, dupMode: imp.dupMode, secOpen: imp.secOpen, shapeW: imp.shapeW, snapFt: imp.snapFt, bufFt: imp.bufFt, gapFt: imp.gapFt, anaMovedFt: imp.ana.movedFt, paAssets: imp.env.paAssets, paSizeFt: imp.env.paSizeFt, paMatchFt: imp.env.paMatchFt, hvOn: imp.hv.on, hvEnv: imp.hv.useEnv, thirdType: imp.env.thirdType, alignDeg: imp.alignDeg, farFt: imp.farFt, flagAdvance: imp.flagAdvance, flagDir: imp.flagDir, pri: { clusterFt: imp.pri.clusterFt, padFt: imp.pri.padFt, p1Min: imp.pri.p1Min, p1Max: imp.pri.p1Max, open: imp.pri.open, setOpen: imp.pri.setOpen, zeroUntier: imp.pri.zeroUntier, envUntier: imp.pri.envUntier } })); } catch (e) {} }
     function impLoadParams() {
         try {
             const raw = GM_getValue(IMP_PARAMS_KEY, ''); if (!raw) return;
@@ -23063,6 +23063,7 @@
             if (typeof o.gapFt === 'number' && o.gapFt >= 0) imp.gapFt = o.gapFt;
             if (typeof o.paAssets === 'boolean') imp.env.paAssets = o.paAssets;
             if (typeof o.hvOn === 'boolean') imp.hv.on = o.hvOn;
+            if (typeof o.thirdType === 'string' && o.thirdType.trim()) imp.env.thirdType = o.thirdType.trim();
             if (typeof o.alignDeg === 'number' && o.alignDeg >= 0) imp.alignDeg = o.alignDeg;
             if (typeof o.farFt === 'number' && o.farFt >= 0) imp.farFt = o.farFt;
             if (typeof o.flagAdvance === 'boolean') imp.flagAdvance = o.flagAdvance;
@@ -24629,6 +24630,7 @@
                     if (at.length > st.length && impTokensContain(at, st)) { const extra = at.filter(t => !st.includes(t)); if (extra.length && extra.every(t => /^(battery|batt|tank|tanks|tb)$/.test(t)) && !/BATTERY|TANK/i.test(p.typeRaw || '')) guarded = `not matched to the battery "${nm.name}" — a well, created as new`; }
                 }
             }
+            if (nm && p.thirdParty && !p.statusWas) { guarded = `third-party point — never updates the client's asset "${nm.name}"; created as its own AVOID asset`; }   // v4.444
             if (nm && !guarded) { p.dup = true; p.dupWhy = nmM.why; p.dupTier = nmM.tier; p.dupAmbiguous = nmM.ambiguous; p.dupId = nm.id; p.dupSubtype = nm.subtype || ''; } else { p.dupId = null; p.dupSubtype = ''; p.dupTier = 0; p.dupAmbiguous = false; if (guarded) p.matchNote = guarded; }
             // v4.332: two informational flags, never skipped —
             //   child = the square this point would become (Size ft) overlaps an
@@ -26493,11 +26495,13 @@
             if (m.lat) row[m.lat] = String(x.lat);
             if (m.lng) row[m.lng] = String(x.lng);
             if (c.apiCol && !x.facility) row[c.apiCol] = x.api;
-            const typeRaw = x.pa ? impPaTypeFor(x.ours !== false, x.paLabel) : (m.type ? (x.facility ? (x.ours === false ? `3RD PARTY ${x.facType || 'FACILITY'} (${(x.op || 'unknown operator').toUpperCase()})` : (x.facType || 'FACILITY')) : (x.ours === false ? `3RD PARTY WELL (${(x.op || 'unknown operator').toUpperCase()})` : `${/HORIZ/.test(x.traj) ? 'H' : 'V'} - WELL (Enverus)`)) : '');
+            const typeRaw = x.pa ? impPaTypeFor(x.ours !== false, x.paLabel) : (x.ours === false ? impThirdType(x) : (m.type ? (x.facility ? (x.facType || 'FACILITY') : `${/HORIZ/.test(x.traj) ? 'H' : 'V'} - WELL (Enverus)`) : ''));   // v4.444: 3rd party → AVOID type regardless of a type column
             if (m.type) row[m.type] = typeRaw;
+            const thirdName = (!x.pa && x.ours === false) ? impThirdName(x) : '';
+            if (m.name && thirdName) row[m.name] = thirdName;
             imp.rows.push(row);
             const i = imp.rows.length - 1;
-            const p = { i, name: paName || x.name, rawName: x.name, lat: x.lat, lng: x.lng, typeRaw, notes: '', sel: false, dup: false, dupWhy: '', child: null, near: null, done: false, src: x.ours === false ? 'enverus-3p' : 'enverus', thirdParty: x.ours === false, rigWatch: !!x.rigWatch, env: Object.assign({ api: x.api, found: true, checkedAt: c.missingAt, distFt: 0 }, x) };
+            const p = { i, name: paName || thirdName || x.name, rawName: x.name, lat: x.lat, lng: x.lng, typeRaw, notes: '', sel: false, dup: false, dupWhy: '', child: null, near: null, done: false, src: x.ours === false ? 'enverus-3p' : 'enverus', thirdParty: x.ours === false, rigWatch: !!x.rigWatch, env: Object.assign({ api: x.api, found: true, checkedAt: c.missingAt, distFt: 0 }, x) };
             if (x.pa) p.pa = { status: x.status, label: x.paLabel || impPaLabel(x.status), onPad: !!x.onPad };
             imp.points.push(p); x.staged = true;
         });
@@ -26523,7 +26527,7 @@
             if (m.lat) row[m.lat] = String(r.lat);
             if (m.lng) row[m.lng] = String(r.lng);
             if (c.apiCol && !x.facility) row[c.apiCol] = x.api;
-            const typeRaw = r.nowPlugged ? impPaTypeFor(ours, r.labelNow) : (x.facility ? (ours ? (x.facType || 'FACILITY') : `3RD PARTY ${x.facType || 'FACILITY'} (${(x.op || 'unknown operator').toUpperCase()})`) : (ours ? `${/HORIZ/.test(x.traj) ? 'H' : 'V'} - WELL (Enverus)` : `3RD PARTY WELL (${(x.op || 'unknown operator').toUpperCase()})`));
+            const typeRaw = r.nowPlugged ? impPaTypeFor(ours, r.labelNow) : (!ours ? impThirdType(x) : (x.facility ? (x.facType || 'FACILITY') : `${/HORIZ/.test(x.traj) ? 'H' : 'V'} - WELL (Enverus)`));
             if (m.type) row[m.type] = typeRaw;
             imp.rows.push(row);
             const i = imp.rows.length - 1;
@@ -26635,6 +26639,10 @@
         const padM = (imp.pri.padFt || 50) * GEN_FT_TO_M;
         list.forEach(x => { if (x.pa !== undefined) return; x.pa = x.group === 'plugged'; x.paLabel = x.pa ? impPaLabel(x.status) : ''; x.onPad = !!(x.inside || (x.nearFt != null && x.nearFt * GEN_FT_TO_M <= padM)); });
     }
+    // v4.444: every other operator's well / facility = one type that says what to do (searchable, metric-able) and a name that
+    // says it on the map label; the operator and the Enverus record stay in the notes
+    function impThirdType(x) { const t = (imp.env.thirdType || 'AVOID - 3rd Party Pad').trim(); return x && x.facility ? `${t} (${(x.facType || 'facility').toLowerCase()})` : t; }
+    function impThirdName(x) { return genCleanName(`AVOID - ${x.name || x.api}`); }
     function impPaStageable(x) { return !x.pa || (imp.env.paAssets !== false && !x.onPad); }
     function impPointSizeFt(p) { return p && p.pa ? (imp.env.paSizeFt || 100) : impSizeFt; }
     function impIsPlugged(p) { return !!(p && ((p.pa) || (p.env && p.env.found && impEnvBucket(p.env) === 'plugged'))); }
@@ -26770,7 +26778,8 @@
             ${gear('b', !!set.b, `
                 <label style="${lbl}">operator <input type="text" data-impenv-op value="${impEsc(c.missingOp || c.mainOp || '')}" placeholder="from step A" style="width:130px;${inCss}"></label>
                 <label style="${lbl}" title="Every operator's wells inside the area, not just the client's. Anything not plugged is an obstacle the drone must know about: other operators' wells stage as '3RD PARTY WELL (operator)', never tiered, never inspected."><input type="checkbox" data-impenv-all ${c.missingAll ? 'checked' : ''} style="accent-color:#ffd666;margin:0"> every operator (others' wells become obstacles)</label>
-                <label style="${lbl}" title="Also pull facilities: batteries, compressor / meter / pumping stations, pipeline receipt points — yours with their type, other operators' as 3rd-party obstacles. Batteries, compressor stations and disposal sites also feed the 🏗 rig / crane watch export."><input type="checkbox" data-impenv-fac ${c.missingFac !== false ? 'checked' : ''} style="accent-color:#c39bd3;margin:0"> facilities too</label>`)}
+                <label style="${lbl}" title="Also pull facilities: batteries, compressor / meter / pumping stations, pipeline receipt points — yours with their type, other operators' as 3rd-party obstacles. Batteries, compressor stations and disposal sites also feed the 🏗 rig / crane watch export."><input type="checkbox" data-impenv-fac ${c.missingFac !== false ? 'checked' : ''} style="accent-color:#c39bd3;margin:0"> facilities too</label>
+                <label style="${lbl}" title="The TYPE every other operator's well / facility is created with (facilities get the facility kind in brackets). Names are 'AVOID - <Enverus well name>'; the operator and the record go in the notes. Never tiered, never name-matched to the client's assets.">3rd-party type <input type="text" data-impenv-thirdtype value="${impEsc(c.thirdType || 'AVOID - 3rd Party Pad')}" style="width:170px;${inCss}"></label>`)}
             <div data-impenv-missing style="margin-top:4px"></div>
             <div data-impenv-pareview style="margin-top:4px"></div>
             ${stepHdr('C', 'Report for the client', 'what they need to go check — written for a non-technical reader')}
@@ -26791,6 +26800,7 @@
         el.querySelector('[data-impenv-op]').onchange = function () { c.missingOp = this.value.trim(); };
         el.querySelector('[data-impenv-all]').onchange = function () { c.missingAll = this.checked; };
         el.querySelector('[data-impenv-fac]').onchange = function () { c.missingFac = this.checked; };
+        const tt = el.querySelector('[data-impenv-thirdtype]'); if (tt) tt.onchange = function () { const v = this.value.trim(); if (v) { c.thirdType = v; impSaveParams(); } };
         const fb = el.querySelector('[data-impenv-find]'); if (fb) fb.onclick = () => { c.missingOp = (el.querySelector('[data-impenv-op]') || {}).value || c.missingOp; impEnvFindMissing().catch(e => { console.warn(`${TAG} 🔍`, e); impStatus(`🔍 ${impEsc(e && e.message || e)}`, '#ff6060'); }); };
         el.querySelectorAll('details[data-impenv-set]').forEach(d => { d.ontoggle = () => { c.setOpen = c.setOpen || {}; c.setOpen[d.getAttribute('data-impenv-set')] = d.open; }; });
         impRenderMissingUi(el);
@@ -26829,7 +26839,7 @@
             <input type="checkbox" data-impmiss-sel="${x.api}" ${x.staged || !impPaStageable(x) ? 'disabled' : (c.missingSel.has(x.api) ? 'checked' : '')} title="${x.pa && x.onPad ? 'on one of our pads — shown as a red ✕ only, never written to the site' : (x.pa && c.paAssets === false ? 'P&A staging is off (tick \'stage as P&A assets\')' : '')}" style="accent-color:#ffd666;margin:0;flex:none">
             ${x.pa ? `<span style="display:inline-block;width:9px;height:9px;flex:none;color:#ff2d2d;font-weight:900;font-size:11px;line-height:9px;text-align:center" title="${impEsc(x.status)}">✕</span>` : `<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${gcol[x.group]};flex:none" title="${impEsc(x.status)}"></span>`}
             <b style="flex:none;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${impEsc(x.pa ? genCleanName(impPaName(x)) : x.name)}</b>
-            <span style="color:#8a949e;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${x.pa ? `<b style="color:#ff8a80">🩻 ${impEsc(impPaTypeFor(x.ours !== false, x.paLabel))}</b>${x.onPad ? ' · <b style="color:#ffb347">on our pad — ✕ only</b>' : ''} · ${impEsc(x.name)} · ` : ''}${x.ours === false ? `<b style="color:#ffd666">${impEsc(x.op || '3rd party')}</b> · ` : ''}${x.facility ? '<b style="color:#c39bd3">facility</b> · ' : ''}${impEsc(x.status)} · ${impEsc(x.type || '')}${x.traj ? ` · ${impEsc(x.traj.toLowerCase())}` : ''} · ${x.facility ? `Enverus ${x.api}` : `API ${x.api}`}${x.nearFt != null ? ` · ${x.inside ? 'inside' : `${x.nearFt.toLocaleString()} ft from`} ${impEsc(x.nearName)}` : ' · no mapped asset nearby'}${x.staged ? ' · ✓ staged' : ''}</span>
+            <span style="color:#8a949e;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${x.pa ? `<b style="color:#ff8a80">🩻 ${impEsc(impPaTypeFor(x.ours !== false, x.paLabel))}</b>${x.onPad ? ' · <b style="color:#ffb347">on our pad — ✕ only</b>' : ''} · ${impEsc(x.name)} · ` : (x.ours === false ? `<b style="color:#ffd666">${impEsc(impThirdType(x))}</b> · ` : '')}${x.ours === false ? `<b style="color:#ffd666">${impEsc(x.op || '3rd party')}</b> · ` : ''}${x.facility ? '<b style="color:#c39bd3">facility</b> · ' : ''}${impEsc(x.status)} · ${impEsc(x.type || '')}${x.traj ? ` · ${impEsc(x.traj.toLowerCase())}` : ''} · ${x.facility ? `Enverus ${x.api}` : `API ${x.api}`}${x.nearFt != null ? ` · ${x.inside ? 'inside' : `${x.nearFt.toLocaleString()} ft from`} ${impEsc(x.nearName)}` : ' · no mapped asset nearby'}${x.staged ? ' · ✓ staged' : ''}</span>
             <span data-impmiss-info="${x.api}" title="${impEsc(`${x.name} · API ${x.api}\n${x.status} · ${x.type || ''} · ${x.traj || ''} · ${x.op}\nspud ${x.spud || '—'} · first prod ${x.firstProd || '—'}${x.plug ? ` · plugged ${x.plug}` : ''}\n${Number(x.lat).toFixed(6)}, ${Number(x.lng).toFixed(6)} · ${x.county} County\n${x.nearName ? `${x.inside ? 'inside' : x.nearFt + ' ft from'} mapped asset "${x.nearName}"` : 'no mapped asset nearby'}${x.bores > 1 ? `\n${x.bores} wellbores` : ''}`)}" style="flex:none;width:14px;height:14px;line-height:12px;text-align:center;border:1px solid rgba(122,223,230,0.5);border-radius:50%;color:#7adfe6;font-size:9px;font-weight:700;cursor:help">i</span>
         </div>`;
         el.innerHTML = `<div style="padding:6px 8px;background:rgba(255,255,255,0.03);border:1px dashed rgba(255,214,102,0.3);border-radius:3px">
@@ -27671,6 +27681,7 @@
         const subtypeFor = (p) => {
             let v;
             if (p.pa) return impPaType(p);                                             // v4.413: P&A Asset / P&A 3rd Party - <status>, never tiered, shielding modifier irrelevant
+            if (p.thirdParty) return p.typeRaw || impThirdType(p.env || {});           // v4.444: AVOID - 3rd Party Pad, as staged
             if (!imp.mapping || !imp.mapping.type) v = impApplyShield((imp.typeMap['__all__'] || '').trim() || defSub);
             else {
                 v = impResolveSubtype(p.typeRaw || '', siteSubs).value;   // v4.333: file value as-is unless overridden; v4.343: shielding modifier rule applied inside

@@ -1,3 +1,7 @@
+## 2026-10-23 — 🚫 AVOID - 3rd Party Pad — Site Setup Tools latest v4.444 (latest only)
+
+- **v4.444** — other operators' wells and facilities from the fill-in are now staged as type **AVOID - 3rd Party Pad** (facilities: `AVOID - 3rd Party Pad (battery)` etc.), editable under 5 · B ⚙ settings, and named **AVOID - <Enverus well name>** so the warning reads on the map label. The operator and the full record stay in the notes. Never tiered, never H/V-prefixed, and — closing a real hole — **never name-matched to one of the client's assets** (a third-party well sharing a name used to count as an update of ours; it is now flagged and created as its own AVOID asset).
+
 ## 2026-10-23 — Flags list workflow: ↩ per row · click holds the dot · ✓ = next · Moved far — Site Setup Tools latest v4.442 → v4.443 (latest only)
 
 - **v4.443** — flags list: **↓ / ↑** toggle for which way "✓ = next" walks the list, and **✋ jump to held** scrolls to the row you are holding. New **🏚 Existing assets this tool moved** box above the flags: every existing pad whose polygon was slid by the client-response 🏷 Apply and now sits elsewhere, with the distance, click = zoom to before/after, and a per-asset **⚡ ↩ put back** that restores it exactly as it was (dry run, confirm).
