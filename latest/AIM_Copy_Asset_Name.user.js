@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.442
+// @version      4.443
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.442';
+    const SCRIPT_VERSION = '4.443';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -23005,7 +23005,7 @@
         mode: null,                                 // null | 'circle' | 'lasso' | 'pick' | 'edit' | 'move'
         moveHeld: null, moveDrag: false, moveDownPt: null,   // v4.344: ↔ Move point — the staged point being carried
         shapeHeld: null, stroke: null, strokeLayer: null, assetShapeLayers: [], heldLayers: [], shapeEdit: null, shapeW: 15, snapFt: 10, bufFt: 7.5, gapFt: 15, line: null, lineStart: null, lineLayer: null, linePrev: null, alignDeg: 5,   // v4.433: two-click line + align tolerance
-        farFt: 500, flagAdvance: true,              // v4.442: 'Moved far' threshold · check a flag row → hold the next one   // v4.367: ✏ Shape · v4.373: W = the NARROW side (15 ft), buffer 7.5 ft each side, snap keeps a 15 ft gap
+        farFt: 500, flagAdvance: true, flagDir: 'down',              // v4.442: 'Moved far' threshold · check a flag row → hold the next one   // v4.367: ✏ Shape · v4.373: W = the NARROW side (15 ft), buffer 7.5 ft each side, snap keeps a 15 ft gap
         radiusVal: 3, radiusUnit: 'mi', includeDups: false,   // v4.343: 3 mi = the usual base reach circle
         keepShield: true,                           // v4.343: keep "- unsh" / "shielded" modifiers in subtypes (off = strip them)
         dupMode: 'update',                          // v4.347: name matches an existing asset → 'skip' | 'update' (type + notes only) | 'copy' (create "-N")
@@ -23038,7 +23038,7 @@
         lastDelete: null,                           // {siteID, when, entities:[full bodies]} — ↩ Undo batch source
         assetIndex: null,                           // cached [{id,name,clean,ring,bbox,centroid}] for dup-guard + delete select
     };
-    function impSaveParams() { try { GM_setValue(IMP_PARAMS_KEY, JSON.stringify({ radiusVal: imp.radiusVal, radiusUnit: imp.radiusUnit, includeDups: imp.includeDups, advOpen: imp.advOpen, keepShield: imp.keepShield, dupMode: imp.dupMode, secOpen: imp.secOpen, shapeW: imp.shapeW, snapFt: imp.snapFt, bufFt: imp.bufFt, gapFt: imp.gapFt, anaMovedFt: imp.ana.movedFt, paAssets: imp.env.paAssets, paSizeFt: imp.env.paSizeFt, paMatchFt: imp.env.paMatchFt, hvOn: imp.hv.on, hvEnv: imp.hv.useEnv, alignDeg: imp.alignDeg, farFt: imp.farFt, flagAdvance: imp.flagAdvance, pri: { clusterFt: imp.pri.clusterFt, padFt: imp.pri.padFt, p1Min: imp.pri.p1Min, p1Max: imp.pri.p1Max, open: imp.pri.open, setOpen: imp.pri.setOpen, zeroUntier: imp.pri.zeroUntier, envUntier: imp.pri.envUntier } })); } catch (e) {} }
+    function impSaveParams() { try { GM_setValue(IMP_PARAMS_KEY, JSON.stringify({ radiusVal: imp.radiusVal, radiusUnit: imp.radiusUnit, includeDups: imp.includeDups, advOpen: imp.advOpen, keepShield: imp.keepShield, dupMode: imp.dupMode, secOpen: imp.secOpen, shapeW: imp.shapeW, snapFt: imp.snapFt, bufFt: imp.bufFt, gapFt: imp.gapFt, anaMovedFt: imp.ana.movedFt, paAssets: imp.env.paAssets, paSizeFt: imp.env.paSizeFt, paMatchFt: imp.env.paMatchFt, hvOn: imp.hv.on, hvEnv: imp.hv.useEnv, alignDeg: imp.alignDeg, farFt: imp.farFt, flagAdvance: imp.flagAdvance, flagDir: imp.flagDir, pri: { clusterFt: imp.pri.clusterFt, padFt: imp.pri.padFt, p1Min: imp.pri.p1Min, p1Max: imp.pri.p1Max, open: imp.pri.open, setOpen: imp.pri.setOpen, zeroUntier: imp.pri.zeroUntier, envUntier: imp.pri.envUntier } })); } catch (e) {} }
     function impLoadParams() {
         try {
             const raw = GM_getValue(IMP_PARAMS_KEY, ''); if (!raw) return;
@@ -23066,6 +23066,7 @@
             if (typeof o.alignDeg === 'number' && o.alignDeg >= 0) imp.alignDeg = o.alignDeg;
             if (typeof o.farFt === 'number' && o.farFt >= 0) imp.farFt = o.farFt;
             if (typeof o.flagAdvance === 'boolean') imp.flagAdvance = o.flagAdvance;
+            if (o.flagDir === 'up' || o.flagDir === 'down') imp.flagDir = o.flagDir;
             if (typeof o.hvEnv === 'boolean') imp.hv.useEnv = o.hvEnv;
             if (typeof o.paSizeFt === 'number' && o.paSizeFt >= 5) imp.env.paSizeFt = o.paSizeFt;
             if (typeof o.paMatchFt === 'number' && o.paMatchFt >= 0) imp.env.paMatchFt = o.paMatchFt;
@@ -26039,6 +26040,7 @@
                 <button id="aim-imp-undoreset" style="display:none;background:rgba(95,255,95,0.12);color:#5fff5f;border:1px solid rgba(95,255,95,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px;font-weight:600" title="Reverse the last ↩ reset moved exactly">↶ undo reset</button>
                 <button id="aim-imp-recover" style="display:none;background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px" title="After a reset or a bad load: outlined points go back to the centre of their outline, client-corrected points back to the coordinate the client gave. Hand moves without an outline cannot be re-derived.">🩹 Recover positions</button>
             </div>
+            <div id="aim-imp-movedexisting"></div>
             <div id="aim-imp-flags" style="margin-bottom:8px"></div>
             <div id="aim-imp-swap"></div>
             ${IMP_SEC_CLOSE}
@@ -27129,9 +27131,55 @@
         impStatus(`🔎 ${impEsc(p.name)} — ${impEsc(impFlagShort(tab ? tab.id : impFlagKind(p), p))}${held ? ` · <b style="color:#ff5fff">holding it</b> — ${imp.mode === 'shape' ? 'CTRL+click to draw its outline' : 'click where it belongs'}` : ''}`);
         try { impRenderFlagsUi(imp.points.filter(q => !q.done)); } catch (e) {}
     }
+    // ---- v4.443 existing assets THIS TOOL moved (client-response 🏷 site writes): their pre-move bodies are banked in
+    // imp.lastUpdated, so each can be put back on its own. Lists only the ones whose polygon actually sits elsewhere now. ----
+    function impMovedExisting() {
+        const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || []; const byId = new Map(ents.map(e => [e.id, e]));
+        const out = [];
+        (imp.lastUpdated || []).forEach(u => {
+            const b = u.before, e = byId.get(u.id); if (!b || !e) return;
+            const rb = entityCoords(b), re = entityCoords(e); if (!rb || !re || rb.length < 3 || re.length < 3) return;
+            const cb = ringCentroid(rb), ce = ringCentroid(re); const ft = Math.round(approxMeters(cb.lat, cb.lng, ce.lat, ce.lng) / GEN_FT_TO_M);
+            if (ft > 3) out.push({ u, e, name: e.name || u.name, ft, from: cb, to: ce });
+        });
+        return out.sort((a, b) => b.ft - a.ft);
+    }
+    async function impRestoreExisting(u) {
+        if (liteBlockedWrite('put an existing asset back')) return;
+        const sid = genState.siteID;
+        const dry = (() => { try { return !!document.getElementById('aim-gen-dryrun').checked; } catch (e) { return true; } })();
+        if (dry) { impStatus(`DRY RUN — would put "<b>${impEsc(u.name)}</b>" back where it was before this tool moved it. Untick Dry run to write.`); return; }
+        const csrf = getCsrfToken(); if (!csrf) { impStatus('No CSRF token — make one native save anywhere in Percepto first, then retry', '#ff6060'); return; }
+        let siteCfg = null; try { siteCfg = await fetchSiteConfig(sid); } catch (e) {}
+        if (!siteCfg) { impStatus('Could not read the site config — nothing written', '#ff6060'); return; }
+        if (!confirm(`Put "${u.name}" back where it was before this tool moved it (polygon, name, type and notes as they were)?`)) return;
+        try {
+            const body = buildWriteBody(u.before, siteCfg);
+            const rr = await fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) });
+            if (rr.status !== 200) { impStatus(`↩ "${impEsc(u.name)}" failed: server ${rr.status}`, '#ff6060'); return; }
+        } catch (e) { impStatus(`↩ "${impEsc(u.name)}" failed: ${impEsc(e && e.message || e)}`, '#ff6060'); return; }
+        imp.lastUpdated = imp.lastUpdated.filter(x => x !== u);
+        try { await fetchMapObjects(sid, true); } catch (e) {}
+        imp._rootCache = null; impBuildAssetIndex(); impComputeDups(); impRefreshAfterSelChange(); try { impSaveSession('restore'); } catch (e) {}
+        impStatus(`↩ "<b>${impEsc(u.name)}</b>" is back where it was`, '#5fff5f');
+    }
+    function impRenderMovedExistingUi() {
+        const el = document.getElementById('aim-imp-movedexisting'); if (!el) return;
+        let list = []; try { list = impMovedExisting(); } catch (e) {}
+        if (!list.length) { el.innerHTML = ''; return; }
+        el.innerHTML = `<div style="margin-top:6px;padding:6px 8px;background:rgba(255,95,255,0.04);border:1px dashed rgba(255,95,255,0.35);border-radius:3px;font-size:11px">
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:4px"><b style="color:#ff5fff">🏚 Existing assets this tool moved</b> <span style="color:#888;font-size:10px">${list.length} polygon${list.length === 1 ? '' : 's'} slid to the client's corrected coordinate (📬 🏷 Apply) — if the client's coordinate was the wrong one, ↩ puts the pad back exactly where it was · click = zoom to both</span></div>
+            <div style="max-height:160px;overflow:auto;border:1px solid rgba(255,255,255,0.06);border-radius:3px;background:rgba(0,0,0,0.15)">${list.map((x, i) => `<div data-impmv-row="${i}" style="display:flex;align-items:center;gap:6px;padding:1px 4px;border-bottom:1px solid rgba(255,255,255,0.05);font-size:10.5px;color:#cfd6dc;cursor:pointer" onmouseover="this.style.background='rgba(255,255,255,0.05)'" onmouseout="this.style.background=''"><b style="flex:none;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${impEsc(x.name)}</b><span style="color:#8a949e;flex:1">moved ${x.ft.toLocaleString()} ft from where it was</span><button data-impmv-undo="${i}" title="WRITES to AIM: puts this asset back exactly as it was before the move (honours Dry run)" style="flex:none;background:rgba(255,120,60,0.15);border:1px solid rgba(255,120,60,0.5);color:#ffb28a;border-radius:3px;padding:0 6px;cursor:pointer;font:inherit;font-size:10px">⚡ ↩ put back</button></div>`).join('')}</div>
+        </div>`;
+        el.onclick = (ev) => {
+            const ub = ev.target.closest('[data-impmv-undo]'); if (ub) { const x = list[Number(ub.getAttribute('data-impmv-undo'))]; if (x) impRestoreExisting(x.u).catch(e => impStatus(`↩ ${impEsc(e && e.message || e)}`, '#ff6060')).then(() => impRenderMovedExistingUi()); return; }
+            const r = ev.target.closest('[data-impmv-row]'); if (r) { const x = list[Number(r.getAttribute('data-impmv-row'))]; if (x) { impZoomToPoints([{ lat: x.to.lat, lng: x.to.lng, name: `${x.name} (now)` }, { lat: x.from.lat, lng: x.from.lng, name: `${x.name} (before)` }], x.name); } }
+        };
+    }
     function impRenderFlagsUi(live) {
         const el = document.getElementById('aim-imp-flags');
         if (!el) return;
+        try { impRenderMovedExistingUi(); } catch (e) {}
         if (!live || !live.length) { el.innerHTML = ''; return; }
         const tabs = impFlagTabs(live);
         const total = tabs.filter(t => t.id !== 'rev').reduce((a, t) => a + t.items.length, 0);
@@ -27162,7 +27210,8 @@
                 ${tabs.map(chip).join('')}
                 <span style="flex:1"></span>
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:#9ad;cursor:pointer"><input type="checkbox" data-impflaghide ${imp.flagHideReviewed ? 'checked' : ''} style="accent-color:#5fff5f;margin:0"> hide reviewed</label>
-                <label style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:#ff5fff;cursor:pointer" title="Ticking a row releases the dot you are holding and holds the NEXT row's dot (zoomed to it) so you can draw straight away"><input type="checkbox" data-impflagadv ${imp.flagAdvance ? 'checked' : ''} style="accent-color:#ff5fff;margin:0"> ✓ = next</label>
+                <label style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:#ff5fff;cursor:pointer" title="Ticking a row releases the dot you are holding and holds the NEXT row's dot (zoomed to it) so you can draw straight away"><input type="checkbox" data-impflagadv ${imp.flagAdvance ? 'checked' : ''} style="accent-color:#ff5fff;margin:0"> ✓ = next</label><button data-impflagdir title="Which way ✓ = next walks the list" style="background:none;border:1px solid rgba(255,95,255,0.45);color:#ff5fff;border-radius:3px;padding:0 6px;cursor:pointer;font:inherit;font-size:10px">${imp.flagDir === 'up' ? '↑ up' : '↓ down'}</button>
+                <button data-impflaghand title="Scroll the list to the row you are holding (✋)" style="background:none;border:1px solid rgba(255,95,255,0.45);color:#ff5fff;border-radius:3px;padding:0 6px;cursor:pointer;font:inherit;font-size:10px">✋ jump to held</button>
                 ${tab.id === 'far' ? `<label style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:#ff5fff" title="A box or dot farther than this from where the well really is (Enverus pin, else the client's coordinate, else the file) is listed here">over <input type="number" data-impflagfar value="${imp.farFt}" min="0" step="50" style="width:56px;background:#1a1d23;border:1px solid rgba(255,95,255,0.45);color:#fff;padding:1px 4px;border-radius:3px;font:inherit;font-size:10px;text-align:right"> ft</label>` : ''}
                 <button data-imp-flags="sheets" title="Copy every flagged point as a table (Flag · Name · Existing asset · Detail · Reviewed · Type · Lat · Lng) — paste into Google Sheets / Excel" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">📤 Sheets</button>
                 <button data-imp-flags="csv" title="Download the same table as a CSV" style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">⬇ CSV</button>
@@ -27188,6 +27237,8 @@
             if (tb) { imp.flagTab = tb.getAttribute('data-impflagtab'); impRenderFlagsUi(live); return; }
             if (ev.target.closest('[data-impflaghide]')) { imp.flagHideReviewed = !!ev.target.checked; impRenderFlagsUi(live); return; }
             if (ev.target.closest('[data-impflagadv]')) { imp.flagAdvance = !!ev.target.checked; impSaveParams(); return; }
+            if (ev.target.closest('[data-impflagdir]')) { imp.flagDir = imp.flagDir === 'up' ? 'down' : 'up'; impSaveParams(); impRenderFlagsUi(live); return; }
+            if (ev.target.closest('[data-impflaghand]')) { const h = imp.shapeHeld || imp.moveHeld; if (!h) { impStatus('✋ nothing held right now', '#ffb347'); return; } const r2 = el.querySelector(`[data-impflagrow="${h.i}"]`); if (!r2) { impStatus(`✋ "${impEsc(h.name)}" is not in this tab${imp.flagHideReviewed && h.reviewed ? ' (reviewed rows are hidden)' : ''}`, '#ffb347'); return; } r2.scrollIntoView({ block: 'center' }); r2.style.transition = 'background 0.3s'; r2.style.background = 'rgba(255,95,255,0.3)'; setTimeout(() => { r2.style.background = ''; }, 1500); return; }
             if (ev.target.closest('[data-impflagfar]')) return;
             const ub = ev.target.closest('[data-impflagundo]');
             if (ub) { const p = byI.get(ub.getAttribute('data-impflagundo')); if (p) { const what = impUndoPoint(p, ev.altKey); impStatus(what ? `↩ "${impEsc(p.name)}" ${what}` : `↩ "${impEsc(p.name)}" has no change to undo`, what ? '#5fff5f' : '#ffb347'); if (imp.shapeHeld === p || imp.moveHeld === p) impZoomToPoints([p], p.name); } return; }
@@ -27200,7 +27251,7 @@
                 let nxt = null;
                 if (p.reviewed) {                                              // v4.442: release what you hold; with ✓ = next, hold the next unreviewed row and zoom to it
                     impReleaseHeld();
-                    if (imp.flagAdvance) { const idx = shown.indexOf(p); const after = shown.slice(idx + 1).concat(shown.slice(0, idx)); nxt = after.find(q => !q.reviewed && !q.done) || null; }
+                    if (imp.flagAdvance) { const idx = shown.indexOf(p); const after = imp.flagDir === 'up' ? shown.slice(0, idx).reverse().concat(shown.slice(idx + 1).reverse()) : shown.slice(idx + 1).concat(shown.slice(0, idx)); nxt = after.find(q => !q.reviewed && !q.done) || null; }
                 }
                 impRenderFlagsUi(live); impSecSummaries();
                 if (nxt) { impFocusFlagRow(nxt, tab); try { const r2 = el.querySelector(`[data-impflagrow="${nxt.i}"]`); if (r2) r2.scrollIntoView({ block: 'nearest' }); } catch (e) {} }
