@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.449
+// @version      4.450
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.449';
+    const SCRIPT_VERSION = '4.450';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -23015,7 +23015,7 @@
         swap: { pairs: [], pick: [], at: null, lastSwaps: [] },               // 🔁 mislabeled wellheads
         env: { apiCol: null, open: false, notes: true, checkedAt: null, summary: null, running: false, opFilter: '', mismatchFt: 300, scope: 'selected', includeOurs: false,
             missing: null, missingAt: null, missingOp: '', missingSel: new Set(), missStatus: { producing: true, drilled: true, inactive: true, plugged: true, facility: true }, finding: false, missingFac: true,
-            paAssets: true, paSizeFt: 100, paMatchFt: 250, paReview: null, thirdType: 'AVOID - 3rd Party Pad' },   // v4.444: one searchable type for every other operator's well / facility   // v4.413: 🩻 plugged / retired → P&A assets (own size), status review (API match, location tolerance)   // v4.366: fill-in · facilities too   // v4.356: Enverus cross-check · v4.358: client review report
+            paAssets: true, paSizeFt: 100, paMatchFt: 250, paReview: null, thirdType: 'AVOID - 3rd Party Pad', areaFt: 300 },   // v4.450: fill-in area = the site's flight envelope (FFZs) + areaFt when no importer boundary is drawn   // v4.444: one searchable type for every other operator's well / facility   // v4.413: 🩻 plugged / retired → P&A assets (own size), status review (API match, location tolerance)   // v4.366: fill-in · facilities too   // v4.356: Enverus cross-check · v4.358: client review report
         hv: { on: true, col: null, useEnv: true },     // v4.418: h - / v - / d - type prefix: file deviation column → Enverus trajectory → the asset's existing prefix
         pri: { on: false, open: false, oilCol: null, waterCol: null, blpdCol: null, priCol: null, clusterFt: 100, padFt: 50, p1Min: 250, p1Max: 1500, summary: null, zeroUntier: true, envUntier: true },   // v4.347: priority tiers · v4.357: zero-production / Enverus-dead wells get no tier
         advOpen: false,                             // v4.331: ▸ Advanced (subset tools + delete mode) expanded — GM-remembered
@@ -23038,7 +23038,7 @@
         lastDelete: null,                           // {siteID, when, entities:[full bodies]} — ↩ Undo batch source
         assetIndex: null,                           // cached [{id,name,clean,ring,bbox,centroid}] for dup-guard + delete select
     };
-    function impSaveParams() { try { GM_setValue(IMP_PARAMS_KEY, JSON.stringify({ radiusVal: imp.radiusVal, radiusUnit: imp.radiusUnit, includeDups: imp.includeDups, advOpen: imp.advOpen, keepShield: imp.keepShield, dupMode: imp.dupMode, secOpen: imp.secOpen, shapeW: imp.shapeW, snapFt: imp.snapFt, bufFt: imp.bufFt, gapFt: imp.gapFt, anaMovedFt: imp.ana.movedFt, paAssets: imp.env.paAssets, paSizeFt: imp.env.paSizeFt, paMatchFt: imp.env.paMatchFt, hvOn: imp.hv.on, hvEnv: imp.hv.useEnv, thirdType: imp.env.thirdType, alignDeg: imp.alignDeg, farFt: imp.farFt, flagAdvance: imp.flagAdvance, flagDir: imp.flagDir, pri: { clusterFt: imp.pri.clusterFt, padFt: imp.pri.padFt, p1Min: imp.pri.p1Min, p1Max: imp.pri.p1Max, open: imp.pri.open, setOpen: imp.pri.setOpen, zeroUntier: imp.pri.zeroUntier, envUntier: imp.pri.envUntier } })); } catch (e) {} }
+    function impSaveParams() { try { GM_setValue(IMP_PARAMS_KEY, JSON.stringify({ radiusVal: imp.radiusVal, radiusUnit: imp.radiusUnit, includeDups: imp.includeDups, advOpen: imp.advOpen, keepShield: imp.keepShield, dupMode: imp.dupMode, secOpen: imp.secOpen, shapeW: imp.shapeW, snapFt: imp.snapFt, bufFt: imp.bufFt, gapFt: imp.gapFt, anaMovedFt: imp.ana.movedFt, paAssets: imp.env.paAssets, paSizeFt: imp.env.paSizeFt, paMatchFt: imp.env.paMatchFt, hvOn: imp.hv.on, hvEnv: imp.hv.useEnv, thirdType: imp.env.thirdType, areaFt: imp.env.areaFt, alignDeg: imp.alignDeg, farFt: imp.farFt, flagAdvance: imp.flagAdvance, flagDir: imp.flagDir, pri: { clusterFt: imp.pri.clusterFt, padFt: imp.pri.padFt, p1Min: imp.pri.p1Min, p1Max: imp.pri.p1Max, open: imp.pri.open, setOpen: imp.pri.setOpen, zeroUntier: imp.pri.zeroUntier, envUntier: imp.pri.envUntier } })); } catch (e) {} }
     function impLoadParams() {
         try {
             const raw = GM_getValue(IMP_PARAMS_KEY, ''); if (!raw) return;
@@ -23064,6 +23064,7 @@
             if (typeof o.paAssets === 'boolean') imp.env.paAssets = o.paAssets;
             if (typeof o.hvOn === 'boolean') imp.hv.on = o.hvOn;
             if (typeof o.thirdType === 'string' && o.thirdType.trim()) imp.env.thirdType = o.thirdType.trim();
+            if (typeof o.areaFt === 'number' && o.areaFt >= 0) imp.env.areaFt = o.areaFt;
             if (typeof o.alignDeg === 'number' && o.alignDeg >= 0) imp.alignDeg = o.alignDeg;
             if (typeof o.farFt === 'number' && o.farFt >= 0) imp.farFt = o.farFt;
             if (typeof o.flagAdvance === 'boolean') imp.flagAdvance = o.flagAdvance;
@@ -26367,8 +26368,27 @@
     // StateProvince filter server-side; a 1000-row cap is split by status, then
     // by API range). Boxed client-side to the boundaries (or the staged points'
     // bbox + 0.25 mi when there are none). ----
+    // v4.450: the site's flight envelope = every FFZ polygon (type 16) on the site, with bounding boxes for a fast reject
+    function impFlightEnvelope() {
+        const sid = genState.siteID; const ents = (sid && mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+        if (!imp._ffzIdx || imp._ffzIdx.sid !== sid || imp._ffzIdx.n !== ents.length) {
+            const list = ents.filter(e => e && e.type === 16).map(e => { const ring = entityCoords(e); if (!ring || ring.length < 3) return null; let la0 = Infinity, lo0 = Infinity, la1 = -Infinity, lo1 = -Infinity; ring.forEach(v => { la0 = Math.min(la0, v.lat); lo0 = Math.min(lo0, v.lng); la1 = Math.max(la1, v.lat); lo1 = Math.max(lo1, v.lng); }); return { name: e.name || '', ring, la0, lo0, la1, lo1 }; }).filter(Boolean);
+            imp._ffzIdx = { sid, n: ents.length, list };
+        }
+        return imp._ffzIdx.list;
+    }
+    function impInFlightEnvelope(lat, lng, bufM) {
+        const dLat = bufM / 111320, dLng = bufM / (111320 * Math.cos(lat * Math.PI / 180));
+        for (const z of impFlightEnvelope()) {
+            if (lat < z.la0 - dLat || lat > z.la1 + dLat || lng < z.lo0 - dLng || lng > z.lo1 + dLng) continue;
+            if (pointInPolygon(lat, lng, z.ring)) return true;
+            if (bufM > 0 && pointToPolygonMeters(lat, lng, z.ring) <= bufM) return true;
+        }
+        return false;
+    }
     function impEnvInBox(lat, lng, box) {
-        if (imp.shapes.length) return imp.shapes.some(sh => impShapeContains(sh, lat, lng));
+        if (imp.shapes.length) return imp.shapes.some(sh => impShapeContains(sh, lat, lng));   // an importer boundary you drew / loaded wins
+        if (impFlightEnvelope().length) return impInFlightEnvelope(lat, lng, (imp.env.areaFt || 0) * GEN_FT_TO_M);   // v4.450: else the site's flight envelope
         return box && lat >= box.la0 && lat <= box.la1 && lng >= box.lo0 && lng <= box.lo1;
     }
     function impEnvStatusGroup(st) { const b = impEnvBucket({ found: true, status: String(st || '').toUpperCase() }); return b === 'producing' ? 'producing' : (b === 'inactive' ? 'inactive' : (b === 'plugged' ? 'plugged' : 'drilled')); }
@@ -26423,7 +26443,7 @@
         if (!counties.size) { impStatus('No counties known yet — run the 🛢 cross-check on some points first', '#ffb347'); return; }
         const live = imp.points.filter(p => !p.done);
         let box = null;
-        if (!imp.shapes.length) {
+        if (!imp.shapes.length && !impFlightEnvelope().length) {
             const sel = live.filter(p => p.sel); if (!sel.length) { impStatus('Draw a boundary (or select points) so the search has an area', '#ffb347'); return; }
             let la0 = Infinity, lo0 = Infinity, la1 = -Infinity, lo1 = -Infinity;
             sel.forEach(p => { la0 = Math.min(la0, p.lat); lo0 = Math.min(lo0, p.lng); la1 = Math.max(la1, p.lat); lo1 = Math.max(lo1, p.lng); });
@@ -26776,12 +26796,13 @@
             ${stepHdr('B', 'Find what the list is missing', 'wells and facilities inside your boundaries that are not in the file')}
             <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
                 ${btnP('data-impenv-find', c.finding ? '⏳ searching…' : '👁 Find missing', c.finding || !key)}
-                <span style="color:#888;font-size:10px">${!S ? 'run step A first — it learns the operator and the counties' : `${imp.shapes.length ? `inside your ${imp.shapes.length} boundar${imp.shapes.length === 1 ? 'y' : 'ies'}` : 'no boundary — around the selected points (¼ mi)'} · <b style="color:#cfd6dc">${impEsc(c.missingAll ? 'every operator' : (c.missingOp || c.mainOp || '?'))}</b>${c.missingFac !== false ? ' · facilities too' : ''}`}</span>
+                <span style="color:#888;font-size:10px">${!S ? 'run step A first — it learns the operator and the counties' : `${imp.shapes.length ? `inside your ${imp.shapes.length} boundar${imp.shapes.length === 1 ? 'y' : 'ies'}` : (impFlightEnvelope().length ? `inside the site's flight envelope (${impFlightEnvelope().length} FFZ${impFlightEnvelope().length === 1 ? '' : 's'} + ${c.areaFt} ft)` : 'no boundary — around the selected points (¼ mi)')} · <b style="color:#cfd6dc">${impEsc(c.missingAll ? 'every operator' : (c.missingOp || c.mainOp || '?'))}</b>${c.missingFac !== false ? ' · facilities too' : ''}`}</span>
             </div>
             ${gear('b', !!set.b, `
                 <label style="${lbl}">operator <input type="text" data-impenv-op value="${impEsc(c.missingOp || c.mainOp || '')}" placeholder="from step A" style="width:130px;${inCss}"></label>
                 <label style="${lbl}" title="Every operator's wells inside the area, not just the client's. Anything not plugged is an obstacle the drone must know about: other operators' wells stage as '3RD PARTY WELL (operator)', never tiered, never inspected."><input type="checkbox" data-impenv-all ${c.missingAll ? 'checked' : ''} style="accent-color:#ffd666;margin:0"> every operator (others' wells become obstacles)</label>
                 <label style="${lbl}" title="Also pull facilities: batteries, compressor / meter / pumping stations, pipeline receipt points — yours with their type, other operators' as 3rd-party obstacles. Batteries, compressor stations and disposal sites also feed the 🏗 rig / crane watch export."><input type="checkbox" data-impenv-fac ${c.missingFac !== false ? 'checked' : ''} style="accent-color:#c39bd3;margin:0"> facilities too</label>
+                <label style="${lbl}" title="With no importer boundary drawn, the search area is the site's flight envelope (every FFZ polygon) plus this margin">envelope margin <input type="number" data-impenv-areaft value="${c.areaFt}" min="0" step="50" style="width:56px;${inCss};text-align:right"> ft</label>
                 <label style="${lbl}" title="The TYPE every other operator's well / facility is created with (facilities get the facility kind in brackets). Names are 'AVOID - <Enverus well name>'; the operator and the record go in the notes. Never tiered, never name-matched to the client's assets.">3rd-party type <input type="text" data-impenv-thirdtype value="${impEsc(c.thirdType || 'AVOID - 3rd Party Pad')}" style="width:170px;${inCss}"></label>`)}
             <div data-impenv-missing style="margin-top:4px"></div>
             <div data-impenv-pareview style="margin-top:4px"></div>
@@ -26803,6 +26824,7 @@
         el.querySelector('[data-impenv-op]').onchange = function () { c.missingOp = this.value.trim(); };
         el.querySelector('[data-impenv-all]').onchange = function () { c.missingAll = this.checked; };
         el.querySelector('[data-impenv-fac]').onchange = function () { c.missingFac = this.checked; };
+        const af = el.querySelector('[data-impenv-areaft]'); if (af) af.onchange = function () { const v = parseFloat(this.value); if (isFinite(v) && v >= 0) { c.areaFt = v; impSaveParams(); impRenderEnvUi(); } };
         const tt = el.querySelector('[data-impenv-thirdtype]'); if (tt) tt.onchange = function () { const v = this.value.trim(); if (v) { c.thirdType = v; impSaveParams(); } };
         const fb = el.querySelector('[data-impenv-find]'); if (fb) fb.onclick = () => { c.missingOp = (el.querySelector('[data-impenv-op]') || {}).value || c.missingOp; impEnvFindMissing().catch(e => { console.warn(`${TAG} 🔍`, e); impStatus(`🔍 ${impEsc(e && e.message || e)}`, '#ff6060'); }); };
         el.querySelectorAll('details[data-impenv-set]').forEach(d => { d.ontoggle = () => { c.setOpen = c.setOpen || {}; c.setOpen[d.getAttribute('data-impenv-set')] = d.open; }; });

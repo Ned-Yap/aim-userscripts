@@ -1,4 +1,6 @@
-## 2026-10-23 — 🚫 AVOID - 3rd Party Pad — Site Setup Tools latest v4.444 → v4.449 (latest only)
+## 2026-10-23 — 🚫 AVOID - 3rd Party Pad — Site Setup Tools latest v4.444 → v4.450 (latest only)
+
+- **v4.450** — 👁 Find missing searches **inside the site's flight envelope** (every FFZ polygon plus a 300 ft margin, editable) when no importer boundary is drawn — not a box around every selected point, which on a whole-file selection covered the county. A boundary you draw or load in step 1 still wins.
 
 - **v4.449** — **⬇ Backup file** in the sticky header downloads the whole session (every outline, move, tick, Enverus and client result) as one file; ⬆ Load saved session brings it back on any machine. ⚡ Create now saves the session and downloads that backup file automatically before its first write. **Undo re-arms the points**: after ↩ Undo last import or 🕘 delete-the-run, the affected points are staged and selected again with their outlines, so you fix what you need and ⚡ Create once more.
 
