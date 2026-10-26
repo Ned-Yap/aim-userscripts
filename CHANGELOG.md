@@ -1,4 +1,6 @@
-## 2026-10-26 — 🧱 Pad model — Site Setup Tools latest v4.470 → v4.472 (latest only)
+## 2026-10-26 — 🧱 Pad model — Site Setup Tools latest v4.470 → v4.473 (latest only)
+
+- **v4.473** — 👁 Audit placements also lists any asset created this session that lies outside the site's flight envelope (+ 1 mi), nested or not.
 
 - **v4.472** — name matching is strict again: a non-exact match is accepted only when the existing asset is the row's name plus wrapper words (`Pad`, `Battery`), never when the two merely share words, and never in the reverse direction (a short asset name inside a longer row name — `HUGHES` must not match `BOREN PAN AM HUGHES C 2`). New **👁 🔍 Audit placements**: lists wells created more than 1,500 ft from their pad, with a delete for exactly those.
 

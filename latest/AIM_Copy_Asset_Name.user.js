@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.472
+// @version      4.473
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.472';
+    const SCRIPT_VERSION = '4.473';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -28082,7 +28082,13 @@
             const ft = Math.round(approxMeters(ringCentroid(rc).lat, ringCentroid(rc).lng, ringCentroid(rp).lat, ringCentroid(rp).lng) / GEN_FT_TO_M);
             if (ft > 1500 && imp.lastCreated.includes(e.id)) out.push({ kind: 'far', e, pad, ft, why: `created ${ft.toLocaleString()} ft from its pad "${pad.name}"` });
         });
-        return out;
+        // v4.473: ANY asset created this session that lies outside the site's flight envelope (+ 1 mi) — nested or not
+        const createdIds = new Set((imp.lastCreated || []).concat(imp.points.filter(p => p.createdId).map(p => p.createdId)));
+        if (impFlightEnvelope().length) ents.filter(e => e.type === 3 && createdIds.has(e.id) && !out.some(x => x.e.id === e.id)).forEach(e => {
+            const rc = entityCoords(e); if (!rc || rc.length < 3) return; const c = ringCentroid(rc);
+            if (!impInFlightEnvelope(c.lat, c.lng, 1609)) { let bd = Infinity; impFlightEnvelope().forEach(z => { const d = pointToPolygonMeters(c.lat, c.lng, z.ring); if (d < bd) bd = d; }); out.push({ kind: 'outside', e, pad: null, ft: Math.round(bd / GEN_FT_TO_M), why: `created ${(bd / 1609.34).toFixed(1)} mi outside the flight envelope${e.parent_asset_name ? ` (parent ${e.parent_asset_name})` : ''}` }); }
+        });
+        return out.sort((a, b) => b.ft - a.ft);
     }
     async function impAuditRevert(list) {
         if (liteBlockedWrite('revert audited assets')) return;
@@ -28098,8 +28104,8 @@
     async function impAudit() {
         const sid = genState.siteID; try { await fetchMapObjects(sid, true); } catch (e) {}
         const list = impAuditRows();
-        if (!list.length) { impCommitNote('🔍 audit: no well created far from its pad', '#5fff5f'); return; }
-        impCommitNote(`🔍 audit: <b>${list.length}</b> created well(s) sit far from their pad: ${impEsc(list.slice(0, 8).map(x => `${x.e.name} (${x.why})`).join(' · '))}${list.length > 8 ? ' …' : ''} — <button data-impaudit-revert style="background:rgba(255,120,60,0.15);color:#ffb28a;border:1px solid rgba(255,120,60,0.5);border-radius:3px;padding:1px 8px;cursor:pointer;font:inherit;font-size:10px">⚡ delete these ${list.length}</button> <button data-impaudit-zoom style="background:none;border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:3px;padding:1px 8px;cursor:pointer;font:inherit;font-size:10px">🔎 zoom to the first</button>`, '#ffb347');
+        if (!list.length) { impCommitNote('🔍 audit: nothing created far from its pad or outside the flight envelope', '#5fff5f'); return; }
+        impCommitNote(`🔍 audit: <b>${list.length}</b> created asset(s) out of place: ${impEsc(list.slice(0, 8).map(x => `${x.e.name} (${x.why})`).join(' · '))}${list.length > 8 ? ' …' : ''} — <button data-impaudit-revert style="background:rgba(255,120,60,0.15);color:#ffb28a;border:1px solid rgba(255,120,60,0.5);border-radius:3px;padding:1px 8px;cursor:pointer;font:inherit;font-size:10px">⚡ delete these ${list.length}</button> <button data-impaudit-zoom style="background:none;border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:3px;padding:1px 8px;cursor:pointer;font:inherit;font-size:10px">🔎 zoom to the first</button>`, '#ffb347');
         const host = document.getElementById('aim-imp-commit-note');
         if (host) { const rb = host.querySelector('[data-impaudit-revert]'); if (rb) rb.onclick = () => impAuditRevert(list).catch(e => impCommitNote(`🔍 ${impEsc(e && e.message || e)}`, '#ff6060')); const zb = host.querySelector('[data-impaudit-zoom]'); if (zb) zb.onclick = () => { const x = list[0]; const c = ringCentroid(entityCoords(x.e)); impZoomToPoints([{ lat: c.lat, lng: c.lng, name: x.e.name }], x.e.name); }; }
     }
