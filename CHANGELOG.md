@@ -1,4 +1,6 @@
-## 2026-10-23 — 🚫 AVOID - 3rd Party Pad — Site Setup Tools latest v4.444 → v4.457 (latest only)
+## 2026-10-23 — 🚫 AVOID - 3rd Party Pad — Site Setup Tools latest v4.444 → v4.458 (latest only)
+
+- **v4.458** — asset notes are sanitised before writing: Percepto returns 400 "Name or description consists illegal characters" for `" ' # & ( )` and similar, which reached the notes through Enverus well names and the P & A status. `&` becomes "and", `#` becomes "No", quotes are dropped, anything else outside letters / digits / space / newline / `- _ . , : ·` becomes a space. First live run on Cobra 01: 347 created, 47 of the P&A rows failed on exactly this.
 
 - **v4.457** — every message from ⚡ Create (dry-run plan, progress, blockers, final counts) also renders directly under the Create button, not only in the status line at the top of the panel.
 

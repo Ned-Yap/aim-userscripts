@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.457
+// @version      4.458
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.457';
+    const SCRIPT_VERSION = '4.458';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -23638,6 +23638,15 @@
     function impExtOfEnt(e) { const c = e && e.custom; return String(c && c[IMP_EXT_FIELD] != null ? c[IMP_EXT_FIELD] : '').trim(); }
     function impSetExtOnBody(body, v) { if (!body.custom || typeof body.custom !== 'object') body.custom = {}; body.custom[IMP_EXT_FIELD] = v; }
     function impExtIdOf(p) { const m = imp.mapping; if (!m || !m.extId || !p) return ''; const v = (imp.rows[p.i] || {})[m.extId]; return String(v == null ? '' : v).trim().slice(0, 100); }
+    // v4.458: Percepto rejects a description with characters outside its allow-list (400 'Name or description consists
+    // illegal characters'). 347 creates with · - _ . , : and newlines went through; the 47 that failed carried " ' # & ( ) from
+    // Enverus well names. Keep what is known to pass, turn the rest into readable equivalents or a space.
+    function impSafeNotes(txt) {
+        return String(txt || '')
+            .replace(/&/g, ' and ').replace(/#/g, ' No ').replace(/[\u2014\u2013]/g, '-').replace(/[\u2018\u2019'`]/g, '').replace(/[\u201c\u201d"]/g, '')
+            .replace(/[^A-Za-z0-9 \n\-_.,:\u00b7]/g, ' ')
+            .replace(/[ \t]{2,}/g, ' ').replace(/ +\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+    }
     function impComposeNotes(p, when, how) {
         const r = imp.rows[p.i] || {};
         const dateStr = String(when).slice(0, 10);
@@ -23648,7 +23657,7 @@
             .concat(fromEnv ? [`Status recorded\n${dateStr} · ${p.env.status || '?'}${p.statusWas ? ` (was ${p.statusWas})` : ''}`] : []);   // v4.413: the date this status was read — the future review compares against it
         impNotesCols().forEach(c => { const v = String(r[c.col] == null ? '' : r[c.col]).trim(); if (v) parts.push(`${c.label || impCleanLabel(c.col)}\n${v}`); });
         parts.push(`Imported by ${impAuthor() || 'AIM user'} on ${when} from ${imp.fileName || 'file'} · ${how === 'update' ? 'updated' : 'created'} by import`);
-        return parts.join('\n\n').slice(0, 2000);
+        return impSafeNotes(parts.join('\n\n')).slice(0, 2000);
     }
     // ---- v4.365 UNDO BY STAMP — reads the SITE, not the session. Groups every
     // asset whose notes end in our stamp line by (file · time · author); a
