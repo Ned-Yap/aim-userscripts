@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.458
+// @version      4.459
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.458';
+    const SCRIPT_VERSION = '4.459';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -26744,8 +26744,9 @@
         const was = impPaStatusFromNotes(ent.description);
         const sub = (ent.custom && ent.custom.poi_type_str) ? String(ent.custom.poi_type_str) : '';
         const now = String(m.status || '').toUpperCase();
+        const nowSafe = impSafeNotes(now).toUpperCase();                                         // v4.459: notes are written sanitised ('P and A'), compare like for like
         return { assetId: ent.id, assetName: ent.name || '', api, sub, isPa: /^P(&|)A /.test(sub), statusBefore: was.status, recordedAt: was.at, statusNow: now, labelNow: impPaLabel(now),
-            changed: !!was.status && was.status !== now, unknownBefore: !was.status, distFt: isFinite(dM) ? Math.round(dM / GEN_FT_TO_M) : null, moved: isFinite(dM) && dM > (imp.env.paMatchFt || 0) * GEN_FT_TO_M,
+            changed: !!was.status && was.status !== now && impSafeNotes(was.status).toUpperCase() !== nowSafe, unknownBefore: !was.status, distFt: isFinite(dM) ? Math.round(dM / GEN_FT_TO_M) : null, moved: isFinite(dM) && dM > (imp.env.paMatchFt || 0) * GEN_FT_TO_M,
             nowPlugged: impEnvBucket({ found: true, status: now }) === 'plugged', lat: cen ? cen.lat : m.lat, lng: cen ? cen.lng : m.lng, lat2: m.lat, lng2: m.lng, cand: m, staged: false };
     }
     // red X geometry: a pixel-sized cross around a lat/lng (re-computed on every render, so it stays the same size at every zoom)
