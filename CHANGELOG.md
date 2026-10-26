@@ -1,4 +1,6 @@
-## 2026-10-23 — 🚫 AVOID - 3rd Party Pad — Site Setup Tools latest v4.444 → v4.446 (latest only)
+## 2026-10-23 — 🚫 AVOID - 3rd Party Pad — Site Setup Tools latest v4.444 → v4.447 (latest only)
+
+- **v4.447** — the missing-wells list shows every name exactly as it will be written (letters, digits, space, hyphen, underscore only; brackets, apostrophes, ampersands and dots become spaces; made unique at Create).
 
 - **v4.446** — **➕ Stage everything** in the missing-wells list: one click stages every candidate Enverus found in the area — plugged / retired / cancelled as P&A triangles (off our pads only), the client's missing wells and facilities as normal assets, every other operator's as AVOID - 3rd Party Pad.
 
