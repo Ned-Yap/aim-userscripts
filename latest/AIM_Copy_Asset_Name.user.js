@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.451
+// @version      4.452
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.451';
+    const SCRIPT_VERSION = '4.452';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -23005,7 +23005,7 @@
         mode: null,                                 // null | 'circle' | 'lasso' | 'pick' | 'edit' | 'move'
         moveHeld: null, moveDrag: false, moveDownPt: null,   // v4.344: ↔ Move point — the staged point being carried
         shapeHeld: null, stroke: null, strokeLayer: null, assetShapeLayers: [], heldLayers: [], shapeEdit: null, shapeW: 15, snapFt: 10, bufFt: 7.5, gapFt: 15, line: null, lineStart: null, lineLayer: null, linePrev: null, alignDeg: 5,   // v4.433: two-click line + align tolerance
-        farFt: 500, flagAdvance: true, flagDir: 'down',              // v4.442: 'Moved far' threshold · check a flag row → hold the next one   // v4.367: ✏ Shape · v4.373: W = the NARROW side (15 ft), buffer 7.5 ft each side, snap keeps a 15 ft gap
+        farFt: 500, flagAdvance: true, flagDir: 'down', showUnsel: false,   // v4.452: unselected dots hidden unless asked              // v4.442: 'Moved far' threshold · check a flag row → hold the next one   // v4.367: ✏ Shape · v4.373: W = the NARROW side (15 ft), buffer 7.5 ft each side, snap keeps a 15 ft gap
         radiusVal: 3, radiusUnit: 'mi', includeDups: false,   // v4.343: 3 mi = the usual base reach circle
         keepShield: true,                           // v4.343: keep "- unsh" / "shielded" modifiers in subtypes (off = strip them)
         dupMode: 'update',                          // v4.347: name matches an existing asset → 'skip' | 'update' (type + notes only) | 'copy' (create "-N")
@@ -23038,7 +23038,7 @@
         lastDelete: null,                           // {siteID, when, entities:[full bodies]} — ↩ Undo batch source
         assetIndex: null,                           // cached [{id,name,clean,ring,bbox,centroid}] for dup-guard + delete select
     };
-    function impSaveParams() { try { GM_setValue(IMP_PARAMS_KEY, JSON.stringify({ radiusVal: imp.radiusVal, radiusUnit: imp.radiusUnit, includeDups: imp.includeDups, advOpen: imp.advOpen, keepShield: imp.keepShield, dupMode: imp.dupMode, secOpen: imp.secOpen, shapeW: imp.shapeW, snapFt: imp.snapFt, bufFt: imp.bufFt, gapFt: imp.gapFt, anaMovedFt: imp.ana.movedFt, paAssets: imp.env.paAssets, paSizeFt: imp.env.paSizeFt, paMatchFt: imp.env.paMatchFt, hvOn: imp.hv.on, hvEnv: imp.hv.useEnv, thirdType: imp.env.thirdType, areaFt: imp.env.areaFt, alignDeg: imp.alignDeg, farFt: imp.farFt, flagAdvance: imp.flagAdvance, flagDir: imp.flagDir, pri: { clusterFt: imp.pri.clusterFt, padFt: imp.pri.padFt, p1Min: imp.pri.p1Min, p1Max: imp.pri.p1Max, open: imp.pri.open, setOpen: imp.pri.setOpen, zeroUntier: imp.pri.zeroUntier, envUntier: imp.pri.envUntier } })); } catch (e) {} }
+    function impSaveParams() { try { GM_setValue(IMP_PARAMS_KEY, JSON.stringify({ radiusVal: imp.radiusVal, radiusUnit: imp.radiusUnit, includeDups: imp.includeDups, advOpen: imp.advOpen, keepShield: imp.keepShield, dupMode: imp.dupMode, secOpen: imp.secOpen, shapeW: imp.shapeW, snapFt: imp.snapFt, bufFt: imp.bufFt, gapFt: imp.gapFt, anaMovedFt: imp.ana.movedFt, paAssets: imp.env.paAssets, paSizeFt: imp.env.paSizeFt, paMatchFt: imp.env.paMatchFt, hvOn: imp.hv.on, hvEnv: imp.hv.useEnv, thirdType: imp.env.thirdType, areaFt: imp.env.areaFt, alignDeg: imp.alignDeg, farFt: imp.farFt, flagAdvance: imp.flagAdvance, flagDir: imp.flagDir, showUnsel: imp.showUnsel, pri: { clusterFt: imp.pri.clusterFt, padFt: imp.pri.padFt, p1Min: imp.pri.p1Min, p1Max: imp.pri.p1Max, open: imp.pri.open, setOpen: imp.pri.setOpen, zeroUntier: imp.pri.zeroUntier, envUntier: imp.pri.envUntier } })); } catch (e) {} }
     function impLoadParams() {
         try {
             const raw = GM_getValue(IMP_PARAMS_KEY, ''); if (!raw) return;
@@ -23069,6 +23069,7 @@
             if (typeof o.farFt === 'number' && o.farFt >= 0) imp.farFt = o.farFt;
             if (typeof o.flagAdvance === 'boolean') imp.flagAdvance = o.flagAdvance;
             if (o.flagDir === 'up' || o.flagDir === 'down') imp.flagDir = o.flagDir;
+            if (typeof o.showUnsel === 'boolean') imp.showUnsel = o.showUnsel;
             if (typeof o.hvEnv === 'boolean') imp.hv.useEnv = o.hvEnv;
             if (typeof o.paSizeFt === 'number' && o.paSizeFt >= 5) imp.env.paSizeFt = o.paSizeFt;
             if (typeof o.paMatchFt === 'number' && o.paMatchFt >= 0) imp.env.paMatchFt = o.paMatchFt;
@@ -24720,6 +24721,7 @@
             }
         } catch (e) { console.warn(`${TAG} 🩻 candidate ✕ render failed:`, e); }
         for (const p of live) {
+            if (!p.sel && !imp.showUnsel && imp.moveHeld !== p && !(imp.pulse && imp.pulse.has(p))) continue;   // v4.452: only what you selected is on the map
             if (bounds && !bounds.contains([p.lat, p.lng])) { culled++; continue; }
             if (drawn >= IMP_MAX_RENDER) { culled++; continue; }
             try {
@@ -26041,6 +26043,8 @@
                 <span id="aim-imp-shape-note" style="color:#888;font-size:10px"></span>
                 <button id="aim-imp-move" title="Fix a point's location BEFORE it becomes an asset. Click a staged point to pick it up (it turns magenta), pan/zoom freely, click where it belongs to drop it — or just drag it. No Alt needed while this is on; clicking empty map still pans. Delete / Backspace while holding a point removes it from the import. Esc puts it back. Moved points keep a magenta ring; the square is created at the new spot." style="background:rgba(255,95,255,0.12);color:#ff5fff;border:1px solid rgba(255,95,255,0.5);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px">↔ Move point</button>
                 <span id="aim-imp-move-note" style="color:#888;font-size:10px"></span>
+                <label style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:#9ad;cursor:pointer" title="Draw the points that are NOT selected (outside your boundaries) as small dots — off by default, only what is selected shows"><input type="checkbox" id="aim-imp-showunsel" style="accent-color:#9ad;margin:0"> show unselected dots</label>
+                <button id="aim-imp-dropoutside" style="display:none;background:transparent;color:#ffb347;border:1px solid rgba(255,179,71,0.45);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px" title="Remove every Enverus-staged point (fill-in, third-party, P&A) that lies outside the current area — importer boundary, else the site's flight envelope. The client's own rows are never touched.">🧹 drop Enverus points outside the area</button>
                 <button id="aim-imp-resetmoves" style="display:none;background:transparent;color:#ffb347;border:1px solid rgba(255,179,71,0.45);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px" title="Put every hand-moved point (without a drawn outline) back where the file had it, and restore removed points. Asks first. Outlined points are never touched. ↶ undo reset reverses it.">↩ reset moved…</button>
                 <button id="aim-imp-undoreset" style="display:none;background:rgba(95,255,95,0.12);color:#5fff5f;border:1px solid rgba(95,255,95,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px;font-weight:600" title="Reverse the last ↩ reset moved exactly">↶ undo reset</button>
                 <button id="aim-imp-recover" style="display:none;background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px" title="After a reset or a bad load: outlined points go back to the centre of their outline, client-corrected points back to the coordinate the client gave. Hand moves without an outline cannot be re-derived.">🩹 Recover positions</button>
@@ -26164,6 +26168,16 @@
             impStatus(`↩ ${nM} point(s) back at their file coordinates${nR ? ` · ${nR} removed point(s) restored` : ''}${nS ? ` · ${nS} with outlines left alone` : ''} — <b>↶ undo reset</b> reverses this`);
         };
         try { const adv = q('aim-imp-adv'), rb = q('aim-imp-resetmoves'); if (adv && rb) { const wrap = document.createElement('div'); wrap.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px;padding:6px 8px;border:1px dashed rgba(255,179,71,0.4);border-radius:3px;font-size:10px;color:#888'; wrap.innerHTML = '<b style="color:#ffb347">Danger zone</b> <span>undoes hand placement for every moved point without an outline · asks you to type RESET · ↶ undo reset reverses it</span>'; wrap.appendChild(rb); adv.appendChild(wrap); } } catch (e) {}   // v4.439: out of the everyday row
+        const su = q('aim-imp-showunsel'); su.checked = !!imp.showUnsel; su.onchange = () => { imp.showUnsel = su.checked; impSaveParams(); impRenderStaged(); };
+        q('aim-imp-dropoutside').onclick = () => {
+            const area = imp.shapes.length || impFlightEnvelope().length; if (!area) { impStatus('No area to judge by — draw a boundary first', '#ffb347'); return; }
+            const out = imp.points.filter(p => !p.done && (p.src === 'enverus' || p.src === 'enverus-3p') && !impEnvInBox(p.lat, p.lng, null));
+            if (!out.length) { impStatus('🧹 nothing staged from Enverus outside the area', '#5fff5f'); return; }
+            if (!confirm(`Remove ${out.length} Enverus-staged point(s) outside the area from this import? They are not created either way; this just takes them off the map and the lists.`)) return;
+            out.forEach(p => { p.removed = true; p.done = true; p.sel = false; const x = (imp.env.missing || []).find(c => c.api === (p.env && p.env.api)); if (x) x.staged = false; });
+            impComputeDups(); impRefreshAfterSelChange(); impRenderEnvUi();
+            impStatus(`🧹 ${out.length} Enverus point(s) outside the area removed from the import`, '#5fff5f');
+        };
         q('aim-imp-undoreset').onclick = () => {
             const R = imp.lastReset; if (!R || !R.length) { impStatus('↶ nothing to undo', '#ffb347'); return; }
             const byI = new Map(imp.points.map(p => [p.i, p])); let k = 0;
@@ -27681,6 +27695,7 @@
             if (fl) fl.textContent = imp.fileName ? `${imp.fileName} · ${live.length} staged · ${selN} selected` : 'no file loaded';
             const swb = document.getElementById('aim-imp-swapfile'); if (swb) swb.style.display = imp.points.length ? '' : 'none';   // v4.435
             const ur = document.getElementById('aim-imp-undoreset'); if (ur) ur.style.display = (imp.lastReset && imp.lastReset.length) ? '' : 'none';   // v4.437
+            const dob = document.getElementById('aim-imp-dropoutside'); if (dob) { let anyOut = false; try { anyOut = (imp.shapes.length || impFlightEnvelope().length) && imp.points.some(p => !p.done && (p.src === 'enverus' || p.src === 'enverus-3p') && !impEnvInBox(p.lat, p.lng, null)); } catch (e) {} dob.style.display = anyOut ? '' : 'none'; }
             const rc = document.getElementById('aim-imp-recover'); if (rc) rc.style.display = imp.points.some(p => !p.done && ((p.shape && p.shape.length >= 3 && (Math.abs(ringCentroid(p.shape).lat - p.lat) > 1e-9 || Math.abs(ringCentroid(p.shape).lng - p.lng) > 1e-9)) || (p.client && p.client.coords && (Math.abs(p.client.coords.lat - p.lat) > 1e-9 || Math.abs(p.client.coords.lng - p.lng) > 1e-9)))) ? '' : 'none';
             const sb = document.getElementById('aim-imp-save'), sn = document.getElementById('aim-imp-saved-note');
             if (sb) sb.style.display = imp.headers.length ? '' : 'none';

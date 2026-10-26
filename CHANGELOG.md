@@ -1,4 +1,6 @@
-## 2026-10-23 — 🚫 AVOID - 3rd Party Pad — Site Setup Tools latest v4.444 → v4.451 (latest only)
+## 2026-10-23 — 🚫 AVOID - 3rd Party Pad — Site Setup Tools latest v4.444 → v4.452 (latest only)
+
+- **v4.452** — only SELECTED points are drawn on the map; unselected rows (outside your boundaries) are hidden unless "show unselected dots" is ticked in Placement. **🧹 drop Enverus points outside the area** removes Enverus-staged points (fill-in, third-party, P&A) that lie outside the importer boundary / flight envelope from the import; the client's rows are never touched.
 
 - **v4.451** — fill-in candidates outside the current area are dropped from the saved list on load, no re-search needed.
 
