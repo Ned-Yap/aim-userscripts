@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.463
+// @version      4.464
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.463';
+    const SCRIPT_VERSION = '4.464';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -27824,7 +27824,7 @@
         try { downloadJSONFile(`asset-import-${sid}-${Date.now()}.json`, JSON.stringify(manifest, null, 1)); } catch (e) { impCommitNote('backup manifest download failed (localStorage stash still written)'); }
         // v4.460: a type the site did not have at the START is declared (new_poi_type_str) on EVERY write of it, like the inline
         // type edit does per edit — declaring only the first and referencing after cascaded into the OLD type on all later assets
-        const knownSubs = new Set([...impSiteSubtypes().keys()]);
+        const knownSubs = impSiteTypeSet();                                            // v4.464: lowercase registry, refreshed when a new type is first written
         let ok = 0, fail = 0, aborted = false, updOk = 0;
         const created = [], updated = [];
         for (let i = 0; i < plan.length; i++) {
@@ -27837,12 +27837,12 @@
                 body.description = String(x.notes || '').slice(0, 2000);
                 if (!body.custom || typeof body.custom !== 'object') body.custom = {};
                 body.custom.poi_type_str = x.subtype;
-                body.custom.new_poi_type_str = knownSubs.has(x.subtype) ? '' : x.subtype;
+                const isNewU = !knownSubs.has(x.subtype.toLowerCase()); body.custom.new_poi_type_str = isNewU ? x.subtype : '';
                 if (x.ext) impSetExtOnBody(body, x.ext);                     // v4.434/v4.438: External ID (custom.external_asset_id) from the file; left as it was when the file has none
                 let st = 0, raw = '';
                 try { const rr = await fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) }); st = rr.status; raw = await rr.text(); }
                 catch (e) { raw = String(e && e.message || e); }
-                if (st === 200) { updOk++; updated.push({ id: ent.id, name: x.name, before: JSON.parse(JSON.stringify(ent)), point: x.p, subtype: x.subtype, notes: body.description }); x.p.done = true; x.p.sel = false; }
+                if (st === 200) { updOk++; updated.push({ id: ent.id, name: x.name, before: JSON.parse(JSON.stringify(ent)), point: x.p, subtype: x.subtype, notes: body.description }); x.p.done = true; x.p.sel = false; if (isNewU) { impCommitNote(`new type "${impEsc(x.subtype)}" declared — waiting for the server to list it…`); if (await impConfirmType(sid, x.subtype)) knownSubs.add(x.subtype.toLowerCase()); } }
                 else {
                     fail++; console.warn(`${TAG} 📥 update "${x.name}" failed: ${st} ${raw.slice(0, 200)}`);
                     if (st === 403) { aborted = true; impCommitNote(`ABORTED at ${i + 1}/${plan.length} — server 403 (write permission lost). ${ok} created, ${updOk} updated, rest kept staged.`, '#ff6060'); break; }
@@ -27851,9 +27851,11 @@
                 continue;
             }
             impCommitNote(`creating ${i + 1}/${plan.length} — "${impEsc(x.name)}"…`);
-            const r = await createAssetSquare(sid, x.p.lat, x.p.lng, impPointSizeFt(x.p), x.name, x.subtype, !knownSubs.has(x.subtype), x.notes || '', x.p.shape || (x.p.pa ? assetTrianglePoints(x.p.lat, x.p.lng, impPointSizeFt(x.p)) : null), x.ext ? { custom: { [IMP_EXT_FIELD]: x.ext } } : null);   // v4.413: P&A size · v4.416: P&A = triangle unless an outline was drawn
+            const isNewC = !knownSubs.has(x.subtype.toLowerCase());
+            const r = await createAssetSquare(sid, x.p.lat, x.p.lng, impPointSizeFt(x.p), x.name, x.subtype, isNewC, x.notes || '', x.p.shape || (x.p.pa ? assetTrianglePoints(x.p.lat, x.p.lng, impPointSizeFt(x.p)) : null), x.ext ? { custom: { [IMP_EXT_FIELD]: x.ext } } : null);   // v4.413: P&A size · v4.416: P&A = triangle unless an outline was drawn
             if (r && r.ok) {
                 ok++; created.push({ id: r.id, name: x.name, point: x.p, ext: x.ext, subtype: x.subtype }); x.p.createdId = r.id;
+                if (isNewC) { impCommitNote(`new type "${impEsc(x.subtype)}" declared — waiting for the server to list it…`); if (await impConfirmType(sid, x.subtype)) knownSubs.add(x.subtype.toLowerCase()); }
                 x.p.done = true; x.p.sel = false;
             } else {
                 fail++;
@@ -27936,6 +27938,14 @@
         impCommitNote(msg, '#5fff5f');
         try { const host = document.getElementById('aim-imp-preflight-note'); if (host) host.innerHTML = msg; } catch (e) {}
     }
+    // ---- v4.464 TYPE REGISTRY. The server stores types in lowercase and drops a write that declares (new_poi_type_str) a
+    // type it already has. So: existence is checked ignoring case; a type is declared new only when truly absent; after the
+    // FIRST write of a new type the site is re-read until the type shows up (≤ 3 s) so the next writes reference it. ----
+    function impSiteTypeSet() { return new Set([...impSiteSubtypes().keys()].map(t => t.toLowerCase())); }
+    async function impConfirmType(sid, want) {
+        for (let i = 0; i < 5; i++) { await sleep(600); try { await fetchMapObjects(sid, true); } catch (e) {} if (impSiteTypeSet().has(want.toLowerCase())) return true; }
+        return false;
+    }
     // ---- v4.460 ↻ RE-SEND TYPES — for every asset this session created or updated, compare the stored type with the
     // intended one (same resolver as Create) and re-POST only the type (declared as new when the site lacked it). ----
     async function impResendTypes() {
@@ -27962,18 +27972,20 @@
         const csrf = getCsrfToken(); if (!csrf) { impCommitNote('No CSRF token — make one native save anywhere in Percepto first, then retry', '#ff6060'); return; }
         let siteCfg = null; try { siteCfg = await fetchSiteConfig(sid); } catch (e) {}
         if (!siteCfg) { impCommitNote('Could not read the site config — nothing written', '#ff6060'); return; }
-        if (!confirm(`Re-send the TYPE on ${todo.length} asset(s) (only custom.poi_type_str changes; names, notes, shapes untouched)?`)) return;
+        if (!imp._resendPass && !confirm(`Re-send the TYPE on ${todo.length} asset(s) (only custom.poi_type_str changes; names, notes, shapes untouched)?`)) return;
         try { downloadJSONFile(`resend-types-${sid}-${Date.now()}.json`, JSON.stringify({ site: sid, at: new Date().toISOString(), changes: todo.map(x => ({ id: x.e.id, name: x.e.name, from: x.have, to: x.want })), before: todo.map(x => x.e) }, null, 1)); } catch (e) {}
-        const known = new Set(siteSubs); let ok = 0, fail = 0; const done = []; const refusedLog = [];
+        const known = impSiteTypeSet(); let ok = 0, fail = 0; const done = []; const refusedLog = [];
         for (let i = 0; i < todo.length; i++) {
             const x = todo[i]; impCommitNote(`↻ ${i + 1}/${todo.length} — "${impEsc(x.e.name)}" → ${impEsc(x.want)}…`);
             try {
                 const body = buildWriteBody(x.e, siteCfg); if (!body.custom || typeof body.custom !== 'object') body.custom = {};
-                body.custom.poi_type_str = x.want; body.custom.new_poi_type_str = known.has(x.want) ? '' : x.want;
+                const isNew = !known.has(x.want.toLowerCase());
+                body.custom.poi_type_str = x.want; body.custom.new_poi_type_str = isNew ? x.want : '';
                 const rr = await fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) });
                 const txt = await rr.text(); let js = null; try { js = JSON.parse(txt); } catch (e) {}
                 if (rr.status === 200) {
                     ok++; done.push({ id: x.e.id, name: x.e.name, before: JSON.parse(JSON.stringify(x.e)), want: x.want });
+                    if (isNew) { impCommitNote(`↻ ${i + 1}/${todo.length} — new type "${impEsc(x.want)}" declared, waiting for the server to list it…`); if (await impConfirmType(sid, x.want)) known.add(x.want.toLowerCase()); else console.warn(`${TAG} ↻ type "${x.want}" not listed by the server 3 s after its first write`); }
                     // v4.463: what did the server actually store, and did it say why? (type refusals come back as 200)
                     const stored = js && js.map_objects && js.map_objects.custom ? String(js.map_objects.custom.poi_type_str || '') : '?';
                     if (stored.toLowerCase() !== x.want.toLowerCase()) { refusedLog.push({ name: x.e.name, sent: x.want, stored, warnings: js && js.warnings, sentBody: body }); console.warn(`${TAG} ↻ REFUSED "${x.e.name}": sent "${x.want}" → stored "${stored}" · warnings: ${JSON.stringify(js && js.warnings)} · response: ${txt.slice(0, 600)}`); }
@@ -27982,14 +27994,17 @@
             } catch (e) { fail++; console.warn(`${TAG} ↻ type "${x.e.name}"`, e); }
             await sleep(DELETE_GAP_MS);
         }
-        try { await fetchMapObjects(sid, true); } catch (e) {}
+        await sleep(1500); try { await fetchMapObjects(sid, true); } catch (e) {}
         const after = new Map(((mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || []).map(e => [e.id, e]));
         const confirmed = done.filter(d => String(((after.get(d.id) || {}).custom || {}).poi_type_str || '').toLowerCase() === d.want.toLowerCase()).length;
+        imp._resendPass = (imp._resendPass || 0) + 1;
         const sample = done.find(d => String(((after.get(d.id) || {}).custom || {}).poi_type_str || '').toLowerCase() !== d.want.toLowerCase());
         imp.lastUpdated = imp.lastUpdated.concat(done.map(d => ({ id: d.id, name: d.name, before: d.before })));
         imp._rootCache = null; impBuildAssetIndex(); impComputeDups(); impRefreshAfterSelChange(); try { impSaveSession('resend-types'); } catch (e) {}
         if (refusedLog.length) { try { downloadJSONFile(`type-refusals-${sid}-${Date.now()}.json`, JSON.stringify(refusedLog, null, 1)); } catch (e) {} console.warn(`${TAG} ↻ ${refusedLog.length} refusal(s) logged above and saved to type-refusals-*.json`); }
-        impCommitNote(`↻ DONE: <b>${ok}</b> re-sent${fail ? ` · <span style="color:#ff6060">${fail} failed</span>` : ''} · stored as sent: <b>${confirmed}/${done.length}</b>${refusedLog.length ? ` · <b style="color:#ff6060">${refusedLog.length} refusals — console + type-refusals-*.json have the server's answer</b>` : ''}${sample ? ` · <span style="color:#ff6060">server kept "${impEsc(String(((after.get(sample.id) || {}).custom || {}).poi_type_str || ''))}" instead of "${impEsc(sample.want)}" on ${impEsc(sample.name)} — the type string itself is being refused</span>` : ''} · ↩ Undo last import reverts`, fail || confirmed < done.length ? '#ffb347' : '#5fff5f');
+        if (confirmed < done.length && imp._resendPass < 4 && !fail) { impCommitNote(`↻ pass ${imp._resendPass}: ${confirmed}/${done.length} stored — running another pass for the rest…`); imp.lastUpdated = imp.lastUpdated.concat(done.map(d => ({ id: d.id, name: d.name, before: d.before }))); return impResendTypes(); }
+        const passes = imp._resendPass; imp._resendPass = 0;
+        impCommitNote(`↻ DONE after ${passes} pass${passes === 1 ? '' : 'es'}: <b>${ok}</b> re-sent${fail ? ` · <span style="color:#ff6060">${fail} failed</span>` : ''} · stored as sent: <b>${confirmed}/${done.length}</b>${refusedLog.length ? ` · <b style="color:#ff6060">${refusedLog.length} refusals — console + type-refusals-*.json have the server's answer</b>` : ''}${sample ? ` · <span style="color:#ff6060">server kept "${impEsc(String(((after.get(sample.id) || {}).custom || {}).poi_type_str || ''))}" instead of "${impEsc(sample.want)}" on ${impEsc(sample.name)} — the type string itself is being refused</span>` : ''} · ↩ Undo last import reverts`, fail || confirmed < done.length ? '#ffb347' : '#5fff5f');
     }
     // Undo THIS import: delete exactly the ids the last commit created.
     async function impUndoCreate() {

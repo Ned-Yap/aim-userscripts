@@ -1,4 +1,6 @@
-## 2026-10-23 — 🚫 AVOID - 3rd Party Pad — Site Setup Tools latest v4.444 → v4.463 (latest only)
+## 2026-10-23 — 🚫 AVOID - 3rd Party Pad — Site Setup Tools latest v4.444 → v4.464 (latest only)
+
+- **v4.464** — type registry: the server stores types in lowercase and silently drops a write that declares a type it already has. Types are now matched ignoring case, declared new only when truly absent, and after the first write of a new type the site is re-read until the type is listed before the next asset of that type is written. ↻ Re-send types repeats its pass automatically (up to 4) until everything is stored.
 
 - **v4.463** — ↻ Re-send types logs the server's response for every refused type (stored value + warnings) to the console and a type-refusals-*.json file.
 
