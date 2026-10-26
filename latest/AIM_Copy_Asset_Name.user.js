@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.473
+// @version      4.474
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.473';
+    const SCRIPT_VERSION = '4.474';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -28059,6 +28059,7 @@
         const out = [];
         imp.points.forEach(p => {
             if (!p.dup || p.dupId == null || p.removed || p.pa || p.thirdParty) return;
+            if (!p.sel && !p.createdId && !p.done) return;                                    // v4.474: never a row outside the selection (HUGHES / FRAZIER, 20–60 mi away, matched local pads by name)
             const pad = byId.get(p.dupId); if (!pad) return;
             const rowName = genCleanName(p.name); if (!rowName) return;
             if (String(pad.name || '').trim().toLowerCase() === rowName.toLowerCase()) return;   // exact match = the row IS that asset
@@ -28088,24 +28089,33 @@
             const rc = entityCoords(e); if (!rc || rc.length < 3) return; const c = ringCentroid(rc);
             if (!impInFlightEnvelope(c.lat, c.lng, 1609)) { let bd = Infinity; impFlightEnvelope().forEach(z => { const d = pointToPolygonMeters(c.lat, c.lng, z.ring); if (d < bd) bd = d; }); out.push({ kind: 'outside', e, pad: null, ft: Math.round(bd / GEN_FT_TO_M), why: `created ${(bd / 1609.34).toFixed(1)} mi outside the flight envelope${e.parent_asset_name ? ` (parent ${e.parent_asset_name})` : ''}` }); }
         });
+        // v4.474: pads whose last update came from a row OUTSIDE the selection (its type / notes are from the wrong well)
+        (imp.lastUpdated || []).forEach(u => {
+            const e = byId.get(u.id); if (!e || !u.before) return;
+            const rows = imp.points.filter(p => p.dup && p.dupId === u.id);
+            if (rows.length && rows.every(p => !p.sel && !p.createdId && !p.done) && !out.some(x => x.e.id === e.id)) out.push({ kind: 'padUnsel', e, pad: null, ft: 0, before: u.before, why: `updated from a row outside the selection ("${rows[0].name}") — type / notes are the wrong well's` });
+        });
         return out.sort((a, b) => b.ft - a.ft);
     }
     async function impAuditRevert(list) {
         if (liteBlockedWrite('revert audited assets')) return;
         const sid = genState.siteID; const csrf = getCsrfToken(); if (!csrf) { impCommitNote('No CSRF token — make one native save anywhere in Percepto first, then retry', '#ff6060'); return; }
-        if (!confirm(`Delete ${list.length} created asset(s) flagged by the audit?`)) return;
+        const dels = list.filter(x => x.kind !== 'padUnsel'), revs = list.filter(x => x.kind === 'padUnsel');
+        if (!confirm(`Audit revert: delete ${dels.length} created asset(s)${revs.length ? ` and restore ${revs.length} pad(s) to their state before the wrong update` : ''}?`)) return;
         try { downloadJSONFile(`audit-revert-${sid}-${Date.now()}.json`, JSON.stringify({ site: sid, at: new Date().toISOString(), deleted: list.map(x => x.e) }, null, 1)); } catch (e) {}
         let ok = 0, fail = 0;
-        for (const x of list) { try { const r = await fetch(`/map_objects/${encodeURIComponent(x.e.id)}/`, { method: 'DELETE', credentials: 'same-origin', headers: { 'X-CSRFToken': csrf, 'Accept': 'application/json, text/plain, */*' } }); if (r.ok || r.status === 404) { ok++; imp.lastCreated = imp.lastCreated.filter(id => id !== x.e.id); imp.points.forEach(p => { if (p.createdId === x.e.id) { delete p.createdId; p.done = false; p.sel = false; p.selManual = false; } }); } else fail++; } catch (e) { fail++; } await sleep(DELETE_GAP_MS); }
+        let siteCfgA = null; try { siteCfgA = await fetchSiteConfig(sid); } catch (e) {}
+        for (const x of revs) { try { if (!siteCfgA) throw new Error('no site config'); const body = buildWriteBody(x.before, siteCfgA); const rr = await fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) }); if (rr.status === 200) { ok++; imp.lastUpdated = imp.lastUpdated.filter(u => u.id !== x.e.id); } else fail++; } catch (e) { fail++; console.warn(`${TAG} 🔍 pad revert "${x.e.name}"`, e); } await sleep(DELETE_GAP_MS); }
+        for (const x of dels) { try { const r = await fetch(`/map_objects/${encodeURIComponent(x.e.id)}/`, { method: 'DELETE', credentials: 'same-origin', headers: { 'X-CSRFToken': csrf, 'Accept': 'application/json, text/plain, */*' } }); if (r.ok || r.status === 404) { ok++; imp.lastCreated = imp.lastCreated.filter(id => id !== x.e.id); imp.points.forEach(p => { if (p.createdId === x.e.id) { delete p.createdId; p.done = false; p.sel = false; p.selManual = false; } }); } else fail++; } catch (e) { fail++; } await sleep(DELETE_GAP_MS); }
         try { await fetchMapObjects(sid, true); } catch (e) {}
         imp._rootCache = null; impBuildAssetIndex(); impComputeDups(); impRefreshAfterSelChange(); try { impSaveSession('audit'); } catch (e) {}
-        impCommitNote(`🔍 audit revert: ${ok} deleted${fail ? ` · <span style="color:#ff6060">${fail} failed</span>` : ''} · the rows are staged again but DESELECTED`, fail ? '#ffb347' : '#5fff5f');
+        impCommitNote(`🔍 audit revert: ${ok} done (deleted / restored)${fail ? ` · <span style="color:#ff6060">${fail} failed</span>` : ''} · the rows are staged again but DESELECTED`, fail ? '#ffb347' : '#5fff5f');
     }
     async function impAudit() {
         const sid = genState.siteID; try { await fetchMapObjects(sid, true); } catch (e) {}
         const list = impAuditRows();
         if (!list.length) { impCommitNote('🔍 audit: nothing created far from its pad or outside the flight envelope', '#5fff5f'); return; }
-        impCommitNote(`🔍 audit: <b>${list.length}</b> created asset(s) out of place: ${impEsc(list.slice(0, 8).map(x => `${x.e.name} (${x.why})`).join(' · '))}${list.length > 8 ? ' …' : ''} — <button data-impaudit-revert style="background:rgba(255,120,60,0.15);color:#ffb28a;border:1px solid rgba(255,120,60,0.5);border-radius:3px;padding:1px 8px;cursor:pointer;font:inherit;font-size:10px">⚡ delete these ${list.length}</button> <button data-impaudit-zoom style="background:none;border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:3px;padding:1px 8px;cursor:pointer;font:inherit;font-size:10px">🔎 zoom to the first</button>`, '#ffb347');
+        impCommitNote(`🔍 audit: <b>${list.length}</b> created asset(s) out of place: ${impEsc(list.slice(0, 8).map(x => `${x.e.name} (${x.why})`).join(' · '))}${list.length > 8 ? ' …' : ''} — <button data-impaudit-revert style="background:rgba(255,120,60,0.15);color:#ffb28a;border:1px solid rgba(255,120,60,0.5);border-radius:3px;padding:1px 8px;cursor:pointer;font:inherit;font-size:10px">⚡ fix these ${list.length} (delete strays · restore wrongly updated pads)</button> <button data-impaudit-zoom style="background:none;border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:3px;padding:1px 8px;cursor:pointer;font:inherit;font-size:10px">🔎 zoom to the first</button>`, '#ffb347');
         const host = document.getElementById('aim-imp-commit-note');
         if (host) { const rb = host.querySelector('[data-impaudit-revert]'); if (rb) rb.onclick = () => impAuditRevert(list).catch(e => impCommitNote(`🔍 ${impEsc(e && e.message || e)}`, '#ff6060')); const zb = host.querySelector('[data-impaudit-zoom]'); if (zb) zb.onclick = () => { const x = list[0]; const c = ringCentroid(entityCoords(x.e)); impZoomToPoints([{ lat: c.lat, lng: c.lng, name: x.e.name }], x.e.name); }; }
     }

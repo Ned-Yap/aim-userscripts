@@ -1,4 +1,6 @@
-## 2026-10-26 — 🧱 Pad model — Site Setup Tools latest v4.470 → v4.473 (latest only)
+## 2026-10-26 — 🧱 Pad model — Site Setup Tools latest v4.470 → v4.474 (latest only)
+
+- **v4.474** — the pad-model repair and the commit only ever act on SELECTED rows (a far-away `HUGHES` battery row matched the local `Pad - HUGHES` and was created 61 mi south). The audit also lists pads whose last update came from a row outside the selection and restores them to their previous state.
 
 - **v4.473** — 👁 Audit placements also lists any asset created this session that lies outside the site's flight envelope (+ 1 mi), nested or not.
 
