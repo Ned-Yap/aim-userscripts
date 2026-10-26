@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.474
+// @version      4.475
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.474';
+    const SCRIPT_VERSION = '4.475';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -28060,9 +28060,19 @@
         imp.points.forEach(p => {
             if (!p.dup || p.dupId == null || p.removed || p.pa || p.thirdParty) return;
             if (!p.sel && !p.createdId && !p.done) return;                                    // v4.474: never a row outside the selection (HUGHES / FRAZIER, 20–60 mi away, matched local pads by name)
-            const pad = byId.get(p.dupId); if (!pad) return;
+            const m = byId.get(p.dupId); if (!m) return;
             const rowName = genCleanName(p.name); if (!rowName) return;
-            if (String(pad.name || '').trim().toLowerCase() === rowName.toLowerCase()) return;   // exact match = the row IS that asset
+            const isWrapperOf = (e) => { const st = impNameTokens(rowName), at = impNameTokens(e.name || ''); return at.length > st.length && impTokensContain(at, st) && at.filter(t => !st.includes(t)).every(t => /^(pad|battery|batt|tank|tb)$/.test(t)); };
+            if (String(m.name || '').trim().toLowerCase() === rowName.toLowerCase()) {
+                // v4.475: exact match = the row IS this well; its PAD is the parent (or, for an orphan, the strict 'Pad - <row>' wrapper)
+                const pn = typeof m.parent_asset_name === 'string' ? m.parent_asset_name.trim().toLowerCase() : '';
+                let pad = pn ? byName.get(pn) : null;
+                if (!pad) pad = ents.find(e => e.type === 3 && e.id !== m.id && isWrapperOf(e)) || null;
+                if (!pad) return;
+                out.push({ p, pad, name: rowName, child: m, nWells: kids.get(String(pad.name).trim().toLowerCase()) || 0 });
+                return;
+            }
+            const pad = m;
             const child = byName.get(rowName.toLowerCase()) || null;
             out.push({ p, pad, name: rowName, child, nWells: (kids.get(String(pad.name).trim().toLowerCase()) || 0) + (child ? 0 : 1) });
         });
