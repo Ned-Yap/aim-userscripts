@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.462
+// @version      4.463
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.462';
+    const SCRIPT_VERSION = '4.463';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -27964,15 +27964,21 @@
         if (!siteCfg) { impCommitNote('Could not read the site config — nothing written', '#ff6060'); return; }
         if (!confirm(`Re-send the TYPE on ${todo.length} asset(s) (only custom.poi_type_str changes; names, notes, shapes untouched)?`)) return;
         try { downloadJSONFile(`resend-types-${sid}-${Date.now()}.json`, JSON.stringify({ site: sid, at: new Date().toISOString(), changes: todo.map(x => ({ id: x.e.id, name: x.e.name, from: x.have, to: x.want })), before: todo.map(x => x.e) }, null, 1)); } catch (e) {}
-        const known = new Set(siteSubs); let ok = 0, fail = 0; const done = [];
+        const known = new Set(siteSubs); let ok = 0, fail = 0; const done = []; const refusedLog = [];
         for (let i = 0; i < todo.length; i++) {
             const x = todo[i]; impCommitNote(`↻ ${i + 1}/${todo.length} — "${impEsc(x.e.name)}" → ${impEsc(x.want)}…`);
             try {
                 const body = buildWriteBody(x.e, siteCfg); if (!body.custom || typeof body.custom !== 'object') body.custom = {};
                 body.custom.poi_type_str = x.want; body.custom.new_poi_type_str = known.has(x.want) ? '' : x.want;
                 const rr = await fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) });
-                if (rr.status === 200) { ok++; done.push({ id: x.e.id, name: x.e.name, before: JSON.parse(JSON.stringify(x.e)), want: x.want }); }
-                else { fail++; const t = await rr.text(); console.warn(`${TAG} ↻ type "${x.e.name}" ${rr.status} ${t.slice(0, 200)}`); if (rr.status === 403) { impCommitNote(`ABORTED at ${i + 1}/${todo.length} — server 403`, '#ff6060'); break; } }
+                const txt = await rr.text(); let js = null; try { js = JSON.parse(txt); } catch (e) {}
+                if (rr.status === 200) {
+                    ok++; done.push({ id: x.e.id, name: x.e.name, before: JSON.parse(JSON.stringify(x.e)), want: x.want });
+                    // v4.463: what did the server actually store, and did it say why? (type refusals come back as 200)
+                    const stored = js && js.map_objects && js.map_objects.custom ? String(js.map_objects.custom.poi_type_str || '') : '?';
+                    if (stored.toLowerCase() !== x.want.toLowerCase()) { refusedLog.push({ name: x.e.name, sent: x.want, stored, warnings: js && js.warnings, sentBody: body }); console.warn(`${TAG} ↻ REFUSED "${x.e.name}": sent "${x.want}" → stored "${stored}" · warnings: ${JSON.stringify(js && js.warnings)} · response: ${txt.slice(0, 600)}`); }
+                }
+                else { fail++; console.warn(`${TAG} ↻ type "${x.e.name}" ${rr.status} ${txt.slice(0, 200)}`); if (rr.status === 403) { impCommitNote(`ABORTED at ${i + 1}/${todo.length} — server 403`, '#ff6060'); break; } }
             } catch (e) { fail++; console.warn(`${TAG} ↻ type "${x.e.name}"`, e); }
             await sleep(DELETE_GAP_MS);
         }
@@ -27982,7 +27988,8 @@
         const sample = done.find(d => String(((after.get(d.id) || {}).custom || {}).poi_type_str || '').toLowerCase() !== d.want.toLowerCase());
         imp.lastUpdated = imp.lastUpdated.concat(done.map(d => ({ id: d.id, name: d.name, before: d.before })));
         imp._rootCache = null; impBuildAssetIndex(); impComputeDups(); impRefreshAfterSelChange(); try { impSaveSession('resend-types'); } catch (e) {}
-        impCommitNote(`↻ DONE: <b>${ok}</b> re-sent${fail ? ` · <span style="color:#ff6060">${fail} failed</span>` : ''} · stored as sent: <b>${confirmed}/${done.length}</b>${sample ? ` · <span style="color:#ff6060">server kept "${impEsc(String(((after.get(sample.id) || {}).custom || {}).poi_type_str || ''))}" instead of "${impEsc(sample.want)}" on ${impEsc(sample.name)} — the type string itself is being refused</span>` : ''} · ↩ Undo last import reverts`, fail || confirmed < done.length ? '#ffb347' : '#5fff5f');
+        if (refusedLog.length) { try { downloadJSONFile(`type-refusals-${sid}-${Date.now()}.json`, JSON.stringify(refusedLog, null, 1)); } catch (e) {} console.warn(`${TAG} ↻ ${refusedLog.length} refusal(s) logged above and saved to type-refusals-*.json`); }
+        impCommitNote(`↻ DONE: <b>${ok}</b> re-sent${fail ? ` · <span style="color:#ff6060">${fail} failed</span>` : ''} · stored as sent: <b>${confirmed}/${done.length}</b>${refusedLog.length ? ` · <b style="color:#ff6060">${refusedLog.length} refusals — console + type-refusals-*.json have the server's answer</b>` : ''}${sample ? ` · <span style="color:#ff6060">server kept "${impEsc(String(((after.get(sample.id) || {}).custom || {}).poi_type_str || ''))}" instead of "${impEsc(sample.want)}" on ${impEsc(sample.name)} — the type string itself is being refused</span>` : ''} · ↩ Undo last import reverts`, fail || confirmed < done.length ? '#ffb347' : '#5fff5f');
     }
     // Undo THIS import: delete exactly the ids the last commit created.
     async function impUndoCreate() {
