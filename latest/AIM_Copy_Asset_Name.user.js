@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.453
+// @version      4.454
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.453';
+    const SCRIPT_VERSION = '4.454';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -26068,7 +26068,7 @@
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc" title="Square side of each created asset — same shape ➕ Create asset uses. Reshape in Percepto afterwards (auto-reshape is feature #251).">Size <input type="number" id="aim-imp-size" min="5" max="2000" step="5" style="width:52px;${inCss}"> ft</label>
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#ff8a80" title="Side of the TRIANGLE a 🩻 P&A asset becomes (plugged / expired / cancelled / retired wells and facilities from the fill-in) — three corners instead of four so it never passes for a normal asset. ↔ Move and ✏ Shape still apply.">P&A size <input type="number" id="aim-imp-pasize" min="5" max="2000" step="5" style="width:52px;background:#1a1d23;border:1px solid rgba(255,138,128,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px"> ft</label>
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#ffd400" title="What happens to a staged point whose NAME matches an asset already on this site. Update = rewrite that asset's TYPE and NOTES from this file, never its shape or position (the quarterly re-run). Copy = create a second asset named …-2. Skip = leave it alone. Points merely inside / near an existing asset are only flagged and always created.">name matches <select id="aim-imp-dupmode" style="background:#1a1d23;border:1px solid rgba(255,212,0,0.45);color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px"><option value="update">update type + notes</option><option value="skip">skip</option><option value="copy">create a copy (-N)</option></select></label>
-                <button id="aim-imp-preflight" style="${btnCss('122,223,230')}" title="👁 Reads only: a plain-text report of everything the importer knows about the run — what Create would do, types, names, flags, Enverus, safety — downloaded and copied to the clipboard for review before writing.">👁 📋 Pre-flight report</button>
+                <button id="aim-imp-preflight" style="${btnCss('122,223,230')}" title="👁 Reads only: a plain-text report of everything the importer knows about the run — what Create would do, types, names, flags, Enverus, safety — downloaded and copied to the clipboard for review before writing.">👁 📋 Pre-import report</button>
                 <button id="aim-imp-commit" style="${btnCss('255,120,60')};font-weight:600" title="WRITES to AIM: creates the selected staged points as real assets (updates type + notes on name matches). Honours Dry run. A backup manifest downloads first; ↩ Undo reverts exactly this run.">⚡ Create selected</button>
                 <button id="aim-imp-undocreate" style="${btnCss('255,179,71')}" title="WRITES to AIM: deletes exactly the assets the most recent import created (this session) and puts updated ones back. Each delete rides Delete Guard's undo ring when installed.">↩ Undo last import</button>
             </div>
@@ -27858,7 +27858,7 @@
         const cre = plan.filter(x => !x.update), upd = plan.filter(x => x.update);
         const dry = (() => { try { return !!document.getElementById('aim-gen-dryrun').checked; } catch (e) { return true; } })();
         const ft = (m) => Math.round(m / GEN_FT_TO_M);
-        line(`AIM ASSET IMPORT — PRE-FLIGHT REPORT`); line(`site ${genState.siteID} · ${getCurrentSiteName() || ''} · ${impNowStamp()} · Site Setup Tools v${SCRIPT_VERSION} · Dry run ${dry ? 'ON' : 'OFF (LIVE)'}`);
+        line(`AIM ASSET IMPORT — PRE-IMPORT REPORT`); line(`site ${genState.siteID} · ${getCurrentSiteName() || ''} · ${impNowStamp()} · Site Setup Tools v${SCRIPT_VERSION} · Dry run ${dry ? 'ON' : 'OFF (LIVE)'}`);
         line(`file ${imp.fileName || '—'} · ${imp.rows.length} rows · ${imp.invalid} without coordinates`); line('');
         line(`== SELECTION ==`); line(`${live.length} staged · ${sel.length} selected · boundaries: ${imp.shapes.length ? imp.shapes.map(sh => sh.kind === 'circle' ? `circle ${Math.round(sh.radiusM / 1609.34 * 100) / 100} mi` : `polygon ${sh.ring.length} pts`).join(', ') : (impFlightEnvelope().length ? `none drawn — flight envelope (${impFlightEnvelope().length} FFZs + ${imp.env.areaFt} ft) for the fill-in` : 'none')}`);
         line(`name matches → ${imp.dupMode} · size ${impSizeFt} ft · P&A size ${imp.env.paSizeFt} ft · tiers ${imp.pri.on ? 'ON' : 'off'} · H/V/D ${imp.hv.on ? 'ON' : 'off'} · External ID column ${imp.mapping && imp.mapping.extId ? imp.mapping.extId : 'NONE'}`); line('');
@@ -27887,11 +27887,11 @@
     }
     function impPreflight(how) {
         let txt; try { txt = impPreflightText(); } catch (e) { console.warn(`${TAG} 📋 preflight:`, e); impStatus(`📋 report failed: ${impEsc(e && e.message || e)}`, '#ff6060'); return; }
-        const name = `preflight-${genState.siteID}-${impNowStamp().replace(/[: ]/g, '-')}.txt`;
+        const name = `pre-import-report-${genState.siteID}-${impNowStamp().replace(/[: ]/g, '-')}.txt`;
         if (how !== 'copy') { try { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([txt], { type: 'text/plain' })); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); } catch (e) {} }
         try { navigator.clipboard.writeText(txt); } catch (e) {}
-        console.log(`${TAG} 📋 pre-flight report\n${txt}`);
-        impStatus(`📋 pre-flight report ${how === 'copy' ? 'copied' : `saved as ${impEsc(name)} and copied`} — ${txt.split('\n').length} lines; paste it anywhere for review (also in the console)`, '#5fff5f');
+        console.log(`${TAG} 📋 pre-import report\n${txt}`);
+        impStatus(`📋 pre-import report ${how === 'copy' ? 'copied' : `saved as ${impEsc(name)} and copied`} — ${txt.split('\n').length} lines; paste it anywhere for review (also in the console)`, '#5fff5f');
     }
     // Undo THIS import: delete exactly the ids the last commit created.
     async function impUndoCreate() {
