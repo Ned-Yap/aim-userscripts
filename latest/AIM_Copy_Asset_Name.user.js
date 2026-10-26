@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.466
+// @version      4.467
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.466';
+    const SCRIPT_VERSION = '4.467';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -28387,7 +28387,7 @@
         if (!imp.siteID || !imp.headers.length) return;
         imp.dirty = true;
         clearTimeout(impAutosaveT);
-        impAutosaveT = setTimeout(() => { try { impSaveSession('auto'); } catch (e) { console.warn(`${TAG} 📥 autosave failed:`, e); } }, 3000);
+        impAutosaveT = setTimeout(() => { try { impSaveSession('auto'); } catch (e) { console.warn(`${TAG} 📥 autosave failed:`, e); } }, 20000);   // v4.467: 20 s (a save rewrites Tampermonkey's whole storage)
     }
     function impAutosaveTimer() {
         clearInterval(impAutosaveIv); impAutosaveIv = null;
@@ -28439,8 +28439,11 @@
             // v4.437: keep history. ':prev' = whatever was saved last time (one step back); ':h1..h4' = a ring that
             // advances only when the newest ring entry is ≥ 30 min old (so a mistake + autosave still leaves the
             // state from up to ~2 hours ago). Each slot carries its own meta for the picker.
-            const prevJson = GM_getValue(IMP_SESSION_DATA + k, ''), prevMeta = GM_getValue(IMP_SESSION_META + k, '');
+            // v4.467: Tampermonkey rewrites its WHOLE storage on every GM_setValue, so the history copies must stay small — they
+            // drop the file rows (≈3 MB on a 12k-row list) and reuse the main save's rows at resume time when the file name matches
+            let prevJson = GM_getValue(IMP_SESSION_DATA + k, ''), prevMeta = GM_getValue(IMP_SESSION_META + k, '');
             if (prevJson && prevJson !== json) {
+                try { const pd = JSON.parse(prevJson); if (Array.isArray(pd.rows) && pd.rows.length) { pd.rows = []; pd.rowsFrom = 'main'; prevJson = JSON.stringify(pd); } } catch (e) {}
                 GM_setValue(IMP_SESSION_DATA + k + ':prev', prevJson); GM_setValue(IMP_SESSION_META + k + ':prev', prevMeta);
                 let pm = null; try { pm = JSON.parse(prevMeta || 'null'); } catch (e) {}
                 let h1 = null; try { h1 = JSON.parse(GM_getValue(IMP_SESSION_META + k + ':h1', '') || 'null'); } catch (e) {}
@@ -28502,6 +28505,11 @@
         const k = impSessionKey(); if (!k) return;
         slot = slot || '';
         let d; try { d = JSON.parse(GM_getValue(IMP_SESSION_DATA + k + slot, '') || 'null'); } catch (e) { d = null; }
+        if (d && d.rowsFrom === 'main' && (!d.rows || !d.rows.length)) {                 // v4.467: slim history copy → rows from the main save
+            let main = null; try { main = JSON.parse(GM_getValue(IMP_SESSION_DATA + k, '') || 'null'); } catch (e) {}
+            if (main && main.fileName === d.fileName && Array.isArray(main.rows) && main.rows.length) { d.rows = main.rows; d.headers = main.headers; }
+            else { impStatus(`That older save belongs to a different file (${impEsc(d.fileName || '?')}) than the current one — load that file, then resume it`, '#ffb347'); return; }
+        }
         if (!d || d.v !== 1 || !Array.isArray(d.headers) || !Array.isArray(d.rows)) { impStatus('No usable saved session for this site', '#ffb347'); impDiscardSession(); return; }
         const hdr = d.headers;
         imp.fileName = d.fileName; imp.headers = hdr;
