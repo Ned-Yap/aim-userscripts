@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.467
+// @version      4.468
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.467';
+    const SCRIPT_VERSION = '4.468';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -28497,8 +28497,18 @@
         rd.onerror = () => impStatus('File read failed', '#ff6060');
         rd.readAsText(file);
     }
+    // v4.468: one-time slimming of history copies written by 4.437–4.466 (each carried the full rows)
+    function impSlimHistoryOnce() {
+        const k = impSessionKey(); if (!k || imp._slimmed) return; imp._slimmed = true;
+        let freed = 0;
+        [':prev', ':h1', ':h2', ':h3', ':h4'].forEach(slot => {
+            try { const raw = GM_getValue(IMP_SESSION_DATA + k + slot, ''); if (!raw || raw.length < 500000) return; const d = JSON.parse(raw); if (Array.isArray(d.rows) && d.rows.length) { d.rows = []; d.rowsFrom = 'main'; const slim = JSON.stringify(d); GM_setValue(IMP_SESSION_DATA + k + slot, slim); freed += raw.length - slim.length; } } catch (e) {}
+        });
+        if (freed) console.log(`${TAG} 📥 slimmed older saves: ${(freed / 1048576).toFixed(1)} MB less Tampermonkey storage to rewrite per save`);
+    }
     function impOlderSaves() {
         const k = impSessionKey(); if (!k) return [];
+        try { impSlimHistoryOnce(); } catch (e) {}
         return [':prev', ':h1', ':h2', ':h3', ':h4'].map(slot => { let m = null; try { m = JSON.parse(GM_getValue(IMP_SESSION_META + k + slot, '') || 'null'); } catch (e) {} return m ? { slot, meta: m } : null; }).filter(Boolean);
     }
     function impResumeSession(slot) {

@@ -1,4 +1,6 @@
-## 2026-10-23 — 🚫 AVOID - 3rd Party Pad — Site Setup Tools latest v4.444 → v4.467 (latest only)
+## 2026-10-23 — 🚫 AVOID - 3rd Party Pad — Site Setup Tools latest v4.444 → v4.468 (latest only)
+
+- **v4.468** — older saves written before v4.467 are slimmed once on load (rows dropped, reused from the main save).
 
 - **v4.467** — performance: the older-saves history no longer carries the file rows (they are reused from the main save), cutting each autosave from ~30 MB to ~5 MB of Tampermonkey storage rewrite; autosave now waits 20 s after a change instead of 3.
 
