@@ -1,4 +1,6 @@
-## 2026-10-23 — 🚫 AVOID - 3rd Party Pad — Site Setup Tools latest v4.444 → v4.450 (latest only)
+## 2026-10-23 — 🚫 AVOID - 3rd Party Pad — Site Setup Tools latest v4.444 → v4.451 (latest only)
+
+- **v4.451** — fill-in candidates outside the current area are dropped from the saved list on load, no re-search needed.
 
 - **v4.450** — 👁 Find missing searches **inside the site's flight envelope** (every FFZ polygon plus a 300 ft margin, editable) when no importer boundary is drawn — not a box around every selected point, which on a whole-file selection covered the county. A boundary you draw or load in step 1 still wins.
 
