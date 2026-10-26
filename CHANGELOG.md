@@ -1,4 +1,6 @@
-## 2026-10-23 — 🚫 AVOID - 3rd Party Pad — Site Setup Tools latest v4.444 → v4.452 (latest only)
+## 2026-10-23 — 🚫 AVOID - 3rd Party Pad — Site Setup Tools latest v4.444 → v4.453 (latest only)
+
+- **v4.453** — **👁 📋 Pre-flight report** next to ⚡ Create: a plain-text summary of everything the importer knows about the run — what Create would do (creates / updates / blockers), every type that would be written and whether it is new on the site, H/V/D and tier counts, External ID coverage, name suffixes, placement flags, moved-far list, Enverus / fill-in / status-review counts, and the safety state — downloaded and copied to the clipboard for review before writing.
 
 - **v4.452** — only SELECTED points are drawn on the map; unselected rows (outside your boundaries) are hidden unless "show unselected dots" is ticked in Placement. **🧹 drop Enverus points outside the area** removes Enverus-staged points (fill-in, third-party, P&A) that lie outside the importer boundary / flight envelope from the import; the client's rows are never touched.
 

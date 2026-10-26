@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.452
+// @version      4.453
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.452';
+    const SCRIPT_VERSION = '4.453';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -26068,6 +26068,7 @@
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc" title="Square side of each created asset — same shape ➕ Create asset uses. Reshape in Percepto afterwards (auto-reshape is feature #251).">Size <input type="number" id="aim-imp-size" min="5" max="2000" step="5" style="width:52px;${inCss}"> ft</label>
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#ff8a80" title="Side of the TRIANGLE a 🩻 P&A asset becomes (plugged / expired / cancelled / retired wells and facilities from the fill-in) — three corners instead of four so it never passes for a normal asset. ↔ Move and ✏ Shape still apply.">P&A size <input type="number" id="aim-imp-pasize" min="5" max="2000" step="5" style="width:52px;background:#1a1d23;border:1px solid rgba(255,138,128,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px"> ft</label>
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#ffd400" title="What happens to a staged point whose NAME matches an asset already on this site. Update = rewrite that asset's TYPE and NOTES from this file, never its shape or position (the quarterly re-run). Copy = create a second asset named …-2. Skip = leave it alone. Points merely inside / near an existing asset are only flagged and always created.">name matches <select id="aim-imp-dupmode" style="background:#1a1d23;border:1px solid rgba(255,212,0,0.45);color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px"><option value="update">update type + notes</option><option value="skip">skip</option><option value="copy">create a copy (-N)</option></select></label>
+                <button id="aim-imp-preflight" style="${btnCss('122,223,230')}" title="👁 Reads only: a plain-text report of everything the importer knows about the run — what Create would do, types, names, flags, Enverus, safety — downloaded and copied to the clipboard for review before writing.">👁 📋 Pre-flight report</button>
                 <button id="aim-imp-commit" style="${btnCss('255,120,60')};font-weight:600" title="WRITES to AIM: creates the selected staged points as real assets (updates type + notes on name matches). Honours Dry run. A backup manifest downloads first; ↩ Undo reverts exactly this run.">⚡ Create selected</button>
                 <button id="aim-imp-undocreate" style="${btnCss('255,179,71')}" title="WRITES to AIM: deletes exactly the assets the most recent import created (this session) and puts updated ones back. Each delete rides Delete Guard's undo ring when installed.">↩ Undo last import</button>
             </div>
@@ -26230,6 +26231,7 @@
         dmSel.value = imp.dupMode;
         dmSel.onchange = () => { imp.dupMode = dmSel.value; imp.includeDups = imp.dupMode === 'copy'; impSaveParams(); impSyncUi(); };
         q('aim-imp-commit').onclick = () => { impCommit(); };
+        q('aim-imp-preflight').onclick = () => { impPreflight('download'); };
         q('aim-imp-undocreate').onclick = () => { impUndoCreate(); };
         const dmEl = q('aim-imp-delmode');
         dmEl.checked = imp.target === 'assets';
@@ -27842,6 +27844,54 @@
         try { impRenderImportsUi(); } catch (e) {}
         if (!aborted) impStatus(`DONE: <b>${ok}</b> created${nUpd ? ` · <b>${updOk}/${nUpd}</b> updated (type + notes)` : ''}${fail ? ` · <span style="color:#ff6060">${fail} FAILED (kept staged + selected)</span>` : ''}${skippedDups ? ` · ${skippedDups} name match(es) skipped` : ''} · verify ${verified.length}/${created.length} created present${nUpd ? `, ${updVerified.length}/${updated.length} updates match` : ''}${extNote} · reload to edit them natively`, (fail || updVerified.length !== updated.length) ? '#ffb347' : '#5fff5f');
         showToast(fail ? `Import: ${ok} created, ${updOk} updated, ${fail} FAILED — see the importer panel` : `✓ ${ok} created${updOk ? `, ${updOk} updated` : ''}`, fail ? 'rgba(255,96,96,0.55)' : undefined);
+    }
+    // ---- v4.453 📋 PRE-FLIGHT REPORT — everything the importer knows about the run about to happen, as plain text
+    // (downloaded + copied), so it can be reviewed or pasted to someone before ⚡ Create. Read-only; same resolvers as the commit. ----
+    function impPreflightText() {
+        const L = []; const line = (t) => L.push(t == null ? '' : String(t));
+        const live = imp.points.filter(p => !p.done), sel = live.filter(p => p.sel);
+        const subCounts = impSiteSubtypes(); const siteSubs = [...subCounts.keys()];
+        const defSub = [...subCounts.entries()].sort((a, b) => b[1] - a[1]).map(x => x[0])[0] || 'well-cluster';
+        const subtypeFor = (p) => { if (p.pa) return impPaType(p); if (p.thirdParty) return p.typeRaw || impThirdType(p.env || {}); let v; if (!imp.mapping || !imp.mapping.type) v = impApplyShield((imp.typeMap['__all__'] || '').trim() || defSub); else { v = impResolveSubtype(p.typeRaw || '', siteSubs).value; if (!v) return ''; } if (p.dup && imp.dupMode === 'update' && (!imp.mapping || !imp.mapping.type) && p.dupSubtype) v = impApplyShield(impTierStrip(p.dupSubtype)); v = impApplyHv(p, v, siteSubs); return impTierPrefix(p, v); };
+        const targets = sel.filter(p => !p.dup || imp.dupMode !== 'skip');
+        const plan = targets.map(p => ({ p, sub: subtypeFor(p), update: !!(p.dup && imp.dupMode === 'update' && p.dupId != null), ext: impExtIdOf(p) }));
+        const cre = plan.filter(x => !x.update), upd = plan.filter(x => x.update);
+        const dry = (() => { try { return !!document.getElementById('aim-gen-dryrun').checked; } catch (e) { return true; } })();
+        const ft = (m) => Math.round(m / GEN_FT_TO_M);
+        line(`AIM ASSET IMPORT — PRE-FLIGHT REPORT`); line(`site ${genState.siteID} · ${getCurrentSiteName() || ''} · ${impNowStamp()} · Site Setup Tools v${SCRIPT_VERSION} · Dry run ${dry ? 'ON' : 'OFF (LIVE)'}`);
+        line(`file ${imp.fileName || '—'} · ${imp.rows.length} rows · ${imp.invalid} without coordinates`); line('');
+        line(`== SELECTION ==`); line(`${live.length} staged · ${sel.length} selected · boundaries: ${imp.shapes.length ? imp.shapes.map(sh => sh.kind === 'circle' ? `circle ${Math.round(sh.radiusM / 1609.34 * 100) / 100} mi` : `polygon ${sh.ring.length} pts`).join(', ') : (impFlightEnvelope().length ? `none drawn — flight envelope (${impFlightEnvelope().length} FFZs + ${imp.env.areaFt} ft) for the fill-in` : 'none')}`);
+        line(`name matches → ${imp.dupMode} · size ${impSizeFt} ft · P&A size ${imp.env.paSizeFt} ft · tiers ${imp.pri.on ? 'ON' : 'off'} · H/V/D ${imp.hv.on ? 'ON' : 'off'} · External ID column ${imp.mapping && imp.mapping.extId ? imp.mapping.extId : 'NONE'}`); line('');
+        line(`== WHAT CREATE WOULD DO ==`); line(`create ${cre.length} · update type+notes on ${upd.length} · skipped name matches ${sel.filter(p => p.dup && imp.dupMode === 'skip').length}${plan.length > IMP_BIG_BATCH ? ` · OVER THE ${IMP_BIG_BATCH} GATE` : ''}`);
+        const blank = plan.filter(x => !x.sub); if (blank.length) line(`!! ${blank.length} with a BLANK type (Create is blocked): ${[...new Set(blank.map(x => x.p.typeRaw || '(blank)'))].slice(0, 10).join(' · ')}`);
+        const amb = plan.filter(x => x.update && x.p.dupAmbiguous); if (amb.length) line(`!! ${amb.length} AMBIGUOUS name matches (Create is blocked): ${amb.slice(0, 15).map(x => x.p.name).join(' · ')}`);
+        line(`outlines drawn ${cre.filter(x => x.p.shape).length} · squares ${cre.filter(x => !x.p.shape && !x.p.pa).length} · P&A triangles ${cre.filter(x => x.p.pa).length} · third-party AVOID ${cre.filter(x => x.p.thirdParty && !x.p.pa).length} · from Enverus (ours) ${cre.filter(x => x.p.src === 'enverus' && !x.p.pa).length}`);
+        line(`External ID present on ${plan.filter(x => x.ext).length} / ${plan.length}`);
+        const hv = { H: 0, V: 0, D: 0, none: 0 }; plan.forEach(x => { if (x.p.pa || x.p.thirdParty) return; const r = impHvOf(x.p); if (r.hv) hv[r.hv.toUpperCase()]++; else hv.none++; }); line(`H/V/D: ${hv.H} H · ${hv.V} V · ${hv.D} D · ${hv.none} unknown (type left without a letter)`);
+        if (imp.pri.on) { const t = { P1: 0, P2: 0, P3: 0, none: 0 }; const why = {}; plan.forEach(x => { const q = x.p.pri || {}; if (q.tier) t[q.tier]++; else { t.none++; const k = q.untier || (q.flags && q.flags[0]) || 'no numbers'; why[k] = (why[k] || 0) + 1; } }); line(`tiers: P1 ${t.P1} · P2 ${t.P2} · P3 ${t.P3} · untiered ${t.none} (${Object.entries(why).map(([k, v]) => `${v} ${k}`).join(', ')})`); }
+        const hist = {}; plan.forEach(x => { hist[x.sub || '(blank)'] = (hist[x.sub || '(blank)'] || 0) + 1; }); line(''); line(`== TYPES THAT WOULD BE WRITTEN (${Object.keys(hist).length}) ==`); Object.entries(hist).sort((a, b) => b[1] - a[1]).forEach(([k, v]) => line(`${String(v).padStart(5)}  ${k}${siteSubs.some(st => st.toLowerCase() === k.toLowerCase()) ? '' : '   (new on this site)'}`));
+        // names: uniqueness preview
+        const used = new Set(((mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || []).filter(e => e.name).map(e => e.name)); let suffixed = 0; const seen = new Set();
+        cre.forEach(x => { const b = genCleanName(x.p.name) || 'Import Asset'; if (used.has(b) || seen.has(b)) suffixed++; seen.add(b); });
+        line(''); line(`== NAMES ==`); line(`${suffixed} would get a -2/-3 suffix (name already on the site or twice in this run) · ${live.filter(p => p.fileDup && p.fileDup.kind === 'same').length} -DUP rows · ${live.filter(p => p.fileDup && p.fileDup.kind === 'battery').length} renamed BATTERY · characters: letters, digits, space, - and _ only (enforced)`);
+        const guarded = sel.filter(p => p.matchNote); if (guarded.length) line(`${guarded.length} near-matches set aside as NEW: ${guarded.slice(0, 10).map(p => `${p.name} (${p.matchNote})`).join(' · ')}`);
+        line(''); line(`== PLACEMENT FLAGS (selected) ==`); impFlagTabs(live).forEach(t => { if (t.id === 'rev') return; line(`${String(t.items.length).padStart(5)}  ${t.label.replace(/^[^\w]+/, '')}${t.items.length ? ` · ${t.items.filter(p => p.reviewed).length} reviewed` : ''}`); });
+        const far = sel.filter(p => (p.orig || p.shape) && impFarFt(p) > imp.farFt).sort((a, b) => impFarFt(b) - impFarFt(a)); if (far.length) { line(`moved far (> ${imp.farFt} ft from where the well really is): ${far.length}`); far.slice(0, 20).forEach(p => line(`      ${p.name} — ${impFarFt(p).toLocaleString()} ft from ${(impFarRef(p) || {}).src || '?'}`)); }
+        const paOn = (imp.env.missing || []).filter(x => x.pa && x.onPad && !x.staged).length; if (paOn) line(`${paOn} plugged wells sit ON our pads — shown as ✕ only, never written`);
+        line(''); line(`== ENVERUS ==`); const E = imp.env.summary; line(E ? `checked ${E.found}/${E.withApi} · producing ${E.producing} · inactive ${E.inactive} · plugged ${E.plugged} · not found ${E.notFound} · mostly ${E.mainOp || '?'}` : 'cross-check not run');
+        const M = imp.env.missing || []; line(`fill-in: ${M.length} candidates · staged ${M.filter(x => x.staged).length} · not staged ${M.filter(x => !x.staged).length} (${M.filter(x => !x.staged && x.pa).length} plugged, ${M.filter(x => !x.staged && !x.pa && x.ours === false).length} third-party, ${M.filter(x => !x.staged && !x.pa && x.ours !== false).length} ours)`);
+        const R = imp.env.paReview; if (R && R.rows.length) line(`status review: ${R.rows.length} already on the site by API · ${R.rows.filter(r => r.changed).length} status changed · ${R.rows.filter(r => r.moved).length} beyond ${imp.env.paMatchFt} ft`);
+        if (imp.pri.on && imp.pri.summary && imp.pri.summary.flaggedPads) line(''); 
+        line(''); line(`== SAFETY ==`); line(`session saved ${imp.lastSavedAt ? impFmtWhen(imp.lastSavedAt) : 'not yet'} · older saves ${impOlderSaves().length} · undo record: ${imp.lastCreated.length} created / ${imp.lastUpdated.length} updated from earlier runs · Create downloads a full session backup + a write manifest before the first write · ↩ Undo last import / 🕘 Imports on this site revert a run`);
+        return L.join('\n');
+    }
+    function impPreflight(how) {
+        let txt; try { txt = impPreflightText(); } catch (e) { console.warn(`${TAG} 📋 preflight:`, e); impStatus(`📋 report failed: ${impEsc(e && e.message || e)}`, '#ff6060'); return; }
+        const name = `preflight-${genState.siteID}-${impNowStamp().replace(/[: ]/g, '-')}.txt`;
+        if (how !== 'copy') { try { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([txt], { type: 'text/plain' })); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); } catch (e) {} }
+        try { navigator.clipboard.writeText(txt); } catch (e) {}
+        console.log(`${TAG} 📋 pre-flight report\n${txt}`);
+        impStatus(`📋 pre-flight report ${how === 'copy' ? 'copied' : `saved as ${impEsc(name)} and copied`} — ${txt.split('\n').length} lines; paste it anywhere for review (also in the console)`, '#5fff5f');
     }
     // Undo THIS import: delete exactly the ids the last commit created.
     async function impUndoCreate() {
