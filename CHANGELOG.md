@@ -1,4 +1,6 @@
-## 2026-10-26 — 🧱 Pad model — Site Setup Tools latest v4.470 (latest only)
+## 2026-10-26 — 🧱 Pad model — Site Setup Tools latest v4.470 → v4.471 (latest only)
+
+- **v4.471** — pad model: the External ID is cleared with an empty string (the server ignores null); wells that exist but are not nested under their pad get re-parented.
 
 - **v4.470** — agreed with the account manager: a `Pad - X` asset is a **container**. Its type is the pad tier plus `Pad` (`P2 - Pad`), its notes carry the same pad-level priority line as every well on it (`P2 · pad total 402 BLPD across 5 assets · pad …`, no per-well volume anywhere), and it carries **no External ID** (only wells do). Every well, X included, is its own child asset with its outline or a square. **⚡ 🧱 Apply pad model** does this for the 235 pads already imported; every future ⚡ Create applies the same rule, and the quarterly re-run rewrites tier, type and notes on pad and wells alike.
 

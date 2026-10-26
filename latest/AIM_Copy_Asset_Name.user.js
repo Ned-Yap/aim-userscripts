@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.470
+// @version      4.471
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.470';
+    const SCRIPT_VERSION = '4.471';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -27853,7 +27853,7 @@
                 const body = buildWriteBody(ent, siteCfg);
                 body.description = String(x.notes || '').slice(0, 2000);
                 if (!body.custom || typeof body.custom !== 'object') body.custom = {};
-                if (x.padRow) { x.subtype = impPadType(x.p); body.description = impComposePadNotes(x.p, ent, stamp, x.padRow.nWells); body.custom[IMP_EXT_FIELD] = null; }   // v4.470: a pad is a container — tier + Pad, pad notes, no External ID
+                if (x.padRow) { x.subtype = impPadType(x.p); body.description = impComposePadNotes(x.p, ent, stamp, x.padRow.nWells); body.custom[IMP_EXT_FIELD] = ''; }   // v4.470: a pad is a container — tier + Pad, pad notes, no External ID
                 body.custom.poi_type_str = x.subtype;
                 const isNewU = !knownSubs.has(x.subtype.toLowerCase()); body.custom.new_poi_type_str = isNewU ? x.subtype : '';
                 if (x.ext && !x.padRow) impSetExtOnBody(body, x.ext);                     // v4.434/v4.438: External ID (custom.external_asset_id) from the file; left as it was when the file has none
@@ -28071,8 +28071,9 @@
         if (!rows.length) { impCommitNote('✓ no pad-matched rows in this import', '#5fff5f'); return; }
         const todoPad = rows.filter(x => { const want = impPadType(x.p); const have = String((x.pad.custom && x.pad.custom.poi_type_str) || '').trim(); return have.toLowerCase() !== want.toLowerCase() || impExtOfEnt(x.pad) !== '' || !/^Pad\n/.test(String(x.pad.description || '')); });
         const todoChild = rows.filter(x => !x.child && !x.p.createdId);
+        const todoParent = rows.filter(x => x.child && !String(x.child.parent_asset_name || '').trim());   // v4.471: well exists but is not nested under its pad
         const dry = (() => { try { return !!document.getElementById('aim-gen-dryrun').checked; } catch (e) { return true; } })();
-        if (dry) { impCommitNote(`DRY RUN — pad model: <b>${todoPad.length}</b> pad(s) get type "${impEsc(impPadType({ pri: { tier: 'P2' } }))}"-style + pad notes + External ID cleared · <b>${todoChild.length}</b> well(s) created under their pad (${todoChild.filter(x => x.p.shape).length} from drawn outlines, ${todoChild.filter(x => !x.p.shape).length} as squares) · e.g. ${impEsc(rows.slice(0, 6).map(x => `${x.pad.name} → ${impPadType(x.p)}${x.child || x.p.createdId ? '' : ` + well ${x.name}`}`).join(' · '))} …. Untick Dry run to write.`); return; }
+        if (dry) { impCommitNote(`DRY RUN — pad model: ${todoParent.length ? `<b>${todoParent.length}</b> existing well(s) re-parented under their pad · ` : ''}<b>${todoPad.length}</b> pad(s) get type "${impEsc(impPadType({ pri: { tier: 'P2' } }))}"-style + pad notes + External ID cleared · <b>${todoChild.length}</b> well(s) created under their pad (${todoChild.filter(x => x.p.shape).length} from drawn outlines, ${todoChild.filter(x => !x.p.shape).length} as squares) · e.g. ${impEsc(rows.slice(0, 6).map(x => `${x.pad.name} → ${impPadType(x.p)}${x.child || x.p.createdId ? '' : ` + well ${x.name}`}`).join(' · '))} …. Untick Dry run to write.`); return; }
         const csrf = getCsrfToken(); if (!csrf) { impCommitNote('No CSRF token — make one native save anywhere in Percepto first, then retry', '#ff6060'); return; }
         let siteCfg = null; try { siteCfg = await fetchSiteConfig(sid); } catch (e) {}
         if (!siteCfg) { impCommitNote('Could not read the site config — nothing written', '#ff6060'); return; }
@@ -28087,7 +28088,7 @@
             try {
                 const body = buildWriteBody(x.pad, siteCfg); if (!body.custom || typeof body.custom !== 'object') body.custom = {};
                 const isNew = !known.has(want.toLowerCase()); body.custom.poi_type_str = want; body.custom.new_poi_type_str = isNew ? want : '';
-                body.custom[IMP_EXT_FIELD] = null; body.description = impComposePadNotes(x.p, x.pad, stamp, x.nWells);
+                body.custom[IMP_EXT_FIELD] = ''; body.description = impComposePadNotes(x.p, x.pad, stamp, x.nWells);   // v4.471: '' clears it — null was ignored (56/241 verified)
                 const rr = await post(body);
                 if (rr.status === 200) { okP++; updated.push({ id: x.pad.id, name: x.pad.name, before: JSON.parse(JSON.stringify(x.pad)) }); if (isNew && await impConfirmType(sid, want)) known.add(want.toLowerCase()); }
                 else { fail++; console.warn(`${TAG} 🧱 pad "${x.pad.name}" ${rr.status} ${(await rr.text()).slice(0, 200)}`); if (rr.status === 403) { impCommitNote('ABORTED — server 403', '#ff6060'); break; } }
@@ -28102,6 +28103,11 @@
             const r = await createAssetSquare(sid, x.p.lat, x.p.lng, impPointSizeFt(x.p), x.name, sub, isNew, notes, x.p.shape || null, extra);
             if (r && r.ok) { okC++; created.push(r.id); x.p.createdId = r.id; if (isNew && await impConfirmType(sid, sub)) known.add(sub.toLowerCase()); }
             else { fail++; console.warn(`${TAG} 🧱 well "${x.name}" failed:`, r && r.error); if (r && /Server 403/.test(r.error || '')) { impCommitNote('ABORTED — server 403', '#ff6060'); break; } }
+            await sleep(DELETE_GAP_MS);
+        }
+        for (let i = 0; i < todoParent.length; i++) {
+            const x = todoParent[i]; impCommitNote(`re-parent ${i + 1}/${todoParent.length} — "${impEsc(x.child.name)}" under ${impEsc(x.pad.name)}…`);
+            try { const body = buildWriteBody(x.child, siteCfg); body.parent_asset_name = x.pad.name; const rr = await post(body); if (rr.status === 200) updated.push({ id: x.child.id, name: x.child.name, before: JSON.parse(JSON.stringify(x.child)) }); else { fail++; console.warn(`${TAG} 🧱 re-parent "${x.child.name}" ${rr.status} ${(await rr.text()).slice(0, 200)}`); } } catch (e) { fail++; console.warn(`${TAG} 🧱 re-parent "${x.child.name}"`, e); }
             await sleep(DELETE_GAP_MS);
         }
         imp.lastUpdated = imp.lastUpdated.concat(updated); imp.lastCreated = imp.lastCreated.concat(created);
