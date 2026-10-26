@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.446
+// @version      4.447
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.446';
+    const SCRIPT_VERSION = '4.447';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -26502,7 +26502,7 @@
             if (m.name && thirdName) row[m.name] = thirdName;
             imp.rows.push(row);
             const i = imp.rows.length - 1;
-            const p = { i, name: paName || thirdName || x.name, rawName: x.name, lat: x.lat, lng: x.lng, typeRaw, notes: '', sel: false, dup: false, dupWhy: '', child: null, near: null, done: false, src: x.ours === false ? 'enverus-3p' : 'enverus', thirdParty: x.ours === false, rigWatch: !!x.rigWatch, env: Object.assign({ api: x.api, found: true, checkedAt: c.missingAt, distFt: 0 }, x) };
+            const p = { i, name: paName || thirdName || genCleanName(x.name), rawName: x.name, lat: x.lat, lng: x.lng, typeRaw, notes: '', sel: false, dup: false, dupWhy: '', child: null, near: null, done: false, src: x.ours === false ? 'enverus-3p' : 'enverus', thirdParty: x.ours === false, rigWatch: !!x.rigWatch, env: Object.assign({ api: x.api, found: true, checkedAt: c.missingAt, distFt: 0 }, x) };
             if (x.pa) p.pa = { status: x.status, label: x.paLabel || impPaLabel(x.status), onPad: !!x.onPad };
             imp.points.push(p); x.staged = true;
         });
@@ -26839,7 +26839,7 @@
         const row = (x) => `<div data-impmiss-row="${x.api}" data-impmiss-hay="${impEsc(`${x.name} ${x.api} ${x.status} ${x.op || ''} ${x.type || ''} ${x.nearName || ''}${x.pa ? ' ' + impPaName(x) : ''}`.toLowerCase())}" style="display:flex;align-items:center;gap:6px;padding:1px 4px;border-bottom:1px solid rgba(255,255,255,0.05);font-size:10.5px;color:${x.staged ? '#6f7a85' : '#cfd6dc'};cursor:pointer" onmouseover="this.style.background='rgba(255,255,255,0.05)'" onmouseout="this.style.background=''" title="click = zoom to it">
             <input type="checkbox" data-impmiss-sel="${x.api}" ${x.staged || !impPaStageable(x) ? 'disabled' : (c.missingSel.has(x.api) ? 'checked' : '')} title="${x.pa && x.onPad ? 'on one of our pads — shown as a red ✕ only, never written to the site' : (x.pa && c.paAssets === false ? 'P&A staging is off (tick \'stage as P&A assets\')' : '')}" style="accent-color:#ffd666;margin:0;flex:none">
             ${x.pa ? `<span style="display:inline-block;width:9px;height:9px;flex:none;color:#ff2d2d;font-weight:900;font-size:11px;line-height:9px;text-align:center" title="${impEsc(x.status)}">✕</span>` : `<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${gcol[x.group]};flex:none" title="${impEsc(x.status)}"></span>`}
-            <b style="flex:none;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${impEsc(x.pa ? genCleanName(impPaName(x)) : x.name)}</b>
+            <b style="flex:none;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="name as it will be written (letters, digits, space, - and _ only; made unique at Create)">${impEsc(x.pa ? genCleanName(impPaName(x)) : (x.ours === false ? impThirdName(x) : genCleanName(x.name)))}</b>
             <span style="color:#8a949e;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${x.pa ? `<b style="color:#ff8a80">🩻 ${impEsc(impPaTypeFor(x.ours !== false, x.paLabel))}</b>${x.onPad ? ' · <b style="color:#ffb347">on our pad — ✕ only</b>' : ''} · ${impEsc(x.name)} · ` : (x.ours === false ? `<b style="color:#ffd666">${impEsc(impThirdType(x))}</b> · ` : '')}${x.ours === false ? `<b style="color:#ffd666">${impEsc(x.op || '3rd party')}</b> · ` : ''}${x.facility ? '<b style="color:#c39bd3">facility</b> · ' : ''}${impEsc(x.status)} · ${impEsc(x.type || '')}${x.traj ? ` · ${impEsc(x.traj.toLowerCase())}` : ''} · ${x.facility ? `Enverus ${x.api}` : `API ${x.api}`}${x.nearFt != null ? ` · ${x.inside ? 'inside' : `${x.nearFt.toLocaleString()} ft from`} ${impEsc(x.nearName)}` : ' · no mapped asset nearby'}${x.staged ? ' · ✓ staged' : ''}</span>
             <span data-impmiss-info="${x.api}" title="${impEsc(`${x.name} · API ${x.api}\n${x.status} · ${x.type || ''} · ${x.traj || ''} · ${x.op}\nspud ${x.spud || '—'} · first prod ${x.firstProd || '—'}${x.plug ? ` · plugged ${x.plug}` : ''}\n${Number(x.lat).toFixed(6)}, ${Number(x.lng).toFixed(6)} · ${x.county} County\n${x.nearName ? `${x.inside ? 'inside' : x.nearFt + ' ft from'} mapped asset "${x.nearName}"` : 'no mapped asset nearby'}${x.bores > 1 ? `\n${x.bores} wellbores` : ''}`)}" style="flex:none;width:14px;height:14px;line-height:12px;text-align:center;border:1px solid rgba(122,223,230,0.5);border-radius:50%;color:#7adfe6;font-size:9px;font-weight:700;cursor:help">i</span>
         </div>`;
