@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.461
+// @version      4.462
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.461';
+    const SCRIPT_VERSION = '4.462';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -23150,6 +23150,15 @@
         return t.replace(/[\s\-–—:]+$/, '').trim() || String(v || '').trim();
     }
     function impApplyShield(v) { return imp.keepShield ? v : impStripShield(v); }
+    // v4.462: on an UPDATE the existing asset's shielding modifier ('… - unshielded') is carried onto the new type when the file
+    // value has none and 'keep shielded / unshielded modifiers' is on — the site's marker must not vanish in a type rewrite
+    function impCarryShield(p, v) {
+        if (!imp.keepShield || !p || !p.dup || !p.dupSubtype || !v) return v;
+        const had = String(p.dupSubtype).match(IMP_SHIELD_RE); if (!had) return v;
+        if (IMP_SHIELD_RE.test(v)) return v;
+        const word = /unsh/i.test(had[0]) ? 'Unshielded' : 'Shielded';
+        return `${v} - ${word}`;
+    }
 
     // ---- v4.347 PRIORITY TIERS (client rule, confirmed with the account manager 2026-10-16) ----
     // BLPD = oil + water per PAD (all assets on the pad summed). P3 < p1Min ·
@@ -27770,7 +27779,7 @@
             // v4.347: on an UPDATE with no type column, keep the asset's own base type
             if (p.dup && imp.dupMode === 'update' && (!imp.mapping || !imp.mapping.type) && p.dupSubtype) v = impApplyShield(impTierStrip(p.dupSubtype));
             v = impApplyHv(p, v, siteSubs);                                            // v4.418: h - / v - / d - from the file / Enverus / the existing asset
-            v = impCleanType(v);                                                        // v4.456: never a bracket / stray character in a type
+            v = impCarryShield(p, impCleanType(v));                                    // v4.456 clean · v4.462 keep the asset's unshielded marker on updates
             return impTierPrefix(p, v);                                     // v4.347: "P1 - " prefix when tiers are on
         };
         const plan = targets.map(p => ({ p, subtype: subtypeFor(p), update: !!(p.dup && imp.dupMode === 'update' && p.dupId != null) }));
@@ -27884,7 +27893,7 @@
         const live = imp.points.filter(p => !p.done), sel = live.filter(p => p.sel);
         const subCounts = impSiteSubtypes(); const siteSubs = [...subCounts.keys()];
         const defSub = [...subCounts.entries()].sort((a, b) => b[1] - a[1]).map(x => x[0])[0] || 'well-cluster';
-        const subtypeFor = (p) => { if (p.pa) return impPaType(p); if (p.thirdParty) return p.typeRaw || impThirdType(p.env || {}); let v; if (!imp.mapping || !imp.mapping.type) v = impApplyShield((imp.typeMap['__all__'] || '').trim() || defSub); else { v = impResolveSubtype(p.typeRaw || '', siteSubs).value; if (!v) return ''; } if (p.dup && imp.dupMode === 'update' && (!imp.mapping || !imp.mapping.type) && p.dupSubtype) v = impApplyShield(impTierStrip(p.dupSubtype)); v = impCleanType(impApplyHv(p, v, siteSubs)); return impTierPrefix(p, v); };
+        const subtypeFor = (p) => { if (p.pa) return impPaType(p); if (p.thirdParty) return p.typeRaw || impThirdType(p.env || {}); let v; if (!imp.mapping || !imp.mapping.type) v = impApplyShield((imp.typeMap['__all__'] || '').trim() || defSub); else { v = impResolveSubtype(p.typeRaw || '', siteSubs).value; if (!v) return ''; } if (p.dup && imp.dupMode === 'update' && (!imp.mapping || !imp.mapping.type) && p.dupSubtype) v = impApplyShield(impTierStrip(p.dupSubtype)); v = impCarryShield(p, impCleanType(impApplyHv(p, v, siteSubs))); return impTierPrefix(p, v); };
         const targets = sel.filter(p => !p.dup || imp.dupMode !== 'skip');
         const plan = targets.map(p => ({ p, sub: subtypeFor(p), update: !!(p.dup && imp.dupMode === 'update' && p.dupId != null), ext: impExtIdOf(p) }));
         const cre = plan.filter(x => !x.update), upd = plan.filter(x => x.update);
@@ -27937,7 +27946,7 @@
         const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || []; const byId = new Map(ents.map(e => [e.id, e])), byName = new Map(ents.filter(e => e.type === 3).map(e => [e.name, e]));
         const subCounts = impSiteSubtypes(); const siteSubs = [...subCounts.keys()];
         const defSub = [...subCounts.entries()].sort((a, b) => b[1] - a[1]).map(x => x[0])[0] || 'well-cluster';
-        const subtypeFor = (p) => { if (p.pa) return impPaType(p); if (p.thirdParty) return p.typeRaw || impThirdType(p.env || {}); let v; if (!imp.mapping || !imp.mapping.type) v = impApplyShield((imp.typeMap['__all__'] || '').trim() || defSub); else { v = impResolveSubtype(p.typeRaw || '', siteSubs).value; if (!v) return ''; } if (p.dup && imp.dupMode === 'update' && (!imp.mapping || !imp.mapping.type) && p.dupSubtype) v = impApplyShield(impTierStrip(p.dupSubtype)); v = impCleanType(impApplyHv(p, v, siteSubs)); return impTierPrefix(p, v); };
+        const subtypeFor = (p) => { if (p.pa) return impPaType(p); if (p.thirdParty) return p.typeRaw || impThirdType(p.env || {}); let v; if (!imp.mapping || !imp.mapping.type) v = impApplyShield((imp.typeMap['__all__'] || '').trim() || defSub); else { v = impResolveSubtype(p.typeRaw || '', siteSubs).value; if (!v) return ''; } if (p.dup && imp.dupMode === 'update' && (!imp.mapping || !imp.mapping.type) && p.dupSubtype) v = impApplyShield(impTierStrip(p.dupSubtype)); v = impCarryShield(p, impCleanType(impApplyHv(p, v, siteSubs))); return impTierPrefix(p, v); };
         const todo = [];
         imp.points.forEach(p => {
             if (!p.done || p.removed) return;

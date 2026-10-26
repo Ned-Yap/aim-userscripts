@@ -1,4 +1,6 @@
-## 2026-10-23 — 🚫 AVOID - 3rd Party Pad — Site Setup Tools latest v4.444 → v4.461 (latest only)
+## 2026-10-23 — 🚫 AVOID - 3rd Party Pad — Site Setup Tools latest v4.444 → v4.462 (latest only)
+
+- **v4.462** — on an update, the existing asset's shielded / unshielded marker is carried onto the rewritten type (`P3 - V - Pumping Rod - Unshielded`) when the file value has none and "keep shielded / unshielded modifiers" is on.
 
 - **v4.461** — SUM search: a `-term` hides rows whose name, subtype or parent contains it (`gas lift -p1`). Type checks (DONE line, ↻ Re-send types) ignore case — the server stores some new types in lowercase.
 
