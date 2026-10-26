@@ -1,4 +1,6 @@
-## 2026-10-23 — 🚫 AVOID - 3rd Party Pad — Site Setup Tools latest v4.444 → v4.445 (latest only)
+## 2026-10-23 — 🚫 AVOID - 3rd Party Pad — Site Setup Tools latest v4.444 → v4.446 (latest only)
+
+- **v4.446** — **➕ Stage everything** in the missing-wells list: one click stages every candidate Enverus found in the area — plugged / retired / cancelled as P&A triangles (off our pads only), the client's missing wells and facilities as normal assets, every other operator's as AVOID - 3rd Party Pad.
 
 - **v4.445** — fill-in candidates (✕ and squares) are drawn before the staged dots, for every status group, with their own cap — the 4,000-dot viewport cap could hide them entirely when zoomed out on a big site.
 

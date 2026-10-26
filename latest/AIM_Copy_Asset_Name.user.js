@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.445
+// @version      4.446
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.445';
+    const SCRIPT_VERSION = '4.446';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -26481,9 +26481,10 @@
         const g = (k) => c.missing.filter(x => x.group === k).length, third = c.missing.filter(x => !x.ours).length, facN = c.missing.filter(x => x.facility).length;
         impStatus(`🔍 ${everyone ? 'all operators' : op}: <b>${cands.length}</b> wells inside the area in ${counties.size} count${counties.size === 1 ? 'y' : 'ies'} · <b style="color:#ffb347">${c.missing.length} not in the client's list</b> (${g('producing')} producing · ${g('drilled')} drilled/permitted · ${g('inactive')} inactive · ${g('plugged')} plugged${facN ? ` · <b style="color:#c39bd3">${facN} facilit${facN === 1 ? 'y' : 'ies'}</b>` : ''}${third ? ` · <b style="color:#ffd666">${third} third-party</b>` : ''}) — review the list below and stage the ones to add${review.length ? ` · <b style="color:#ff8a80">🩻 ${review.length} already on the site by API</b> (${review.filter(x => x.changed).length} status changed · ${review.filter(x => x.moved).length} beyond ${c.paMatchFt} ft)` : ''}${c.rigWatch && c.rigWatch.length ? ` · <b style="color:#ff6060">🏗 ${c.rigWatch.length} rig / crane watch site${c.rigWatch.length === 1 ? '' : 's'}</b> (batteries, compressor stations, disposal — export below)` : ''}`);
     }
-    function impEnvStageMissing() {
+    function impEnvStageMissing(everything) {
         const c = imp.env; if (!c.missing) return;
         impPaNormalizeCands();
+        if (everything) { c.missing.forEach(x => { if (!x.staged && impPaStageable(x)) c.missingSel.add(x.api); }); Object.keys(c.missStatus).forEach(k => { c.missStatus[k] = true; }); }   // v4.446: ➕ Stage everything
         const pick = c.missing.filter(x => c.missingSel.has(x.api) && !x.staged && impPaStageable(x));
         const refused = c.missing.filter(x => c.missingSel.has(x.api) && !x.staged && !impPaStageable(x)).length;
         if (!pick.length) { impStatus(refused ? `${refused} plugged / retired ticked but none can be staged — they sit on our pads (shown as red ✕ only)${c.paAssets === false ? ' or P&A staging is off' : ''}` : 'Tick the wells to add first', '#ffb347'); return; }
@@ -26861,6 +26862,7 @@
             </div>` : ''}
             <div style="max-height:230px;overflow:auto;border:1px solid rgba(255,255,255,0.06);border-radius:3px;background:rgba(0,0,0,0.15)">${shown.map(row).join('') || '<div style="padding:6px;color:#888;font-size:10px">nothing in the ticked groups</div>'}</div>
             <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
+                <button data-impmiss-stageall ${list.some(x => !x.staged && impPaStageable(x)) ? '' : 'disabled'} title="Stage EVERY candidate Enverus found in the area, all status groups, in one go: plugged / retired / cancelled as P&A triangles (off our pads only), the client's missing wells and facilities as normal assets, every other operator's as 'AVOID - 3rd Party Pad'. Nothing is written until ⚡ Create." style="background:rgba(255,179,71,0.18);color:#ffb347;border:1px solid rgba(255,179,71,0.6);border-radius:3px;padding:4px 12px;cursor:pointer;font:inherit;font-size:11px;font-weight:600${list.some(x => !x.staged && impPaStageable(x)) ? '' : ';opacity:0.45;cursor:default'}">➕ Stage everything (${list.filter(x => !x.staged && impPaStageable(x)).length}) — map only</button>
                 <button data-impmiss-stage ${nSel ? '' : 'disabled'} style="background:rgba(95,255,95,0.15);color:#5fff5f;border:1px solid rgba(95,255,95,0.55);border-radius:3px;padding:4px 12px;cursor:pointer;font:inherit;font-size:11px;font-weight:600${nSel ? '' : ';opacity:0.45;cursor:default'}" title="Adds the ticked wells / facilities to the staged points on the map. Nothing is written until ⚡ Create in step 7.">➕ Stage ${nSel}${nPaSel ? ` (${nPaSel} as P&A)` : ''} — map only</button>
                 <span style="color:#888;font-size:10px">they join the staged points on the map · nothing is written until ⚡ Create in step 7 · on the map: ✕ = plugged, small squares = the other ticked groups (not staged yet)</span>
                 <span title="A staged well is an ordinary point: name = the Enverus well name, type 'H - WELL (Enverus)' / 'V - WELL (Enverus)' (change it in 3 · Type), notes carry a 'Source: added from Enverus' block and a dated 'Status recorded' line. Other operators' wells stage as '3RD PARTY WELL (operator)' obstacles." style="width:14px;height:14px;line-height:12px;text-align:center;border:1px solid rgba(122,223,230,0.5);border-radius:50%;color:#7adfe6;font-size:9px;font-weight:700;cursor:help">i</span>
@@ -26883,6 +26885,7 @@
             if (ev.target.closest('[data-impmiss-none]')) { c.missingSel.clear(); impRenderMissingUi(host); return; }
             const rp = ev.target.closest('[data-impmiss-rep]'); if (rp) { try { impExportMissing(rp.getAttribute('data-impmiss-rep')); } catch (e) { impStatus(`Export failed: ${impEsc(e && e.message || e)}`, '#ff6060'); } return; }
             const rg = ev.target.closest('[data-impmiss-rig]'); if (rg) { try { impExportRigWatch(rg.getAttribute('data-impmiss-rig')); } catch (e) { impStatus(`Export failed: ${impEsc(e && e.message || e)}`, '#ff6060'); } return; }
+            if (ev.target.closest('[data-impmiss-stageall]')) { impEnvStageMissing(true); return; }
             if (ev.target.closest('[data-impmiss-stage]')) { impEnvStageMissing(); return; }
             if (ev.target.closest('[data-impmiss-info]')) return;
             const r = ev.target.closest('[data-impmiss-row]'); if (r) { const x = list.find(y => y.api === r.getAttribute('data-impmiss-row')); if (x) { impZoomToPoints([{ lat: x.lat, lng: x.lng, name: `${x.name} (Enverus)` }], x.name); impStatus(`🔎 ${impEsc(x.name)} — ${impEsc(x.status)}${x.nearName ? ` · ${x.inside ? 'inside' : `${x.nearFt} ft from`} ${impEsc(x.nearName)}` : ''}`); } }
