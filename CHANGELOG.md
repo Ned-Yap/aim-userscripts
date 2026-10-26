@@ -1,4 +1,6 @@
-## 2026-10-23 — 🚫 AVOID - 3rd Party Pad — Site Setup Tools latest v4.444 → v4.454 (latest only)
+## 2026-10-23 — 🚫 AVOID - 3rd Party Pad — Site Setup Tools latest v4.444 → v4.455 (latest only)
+
+- **v4.455** — an ambiguous token-containment match (the name fits several assets and none exactly) is now created as a NEW asset with a note instead of blocking Create; only an ambiguous exact / punctuation match still blocks. Enverus-added wells are typed `H - Well` / `V - Well` (no brackets). The pre-import report downloads through the iframe-safe path and reports next to its button.
 
 - **v4.453** — **👁 📋 Pre-import report** next to ⚡ Create: a plain-text summary of everything the importer knows about the run — what Create would do (creates / updates / blockers), every type that would be written and whether it is new on the site, H/V/D and tier counts, External ID coverage, name suffixes, placement flags, moved-far list, Enverus / fill-in / status-review counts, and the safety state — downloaded and copied to the clipboard for review before writing.
 

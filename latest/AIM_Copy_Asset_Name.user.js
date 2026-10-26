@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.454
+// @version      4.455
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.454';
+    const SCRIPT_VERSION = '4.455';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -24635,6 +24635,7 @@
                 }
             }
             if (nm && p.thirdParty && !p.statusWas) { guarded = `third-party point — never updates the client's asset "${nm.name}"; created as its own AVOID asset`; }   // v4.444
+            if (nm && !guarded && nmM.tier === 3 && nmM.ambiguous) guarded = `name fits ${1 + (nmM.others || []).length} assets (${[nm.name].concat((nmM.others || []).slice(0, 2).map(o => o.name)).join(', ')}…) and none exactly — created as NEW`;   // v4.455: ambiguous = new, not a block
             if (nm && !guarded) { p.dup = true; p.dupWhy = nmM.why; p.dupTier = nmM.tier; p.dupAmbiguous = nmM.ambiguous; p.dupId = nm.id; p.dupSubtype = nm.subtype || ''; } else { p.dupId = null; p.dupSubtype = ''; p.dupTier = 0; p.dupAmbiguous = false; if (guarded) p.matchNote = guarded; }
             // v4.332: two informational flags, never skipped —
             //   child = the square this point would become (Size ft) overlaps an
@@ -26068,7 +26069,7 @@
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc" title="Square side of each created asset — same shape ➕ Create asset uses. Reshape in Percepto afterwards (auto-reshape is feature #251).">Size <input type="number" id="aim-imp-size" min="5" max="2000" step="5" style="width:52px;${inCss}"> ft</label>
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#ff8a80" title="Side of the TRIANGLE a 🩻 P&A asset becomes (plugged / expired / cancelled / retired wells and facilities from the fill-in) — three corners instead of four so it never passes for a normal asset. ↔ Move and ✏ Shape still apply.">P&A size <input type="number" id="aim-imp-pasize" min="5" max="2000" step="5" style="width:52px;background:#1a1d23;border:1px solid rgba(255,138,128,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px"> ft</label>
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#ffd400" title="What happens to a staged point whose NAME matches an asset already on this site. Update = rewrite that asset's TYPE and NOTES from this file, never its shape or position (the quarterly re-run). Copy = create a second asset named …-2. Skip = leave it alone. Points merely inside / near an existing asset are only flagged and always created.">name matches <select id="aim-imp-dupmode" style="background:#1a1d23;border:1px solid rgba(255,212,0,0.45);color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px"><option value="update">update type + notes</option><option value="skip">skip</option><option value="copy">create a copy (-N)</option></select></label>
-                <button id="aim-imp-preflight" style="${btnCss('122,223,230')}" title="👁 Reads only: a plain-text report of everything the importer knows about the run — what Create would do, types, names, flags, Enverus, safety — downloaded and copied to the clipboard for review before writing.">👁 📋 Pre-import report</button>
+                <button id="aim-imp-preflight" style="${btnCss('122,223,230')}" title="👁 Reads only: a plain-text report of everything the importer knows about the run — what Create would do, types, names, flags, Enverus, safety — downloaded and copied to the clipboard for review before writing.">👁 📋 Pre-import report</button><span id="aim-imp-preflight-note" style="flex-basis:100%;font-size:10px;color:#9ad"></span>
                 <button id="aim-imp-commit" style="${btnCss('255,120,60')};font-weight:600" title="WRITES to AIM: creates the selected staged points as real assets (updates type + notes on name matches). Honours Dry run. A backup manifest downloads first; ↩ Undo reverts exactly this run.">⚡ Create selected</button>
                 <button id="aim-imp-undocreate" style="${btnCss('255,179,71')}" title="WRITES to AIM: deletes exactly the assets the most recent import created (this session) and puts updated ones back. Each delete rides Delete Guard's undo ring when installed.">↩ Undo last import</button>
             </div>
@@ -26534,7 +26535,7 @@
             if (m.lat) row[m.lat] = String(x.lat);
             if (m.lng) row[m.lng] = String(x.lng);
             if (c.apiCol && !x.facility) row[c.apiCol] = x.api;
-            const typeRaw = x.pa ? impPaTypeFor(x.ours !== false, x.paLabel) : (x.ours === false ? impThirdType(x) : (m.type ? (x.facility ? (x.facType || 'FACILITY') : `${/HORIZ/.test(x.traj) ? 'H' : 'V'} - WELL (Enverus)`) : ''));   // v4.444: 3rd party → AVOID type regardless of a type column
+            const typeRaw = x.pa ? impPaTypeFor(x.ours !== false, x.paLabel) : (x.ours === false ? impThirdType(x) : (m.type ? (x.facility ? (x.facType || 'FACILITY') : `${/HORIZ/.test(x.traj) ? 'H' : 'V'} - WELL`) : ''));   // v4.444: 3rd party → AVOID type regardless of a type column · v4.455: no brackets in types
             if (m.type) row[m.type] = typeRaw;
             const thirdName = (!x.pa && x.ours === false) ? impThirdName(x) : '';
             if (m.name && thirdName) row[m.name] = thirdName;
@@ -26566,7 +26567,7 @@
             if (m.lat) row[m.lat] = String(r.lat);
             if (m.lng) row[m.lng] = String(r.lng);
             if (c.apiCol && !x.facility) row[c.apiCol] = x.api;
-            const typeRaw = r.nowPlugged ? impPaTypeFor(ours, r.labelNow) : (!ours ? impThirdType(x) : (x.facility ? (x.facType || 'FACILITY') : `${/HORIZ/.test(x.traj) ? 'H' : 'V'} - WELL (Enverus)`));
+            const typeRaw = r.nowPlugged ? impPaTypeFor(ours, r.labelNow) : (!ours ? impThirdType(x) : (x.facility ? (x.facType || 'FACILITY') : `${/HORIZ/.test(x.traj) ? 'H' : 'V'} - WELL`));
             if (m.type) row[m.type] = typeRaw;
             imp.rows.push(row);
             const i = imp.rows.length - 1;
@@ -27719,7 +27720,7 @@
         if (!sid || String(sid) !== String(getCurrentSiteID())) { showToast('Site changed — reopen the generator', 'rgba(255,96,96,0.55)'); return; }
         const targets = imp.points.filter(p => !p.done && p.sel && (!p.dup || imp.dupMode !== 'skip'));
         // v4.427: an ambiguous name match (several assets contain the name) never writes blind
-        const amb = imp.dupMode === 'update' ? targets.filter(p => p.dup && p.dupAmbiguous) : [];
+        const amb = imp.dupMode === 'update' ? targets.filter(p => p.dup && p.dupAmbiguous && p.dupTier !== 3) : [];   // v4.455: only an ambiguous EXACT/punctuation match blocks (tier-3 ambiguity is created as new)
         if (amb.length) { impStatus(`BLOCKED — <b>${amb.length}</b> name match${amb.length === 1 ? '' : 'es'} ${amb.length === 1 ? 'is' : 'are'} ambiguous (the name fits several assets): ${impEsc(amb.slice(0, 8).map(p => `${p.name} → ${p.dupWhy.replace(/^⚠ ambiguous: /, '')}`).join(' · '))}${amb.length > 8 ? ' …' : ''}. Rename the row or the asset so one matches exactly, or set "name matches" to skip.`, '#ff6060'); return; }
         const guardedN = imp.points.filter(p => !p.done && p.sel && p.matchNote).length;
         const skippedDups = imp.points.filter(p => !p.done && p.sel && p.dup && imp.dupMode === 'skip').length;
@@ -27864,7 +27865,7 @@
         line(`name matches → ${imp.dupMode} · size ${impSizeFt} ft · P&A size ${imp.env.paSizeFt} ft · tiers ${imp.pri.on ? 'ON' : 'off'} · H/V/D ${imp.hv.on ? 'ON' : 'off'} · External ID column ${imp.mapping && imp.mapping.extId ? imp.mapping.extId : 'NONE'}`); line('');
         line(`== WHAT CREATE WOULD DO ==`); line(`create ${cre.length} · update type+notes on ${upd.length} · skipped name matches ${sel.filter(p => p.dup && imp.dupMode === 'skip').length}${plan.length > IMP_BIG_BATCH ? ` · OVER THE ${IMP_BIG_BATCH} GATE` : ''}`);
         const blank = plan.filter(x => !x.sub); if (blank.length) line(`!! ${blank.length} with a BLANK type (Create is blocked): ${[...new Set(blank.map(x => x.p.typeRaw || '(blank)'))].slice(0, 10).join(' · ')}`);
-        const amb = plan.filter(x => x.update && x.p.dupAmbiguous); if (amb.length) line(`!! ${amb.length} AMBIGUOUS name matches (Create is blocked): ${amb.slice(0, 15).map(x => x.p.name).join(' · ')}`);
+        const amb = plan.filter(x => x.update && x.p.dupAmbiguous && x.p.dupTier !== 3); if (amb.length) line(`!! ${amb.length} AMBIGUOUS name matches (Create is blocked): ${amb.slice(0, 15).map(x => x.p.name).join(' · ')}`);
         line(`outlines drawn ${cre.filter(x => x.p.shape).length} · squares ${cre.filter(x => !x.p.shape && !x.p.pa).length} · P&A triangles ${cre.filter(x => x.p.pa).length} · third-party AVOID ${cre.filter(x => x.p.thirdParty && !x.p.pa).length} · from Enverus (ours) ${cre.filter(x => x.p.src === 'enverus' && !x.p.pa).length}`);
         line(`External ID present on ${plan.filter(x => x.ext).length} / ${plan.length}`);
         const hv = { H: 0, V: 0, D: 0, none: 0 }; plan.forEach(x => { if (x.p.pa || x.p.thirdParty) return; const r = impHvOf(x.p); if (r.hv) hv[r.hv.toUpperCase()]++; else hv.none++; }); line(`H/V/D: ${hv.H} H · ${hv.V} V · ${hv.D} D · ${hv.none} unknown (type left without a letter)`);
@@ -27888,10 +27889,12 @@
     function impPreflight(how) {
         let txt; try { txt = impPreflightText(); } catch (e) { console.warn(`${TAG} 📋 preflight:`, e); impStatus(`📋 report failed: ${impEsc(e && e.message || e)}`, '#ff6060'); return; }
         const name = `pre-import-report-${genState.siteID}-${impNowStamp().replace(/[: ]/g, '-')}.txt`;
-        if (how !== 'copy') { try { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([txt], { type: 'text/plain' })); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); } catch (e) {} }
+        let saved = false; if (how !== 'copy') saved = downloadJSONFile(name, txt);   // v4.455: top-window download (an anchor inside Percepto's iframe is blocked)
         try { navigator.clipboard.writeText(txt); } catch (e) {}
         console.log(`${TAG} 📋 pre-import report\n${txt}`);
-        impStatus(`📋 pre-import report ${how === 'copy' ? 'copied' : `saved as ${impEsc(name)} and copied`} — ${txt.split('\n').length} lines; paste it anywhere for review (also in the console)`, '#5fff5f');
+        const msg = `📋 report ${saved ? `saved as ${impEsc(name)} and ` : ''}copied to the clipboard — ${txt.split('\n').length} lines${/^!!/m.test(txt) ? ' · <b style="color:#ff6060">contains !! blockers</b>' : ' · no blockers'}`;
+        impStatus(msg, '#5fff5f');
+        try { const host = document.getElementById('aim-imp-preflight-note'); if (host) host.innerHTML = msg; } catch (e) {}
     }
     // Undo THIS import: delete exactly the ids the last commit created.
     async function impUndoCreate() {
