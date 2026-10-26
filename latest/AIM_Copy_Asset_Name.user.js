@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.476
+// @version      4.477
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.476';
+    const SCRIPT_VERSION = '4.477';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -23170,10 +23170,10 @@
     // Prioritized block in the notes. Pad = the nested parent/child tree +
     // anything within padFt of the pad polygon; brand-new points cluster by
     // clusterFt. A pad with no numbers gets NO prefix and is flagged.
-    const IMP_TIER_RE = /^P([1-3])\s*[-–—:]\s*/i;
+    const IMP_TIER_RE = /^P([0-3])\s*[-–—:]\s*/i;   // v4.477: P0 = tiered on purpose, no priority (zero production / dead / client inactive / no pad numbers); NO prefix = the tool never processed it
     const IMP_TIER_COLORS = { P1: '#ff7b00', P2: '#ffe14d', P3: '#4fc3f7', none: '#ff5252' };   // v4.352: map fill per tier (P1 orange = top priority, P2 yellow, P3 blue, untiered red)
     function impTierStrip(sub) { return String(sub || '').replace(IMP_TIER_RE, '').trim(); }
-    function impTierOf(sub) { const m = String(sub || '').match(IMP_TIER_RE); return m ? `P${m[1]}` : ''; }
+    function impTierOf(sub) { const m = String(sub || '').match(IMP_TIER_RE); return m && m[1] !== '0' ? `P${m[1]}` : ''; }   // P0 reads as 'no tier' everywhere tiers are compared
     function impNum(v) { if (v == null) return null; const t = String(v).replace(/[,$\s]/g, ''); if (!t) return null; const n = parseFloat(t); return isFinite(n) ? n : null; }
     function impGuessPriCols(headers) {
         const lower = headers.map(h => String(h).toLowerCase());
@@ -23433,7 +23433,8 @@
     }
     function impTierPrefix(p, subtype) {
         const base = impTierStrip(subtype);
-        if (!imp.pri.on || !p.pri || !p.pri.tier) return base;
+        if (!imp.pri.on || !p.pri) return base;
+        if (!p.pri.tier) return (p.pa || p.thirdParty) ? base : `P0 - ${base}`;     // v4.477: deliberate 'no priority' is visible; P&A / AVOID keep their own types
         return `${p.pri.tier} - ${base}`;
     }
     function impRenderPriUi() {
@@ -28056,7 +28057,7 @@
     // ---- v4.470 PAD MODEL (account manager + user, 2026-10-26): a "Pad - X" asset is a CONTAINER. It carries the pad tier as
     // its type ("P2 - Pad"), the same pad-level priority note as every well on it, and NO External ID (only wells carry one).
     // Every well — X included — is its own child asset with its outline (or a square). ----
-    function impPadType(p) { const t = imp.pri.on && p && p.pri && p.pri.tier ? p.pri.tier : ''; return t ? `${t} - Pad` : 'Pad'; }
+    function impPadType(p) { if (!imp.pri.on || !p || !p.pri) return 'Pad'; return `${p.pri.tier || 'P0'} - Pad`; }   // v4.477: P0 - Pad when the pad has no priority
     function impComposePadNotes(p, pad, when, nWells) {
         const parts = [`Pad\n${pad.name}${nWells ? ` · ${nWells} well${nWells === 1 ? '' : 's'}` : ''}`].concat(impPriNotesBlocks(p, String(when).slice(0, 10)));
         parts.push(`Imported by ${impAuthor() || 'AIM user'} on ${when} from ${imp.fileName || 'file'} · updated by import`);

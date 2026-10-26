@@ -1,4 +1,6 @@
-## 2026-10-26 — 🧱 Pad model — Site Setup Tools latest v4.470 → v4.476 (latest only)
+## 2026-10-26 — 🧱 Pad model — Site Setup Tools latest v4.470 → v4.477 (latest only)
+
+- **v4.477** — **P0** = tiered on purpose with no priority (zero production, dead per Enverus, client says inactive, no numbers for the pad): `P0 - V - Pumping Rod`, `P0 - Pad`. An asset with NO P prefix therefore means the tool never processed it. P&A and AVOID assets keep their own types. Tier readers treat P0 as no tier.
 
 - **v4.476** — every type write references an existing type by the exact string the server stores (lowercase) and declares only a truly new one; mixed-case references were silently ignored on some writes (pads left at their old type).
 
