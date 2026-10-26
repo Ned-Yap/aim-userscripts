@@ -1,4 +1,6 @@
-## 2026-10-23 — 🚫 AVOID - 3rd Party Pad — Site Setup Tools latest v4.444 → v4.455 (latest only)
+## 2026-10-23 — 🚫 AVOID - 3rd Party Pad — Site Setup Tools latest v4.444 → v4.456 (latest only)
+
+- **v4.456** — name matching: when several existing assets contain the row's name, the single closest fit (fewest extra words, e.g. `Pad - BAYES 16` over `Pad - BAYES 16 1`) is the match and the row updates it; only a genuine tie is created as new. Every type is cleaned at write time (bracketed text dropped, name character rule applied), so rows staged before the fix cannot write `(enverus)`.
 
 - **v4.455** — an ambiguous token-containment match (the name fits several assets and none exactly) is now created as a NEW asset with a note instead of blocking Create; only an ambiguous exact / punctuation match still blocks. Enverus-added wells are typed `H - Well` / `V - Well` (no brackets). The pre-import report downloads through the iframe-safe path and reports next to its button.
 

@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.455
+// @version      4.456
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.455';
+    const SCRIPT_VERSION = '4.456';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -24635,7 +24635,12 @@
                 }
             }
             if (nm && p.thirdParty && !p.statusWas) { guarded = `third-party point — never updates the client's asset "${nm.name}"; created as its own AVOID asset`; }   // v4.444
-            if (nm && !guarded && nmM.tier === 3 && nmM.ambiguous) guarded = `name fits ${1 + (nmM.others || []).length} assets (${[nm.name].concat((nmM.others || []).slice(0, 2).map(o => o.name)).join(', ')}…) and none exactly — created as NEW`;   // v4.455: ambiguous = new, not a block
+            if (nm && !guarded && nmM.tier === 3 && nmM.ambiguous) {                      // v4.455/v4.456: ambiguous containment
+                const st = impNameTokens(p.name).length, gap = (a) => Math.abs((a.tokens || []).length - st);
+                const o2 = (nmM.others || [])[0];
+                if (o2 && gap(nm) < gap(o2)) { nmM.ambiguous = false; p.matchNote = ''; nmM.why = `name matches existing asset "${nm.name}" (closest of ${1 + nmM.others.length} that contain it)`; }   // one clear closest fit (e.g. "Pad - BAYES 16" over "Pad - BAYES 16 1") = the match
+                else guarded = `name fits ${1 + (nmM.others || []).length} assets equally (${[nm.name].concat((nmM.others || []).slice(0, 2).map(o => o.name)).join(', ')}…) and none exactly — created as NEW`;
+            }
             if (nm && !guarded) { p.dup = true; p.dupWhy = nmM.why; p.dupTier = nmM.tier; p.dupAmbiguous = nmM.ambiguous; p.dupId = nm.id; p.dupSubtype = nm.subtype || ''; } else { p.dupId = null; p.dupSubtype = ''; p.dupTier = 0; p.dupAmbiguous = false; if (guarded) p.matchNote = guarded; }
             // v4.332: two informational flags, never skipped —
             //   child = the square this point would become (Size ft) overlaps an
@@ -26914,7 +26919,7 @@
                 <button data-impmiss-stageall ${list.some(x => !x.staged && impPaStageable(x)) ? '' : 'disabled'} title="Stage EVERY candidate Enverus found in the area, all status groups, in one go: plugged / retired / cancelled as P&A triangles (off our pads only), the client's missing wells and facilities as normal assets, every other operator's as 'AVOID - 3rd Party Pad'. Nothing is written until ⚡ Create." style="background:rgba(255,179,71,0.18);color:#ffb347;border:1px solid rgba(255,179,71,0.6);border-radius:3px;padding:4px 12px;cursor:pointer;font:inherit;font-size:11px;font-weight:600${list.some(x => !x.staged && impPaStageable(x)) ? '' : ';opacity:0.45;cursor:default'}">➕ Stage everything (${list.filter(x => !x.staged && impPaStageable(x)).length}) — map only</button>
                 <button data-impmiss-stage ${nSel ? '' : 'disabled'} style="background:rgba(95,255,95,0.15);color:#5fff5f;border:1px solid rgba(95,255,95,0.55);border-radius:3px;padding:4px 12px;cursor:pointer;font:inherit;font-size:11px;font-weight:600${nSel ? '' : ';opacity:0.45;cursor:default'}" title="Adds the ticked wells / facilities to the staged points on the map. Nothing is written until ⚡ Create in step 7.">➕ Stage ${nSel}${nPaSel ? ` (${nPaSel} as P&A)` : ''} — map only</button>
                 <span style="color:#888;font-size:10px">they join the staged points on the map · nothing is written until ⚡ Create in step 7 · on the map: ✕ = plugged, small squares = the other ticked groups (not staged yet)</span>
-                <span title="A staged well is an ordinary point: name = the Enverus well name, type 'H - WELL (Enverus)' / 'V - WELL (Enverus)' (change it in 3 · Type), notes carry a 'Source: added from Enverus' block and a dated 'Status recorded' line. Other operators' wells stage as '3RD PARTY WELL (operator)' obstacles." style="width:14px;height:14px;line-height:12px;text-align:center;border:1px solid rgba(122,223,230,0.5);border-radius:50%;color:#7adfe6;font-size:9px;font-weight:700;cursor:help">i</span>
+                <span title="A staged well is an ordinary point: name = the Enverus well name, type 'H - WELL' / 'V - WELL' (change it in 3 · Type), notes carry a 'Source: added from Enverus' block and a dated 'Status recorded' line. Other operators' wells stage as '3RD PARTY WELL (operator)' obstacles." style="width:14px;height:14px;line-height:12px;text-align:center;border:1px solid rgba(122,223,230,0.5);border-radius:50%;color:#7adfe6;font-size:9px;font-weight:700;cursor:help">i</span>
             </div>
         </div>`;
         const applyQ = () => {
@@ -27400,6 +27405,8 @@
         const base = impTitleCase(String(subtype).replace(IMP_HV_RE, '').trim()); if (!base) return subtype;
         return hv ? `${hv.toUpperCase()} - ${base}` : base;
     }
+    // v4.456: types follow the name rule — bracketed text dropped, everything but letters / digits / space / - / _ removed
+    function impCleanType(v) { return genCleanName(String(v || '').replace(/\s*\([^)]*\)\s*/g, ' ')); }
     function impResolveSubtype(raw, subtypes) {
         const key = (raw || '(blank)').toLowerCase();
         const mapped = (imp.typeMap[key] || '').trim();
@@ -27744,6 +27751,7 @@
             // v4.347: on an UPDATE with no type column, keep the asset's own base type
             if (p.dup && imp.dupMode === 'update' && (!imp.mapping || !imp.mapping.type) && p.dupSubtype) v = impApplyShield(impTierStrip(p.dupSubtype));
             v = impApplyHv(p, v, siteSubs);                                            // v4.418: h - / v - / d - from the file / Enverus / the existing asset
+            v = impCleanType(v);                                                        // v4.456: never a bracket / stray character in a type
             return impTierPrefix(p, v);                                     // v4.347: "P1 - " prefix when tiers are on
         };
         const plan = targets.map(p => ({ p, subtype: subtypeFor(p), update: !!(p.dup && imp.dupMode === 'update' && p.dupId != null) }));
@@ -27853,7 +27861,7 @@
         const live = imp.points.filter(p => !p.done), sel = live.filter(p => p.sel);
         const subCounts = impSiteSubtypes(); const siteSubs = [...subCounts.keys()];
         const defSub = [...subCounts.entries()].sort((a, b) => b[1] - a[1]).map(x => x[0])[0] || 'well-cluster';
-        const subtypeFor = (p) => { if (p.pa) return impPaType(p); if (p.thirdParty) return p.typeRaw || impThirdType(p.env || {}); let v; if (!imp.mapping || !imp.mapping.type) v = impApplyShield((imp.typeMap['__all__'] || '').trim() || defSub); else { v = impResolveSubtype(p.typeRaw || '', siteSubs).value; if (!v) return ''; } if (p.dup && imp.dupMode === 'update' && (!imp.mapping || !imp.mapping.type) && p.dupSubtype) v = impApplyShield(impTierStrip(p.dupSubtype)); v = impApplyHv(p, v, siteSubs); return impTierPrefix(p, v); };
+        const subtypeFor = (p) => { if (p.pa) return impPaType(p); if (p.thirdParty) return p.typeRaw || impThirdType(p.env || {}); let v; if (!imp.mapping || !imp.mapping.type) v = impApplyShield((imp.typeMap['__all__'] || '').trim() || defSub); else { v = impResolveSubtype(p.typeRaw || '', siteSubs).value; if (!v) return ''; } if (p.dup && imp.dupMode === 'update' && (!imp.mapping || !imp.mapping.type) && p.dupSubtype) v = impApplyShield(impTierStrip(p.dupSubtype)); v = impCleanType(impApplyHv(p, v, siteSubs)); return impTierPrefix(p, v); };
         const targets = sel.filter(p => !p.dup || imp.dupMode !== 'skip');
         const plan = targets.map(p => ({ p, sub: subtypeFor(p), update: !!(p.dup && imp.dupMode === 'update' && p.dupId != null), ext: impExtIdOf(p) }));
         const cre = plan.filter(x => !x.update), upd = plan.filter(x => x.update);
