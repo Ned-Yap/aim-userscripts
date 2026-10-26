@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.447
+// @version      4.448
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.447';
+    const SCRIPT_VERSION = '4.448';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -26575,7 +26575,7 @@
             <div style="max-height:200px;overflow:auto;border:1px solid rgba(255,255,255,0.06);border-radius:3px;background:rgba(0,0,0,0.15)">${shown.map((r) => row(r, rows.indexOf(r))).join('') || `<div style="padding:6px;color:#5fff5f;font-size:10px">✓ every status matches what the notes recorded${moved.length ? '' : ' and every Enverus point sits within tolerance'}</div>`}</div>
             <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
                 <button data-impparev-stage ${changed.filter(r => !r.staged).length ? '' : 'disabled'} style="background:rgba(255,138,128,0.15);color:#ff8a80;border:1px solid rgba(255,138,128,0.55);border-radius:3px;padding:4px 12px;cursor:pointer;font:inherit;font-size:11px;font-weight:600${changed.filter(r => !r.staged).length ? '' : ';opacity:0.45;cursor:default'}" title="Stages a name-matched update per changed asset. Nothing is written until ⚡ Create in step 7 (type + notes only).">➕ Stage ${changed.filter(r => !r.staged).length} status update${changed.filter(r => !r.staged).length === 1 ? '' : 's'} — map only</button>
-                <span style="color:#888;font-size:10px">a staged update keeps the asset's name, shape and position; ✓ Create rewrites its TYPE (P&A Asset - &lt;status&gt; when plugged, the well / 3rd-party type otherwise) and NOTES with a fresh "Status recorded" date. Nothing is written until ✓ Create.</span>
+                <span style="color:#888;font-size:10px">a staged update keeps the asset's name, shape and position; ✓ Create rewrites its TYPE (PA Asset - &lt;status&gt; when plugged, the well / 3rd-party type otherwise) and NOTES with a fresh "Status recorded" date. Nothing is written until ✓ Create.</span>
             </div>
         </div>`;
         el.onclick = (ev) => {
@@ -26631,7 +26631,7 @@
         if (/INACTIVE|IDLE/.test(st)) return 'Inactive';
         return 'Plugged';
     }
-    function impPaTypeFor(ours, label) { return `${ours === false ? 'P&A 3rd Party' : 'P&A Asset'} - ${label || 'Plugged'}`; }
+    function impPaTypeFor(ours, label) { return `${ours === false ? 'PA 3rd Party' : 'PA Asset'} - ${label || 'Plugged'}`; }   // v4.448: 'PA' not 'P&A' — no special characters in types either
     function impPaType(p) { return impPaTypeFor(!p.thirdParty, p.pa && p.pa.label); }
     function impPaName(x) { return `${impPaLabel(x.status)} - ${x.facility ? (x.name || x.api) : x.api}`; }   // [Status] - [API] (facilities have no API → their name)
     // v4.414: candidates saved by a fill-in run before 4.413 (or resumed from a session) carry no P&A fields — derive them
@@ -26642,7 +26642,7 @@
     }
     // v4.444: every other operator's well / facility = one type that says what to do (searchable, metric-able) and a name that
     // says it on the map label; the operator and the Enverus record stay in the notes
-    function impThirdType(x) { const t = (imp.env.thirdType || 'AVOID - 3rd Party Pad').trim(); return x && x.facility ? `${t} (${(x.facType || 'facility').toLowerCase()})` : t; }
+    function impThirdType(x) { const t = genCleanName(imp.env.thirdType || 'AVOID - 3rd Party Pad') || 'AVOID - 3rd Party Pad'; return x && x.facility ? genCleanName(`${t} ${impTitleCase(String(x.facType || 'facility').toLowerCase())}`) : t; }   // v4.448: letters / digits / space / - / _ only, like names
     function impThirdName(x) { return genCleanName(`AVOID - ${x.name || x.api}`); }
     function impPaStageable(x) { return !x.pa || (imp.env.paAssets !== false && !x.onPad); }
     function impPointSizeFt(p) { return p && p.pa ? (imp.env.paSizeFt || 100) : impSizeFt; }
@@ -26683,7 +26683,7 @@
         const was = impPaStatusFromNotes(ent.description);
         const sub = (ent.custom && ent.custom.poi_type_str) ? String(ent.custom.poi_type_str) : '';
         const now = String(m.status || '').toUpperCase();
-        return { assetId: ent.id, assetName: ent.name || '', api, sub, isPa: /^P&A /.test(sub), statusBefore: was.status, recordedAt: was.at, statusNow: now, labelNow: impPaLabel(now),
+        return { assetId: ent.id, assetName: ent.name || '', api, sub, isPa: /^P(&|)A /.test(sub), statusBefore: was.status, recordedAt: was.at, statusNow: now, labelNow: impPaLabel(now),
             changed: !!was.status && was.status !== now, unknownBefore: !was.status, distFt: isFinite(dM) ? Math.round(dM / GEN_FT_TO_M) : null, moved: isFinite(dM) && dM > (imp.env.paMatchFt || 0) * GEN_FT_TO_M,
             nowPlugged: impEnvBucket({ found: true, status: now }) === 'plugged', lat: cen ? cen.lat : m.lat, lng: cen ? cen.lng : m.lng, lat2: m.lat, lng2: m.lng, cand: m, staged: false };
     }
@@ -26858,7 +26858,7 @@
             ${paN ? `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:4px;padding:4px 6px;background:rgba(255,45,45,0.06);border-radius:3px">
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:#ff8a80;cursor:pointer"><input type="checkbox" data-impmiss-pa ${c.paAssets !== false ? 'checked' : ''} style="accent-color:#ff8a80;margin:0"> <b>✕ plugged → P&A assets</b> (${paN - paOn} off our pads${paOn ? ` · ${paOn} on our pads stay ✕ only` : ''})</label>
                 <span style="color:#888;font-size:10px">flyable ground, mapped on purpose so a reviewer knows we saw it</span>
-                <span title="A P&A asset is named '[Status] - [API]' (e.g. Plugged - 4231736193), typed 'P&A Asset - <status>' ('P&A 3rd Party - …' for other operators), carries the full well record and the date the status was read in its notes, uses the P&A size from the Create row and is never tiered. ↔ Move and ✏ Shape work on it. Untick = still shown as ✕ on the map, nothing staged." style="width:14px;height:14px;line-height:12px;text-align:center;border:1px solid rgba(255,138,128,0.5);border-radius:50%;color:#ff8a80;font-size:9px;font-weight:700;cursor:help">i</span>
+                <span title="A P&A asset is named '[Status] - [API]' (e.g. Plugged - 4231736193), typed 'PA Asset - <status>' ('PA 3rd Party - …' for other operators), carries the full well record and the date the status was read in its notes, uses the P&A size from the Create row and is never tiered. ↔ Move and ✏ Shape work on it. Untick = still shown as ✕ on the map, nothing staged." style="width:14px;height:14px;line-height:12px;text-align:center;border:1px solid rgba(255,138,128,0.5);border-radius:50%;color:#ff8a80;font-size:9px;font-weight:700;cursor:help">i</span>
             </div>` : ''}
             <div style="max-height:230px;overflow:auto;border:1px solid rgba(255,255,255,0.06);border-radius:3px;background:rgba(0,0,0,0.15)">${shown.map(row).join('') || '<div style="padding:6px;color:#888;font-size:10px">nothing in the ticked groups</div>'}</div>
             <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">

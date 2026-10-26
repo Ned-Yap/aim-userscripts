@@ -1,4 +1,6 @@
-## 2026-10-23 — 🚫 AVOID - 3rd Party Pad — Site Setup Tools latest v4.444 → v4.447 (latest only)
+## 2026-10-23 — 🚫 AVOID - 3rd Party Pad — Site Setup Tools latest v4.444 → v4.448 (latest only)
+
+- **v4.448** — types follow the same character rule as names: `PA Asset - Plugged` / `PA 3rd Party - Retired` (no ampersand), `AVOID - 3rd Party Pad Battery` (no brackets). Bulk → Rename's Type tab can restyle them later if wanted.
 
 - **v4.447** — the missing-wells list shows every name exactly as it will be written (letters, digits, space, hyphen, underscore only; brackets, apostrophes, ampersands and dots become spaces; made unique at Create).
 
