@@ -1,4 +1,6 @@
-## 2026-10-23 — 🚫 AVOID - 3rd Party Pad — Site Setup Tools latest v4.444 → v4.460 (latest only)
+## 2026-10-23 — 🚫 AVOID - 3rd Party Pad — Site Setup Tools latest v4.444 → v4.461 (latest only)
+
+- **v4.461** — SUM search: a `-term` hides rows whose name, subtype or parent contains it (`gas lift -p1`). Type checks (DONE line, ↻ Re-send types) ignore case — the server stores some new types in lowercase.
 
 - **v4.460** — a type the site did not have at the start of the run is declared as new on EVERY write of it, not only the first (the first live run stored the OLD type on all 256 updates). The DONE line now reports types and notes stored-as-sent separately. **⚡ ↻ Re-send types** (next to Undo): compares every asset this session touched with the intended type and re-sends only the type where it differs — dry run first, backup, undo.
 

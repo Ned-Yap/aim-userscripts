@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.460
+// @version      4.461
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.460';
+    const SCRIPT_VERSION = '4.461';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -17839,7 +17839,7 @@
     // token (so multi-word names need no quotes). Unknown keys stay in text.
     const SEARCH_TAG_KEYS = ['parent', 'root', 'depth'];
     function parseSearchTags(raw) {
-        const out = { text: '', tags: {} };
+        const out = { text: '', tags: {}, exclude: [] };   // v4.461: `-term` (free text) = hide rows whose name / subtype / parent contains term
         const textParts = [];
         let cur = null;
         String(raw).trim().split(/\s+/).forEach(tok => {
@@ -17847,6 +17847,7 @@
             const m = /^([A-Za-z]+):(.*)$/.exec(tok);
             if (m && SEARCH_TAG_KEYS.includes(m[1].toLowerCase())) { cur = m[1].toLowerCase(); out.tags[cur] = m[2]; return; }
             if (cur) out.tags[cur] = (out.tags[cur] ? out.tags[cur] + ' ' : '') + tok;
+            else if (tok.length > 1 && tok[0] === '-') out.exclude.push(tok.slice(1).toLowerCase());
             else textParts.push(tok);
         });
         for (const k in out.tags) { out.tags[k] = out.tags[k].trim(); if (!out.tags[k]) delete out.tags[k]; }
@@ -17862,7 +17863,7 @@
         // when such a name exists on the site, otherwise as a substring.
         const parsed = parseSearchTags(state.search || '');
         const q = parsed.text.toLowerCase();
-        const tags = parsed.tags;
+        const tags = parsed.tags; const excl = parsed.exclude || [];
         const nameMatcher = (want) => {
             const w = want.toLowerCase();
             const exact = rows.some(r => r.type === 3 && String(r.name || '').toLowerCase() === w);
@@ -17880,6 +17881,7 @@
                 if (!chain.some(rootOk)) return false;
             }
             if (depthWant != null && !(r.type === 3 && r.nestDepth === depthWant)) return false;
+            if (excl.length) { const hay = `${r.name || ''}\n${r.subtype || ''}\n${r.parentName || ''}`.toLowerCase(); if (excl.some(x => hay.includes(x))) return false; }   // v4.461
             if (!state.typeFilter.has(String(r.type))) return false;
             // Validation filters apply only to types where validation is
             // meaningful (FFZ / FP / NFZ). N/A rows (r.validated === null)
@@ -27859,11 +27861,11 @@
         const verified = created.filter(c => byId.has(c.id));
         imp.lastCreated = verified.map(c => c.id);
         const afterById = new Map(after.map(e => [e.id, e]));
-        const updVerified = updated.filter(u => { const e = afterById.get(u.id); return e && e.custom && String(e.custom.poi_type_str || '') === u.subtype && String(e.description || '') === u.notes; });
+        const updVerified = updated.filter(u => { const e = afterById.get(u.id); return e && e.custom && String(e.custom.poi_type_str || '').toLowerCase() === u.subtype.toLowerCase() && String(e.description || '') === u.notes; });
         // v4.434: did the External ID land? (also tells us if the server ignores / renames the field)
         const extWanted = created.filter(c => c.ext && byId.has(c.id)), extOk = extWanted.filter(c => impExtOfEnt(afterById.get(c.id)) === c.ext).length;
-        const typeOkC = created.filter(c => { const e = afterById.get(c.id); return e && e.custom && String(e.custom.poi_type_str || '') === c.subtype; }).length;
-        const typeOkU = updated.filter(u => { const e = afterById.get(u.id); return e && e.custom && String(e.custom.poi_type_str || '') === u.subtype; }).length;
+        const typeOkC = created.filter(c => { const e = afterById.get(c.id); return e && e.custom && String(e.custom.poi_type_str || '').toLowerCase() === c.subtype.toLowerCase(); }).length;
+        const typeOkU = updated.filter(u => { const e = afterById.get(u.id); return e && e.custom && String(e.custom.poi_type_str || '').toLowerCase() === u.subtype.toLowerCase(); }).length;
         const notesOkU = updated.filter(u => { const e = afterById.get(u.id); return e && String(e.description || '') === u.notes; }).length;
         const typeNote = ` · types stored as sent: ${typeOkC}/${created.length} created, ${typeOkU}/${updated.length} updated${updated.length ? ` · notes stored as sent: ${notesOkU}/${updated.length}` : ''}${(typeOkC < created.length || typeOkU < updated.length) ? ' <span style="color:#ff6060">(↻ Re-send types fixes these)</span>' : ''}`;
         const extNote = extWanted.length ? ` · 🆔 External ID ${extOk}/${extWanted.length} confirmed${extOk < extWanted.length ? ` <span style="color:#ff6060">(server did not echo the field for ${extWanted.length - extOk} — check 🆔 below)</span>` : ''}` : '';
@@ -27942,7 +27944,7 @@
             const e = p.createdId ? byId.get(p.createdId) : (p.dupId != null ? byId.get(p.dupId) : byName.get(p.name)); if (!e) return;
             const want = subtypeFor(p); if (!want) return;
             const have = String((e.custom && e.custom.poi_type_str) || '').trim();
-            if (have !== want) todo.push({ p, e, want, have });
+            if (have.toLowerCase() !== want.toLowerCase()) todo.push({ p, e, want, have });   // v4.461: the server lower-cases some stored types — case is not a difference
         });
         if (!todo.length) { impCommitNote('↻ every asset this session touched already carries the intended type', '#5fff5f'); return; }
         const dry = (() => { try { return !!document.getElementById('aim-gen-dryrun').checked; } catch (e) { return true; } })();
@@ -27967,8 +27969,8 @@
         }
         try { await fetchMapObjects(sid, true); } catch (e) {}
         const after = new Map(((mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || []).map(e => [e.id, e]));
-        const confirmed = done.filter(d => String(((after.get(d.id) || {}).custom || {}).poi_type_str || '') === d.want).length;
-        const sample = done.find(d => String(((after.get(d.id) || {}).custom || {}).poi_type_str || '') !== d.want);
+        const confirmed = done.filter(d => String(((after.get(d.id) || {}).custom || {}).poi_type_str || '').toLowerCase() === d.want.toLowerCase()).length;
+        const sample = done.find(d => String(((after.get(d.id) || {}).custom || {}).poi_type_str || '').toLowerCase() !== d.want.toLowerCase());
         imp.lastUpdated = imp.lastUpdated.concat(done.map(d => ({ id: d.id, name: d.name, before: d.before })));
         imp._rootCache = null; impBuildAssetIndex(); impComputeDups(); impRefreshAfterSelChange(); try { impSaveSession('resend-types'); } catch (e) {}
         impCommitNote(`↻ DONE: <b>${ok}</b> re-sent${fail ? ` · <span style="color:#ff6060">${fail} failed</span>` : ''} · stored as sent: <b>${confirmed}/${done.length}</b>${sample ? ` · <span style="color:#ff6060">server kept "${impEsc(String(((after.get(sample.id) || {}).custom || {}).poi_type_str || ''))}" instead of "${impEsc(sample.want)}" on ${impEsc(sample.name)} — the type string itself is being refused</span>` : ''} · ↩ Undo last import reverts`, fail || confirmed < done.length ? '#ffb347' : '#5fff5f');
@@ -33987,7 +33989,7 @@
         searchRow.style.cssText = 'display:flex;gap:8px;align-items:center';
         const searchInput = document.createElement('input');
         searchInput.type = 'text';
-        searchInput.placeholder = '🔍  Search name, subtype, Seg ID · tags: parent:Pad · root:Pad · depth:1';
+        searchInput.placeholder = '🔍  Search name, subtype, Seg ID · -term hides · tags: parent:Pad · root:Pad · depth:1';
         searchInput.title = 'Free text matches name / subtype / parent / Seg ID. Tags (put them after any free text): parent:<asset> = direct children of that asset · root:<asset> = that asset + everything nested anywhere under it · depth:<n> = nesting level (0 = top level). Multi-word names need no quotes: parent:Well Pad 1';
         searchInput.value = sumPanelState.search;
         searchInput.style.cssText = 'flex:1;background:#15171c;color:#e6e6e6;border:1px solid rgba(255,255,255,0.18);border-radius:4px;padding:5px 8px;font:inherit;font-size:12px';
