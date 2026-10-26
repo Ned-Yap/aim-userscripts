@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.469
+// @version      4.470
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.469';
+    const SCRIPT_VERSION = '4.470';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -23427,7 +23427,7 @@
         const fmt = (n) => n == null ? '—' : Math.round(n).toLocaleString();
         const q = p.pri;
         const line = q.tier
-            ? `${q.tier} · ${c.priCol ? 'from the client\'s priority column' : `pad total ${fmt(q.padTotal)} BLPD across ${q.padN} asset${q.padN === 1 ? '' : 's'}${q.padWith < q.padN ? ` (${q.padWith} with numbers)` : ''}`}${q.blpd != null ? ` · this asset ${fmt(q.blpd)} BLPD` : ''}${q.padName && !/^new pad/.test(q.padName) ? ` · pad ${q.padName}` : ''}`
+            ? `${q.tier} · ${c.priCol ? 'from the client\'s priority column' : `pad total ${fmt(q.padTotal)} BLPD across ${q.padN} asset${q.padN === 1 ? '' : 's'}${q.padWith < q.padN ? ` (${q.padWith} with numbers)` : ''}`}${q.padName && !/^new pad/.test(q.padName) ? ` · pad ${q.padName}` : ''}`   // v4.470: pad-level only (account manager 2026-10-26) — same line on the pad and all its wells
             : (q.untier === 'pa' ? `not tiered — ${p.pa && p.pa.label ? p.pa.label.toLowerCase() : 'plugged'} (flyable ground, not inspected)` : (q.untier === 'third' ? 'not tiered — third-party well (obstacle, not inspected)' : (q.untier === 'client' ? `not tiered — client confirmed ${p.client && p.client.status ? p.client.status.toLowerCase() : 'inactive'}` : (q.untier === 'zero' ? 'not tiered — zero production (0 BLPD in the client list)' : (q.untier === 'env' ? `not tiered — Enverus reports ${p.env && p.env.status ? p.env.status : 'inactive'}` : `not tiered — ${q.flags[0] || 'no numbers'}`)))));
         return [`Priority\n${line}`, `Prioritized\n${dateStr}`];
     }
@@ -24193,7 +24193,7 @@
                 if (newBase && oldBase.toLowerCase() !== newBase.toLowerCase()) { R.type.push({ p, name: p.name, detail: `type "${oldBase || '—'}" → "${newBase}"`, before: oldBase, after: newBase, lat: p.lat, lng: p.lng }); changed = true; }
                 if (imp.pri.on && p.pri) { const was = impTierOf(a.subtype || ''), now = p.pri.tier || ''; if (was !== now) { R.tier.push({ p, name: p.name, detail: `${was || 'no tier'} → ${now || 'no tier'}${p.pri.padTotal != null ? ` · pad ${Math.round(p.pri.padTotal).toLocaleString()} BLPD` : ''}`, before: was || 'none', after: now || 'none', lat: p.lat, lng: p.lng }); changed = true; } }
                 const e = byId.get(a.id);
-                const m = e && typeof e.description === 'string' ? e.description.match(/this asset ([\d,]+) BLPD/) : null;
+                const m = e && typeof e.description === 'string' ? (e.description.match(/pad total ([\d,]+) BLPD/) || e.description.match(/this asset ([\d,]+) BLPD/)) : null;
                 const prev = m ? parseFloat(m[1].replace(/,/g, '')) : null, now = (p.pri && p.pri.blpd != null) ? p.pri.blpd : impPriBlpdSafe(p);
                 if (prev != null && now != null && Math.abs(now - prev) >= Math.max(5, 0.2 * Math.max(prev, 1))) { R.prod.push({ p, name: p.name, detail: `${Math.round(prev).toLocaleString()} → ${Math.round(now).toLocaleString()} BLPD (${now > prev ? '+' : ''}${Math.round(100 * (now - prev) / Math.max(prev, 1))}%)`, before: Math.round(prev), after: Math.round(now), lat: p.lat, lng: p.lng }); changed = true; }
             }
@@ -26106,7 +26106,7 @@
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#ffd400" title="What happens to a staged point whose NAME matches an asset already on this site. Update = rewrite that asset's TYPE and NOTES from this file, never its shape or position (the quarterly re-run). Copy = create a second asset named …-2. Skip = leave it alone. Points merely inside / near an existing asset are only flagged and always created.">name matches <select id="aim-imp-dupmode" style="background:#1a1d23;border:1px solid rgba(255,212,0,0.45);color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px"><option value="update">update type + notes</option><option value="skip">skip</option><option value="copy">create a copy (-N)</option></select></label>
                 <button id="aim-imp-preflight" style="${btnCss('122,223,230')}" title="👁 Reads only: a plain-text report of everything the importer knows about the run — what Create would do, types, names, flags, Enverus, safety — downloaded and copied to the clipboard for review before writing.">👁 📋 Pre-import report</button><span id="aim-imp-preflight-note" style="flex-basis:100%;font-size:10px;color:#9ad"></span><div id="aim-imp-commit-note" style="flex-basis:100%;font-size:11px;color:#9ad;line-height:1.5;min-height:14px;padding:4px 8px;background:rgba(255,255,255,0.03);border-radius:3px"></div>
                 <button id="aim-imp-commit" style="${btnCss('255,120,60')};font-weight:600" title="WRITES to AIM: creates the selected staged points as real assets (updates type + notes on name matches). Honours Dry run. A backup manifest downloads first; ↩ Undo reverts exactly this run.">⚡ Create selected</button>
-                <button id="aim-imp-wrapchild" style="${btnCss('255,120,60')}" title="WRITES to AIM: a row with a drawn outline that name-matched a 'Pad - …' asset only updated the pad; this creates the well itself from the outline, with the row's own name, nested under that pad. Dry run lists them first.">⚡ ↻ Create outlines left behind</button>
+                <button id="aim-imp-wrapchild" style="${btnCss('255,120,60')}" title="WRITES to AIM: every row that matched a 'Pad - …' asset → the pad becomes a container (type = tier + Pad, pad-level priority note, External ID removed) and the well itself is created under it from your outline (or as a square) with the row's name, type, notes and External ID. Dry run lists the counts first.">⚡ 🧱 Apply pad model</button>
                 <button id="aim-imp-resize" style="${btnCss('255,120,60')}" title="WRITES to AIM: rewrites the polygon of every asset this session created WITHOUT a drawn outline to the current sizes (Size / 3rd-party size / P&A size), centred where it is. Drawn outlines are never touched. Dry run lists them first.">⚡ ↻ Resize squares</button>
                 <button id="aim-imp-resendtypes" style="${btnCss('255,120,60')}" title="WRITES to AIM: for every asset this session created or updated, compares the stored type with the intended one and re-sends only the type where they differ (declared as new when the site lacks it). Dry run shows the list first.">⚡ ↻ Re-send types</button>
                 <button id="aim-imp-undocreate" style="${btnCss('255,179,71')}" title="WRITES to AIM: deletes exactly the assets the most recent import created (this session) and puts updated ones back. Each delete rides Delete Guard's undo ring when installed.">↩ Undo last import</button>
@@ -26273,7 +26273,7 @@
         q('aim-imp-commit').onclick = () => { impCommit(); };
         q('aim-imp-preflight').onclick = () => { impPreflight('download'); };
         q('aim-imp-undocreate').onclick = () => { impUndoCreate(); };
-        q('aim-imp-wrapchild').onclick = () => { impCreateWrapperOutlines().catch(e => { console.warn(`${TAG} ↻ outlines`, e); impCommitNote(`↻ ${impEsc(e && e.message || e)}`, '#ff6060'); }); };
+        q('aim-imp-wrapchild').onclick = () => { impApplyPadModel().catch(e => { console.warn(`${TAG} ↻ outlines`, e); impCommitNote(`↻ ${impEsc(e && e.message || e)}`, '#ff6060'); }); };
         q('aim-imp-resize').onclick = () => { impResizeCreated().catch(e => { console.warn(`${TAG} ↻ resize`, e); impCommitNote(`↻ ${impEsc(e && e.message || e)}`, '#ff6060'); }); };
         q('aim-imp-resendtypes').onclick = () => { impResendTypes().catch(e => { console.warn(`${TAG} ↻ types`, e); impCommitNote(`↻ ${impEsc(e && e.message || e)}`, '#ff6060'); }); };
         const dmEl = q('aim-imp-delmode');
@@ -27799,7 +27799,7 @@
         };
         const plan = targets.map(p => ({ p, subtype: subtypeFor(p), update: !!(p.dup && imp.dupMode === 'update' && p.dupId != null) }));
         // v4.469: a name-matched row WITH a drawn outline whose match is a wrapper ("Pad - X" for row "X") also creates the well itself as a child of the pad
-        try { const wr = impWrapperOutlineRows(); const wset = new Set(wr.map(x => x.p)); plan.filter(x => x.update && wset.has(x.p)).forEach(x => { x.alsoChild = wr.find(w => w.p === x.p); }); } catch (e) {}
+        try { const wr = impWrapperRows(); plan.filter(x => x.update).forEach(x => { const w = wr.find(y => y.p === x.p); if (w) { x.padRow = w; if (!w.child && !x.p.createdId) x.alsoChild = w; } }); } catch (e) {}   // v4.470: pad model
         if (missing.size) { impCommitNote(`BLOCKED — rows with a blank type: pick a subtype for <b>${impEsc([...missing].join(' · '))}</b> in the Type table above.`, '#ff6060'); return; }
         plan.forEach(x => { x.ext = impExtIdOf(x.p); });
         const nExt = plan.filter(x => x.ext).length;
@@ -27853,16 +27853,18 @@
                 const body = buildWriteBody(ent, siteCfg);
                 body.description = String(x.notes || '').slice(0, 2000);
                 if (!body.custom || typeof body.custom !== 'object') body.custom = {};
+                if (x.padRow) { x.subtype = impPadType(x.p); body.description = impComposePadNotes(x.p, ent, stamp, x.padRow.nWells); body.custom[IMP_EXT_FIELD] = null; }   // v4.470: a pad is a container — tier + Pad, pad notes, no External ID
                 body.custom.poi_type_str = x.subtype;
                 const isNewU = !knownSubs.has(x.subtype.toLowerCase()); body.custom.new_poi_type_str = isNewU ? x.subtype : '';
-                if (x.ext) impSetExtOnBody(body, x.ext);                     // v4.434/v4.438: External ID (custom.external_asset_id) from the file; left as it was when the file has none
+                if (x.ext && !x.padRow) impSetExtOnBody(body, x.ext);                     // v4.434/v4.438: External ID (custom.external_asset_id) from the file; left as it was when the file has none
                 let st = 0, raw = '';
                 try { const rr = await fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) }); st = rr.status; raw = await rr.text(); }
                 catch (e) { raw = String(e && e.message || e); }
                 if (st === 200 && x.alsoChild) {                                           // v4.469: the well itself, with the drawn outline, nested under the pad
                     const ch = x.alsoChild; const childNotes = impComposeNotes(x.p, stamp, 'create'); const extra = { parent_asset_name: ent.name }; if (x.ext) extra.custom = { [IMP_EXT_FIELD]: x.ext };
-                    const rc = await createAssetSquare(sid, x.p.lat, x.p.lng, impPointSizeFt(x.p), uniq(ch.name), x.subtype, !knownSubs.has(x.subtype.toLowerCase()), childNotes, x.p.shape, extra);
-                    if (rc && rc.ok) { ok++; created.push({ id: rc.id, name: ch.name, point: x.p, ext: x.ext, subtype: x.subtype }); x.p.createdId = rc.id; } else { fail++; console.warn(`${TAG} 📥 child "${ch.name}" under "${ent.name}" failed:`, rc && rc.error); }
+                    const wellSub = impTierPrefix(x.p, impCleanType(impApplyHv(x.p, (imp.mapping && imp.mapping.type) ? (impResolveSubtype(x.p.typeRaw || '', siteSubs).value || defSub) : impApplyShield((imp.typeMap['__all__'] || '').trim() || defSub), siteSubs)));
+                    const rc = await createAssetSquare(sid, x.p.lat, x.p.lng, impPointSizeFt(x.p), uniq(ch.name), wellSub, !knownSubs.has(wellSub.toLowerCase()), childNotes, x.p.shape || null, extra);
+                    if (rc && rc.ok) { ok++; created.push({ id: rc.id, name: ch.name, point: x.p, ext: x.ext, subtype: wellSub }); x.p.createdId = rc.id; } else { fail++; console.warn(`${TAG} 📥 child "${ch.name}" under "${ent.name}" failed:`, rc && rc.error); }
                     await sleep(DELETE_GAP_MS);
                 }
                 if (st === 200) { updOk++; updated.push({ id: ent.id, name: x.name, before: JSON.parse(JSON.stringify(ent)), point: x.p, subtype: x.subtype, notes: body.description }); x.p.done = true; x.p.sel = false; if (isNewU) { impCommitNote(`new type "${impEsc(x.subtype)}" declared — waiting for the server to list it…`); if (await impConfirmType(sid, x.subtype)) knownSubs.add(x.subtype.toLowerCase()); } }
@@ -28034,7 +28036,83 @@
     // ---- v4.469 OUTLINES LEFT BEHIND. A row that name-matched a WRAPPER asset ("Pad - X" for row "X") took the update path
     // (type + notes on the pad) and its drawn outline was never written — the pad polygon stayed. The well itself is a
     // separate asset in Percepto's nesting: create it with the row's exact name (free) and the drawn outline, parented to the pad. ----
-    function impWrapperOutlineRows() {
+    // ---- v4.470 PAD MODEL (account manager + user, 2026-10-26): a "Pad - X" asset is a CONTAINER. It carries the pad tier as
+    // its type ("P2 - Pad"), the same pad-level priority note as every well on it, and NO External ID (only wells carry one).
+    // Every well — X included — is its own child asset with its outline (or a square). ----
+    function impPadType(p) { const t = imp.pri.on && p && p.pri && p.pri.tier ? p.pri.tier : ''; return t ? `${t} - Pad` : 'Pad'; }
+    function impComposePadNotes(p, pad, when, nWells) {
+        const parts = [`Pad\n${pad.name}${nWells ? ` · ${nWells} well${nWells === 1 ? '' : 's'}` : ''}`].concat(impPriNotesBlocks(p, String(when).slice(0, 10)));
+        parts.push(`Imported by ${impAuthor() || 'AIM user'} on ${when} from ${imp.fileName || 'file'} · updated by import`);
+        return impSafeNotes(parts.join('\n\n')).slice(0, IMP_NOTES_MAX);
+    }
+    function impWrapperRows() {
+        const sid = genState.siteID; const ents = (sid && mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+        const byId = new Map(ents.map(e => [e.id, e])); const byName = new Map(ents.filter(e => e.name).map(e => [String(e.name).trim().toLowerCase(), e]));
+        const kids = new Map(); ents.forEach(e => { const pn = typeof e.parent_asset_name === 'string' ? e.parent_asset_name.trim().toLowerCase() : ''; if (pn) kids.set(pn, (kids.get(pn) || 0) + 1); });
+        const out = [];
+        imp.points.forEach(p => {
+            if (!p.dup || p.dupId == null || p.removed || p.pa || p.thirdParty) return;
+            const pad = byId.get(p.dupId); if (!pad) return;
+            const rowName = genCleanName(p.name); if (!rowName) return;
+            if (String(pad.name || '').trim().toLowerCase() === rowName.toLowerCase()) return;   // exact match = the row IS that asset
+            const child = byName.get(rowName.toLowerCase()) || null;
+            out.push({ p, pad, name: rowName, child, nWells: (kids.get(String(pad.name).trim().toLowerCase()) || 0) + (child ? 0 : 1) });
+        });
+        return out;
+    }
+    function impWrapperOutlineRows() { return impWrapperRows().filter(x => !x.child && !x.p.createdId); }
+    // the repair: every wrapper-matched row → pad retyped + pad notes + External ID cleared, and the well created (outline or square) if missing
+    async function impApplyPadModel() {
+        if (liteBlockedWrite('apply the pad model')) return;
+        const sid = genState.siteID;
+        try { await fetchMapObjects(sid, true); } catch (e) {}
+        impBuildAssetIndex(); impComputeDups();
+        const rows = impWrapperRows();
+        if (!rows.length) { impCommitNote('✓ no pad-matched rows in this import', '#5fff5f'); return; }
+        const todoPad = rows.filter(x => { const want = impPadType(x.p); const have = String((x.pad.custom && x.pad.custom.poi_type_str) || '').trim(); return have.toLowerCase() !== want.toLowerCase() || impExtOfEnt(x.pad) !== '' || !/^Pad\n/.test(String(x.pad.description || '')); });
+        const todoChild = rows.filter(x => !x.child && !x.p.createdId);
+        const dry = (() => { try { return !!document.getElementById('aim-gen-dryrun').checked; } catch (e) { return true; } })();
+        if (dry) { impCommitNote(`DRY RUN — pad model: <b>${todoPad.length}</b> pad(s) get type "${impEsc(impPadType({ pri: { tier: 'P2' } }))}"-style + pad notes + External ID cleared · <b>${todoChild.length}</b> well(s) created under their pad (${todoChild.filter(x => x.p.shape).length} from drawn outlines, ${todoChild.filter(x => !x.p.shape).length} as squares) · e.g. ${impEsc(rows.slice(0, 6).map(x => `${x.pad.name} → ${impPadType(x.p)}${x.child || x.p.createdId ? '' : ` + well ${x.name}`}`).join(' · '))} …. Untick Dry run to write.`); return; }
+        const csrf = getCsrfToken(); if (!csrf) { impCommitNote('No CSRF token — make one native save anywhere in Percepto first, then retry', '#ff6060'); return; }
+        let siteCfg = null; try { siteCfg = await fetchSiteConfig(sid); } catch (e) {}
+        if (!siteCfg) { impCommitNote('Could not read the site config — nothing written', '#ff6060'); return; }
+        if (!confirm(`Apply the pad model: retype ${todoPad.length} pad(s) (tier + Pad, pad notes, External ID removed) and create ${todoChild.length} well(s) under their pads?\n\nBackup downloads first; ↩ Undo last import reverts.`)) return;
+        try { downloadJSONFile(`pad-model-${sid}-${Date.now()}.json`, JSON.stringify({ site: sid, at: new Date().toISOString(), pads: todoPad.map(x => x.pad), wells: todoChild.map(x => ({ name: x.name, pad: x.pad.name, shape: x.p.shape || null })) }, null, 1)); } catch (e) {}
+        const subCounts = impSiteSubtypes(); const siteSubs = [...subCounts.keys()]; const defSub = [...subCounts.entries()].sort((a, b) => b[1] - a[1]).map(x => x[0])[0] || 'well-cluster';
+        const subtypeFor = (p) => { let v; if (!imp.mapping || !imp.mapping.type) v = impApplyShield((imp.typeMap['__all__'] || '').trim() || defSub); else { v = impResolveSubtype(p.typeRaw || '', siteSubs).value || defSub; } v = impCleanType(impApplyHv(p, v, siteSubs)); return impTierPrefix(p, v); };
+        const known = impSiteTypeSet(); const stamp = impNowStamp(); let okP = 0, okC = 0, fail = 0; const updated = [], created = [];
+        const post = async (body) => fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) });
+        for (let i = 0; i < todoPad.length; i++) {
+            const x = todoPad[i]; const want = impPadType(x.p); impCommitNote(`pad ${i + 1}/${todoPad.length} — "${impEsc(x.pad.name)}" → ${impEsc(want)}…`);
+            try {
+                const body = buildWriteBody(x.pad, siteCfg); if (!body.custom || typeof body.custom !== 'object') body.custom = {};
+                const isNew = !known.has(want.toLowerCase()); body.custom.poi_type_str = want; body.custom.new_poi_type_str = isNew ? want : '';
+                body.custom[IMP_EXT_FIELD] = null; body.description = impComposePadNotes(x.p, x.pad, stamp, x.nWells);
+                const rr = await post(body);
+                if (rr.status === 200) { okP++; updated.push({ id: x.pad.id, name: x.pad.name, before: JSON.parse(JSON.stringify(x.pad)) }); if (isNew && await impConfirmType(sid, want)) known.add(want.toLowerCase()); }
+                else { fail++; console.warn(`${TAG} 🧱 pad "${x.pad.name}" ${rr.status} ${(await rr.text()).slice(0, 200)}`); if (rr.status === 403) { impCommitNote('ABORTED — server 403', '#ff6060'); break; } }
+            } catch (e) { fail++; console.warn(`${TAG} 🧱 pad "${x.pad.name}"`, e); }
+            await sleep(DELETE_GAP_MS);
+        }
+        for (let i = 0; i < todoChild.length; i++) {
+            const x = todoChild[i]; const sub = subtypeFor(x.p); const isNew = !known.has(sub.toLowerCase());
+            impCommitNote(`well ${i + 1}/${todoChild.length} — "${impEsc(x.name)}" under ${impEsc(x.pad.name)}…`);
+            const notes = impComposeNotes(x.p, stamp, 'create'); const ext = impExtIdOf(x.p);
+            const extra = { parent_asset_name: x.pad.name }; if (ext) extra.custom = { [IMP_EXT_FIELD]: ext };
+            const r = await createAssetSquare(sid, x.p.lat, x.p.lng, impPointSizeFt(x.p), x.name, sub, isNew, notes, x.p.shape || null, extra);
+            if (r && r.ok) { okC++; created.push(r.id); x.p.createdId = r.id; if (isNew && await impConfirmType(sid, sub)) known.add(sub.toLowerCase()); }
+            else { fail++; console.warn(`${TAG} 🧱 well "${x.name}" failed:`, r && r.error); if (r && /Server 403/.test(r.error || '')) { impCommitNote('ABORTED — server 403', '#ff6060'); break; } }
+            await sleep(DELETE_GAP_MS);
+        }
+        imp.lastUpdated = imp.lastUpdated.concat(updated); imp.lastCreated = imp.lastCreated.concat(created);
+        await sleep(1500); try { await fetchMapObjects(sid, true); } catch (e) {}
+        const after = new Map((((mapObjectsBySite[sid] || {}).entities) || []).map(e => [e.id, e]));
+        const padOk = updated.filter(u => { const e = after.get(u.id); return e && impExtOfEnt(e) === '' && /pad$/i.test(String((e.custom && e.custom.poi_type_str) || '')); }).length;
+        const nested = created.filter(id => { const e = after.get(id); return e && String(e.parent_asset_name || '').trim(); }).length;
+        imp._rootCache = null; impBuildAssetIndex(); impComputeDups(); impRefreshAfterSelChange(); try { impSaveSession('import'); } catch (e) {}
+        impCommitNote(`🧱 DONE: <b>${okP}</b> pads retyped (verified ${padOk}/${updated.length}: tier + Pad, no External ID) · <b>${okC}</b> wells created (nested ${nested}/${created.length})${fail ? ` · <span style="color:#ff6060">${fail} failed</span>` : ''} · ↩ Undo last import reverts · reload to see them natively`, fail || padOk < updated.length || nested < created.length ? '#ffb347' : '#5fff5f');
+    }
+    function impWrapperOutlineRows_legacy() {
         const sid = genState.siteID; const ents = (sid && mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
         const byId = new Map(ents.map(e => [e.id, e])); const names = new Set(ents.filter(e => e.name).map(e => String(e.name).trim().toLowerCase()));
         const out = [];

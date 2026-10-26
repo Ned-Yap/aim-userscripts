@@ -1,3 +1,7 @@
+## 2026-10-26 — 🧱 Pad model — Site Setup Tools latest v4.470 (latest only)
+
+- **v4.470** — agreed with the account manager: a `Pad - X` asset is a **container**. Its type is the pad tier plus `Pad` (`P2 - Pad`), its notes carry the same pad-level priority line as every well on it (`P2 · pad total 402 BLPD across 5 assets · pad …`, no per-well volume anywhere), and it carries **no External ID** (only wells do). Every well, X included, is its own child asset with its outline or a square. **⚡ 🧱 Apply pad model** does this for the 235 pads already imported; every future ⚡ Create applies the same rule, and the quarterly re-run rewrites tier, type and notes on pad and wells alike.
+
 ## 2026-10-23 — 🚫 AVOID - 3rd Party Pad — Site Setup Tools latest v4.444 → v4.469 (latest only)
 
 - **v4.469** — a row with a drawn outline that name-matched a `Pad - …` wrapper asset took the update path and its outline was never written (updates never touch geometry). Now such a row does both: the pad gets type + notes, and the well itself is created from the outline with the row's own name, nested under the pad. **⚡ ↻ Create outlines left behind** does the same for rows already imported.
