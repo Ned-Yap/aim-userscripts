@@ -1,4 +1,6 @@
-## 2026-10-26 — 🧱 Pad model — Site Setup Tools latest v4.470 → v4.475 (latest only)
+## 2026-10-26 — 🧱 Pad model — Site Setup Tools latest v4.470 → v4.476 (latest only)
+
+- **v4.476** — every type write references an existing type by the exact string the server stores (lowercase) and declares only a truly new one; mixed-case references were silently ignored on some writes (pads left at their old type).
 
 - **v4.475** — pad model follows a well that now exists up to its parent pad (or the strict `Pad - <row>` wrapper for an orphan), so the remaining pad work runs after the wells were created.
 

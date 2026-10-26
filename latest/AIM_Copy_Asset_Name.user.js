@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.475
+// @version      4.476
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.475';
+    const SCRIPT_VERSION = '4.476';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -27861,8 +27861,8 @@
                 body.description = String(x.notes || '').slice(0, 2000);
                 if (!body.custom || typeof body.custom !== 'object') body.custom = {};
                 if (x.padRow) { x.subtype = impPadType(x.p); body.description = impComposePadNotes(x.p, ent, stamp, x.padRow.nWells); body.custom[IMP_EXT_FIELD] = ''; }   // v4.470: a pad is a container — tier + Pad, pad notes, no External ID
-                body.custom.poi_type_str = x.subtype;
-                const isNewU = !knownSubs.has(x.subtype.toLowerCase()); body.custom.new_poi_type_str = isNewU ? x.subtype : '';
+                const refU = impTypeRef(x.subtype, knownSubs); body.custom.poi_type_str = refU.poi;
+                const isNewU = refU.isNew; body.custom.new_poi_type_str = isNewU ? x.subtype : '';
                 if (x.ext && !x.padRow) impSetExtOnBody(body, x.ext);                     // v4.434/v4.438: External ID (custom.external_asset_id) from the file; left as it was when the file has none
                 let st = 0, raw = '';
                 try { const rr = await fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) }); st = rr.status; raw = await rr.text(); }
@@ -27870,7 +27870,8 @@
                 if (st === 200 && x.alsoChild) {                                           // v4.469: the well itself, with the drawn outline, nested under the pad
                     const ch = x.alsoChild; const childNotes = impComposeNotes(x.p, stamp, 'create'); const extra = { parent_asset_name: ent.name }; if (x.ext) extra.custom = { [IMP_EXT_FIELD]: x.ext };
                     const wellSub = impTierPrefix(x.p, impCleanType(impApplyHv(x.p, (imp.mapping && imp.mapping.type) ? (impResolveSubtype(x.p.typeRaw || '', siteSubs).value || defSub) : impApplyShield((imp.typeMap['__all__'] || '').trim() || defSub), siteSubs)));
-                    const rc = await createAssetSquare(sid, x.p.lat, x.p.lng, impPointSizeFt(x.p), uniq(ch.name), wellSub, !knownSubs.has(wellSub.toLowerCase()), childNotes, x.p.shape || null, extra);
+                    const refW = impTypeRef(wellSub, knownSubs);
+                    const rc = await createAssetSquare(sid, x.p.lat, x.p.lng, impPointSizeFt(x.p), uniq(ch.name), refW.poi, refW.isNew, childNotes, x.p.shape || null, extra);
                     if (rc && rc.ok) { ok++; created.push({ id: rc.id, name: ch.name, point: x.p, ext: x.ext, subtype: wellSub }); x.p.createdId = rc.id; } else { fail++; console.warn(`${TAG} 📥 child "${ch.name}" under "${ent.name}" failed:`, rc && rc.error); }
                     await sleep(DELETE_GAP_MS);
                 }
@@ -27883,8 +27884,8 @@
                 continue;
             }
             impCommitNote(`creating ${i + 1}/${plan.length} — "${impEsc(x.name)}"…`);
-            const isNewC = !knownSubs.has(x.subtype.toLowerCase());
-            const r = await createAssetSquare(sid, x.p.lat, x.p.lng, impPointSizeFt(x.p), x.name, x.subtype, isNewC, x.notes || '', x.p.shape || (x.p.pa ? assetTrianglePoints(x.p.lat, x.p.lng, impPointSizeFt(x.p)) : null), x.ext ? { custom: { [IMP_EXT_FIELD]: x.ext } } : null);   // v4.413: P&A size · v4.416: P&A = triangle unless an outline was drawn
+            const refC = impTypeRef(x.subtype, knownSubs); const isNewC = refC.isNew;
+            const r = await createAssetSquare(sid, x.p.lat, x.p.lng, impPointSizeFt(x.p), x.name, refC.poi, isNewC, x.notes || '', x.p.shape || (x.p.pa ? assetTrianglePoints(x.p.lat, x.p.lng, impPointSizeFt(x.p)) : null), x.ext ? { custom: { [IMP_EXT_FIELD]: x.ext } } : null);   // v4.413: P&A size · v4.416: P&A = triangle unless an outline was drawn
             if (r && r.ok) {
                 ok++; created.push({ id: r.id, name: x.name, point: x.p, ext: x.ext, subtype: x.subtype }); x.p.createdId = r.id;
                 if (isNewC) { impCommitNote(`new type "${impEsc(x.subtype)}" declared — waiting for the server to list it…`); if (await impConfirmType(sid, x.subtype)) knownSubs.add(x.subtype.toLowerCase()); }
@@ -27974,6 +27975,15 @@
     // type it already has. So: existence is checked ignoring case; a type is declared new only when truly absent; after the
     // FIRST write of a new type the site is re-read until the type shows up (≤ 3 s) so the next writes reference it. ----
     function impSiteTypeSet() { return new Set([...impSiteSubtypes().keys()].map(t => t.toLowerCase())); }
+    // v4.476: reference an EXISTING type by the exact string the server stores (lowercase); declare only a truly new one.
+    // Mixed-case references resolved on some writes and were silently ignored on others (pad types stuck at the old value).
+    function impTypeRef(want, known) {
+        const w = String(want || '').trim(); const lower = w.toLowerCase();
+        const stored = [...impSiteSubtypes().keys()].find(t => t.toLowerCase() === lower);
+        if (stored) return { poi: stored, isNew: false };
+        if (known && known.has(lower)) return { poi: lower, isNew: false };            // confirmed earlier in this run (server keeps it lowercase)
+        return { poi: w, isNew: true };
+    }
     async function impConfirmType(sid, want) {
         for (let i = 0; i < 5; i++) { await sleep(600); try { await fetchMapObjects(sid, true); } catch (e) {} if (impSiteTypeSet().has(want.toLowerCase())) return true; }
         return false;
@@ -28011,8 +28021,8 @@
             const x = todo[i]; impCommitNote(`↻ ${i + 1}/${todo.length} — "${impEsc(x.e.name)}" → ${impEsc(x.want)}…`);
             try {
                 const body = buildWriteBody(x.e, siteCfg); if (!body.custom || typeof body.custom !== 'object') body.custom = {};
-                const isNew = !known.has(x.want.toLowerCase());
-                body.custom.poi_type_str = x.want; body.custom.new_poi_type_str = isNew ? x.want : '';
+                const ref = impTypeRef(x.want, known); const isNew = ref.isNew;
+                body.custom.poi_type_str = ref.poi; body.custom.new_poi_type_str = isNew ? x.want : '';
                 const rr = await fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) });
                 const txt = await rr.text(); let js = null; try { js = JSON.parse(txt); } catch (e) {}
                 if (rr.status === 200) {
@@ -28154,7 +28164,7 @@
             const x = todoPad[i]; const want = impPadType(x.p); impCommitNote(`pad ${i + 1}/${todoPad.length} — "${impEsc(x.pad.name)}" → ${impEsc(want)}…`);
             try {
                 const body = buildWriteBody(x.pad, siteCfg); if (!body.custom || typeof body.custom !== 'object') body.custom = {};
-                const isNew = !known.has(want.toLowerCase()); body.custom.poi_type_str = want; body.custom.new_poi_type_str = isNew ? want : '';
+                const ref = impTypeRef(want, known); const isNew = ref.isNew; body.custom.poi_type_str = ref.poi; body.custom.new_poi_type_str = isNew ? want : '';
                 body.custom[IMP_EXT_FIELD] = ''; body.description = impComposePadNotes(x.p, x.pad, stamp, x.nWells);   // v4.471: '' clears it — null was ignored (56/241 verified)
                 const rr = await post(body);
                 if (rr.status === 200) { okP++; updated.push({ id: x.pad.id, name: x.pad.name, before: JSON.parse(JSON.stringify(x.pad)) }); if (isNew && await impConfirmType(sid, want)) known.add(want.toLowerCase()); }
@@ -28163,11 +28173,11 @@
             await sleep(DELETE_GAP_MS);
         }
         for (let i = 0; i < todoChild.length; i++) {
-            const x = todoChild[i]; const sub = subtypeFor(x.p); const isNew = !known.has(sub.toLowerCase());
+            const x = todoChild[i]; const sub = subtypeFor(x.p); const refS = impTypeRef(sub, known); const isNew = refS.isNew;
             impCommitNote(`well ${i + 1}/${todoChild.length} — "${impEsc(x.name)}" under ${impEsc(x.pad.name)}…`);
             const notes = impComposeNotes(x.p, stamp, 'create'); const ext = impExtIdOf(x.p);
             const extra = { parent_asset_name: x.pad.name }; if (ext) extra.custom = { [IMP_EXT_FIELD]: ext };
-            const r = await createAssetSquare(sid, x.p.lat, x.p.lng, impPointSizeFt(x.p), x.name, sub, isNew, notes, x.p.shape || null, extra);
+            const r = await createAssetSquare(sid, x.p.lat, x.p.lng, impPointSizeFt(x.p), x.name, refS.poi, isNew, notes, x.p.shape || null, extra);
             if (r && r.ok) { okC++; created.push(r.id); x.p.createdId = r.id; if (isNew && await impConfirmType(sid, sub)) known.add(sub.toLowerCase()); }
             else { fail++; console.warn(`${TAG} 🧱 well "${x.name}" failed:`, r && r.error); if (r && /Server 403/.test(r.error || '')) { impCommitNote('ABORTED — server 403', '#ff6060'); break; } }
             await sleep(DELETE_GAP_MS);
