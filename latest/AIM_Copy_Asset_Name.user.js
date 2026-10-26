@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.456
+// @version      4.457
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.456';
+    const SCRIPT_VERSION = '4.457';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -26074,7 +26074,7 @@
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc" title="Square side of each created asset — same shape ➕ Create asset uses. Reshape in Percepto afterwards (auto-reshape is feature #251).">Size <input type="number" id="aim-imp-size" min="5" max="2000" step="5" style="width:52px;${inCss}"> ft</label>
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#ff8a80" title="Side of the TRIANGLE a 🩻 P&A asset becomes (plugged / expired / cancelled / retired wells and facilities from the fill-in) — three corners instead of four so it never passes for a normal asset. ↔ Move and ✏ Shape still apply.">P&A size <input type="number" id="aim-imp-pasize" min="5" max="2000" step="5" style="width:52px;background:#1a1d23;border:1px solid rgba(255,138,128,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px"> ft</label>
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#ffd400" title="What happens to a staged point whose NAME matches an asset already on this site. Update = rewrite that asset's TYPE and NOTES from this file, never its shape or position (the quarterly re-run). Copy = create a second asset named …-2. Skip = leave it alone. Points merely inside / near an existing asset are only flagged and always created.">name matches <select id="aim-imp-dupmode" style="background:#1a1d23;border:1px solid rgba(255,212,0,0.45);color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px"><option value="update">update type + notes</option><option value="skip">skip</option><option value="copy">create a copy (-N)</option></select></label>
-                <button id="aim-imp-preflight" style="${btnCss('122,223,230')}" title="👁 Reads only: a plain-text report of everything the importer knows about the run — what Create would do, types, names, flags, Enverus, safety — downloaded and copied to the clipboard for review before writing.">👁 📋 Pre-import report</button><span id="aim-imp-preflight-note" style="flex-basis:100%;font-size:10px;color:#9ad"></span>
+                <button id="aim-imp-preflight" style="${btnCss('122,223,230')}" title="👁 Reads only: a plain-text report of everything the importer knows about the run — what Create would do, types, names, flags, Enverus, safety — downloaded and copied to the clipboard for review before writing.">👁 📋 Pre-import report</button><span id="aim-imp-preflight-note" style="flex-basis:100%;font-size:10px;color:#9ad"></span><div id="aim-imp-commit-note" style="flex-basis:100%;font-size:11px;color:#9ad;line-height:1.5;min-height:14px;padding:4px 8px;background:rgba(255,255,255,0.03);border-radius:3px"></div>
                 <button id="aim-imp-commit" style="${btnCss('255,120,60')};font-weight:600" title="WRITES to AIM: creates the selected staged points as real assets (updates type + notes on name matches). Honours Dry run. A backup manifest downloads first; ↩ Undo reverts exactly this run.">⚡ Create selected</button>
                 <button id="aim-imp-undocreate" style="${btnCss('255,179,71')}" title="WRITES to AIM: deletes exactly the assets the most recent import created (this session) and puts updated ones back. Each delete rides Delete Guard's undo ring when installed.">↩ Undo last import</button>
             </div>
@@ -27720,6 +27720,11 @@
     }
     // ---- COMMIT: create-only, rides createAssetSquare (template clone, Lite
     // gate, CSRF, elevation, ghost, session names) + batch rails on top ----
+    // v4.457: Create's messages render NEXT TO the button as well as in the top status line (rule from v4.408)
+    function impCommitNote(html, color) {
+        impStatus(html, color);
+        try { const el = document.getElementById('aim-imp-commit-note'); if (el) { el.innerHTML = html; el.style.color = color || '#9ad'; } } catch (e) {}
+    }
     async function impCommit() {
         if (!impMasterEnabled) { showToast('Asset Importer is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
         if (liteBlockedWrite('import assets')) return;
@@ -27728,11 +27733,11 @@
         const targets = imp.points.filter(p => !p.done && p.sel && (!p.dup || imp.dupMode !== 'skip'));
         // v4.427: an ambiguous name match (several assets contain the name) never writes blind
         const amb = imp.dupMode === 'update' ? targets.filter(p => p.dup && p.dupAmbiguous && p.dupTier !== 3) : [];   // v4.455: only an ambiguous EXACT/punctuation match blocks (tier-3 ambiguity is created as new)
-        if (amb.length) { impStatus(`BLOCKED — <b>${amb.length}</b> name match${amb.length === 1 ? '' : 'es'} ${amb.length === 1 ? 'is' : 'are'} ambiguous (the name fits several assets): ${impEsc(amb.slice(0, 8).map(p => `${p.name} → ${p.dupWhy.replace(/^⚠ ambiguous: /, '')}`).join(' · '))}${amb.length > 8 ? ' …' : ''}. Rename the row or the asset so one matches exactly, or set "name matches" to skip.`, '#ff6060'); return; }
+        if (amb.length) { impCommitNote(`BLOCKED — <b>${amb.length}</b> name match${amb.length === 1 ? '' : 'es'} ${amb.length === 1 ? 'is' : 'are'} ambiguous (the name fits several assets): ${impEsc(amb.slice(0, 8).map(p => `${p.name} → ${p.dupWhy.replace(/^⚠ ambiguous: /, '')}`).join(' · '))}${amb.length > 8 ? ' …' : ''}. Rename the row or the asset so one matches exactly, or set "name matches" to skip.`, '#ff6060'); return; }
         const guardedN = imp.points.filter(p => !p.done && p.sel && p.matchNote).length;
         const skippedDups = imp.points.filter(p => !p.done && p.sel && p.dup && imp.dupMode === 'skip').length;
-        if (!targets.length) { impStatus(`Nothing to create — select staged points first${skippedDups ? ` (${skippedDups} selected point(s) match existing names; set "name matches" to update or copy)` : ''}`, '#ffb347'); return; }
-        if (imp.pri.on) { try { impComputePriority(); } catch (e) { impStatus(`Priority compute failed: ${impEsc(e && e.message || e)}`, '#ff6060'); return; } }
+        if (!targets.length) { impCommitNote(`Nothing to create — select staged points first${skippedDups ? ` (${skippedDups} selected point(s) match existing names; set "name matches" to update or copy)` : ''}`, '#ffb347'); return; }
+        if (imp.pri.on) { try { impComputePriority(); } catch (e) { impCommitNote(`Priority compute failed: ${impEsc(e && e.message || e)}`, '#ff6060'); return; } }
         // resolve every point's subtype BEFORE anything writes — unmapped types block loudly
         const subCounts = impSiteSubtypes();
         // same frequency-sorted default the type-mapping UI shows
@@ -27755,22 +27760,22 @@
             return impTierPrefix(p, v);                                     // v4.347: "P1 - " prefix when tiers are on
         };
         const plan = targets.map(p => ({ p, subtype: subtypeFor(p), update: !!(p.dup && imp.dupMode === 'update' && p.dupId != null) }));
-        if (missing.size) { impStatus(`BLOCKED — rows with a blank type: pick a subtype for <b>${impEsc([...missing].join(' · '))}</b> in the Type table above.`, '#ff6060'); return; }
+        if (missing.size) { impCommitNote(`BLOCKED — rows with a blank type: pick a subtype for <b>${impEsc([...missing].join(' · '))}</b> in the Type table above.`, '#ff6060'); return; }
         plan.forEach(x => { x.ext = impExtIdOf(x.p); });
         const nExt = plan.filter(x => x.ext).length;
         const dry = (() => { try { return !!document.getElementById('aim-gen-dryrun').checked; } catch (e) { return true; } })();
         const nUpd = plan.filter(x => x.update).length, nCre = plan.length - nUpd;
         const nPa = plan.filter(x => x.p.pa).length;
-        if (dry) { impStatus(`DRY RUN — would create <b>${nCre}</b> asset(s) (${impSizeFt}×${impSizeFt} ft squares${nPa ? `, 🩻 ${nPa} P&A as ${imp.env.paSizeFt} ft triangles` : ''})${imp.mapping && imp.mapping.extId ? ` · 🆔 External ID on ${nExt}/${plan.length}` : ' · <span style="color:#ffb347">no External ID column mapped</span>'}${guardedN ? ` · ${guardedN} near-match${guardedN === 1 ? '' : 'es'} set aside as NEW (battery wrapper / -DUP — hover the dot)` : ''}${nUpd ? ` and UPDATE type + notes on <b>${nUpd}</b> existing` : ''}${skippedDups ? `, skipping ${skippedDups} name match(es)` : ''}${imp.pri.on ? ` · tiers ON (${plan.filter(x => /^P[1-3] - /.test(x.subtype)).length} prefixed)` : ''}: ${impEsc(plan.slice(0, 12).map(x => `${x.update ? '↻ ' : ''}${x.p.name} [${x.subtype}]`).join(' · '))}${plan.length > 12 ? ' …' : ''}. Untick Dry run to write.`); return; }
+        if (dry) { impCommitNote(`DRY RUN — would create <b>${nCre}</b> asset(s) (${impSizeFt}×${impSizeFt} ft squares${nPa ? `, 🩻 ${nPa} P&A as ${imp.env.paSizeFt} ft triangles` : ''})${imp.mapping && imp.mapping.extId ? ` · 🆔 External ID on ${nExt}/${plan.length}` : ' · <span style="color:#ffb347">no External ID column mapped</span>'}${guardedN ? ` · ${guardedN} near-match${guardedN === 1 ? '' : 'es'} set aside as NEW (battery wrapper / -DUP — hover the dot)` : ''}${nUpd ? ` and UPDATE type + notes on <b>${nUpd}</b> existing` : ''}${skippedDups ? `, skipping ${skippedDups} name match(es)` : ''}${imp.pri.on ? ` · tiers ON (${plan.filter(x => /^P[1-3] - /.test(x.subtype)).length} prefixed)` : ''}: ${impEsc(plan.slice(0, 12).map(x => `${x.update ? '↻ ' : ''}${x.p.name} [${x.subtype}]`).join(' · '))}${plan.length > 12 ? ' …' : ''}. Untick Dry run to write.`); return; }
         if (plan.length > IMP_BIG_BATCH) {
             const ack = (() => { try { return !!document.getElementById('aim-imp-biggate-ack').checked; } catch (e) { return false; } })();
-            if (!ack) { impStatus(`BLOCKED — <b>${plan.length}</b> assets is more than ${IMP_BIG_BATCH} in one run. Narrow the selection with a boundary KML, or tick "I understand the risk" under the Create button to proceed anyway.`, '#ff6060'); return; }
+            if (!ack) { impCommitNote(`BLOCKED — <b>${plan.length}</b> assets is more than ${IMP_BIG_BATCH} in one run. Narrow the selection with a boundary KML, or tick "I understand the risk" under the Create button to proceed anyway.`, '#ff6060'); return; }
             console.warn(`${TAG} 📥 big batch acknowledged: ${plan.length} creates in one run`);
         }
         const csrf = getCsrfToken();
-        if (!csrf) { impStatus('No CSRF token — make one native save anywhere in Percepto first, then retry', '#ff6060'); return; }
+        if (!csrf) { impCommitNote('No CSRF token — make one native save anywhere in Percepto first, then retry', '#ff6060'); return; }
         // fresh entity fetch → template + used names reflect the live server
-        impStatus('Fetching fresh site data…');
+        impCommitNote('Fetching fresh site data…');
         try { await fetchMapObjects(sid, true); } catch (e) {}
         impBuildAssetIndex();
         const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
@@ -27786,14 +27791,14 @@
         const byIdEnt = new Map(ents.map(e => [e.id, e]));
         plan.forEach(x => { x.name = x.update ? (byIdEnt.get(x.p.dupId) || {}).name || x.p.name : uniq(x.p.name); x.notes = impComposeNotes(x.p, stamp, x.update ? 'update' : 'create'); x.ext = impExtIdOf(x.p); });   // v4.434: + External ID   // v4.345: notes = original name + chosen columns + who/when/file · v4.365: stamp says created / updated
         let siteCfg = null;
-        if (nUpd) { try { siteCfg = await fetchSiteConfig(sid); } catch (e) {} if (!siteCfg) { impStatus('Could not read the site config (mountain-terrain flag) — updates refused, nothing written', '#ff6060'); return; } }
+        if (nUpd) { try { siteCfg = await fetchSiteConfig(sid); } catch (e) {} if (!siteCfg) { impCommitNote('Could not read the site config (mountain-terrain flag) — updates refused, nothing written', '#ff6060'); return; } }
         // backup manifest BEFORE any write (rollback = delete the created ids / re-POST the updated bodies)
         const manifest = { site: sid, at: new Date().toISOString(), file: imp.fileName, sizeFt: impSizeFt,
             creates: plan.filter(x => !x.update).map(x => ({ name: x.name, subtype: x.subtype, lat: x.p.lat, lng: x.p.lng, notes: x.notes, movedFrom: x.p.orig || null, shape: x.p.shape || (x.p.pa ? assetTrianglePoints(x.p.lat, x.p.lng, impPointSizeFt(x.p)) : null), sizeFt: impPointSizeFt(x.p), pa: x.p.pa || null })),
             updates: plan.filter(x => x.update).map(x => ({ id: x.p.dupId, name: x.name, after: { subtype: x.subtype, notes: x.notes }, before: byIdEnt.get(x.p.dupId) || null })) };
         try { impSaveSession('pre-create'); impDownloadSession('before-create'); } catch (e) { console.warn(`${TAG} 📥 pre-create backup:`, e); }   // v4.449: the whole session on disk before the first write
         try { localStorage.setItem(`aim_imp_commit_backup:${sid}`, JSON.stringify(manifest)); } catch (e) {}
-        try { downloadJSONFile(`asset-import-${sid}-${Date.now()}.json`, JSON.stringify(manifest, null, 1)); } catch (e) { impStatus('backup manifest download failed (localStorage stash still written)'); }
+        try { downloadJSONFile(`asset-import-${sid}-${Date.now()}.json`, JSON.stringify(manifest, null, 1)); } catch (e) { impCommitNote('backup manifest download failed (localStorage stash still written)'); }
         // fresh subtypes only need new_poi_type_str on their FIRST create
         const knownSubs = new Set([...impSiteSubtypes().keys()]);
         let ok = 0, fail = 0, aborted = false, updOk = 0;
@@ -27801,7 +27806,7 @@
         for (let i = 0; i < plan.length; i++) {
             const x = plan[i];
             if (x.update) {                                              // v4.347: rewrite TYPE + NOTES on the existing asset, nothing else
-                impStatus(`updating ${i + 1}/${plan.length} — "${impEsc(x.name)}"…`);
+                impCommitNote(`updating ${i + 1}/${plan.length} — "${impEsc(x.name)}"…`);
                 const ent = byIdEnt.get(x.p.dupId);
                 if (!ent) { fail++; console.warn(`${TAG} 📥 update "${x.name}": existing asset #${x.p.dupId} not in the fresh fetch`); await sleep(DELETE_GAP_MS); continue; }
                 const body = buildWriteBody(ent, siteCfg);
@@ -27816,12 +27821,12 @@
                 if (st === 200) { updOk++; updated.push({ id: ent.id, name: x.name, before: JSON.parse(JSON.stringify(ent)), point: x.p, subtype: x.subtype, notes: body.description }); knownSubs.add(x.subtype); x.p.done = true; x.p.sel = false; }
                 else {
                     fail++; console.warn(`${TAG} 📥 update "${x.name}" failed: ${st} ${raw.slice(0, 200)}`);
-                    if (st === 403) { aborted = true; impStatus(`ABORTED at ${i + 1}/${plan.length} — server 403 (write permission lost). ${ok} created, ${updOk} updated, rest kept staged.`, '#ff6060'); break; }
+                    if (st === 403) { aborted = true; impCommitNote(`ABORTED at ${i + 1}/${plan.length} — server 403 (write permission lost). ${ok} created, ${updOk} updated, rest kept staged.`, '#ff6060'); break; }
                 }
                 await sleep(DELETE_GAP_MS);
                 continue;
             }
-            impStatus(`creating ${i + 1}/${plan.length} — "${impEsc(x.name)}"…`);
+            impCommitNote(`creating ${i + 1}/${plan.length} — "${impEsc(x.name)}"…`);
             const r = await createAssetSquare(sid, x.p.lat, x.p.lng, impPointSizeFt(x.p), x.name, x.subtype, !knownSubs.has(x.subtype), x.notes || '', x.p.shape || (x.p.pa ? assetTrianglePoints(x.p.lat, x.p.lng, impPointSizeFt(x.p)) : null), x.ext ? { custom: { [IMP_EXT_FIELD]: x.ext } } : null);   // v4.413: P&A size · v4.416: P&A = triangle unless an outline was drawn
             if (r && r.ok) {
                 ok++; created.push({ id: r.id, name: x.name, point: x.p, ext: x.ext }); x.p.createdId = r.id;
@@ -27830,12 +27835,12 @@
             } else {
                 fail++;
                 console.warn(`${TAG} 📥 create "${x.name}" failed:`, r && r.error);
-                if (r && /Server 403/.test(r.error || '')) { aborted = true; impStatus(`ABORTED at ${i + 1}/${plan.length} — server 403 (write permission lost). ${ok} created, rest kept staged.`, '#ff6060'); break; }
+                if (r && /Server 403/.test(r.error || '')) { aborted = true; impCommitNote(`ABORTED at ${i + 1}/${plan.length} — server 403 (write permission lost). ${ok} created, rest kept staged.`, '#ff6060'); break; }
             }
             await sleep(DELETE_GAP_MS);
         }
         // verify-by-refetch: every created id must exist server-side
-        impStatus('verifying against a fresh fetch…');
+        impCommitNote('verifying against a fresh fetch…');
         try { await fetchMapObjects(sid, true); } catch (e) {}
         const after = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
         const byId = new Set(after.map(e => e.id));
@@ -27851,7 +27856,7 @@
         impBuildAssetIndex(); impComputeDups(); impRefreshAfterSelChange();
         try { impSaveSession('import'); } catch (e) {}   // v4.364: the undo record is on disk before the user can reload
         try { impRenderImportsUi(); } catch (e) {}
-        if (!aborted) impStatus(`DONE: <b>${ok}</b> created${nUpd ? ` · <b>${updOk}/${nUpd}</b> updated (type + notes)` : ''}${fail ? ` · <span style="color:#ff6060">${fail} FAILED (kept staged + selected)</span>` : ''}${skippedDups ? ` · ${skippedDups} name match(es) skipped` : ''} · verify ${verified.length}/${created.length} created present${nUpd ? `, ${updVerified.length}/${updated.length} updates match` : ''}${extNote} · reload to edit them natively`, (fail || updVerified.length !== updated.length) ? '#ffb347' : '#5fff5f');
+        if (!aborted) impCommitNote(`DONE: <b>${ok}</b> created${nUpd ? ` · <b>${updOk}/${nUpd}</b> updated (type + notes)` : ''}${fail ? ` · <span style="color:#ff6060">${fail} FAILED (kept staged + selected)</span>` : ''}${skippedDups ? ` · ${skippedDups} name match(es) skipped` : ''} · verify ${verified.length}/${created.length} created present${nUpd ? `, ${updVerified.length}/${updated.length} updates match` : ''}${extNote} · reload to edit them natively`, (fail || updVerified.length !== updated.length) ? '#ffb347' : '#5fff5f');
         showToast(fail ? `Import: ${ok} created, ${updOk} updated, ${fail} FAILED — see the importer panel` : `✓ ${ok} created${updOk ? `, ${updOk} updated` : ''}`, fail ? 'rgba(255,96,96,0.55)' : undefined);
     }
     // ---- v4.453 📋 PRE-FLIGHT REPORT — everything the importer knows about the run about to happen, as plain text
@@ -27895,13 +27900,13 @@
         return L.join('\n');
     }
     function impPreflight(how) {
-        let txt; try { txt = impPreflightText(); } catch (e) { console.warn(`${TAG} 📋 preflight:`, e); impStatus(`📋 report failed: ${impEsc(e && e.message || e)}`, '#ff6060'); return; }
+        let txt; try { txt = impPreflightText(); } catch (e) { console.warn(`${TAG} 📋 preflight:`, e); impCommitNote(`📋 report failed: ${impEsc(e && e.message || e)}`, '#ff6060'); return; }
         const name = `pre-import-report-${genState.siteID}-${impNowStamp().replace(/[: ]/g, '-')}.txt`;
         let saved = false; if (how !== 'copy') saved = downloadJSONFile(name, txt);   // v4.455: top-window download (an anchor inside Percepto's iframe is blocked)
         try { navigator.clipboard.writeText(txt); } catch (e) {}
         console.log(`${TAG} 📋 pre-import report\n${txt}`);
         const msg = `📋 report ${saved ? `saved as ${impEsc(name)} and ` : ''}copied to the clipboard — ${txt.split('\n').length} lines${/^!!/m.test(txt) ? ' · <b style="color:#ff6060">contains !! blockers</b>' : ' · no blockers'}`;
-        impStatus(msg, '#5fff5f');
+        impCommitNote(msg, '#5fff5f');
         try { const host = document.getElementById('aim-imp-preflight-note'); if (host) host.innerHTML = msg; } catch (e) {}
     }
     // Undo THIS import: delete exactly the ids the last commit created.
