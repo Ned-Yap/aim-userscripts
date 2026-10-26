@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.448
+// @version      4.449
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.448';
+    const SCRIPT_VERSION = '4.449';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -24354,6 +24354,8 @@
             await sleep(DELETE_GAP_MS);
         }
         imp.lastCreated = imp.lastCreated.filter(id => !dead.has(id));
+        const deadNames = new Set(g.created.filter(e => dead.has(e.id)).map(e => e.name));
+        imp.points.forEach(p => { if (p.done && !p.removed && ((p.createdId && dead.has(p.createdId)) || deadNames.has(p.name))) { p.done = false; p.sel = true; p.selManual = true; delete p.createdId; } });   // v4.449: staged again for a retry
         try { await fetchMapObjects(sid, true); } catch (e) {}
         imp._rootCache = null; impBuildAssetIndex(); impComputeDups(); impRefreshAfterSelChange();
         try { impMarkDirty(); } catch (e) {}
@@ -27658,6 +27660,7 @@
             if (hs) { hs.style.display = imp.headers.length ? 'flex' : 'none'; hs.dataset.genDisplay = 'flex'; }
             if (hn) hn.innerHTML = !imp.headers.length ? '' : `${impEsc(imp.fileName || 'file')} · ${live.length} staged · ${selN} selected · ${imp.dirty ? '<span style="color:#ffb347">unsaved changes — autosaves in a moment</span>' : (imp.lastSavedAt ? `<span style="color:#5fff5f">💾 saved ${impEsc(impFmtWhen(imp.lastSavedAt))}</span>` : 'not saved yet')}`;
             if (hb && !hb.onclick) hb.onclick = () => { impSaveSession('manual'); };
+            const bb = document.getElementById('aim-imp-headbackup-btn'); if (bb && !bb.onclick) bb.onclick = () => { impSaveSession('manual'); impDownloadSession(''); };
         } catch (e) {}
     }
     // ---- COMMIT: create-only, rides createAssetSquare (template clone, Lite
@@ -27732,6 +27735,7 @@
         const manifest = { site: sid, at: new Date().toISOString(), file: imp.fileName, sizeFt: impSizeFt,
             creates: plan.filter(x => !x.update).map(x => ({ name: x.name, subtype: x.subtype, lat: x.p.lat, lng: x.p.lng, notes: x.notes, movedFrom: x.p.orig || null, shape: x.p.shape || (x.p.pa ? assetTrianglePoints(x.p.lat, x.p.lng, impPointSizeFt(x.p)) : null), sizeFt: impPointSizeFt(x.p), pa: x.p.pa || null })),
             updates: plan.filter(x => x.update).map(x => ({ id: x.p.dupId, name: x.name, after: { subtype: x.subtype, notes: x.notes }, before: byIdEnt.get(x.p.dupId) || null })) };
+        try { impSaveSession('pre-create'); impDownloadSession('before-create'); } catch (e) { console.warn(`${TAG} 📥 pre-create backup:`, e); }   // v4.449: the whole session on disk before the first write
         try { localStorage.setItem(`aim_imp_commit_backup:${sid}`, JSON.stringify(manifest)); } catch (e) {}
         try { downloadJSONFile(`asset-import-${sid}-${Date.now()}.json`, JSON.stringify(manifest, null, 1)); } catch (e) { impStatus('backup manifest download failed (localStorage stash still written)'); }
         // fresh subtypes only need new_poi_type_str on their FIRST create
@@ -27764,7 +27768,7 @@
             impStatus(`creating ${i + 1}/${plan.length} — "${impEsc(x.name)}"…`);
             const r = await createAssetSquare(sid, x.p.lat, x.p.lng, impPointSizeFt(x.p), x.name, x.subtype, !knownSubs.has(x.subtype), x.notes || '', x.p.shape || (x.p.pa ? assetTrianglePoints(x.p.lat, x.p.lng, impPointSizeFt(x.p)) : null), x.ext ? { custom: { [IMP_EXT_FIELD]: x.ext } } : null);   // v4.413: P&A size · v4.416: P&A = triangle unless an outline was drawn
             if (r && r.ok) {
-                ok++; created.push({ id: r.id, name: x.name, point: x.p, ext: x.ext });
+                ok++; created.push({ id: r.id, name: x.name, point: x.p, ext: x.ext }); x.p.createdId = r.id;
                 knownSubs.add(x.subtype);
                 x.p.done = true; x.p.sel = false;
             } else {
@@ -27829,6 +27833,8 @@
             await sleep(DELETE_GAP_MS);
         }
         imp.lastCreated = imp.lastCreated.filter(id => !deleted.has(id));
+        let rearmed = 0; imp.points.forEach(p => { if (p.createdId && deleted.has(p.createdId)) { p.done = false; p.sel = true; p.selManual = true; delete p.createdId; rearmed++; } });   // v4.449: back to staged → ⚡ Create again
+        if (rearmed) impStatus(`↩ ${rearmed} point(s) are staged again (outlines kept) — fix what you need and ⚡ Create once more`, '#5fff5f');
         try { impMarkDirty(); } catch (e) {}
         try { await fetchMapObjects(genState.siteID, true); } catch (e) {}
         impBuildAssetIndex(); impComputeDups(); impRefreshAfterSelChange();
@@ -28124,8 +28130,8 @@
         clearInterval(impAutosaveIv); impAutosaveIv = null;
         if (impAutosaveMin > 0) impAutosaveIv = setInterval(() => { if (imp.dirty) { try { impSaveSession('timer'); } catch (e) { console.warn(`${TAG} 📥 autosave failed:`, e); } } }, impAutosaveMin * 60000);
     }
-    function impSaveSession(why) {
-        const k = impSessionKey(); if (!k || !imp.headers.length) return false;
+    // v4.449: the whole session as one object — saved to Tampermonkey storage, downloaded as a backup file, loadable with ⬆ Load saved session
+    function impBuildSessionData() {
         const hdr = imp.headers;
         const data = {
             v: 1, savedAt: new Date().toISOString(), fileName: imp.fileName, headers: hdr,
@@ -28135,7 +28141,7 @@
                 const o = { i: p.i };
                 if (p.orig) { o.lat = p.lat; o.lng = p.lng; o.orig = p.orig; }
                 if (p.removed) o.removed = true;
-                if (p.done && !p.removed) o.created = true;
+                if (p.done && !p.removed) { o.created = true; if (p.createdId) o.cid = p.createdId; }
                 if (p.selManual !== undefined) o.selManual = p.selManual;
                 if (p.reviewed) o.rv = true;
                 if (p.env && !p.env.noApi) o.env = p.env;
@@ -28158,6 +28164,11 @@
             lastReset: imp.lastReset || null,   // v4.437
             resp: imp.resp.rows ? { rows: imp.resp.rows.map(r => Object.assign({}, r)), fileName: imp.resp.fileName, at: imp.resp.at, applied: imp.resp.applied, moves: imp.resp.moves.map(x => ({ id: x.id, name: x.name, from: x.from, to: x.to, why: x.why, look: x.look, force: !!x.force })), renames: imp.resp.renames, removeIds: imp.resp.removeIds, removeNames: imp.resp.removeNames } : null,
         };
+        return data;
+    }
+    function impSaveSession(why) {
+        const k = impSessionKey(); if (!k || !imp.headers.length) return false;
+        const data = impBuildSessionData();
         const json = JSON.stringify(data);
         const live = imp.points.filter(p => !p.done).length;
         const meta = { v: 1, savedAt: data.savedAt, fileName: imp.fileName, rows: imp.rows.length, live, moved: imp.points.filter(p => p.orig).length, removed: imp.points.filter(p => p.removed).length, created: imp.points.filter(p => p.done && !p.removed).length, shapes: imp.shapes.length, bytes: json.length, siteName: getCurrentSiteName() || '', undoCreated: imp.lastCreated.length, undoUpdated: imp.lastUpdated.length };
@@ -28182,6 +28193,15 @@
         clearTimeout(impAutosaveT);
         try { impSyncUi(); } catch (e) {}
         if (why === 'manual') impStatus(`💾 progress saved (${(json.length / 1048576).toFixed(1)} MB) — resume from the Asset Import page any time, even after a reload or sign-out`);
+        return true;
+    }
+    function impDownloadSession(tag) {
+        if (!imp.headers.length) { impStatus('Nothing loaded to back up', '#ffb347'); return false; }
+        const d = impBuildSessionData(); const sid = genState.siteID || getCurrentSiteID() || 'site';
+        const name = `aim-import-session-${sid}-${tag ? tag + '-' : ''}${impNowStamp().replace(/[: ]/g, '-')}.json`;
+        try { downloadJSONFile(name, JSON.stringify(d)); } catch (e) { impStatus(`Backup download failed: ${impEsc(e && e.message || e)}`, '#ff6060'); return false; }
+        const pts = d.points || [];
+        impStatus(`⬇ <b>${impEsc(name)}</b> saved to Downloads — ${pts.filter(o => o.shape).length} outlines · ${pts.filter(o => o.orig).length} moved · ${d.rows.length} rows · load it any time with ⬆ Load saved session`, '#5fff5f');
         return true;
     }
     function impSessionMeta(k) { try { const m = JSON.parse(GM_getValue(IMP_SESSION_META + k, '') || 'null'); return m && m.v === 1 ? m : null; } catch (e) { return null; } }
@@ -28244,7 +28264,7 @@
             const p = byI.get(o.i); if (!p) return;
             if (o.orig) { p.orig = o.orig; p.lat = o.lat; p.lng = o.lng; moved++; }
             if (o.removed) { p.removed = true; p.done = true; p.sel = false; removed++; }
-            if (o.created) { p.done = true; p.sel = false; created++; }
+            if (o.created) { p.done = true; p.sel = false; created++; if (o.cid) p.createdId = o.cid; }
             if (o.selManual !== undefined) p.selManual = o.selManual;
             if (o.rv) p.reviewed = true;
             if (o.env) p.env = o.env;
@@ -32565,7 +32585,7 @@
             </div>
             <div style="color:#888;font-size:11px">${xmlEscape(siteName)} · ${assets.length} asset${assets.length === 1 ? '' : 's'} (${eligibleCount} eligible)</div>
             <label data-gen-sec="tool" id="aim-gen-dryrow" style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;margin-top:8px;padding:5px 10px;border-radius:3px;background:rgba(95,255,95,0.08);border:1px solid rgba(95,255,95,0.4)"><input type="checkbox" id="aim-gen-dryrun" checked style="accent-color:#5fff5f"> <b id="aim-gen-drylabel" style="color:#5fff5f">🧪 Dry run — nothing is written</b> <span style="color:#888;font-size:10px">(every tool on this panel honors it)</span></label>
-            <div data-gen-sec="imp" id="aim-imp-headsave" style="display:none;align-items:center;gap:8px;font-size:11px;margin-top:6px;padding:3px 10px;border-radius:3px;background:rgba(95,255,95,0.05);border:1px solid rgba(95,255,95,0.25)"><span id="aim-imp-headsave-note" style="color:#9ad;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span><button id="aim-imp-headsave-btn" title="Save everything on this page — file, mapping, moved / removed points, outlines, boundaries — so you can pick up later, after a reload or sign-out. Autosaves run anyway; this is the 'right now' button." style="background:rgba(95,255,95,0.15);color:#5fff5f;border:1px solid rgba(95,255,95,0.5);border-radius:3px;padding:2px 10px;cursor:pointer;font:inherit;font-size:11px;font-weight:600">💾 Save progress</button></div>
+            <div data-gen-sec="imp" id="aim-imp-headsave" style="display:none;align-items:center;gap:8px;font-size:11px;margin-top:6px;padding:3px 10px;border-radius:3px;background:rgba(95,255,95,0.05);border:1px solid rgba(95,255,95,0.25)"><span id="aim-imp-headsave-note" style="color:#9ad;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span><button id="aim-imp-headbackup-btn" title="Download the whole session as a file: every outline, move, tick, Enverus and client result. Keep it anywhere; ⬆ Load saved session brings it back on any machine." style="background:rgba(122,223,230,0.15);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 10px;cursor:pointer;font:inherit;font-size:11px;font-weight:600">⬇ Backup file</button><button id="aim-imp-headsave-btn" title="Save everything on this page — file, mapping, moved / removed points, outlines, boundaries — so you can pick up later, after a reload or sign-out. Autosaves run anyway; this is the 'right now' button." style="background:rgba(95,255,95,0.15);color:#5fff5f;border:1px solid rgba(95,255,95,0.5);border-radius:3px;padding:2px 10px;cursor:pointer;font:inherit;font-size:11px;font-weight:600">💾 Save progress</button></div>
             </div>
             <div id="aim-gen-help" style="display:none;margin-bottom:12px;padding:8px 10px;background:rgba(122,223,230,0.07);border:1px solid rgba(122,223,230,0.4);border-radius:4px;font-size:11px;color:#cfd6dc;line-height:1.5"></div>
             <div id="aim-gen-menu" data-gen-sec="menu">

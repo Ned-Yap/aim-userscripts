@@ -1,4 +1,6 @@
-## 2026-10-23 — 🚫 AVOID - 3rd Party Pad — Site Setup Tools latest v4.444 → v4.448 (latest only)
+## 2026-10-23 — 🚫 AVOID - 3rd Party Pad — Site Setup Tools latest v4.444 → v4.449 (latest only)
+
+- **v4.449** — **⬇ Backup file** in the sticky header downloads the whole session (every outline, move, tick, Enverus and client result) as one file; ⬆ Load saved session brings it back on any machine. ⚡ Create now saves the session and downloads that backup file automatically before its first write. **Undo re-arms the points**: after ↩ Undo last import or 🕘 delete-the-run, the affected points are staged and selected again with their outlines, so you fix what you need and ⚡ Create once more.
 
 - **v4.448** — types follow the same character rule as names: `PA Asset - Plugged` / `PA 3rd Party - Retired` (no ampersand), `AVOID - 3rd Party Pad Battery` (no brackets). Bulk → Rename's Type tab can restyle them later if wanted.
 
