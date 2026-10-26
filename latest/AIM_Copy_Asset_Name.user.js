@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.465
+// @version      4.466
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.465';
+    const SCRIPT_VERSION = '4.466';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -23017,7 +23017,7 @@
         swap: { pairs: [], pick: [], at: null, lastSwaps: [] },               // 🔁 mislabeled wellheads
         env: { apiCol: null, open: false, notes: true, checkedAt: null, summary: null, running: false, opFilter: '', mismatchFt: 300, scope: 'selected', includeOurs: false,
             missing: null, missingAt: null, missingOp: '', missingSel: new Set(), missStatus: { producing: true, drilled: true, inactive: true, plugged: true, facility: true }, finding: false, missingFac: true,
-            paAssets: true, paSizeFt: 100, paMatchFt: 250, paReview: null, thirdType: 'AVOID - 3rd Party Pad', areaFt: 300 },   // v4.450: fill-in area = the site's flight envelope (FFZs) + areaFt when no importer boundary is drawn   // v4.444: one searchable type for every other operator's well / facility   // v4.413: 🩻 plugged / retired → P&A assets (own size), status review (API match, location tolerance)   // v4.366: fill-in · facilities too   // v4.356: Enverus cross-check · v4.358: client review report
+            paAssets: true, paSizeFt: 100, paMatchFt: 250, paReview: null, thirdType: 'AVOID - 3rd Party Pad', areaFt: 300, thirdSizeFt: 150 },   // v4.466: own size for other operators' pads   // v4.450: fill-in area = the site's flight envelope (FFZs) + areaFt when no importer boundary is drawn   // v4.444: one searchable type for every other operator's well / facility   // v4.413: 🩻 plugged / retired → P&A assets (own size), status review (API match, location tolerance)   // v4.366: fill-in · facilities too   // v4.356: Enverus cross-check · v4.358: client review report
         hv: { on: true, col: null, useEnv: true },     // v4.418: h - / v - / d - type prefix: file deviation column → Enverus trajectory → the asset's existing prefix
         pri: { on: false, open: false, oilCol: null, waterCol: null, blpdCol: null, priCol: null, clusterFt: 100, padFt: 50, p1Min: 250, p1Max: 1500, summary: null, zeroUntier: true, envUntier: true },   // v4.347: priority tiers · v4.357: zero-production / Enverus-dead wells get no tier
         advOpen: false,                             // v4.331: ▸ Advanced (subset tools + delete mode) expanded — GM-remembered
@@ -23040,7 +23040,7 @@
         lastDelete: null,                           // {siteID, when, entities:[full bodies]} — ↩ Undo batch source
         assetIndex: null,                           // cached [{id,name,clean,ring,bbox,centroid}] for dup-guard + delete select
     };
-    function impSaveParams() { try { GM_setValue(IMP_PARAMS_KEY, JSON.stringify({ radiusVal: imp.radiusVal, radiusUnit: imp.radiusUnit, includeDups: imp.includeDups, advOpen: imp.advOpen, keepShield: imp.keepShield, dupMode: imp.dupMode, secOpen: imp.secOpen, shapeW: imp.shapeW, snapFt: imp.snapFt, bufFt: imp.bufFt, gapFt: imp.gapFt, anaMovedFt: imp.ana.movedFt, paAssets: imp.env.paAssets, paSizeFt: imp.env.paSizeFt, paMatchFt: imp.env.paMatchFt, hvOn: imp.hv.on, hvEnv: imp.hv.useEnv, thirdType: imp.env.thirdType, areaFt: imp.env.areaFt, alignDeg: imp.alignDeg, farFt: imp.farFt, flagAdvance: imp.flagAdvance, flagDir: imp.flagDir, showUnsel: imp.showUnsel, pri: { clusterFt: imp.pri.clusterFt, padFt: imp.pri.padFt, p1Min: imp.pri.p1Min, p1Max: imp.pri.p1Max, open: imp.pri.open, setOpen: imp.pri.setOpen, zeroUntier: imp.pri.zeroUntier, envUntier: imp.pri.envUntier } })); } catch (e) {} }
+    function impSaveParams() { try { GM_setValue(IMP_PARAMS_KEY, JSON.stringify({ radiusVal: imp.radiusVal, radiusUnit: imp.radiusUnit, includeDups: imp.includeDups, advOpen: imp.advOpen, keepShield: imp.keepShield, dupMode: imp.dupMode, secOpen: imp.secOpen, shapeW: imp.shapeW, snapFt: imp.snapFt, bufFt: imp.bufFt, gapFt: imp.gapFt, anaMovedFt: imp.ana.movedFt, paAssets: imp.env.paAssets, paSizeFt: imp.env.paSizeFt, paMatchFt: imp.env.paMatchFt, hvOn: imp.hv.on, hvEnv: imp.hv.useEnv, thirdType: imp.env.thirdType, areaFt: imp.env.areaFt, thirdSizeFt: imp.env.thirdSizeFt, alignDeg: imp.alignDeg, farFt: imp.farFt, flagAdvance: imp.flagAdvance, flagDir: imp.flagDir, showUnsel: imp.showUnsel, pri: { clusterFt: imp.pri.clusterFt, padFt: imp.pri.padFt, p1Min: imp.pri.p1Min, p1Max: imp.pri.p1Max, open: imp.pri.open, setOpen: imp.pri.setOpen, zeroUntier: imp.pri.zeroUntier, envUntier: imp.pri.envUntier } })); } catch (e) {} }
     function impLoadParams() {
         try {
             const raw = GM_getValue(IMP_PARAMS_KEY, ''); if (!raw) return;
@@ -23067,6 +23067,7 @@
             if (typeof o.hvOn === 'boolean') imp.hv.on = o.hvOn;
             if (typeof o.thirdType === 'string' && o.thirdType.trim()) imp.env.thirdType = o.thirdType.trim();
             if (typeof o.areaFt === 'number' && o.areaFt >= 0) imp.env.areaFt = o.areaFt;
+            if (typeof o.thirdSizeFt === 'number' && o.thirdSizeFt >= 5) imp.env.thirdSizeFt = o.thirdSizeFt;
             if (typeof o.alignDeg === 'number' && o.alignDeg >= 0) imp.alignDeg = o.alignDeg;
             if (typeof o.farFt === 'number' && o.farFt >= 0) imp.farFt = o.farFt;
             if (typeof o.flagAdvance === 'boolean') imp.flagAdvance = o.flagAdvance;
@@ -26100,10 +26101,12 @@
                     <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;color:#ffb3ad;margin-top:4px"><input type="checkbox" id="aim-imp-biggate-ack" style="accent-color:#ff5555"> I understand the risk — create them anyway</label>
                 </div>
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#cfd6dc" title="Square side of each created asset — same shape ➕ Create asset uses. Reshape in Percepto afterwards (auto-reshape is feature #251).">Size <input type="number" id="aim-imp-size" min="5" max="2000" step="5" style="width:52px;${inCss}"> ft</label>
+                <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#ffd666" title="Square side for other operators' pads (AVOID - 3rd Party Pad) — big enough to read as a pad to avoid, not a wellhead.">3rd-party size <input type="number" id="aim-imp-thirdsize" min="5" max="2000" step="5" style="width:52px;background:#1a1d23;border:1px solid rgba(255,214,102,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px"> ft</label>
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#ff8a80" title="Side of the TRIANGLE a 🩻 P&A asset becomes (plugged / expired / cancelled / retired wells and facilities from the fill-in) — three corners instead of four so it never passes for a normal asset. ↔ Move and ✏ Shape still apply.">P&A size <input type="number" id="aim-imp-pasize" min="5" max="2000" step="5" style="width:52px;background:#1a1d23;border:1px solid rgba(255,138,128,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px"> ft</label>
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#ffd400" title="What happens to a staged point whose NAME matches an asset already on this site. Update = rewrite that asset's TYPE and NOTES from this file, never its shape or position (the quarterly re-run). Copy = create a second asset named …-2. Skip = leave it alone. Points merely inside / near an existing asset are only flagged and always created.">name matches <select id="aim-imp-dupmode" style="background:#1a1d23;border:1px solid rgba(255,212,0,0.45);color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px"><option value="update">update type + notes</option><option value="skip">skip</option><option value="copy">create a copy (-N)</option></select></label>
                 <button id="aim-imp-preflight" style="${btnCss('122,223,230')}" title="👁 Reads only: a plain-text report of everything the importer knows about the run — what Create would do, types, names, flags, Enverus, safety — downloaded and copied to the clipboard for review before writing.">👁 📋 Pre-import report</button><span id="aim-imp-preflight-note" style="flex-basis:100%;font-size:10px;color:#9ad"></span><div id="aim-imp-commit-note" style="flex-basis:100%;font-size:11px;color:#9ad;line-height:1.5;min-height:14px;padding:4px 8px;background:rgba(255,255,255,0.03);border-radius:3px"></div>
                 <button id="aim-imp-commit" style="${btnCss('255,120,60')};font-weight:600" title="WRITES to AIM: creates the selected staged points as real assets (updates type + notes on name matches). Honours Dry run. A backup manifest downloads first; ↩ Undo reverts exactly this run.">⚡ Create selected</button>
+                <button id="aim-imp-resize" style="${btnCss('255,120,60')}" title="WRITES to AIM: rewrites the polygon of every asset this session created WITHOUT a drawn outline to the current sizes (Size / 3rd-party size / P&A size), centred where it is. Drawn outlines are never touched. Dry run lists them first.">⚡ ↻ Resize squares</button>
                 <button id="aim-imp-resendtypes" style="${btnCss('255,120,60')}" title="WRITES to AIM: for every asset this session created or updated, compares the stored type with the intended one and re-sends only the type where they differ (declared as new when the site lacks it). Dry run shows the list first.">⚡ ↻ Re-send types</button>
                 <button id="aim-imp-undocreate" style="${btnCss('255,179,71')}" title="WRITES to AIM: deletes exactly the assets the most recent import created (this session) and puts updated ones back. Each delete rides Delete Guard's undo ring when installed.">↩ Undo last import</button>
             </div>
@@ -26259,6 +26262,7 @@
         const szEl = q('aim-imp-size');
         szEl.value = impSizeFt;
         szEl.oninput = () => { const v = parseFloat(szEl.value); if (isFinite(v) && v >= 5 && v <= 2000) { impSizeFt = v; try { if (imp.points.length) { impComputeDups(); impRenderStaged(); impSyncUi(); } } catch (e) {} } };
+        const tsEl = q('aim-imp-thirdsize'); tsEl.value = imp.env.thirdSizeFt; tsEl.oninput = () => { const v = parseFloat(tsEl.value); if (isFinite(v) && v >= 5 && v <= 2000) { imp.env.thirdSizeFt = v; impSaveParams(); try { if (imp.points.length) { impComputeDups(); impRenderStaged(); impSyncUi(); } } catch (e) {} } };
         const paSzEl = q('aim-imp-pasize');
         paSzEl.value = imp.env.paSizeFt;
         paSzEl.oninput = () => { const v = parseFloat(paSzEl.value); if (isFinite(v) && v >= 5 && v <= 2000) { imp.env.paSizeFt = v; impSaveParams(); try { if (imp.points.length) { impComputeDups(); impRenderStaged(); impSyncUi(); } } catch (e) {} } };
@@ -26268,6 +26272,7 @@
         q('aim-imp-commit').onclick = () => { impCommit(); };
         q('aim-imp-preflight').onclick = () => { impPreflight('download'); };
         q('aim-imp-undocreate').onclick = () => { impUndoCreate(); };
+        q('aim-imp-resize').onclick = () => { impResizeCreated().catch(e => { console.warn(`${TAG} ↻ resize`, e); impCommitNote(`↻ ${impEsc(e && e.message || e)}`, '#ff6060'); }); };
         q('aim-imp-resendtypes').onclick = () => { impResendTypes().catch(e => { console.warn(`${TAG} ↻ types`, e); impCommitNote(`↻ ${impEsc(e && e.message || e)}`, '#ff6060'); }); };
         const dmEl = q('aim-imp-delmode');
         dmEl.checked = imp.target === 'assets';
@@ -26727,7 +26732,7 @@
     function impThirdType(x) { const t = genCleanName(imp.env.thirdType || 'AVOID - 3rd Party Pad') || 'AVOID - 3rd Party Pad'; return x && x.facility ? genCleanName(`${t} ${impTitleCase(String(x.facType || 'facility').toLowerCase())}`) : t; }   // v4.448: letters / digits / space / - / _ only, like names
     function impThirdName(x) { return genCleanName(`AVOID - ${x.name || x.api}`); }
     function impPaStageable(x) { return !x.pa || (imp.env.paAssets !== false && !x.onPad); }
-    function impPointSizeFt(p) { return p && p.pa ? (imp.env.paSizeFt || 100) : impSizeFt; }
+    function impPointSizeFt(p) { return p && p.pa ? (imp.env.paSizeFt || 100) : (p && p.thirdParty ? (imp.env.thirdSizeFt || 150) : impSizeFt); }   // v4.466: 3rd-party size
     function impIsPlugged(p) { return !!(p && ((p.pa) || (p.env && p.env.found && impEnvBucket(p.env) === 'plugged'))); }
     // one-line record = everything the (i) shows (goes into the notes of a P&A asset)
     function impEnvRecordText(e) {
@@ -28013,6 +28018,48 @@
         if (confirmed < done.length && imp._resendPass < 4 && !fail) { impCommitNote(`↻ pass ${imp._resendPass}: ${confirmed}/${done.length} stored — running another pass for the rest…`); imp.lastUpdated = imp.lastUpdated.concat(done.map(d => ({ id: d.id, name: d.name, before: d.before }))); return impResendTypes(); }
         const passes = imp._resendPass; imp._resendPass = 0;
         impCommitNote(`↻ DONE after ${passes} pass${passes === 1 ? '' : 'es'}: <b>${ok}</b> re-sent${fail ? ` · <span style="color:#ff6060">${fail} failed</span>` : ''} · stored as sent: <b>${confirmed}/${done.length}</b>${refusedLog.length ? ` · <b style="color:#ff6060">${refusedLog.length} refusals — console + type-refusals-*.json have the server's answer</b>` : ''}${sample ? ` · <span style="color:#ff6060">server kept "${impEsc(String(((after.get(sample.id) || {}).custom || {}).poi_type_str || ''))}" instead of "${impEsc(sample.want)}" on ${impEsc(sample.name)} — the type string itself is being refused</span>` : ''} · ↩ Undo last import reverts`, fail || confirmed < done.length ? '#ffb347' : '#5fff5f');
+    }
+    // ---- v4.466 ↻ RESIZE — assets this session created WITHOUT a drawn outline get their polygon rewritten to the current
+    // size for their kind (square / 3rd-party square / P&A triangle), centred where they are. Only `points` changes. ----
+    async function impResizeCreated() {
+        if (liteBlockedWrite('resize created assets')) return;
+        const sid = genState.siteID;
+        try { await fetchMapObjects(sid, true); } catch (e) {}
+        const byId = new Map((((mapObjectsBySite[sid] || {}).entities) || []).map(e => [e.id, e]));
+        const todo = [];
+        imp.points.forEach(p => {
+            if (!p.createdId || p.removed || (p.shape && p.shape.length >= 3)) return;
+            const e = byId.get(p.createdId); if (!e) return; const ring = entityCoords(e); if (!ring || ring.length < 3) return;
+            const c = ringCentroid(ring); const pr = impProj(c.lat, c.lng); const cur = impMinAreaRect(ring.map(pr.to));
+            const want = impPointSizeFt(p), haveFt = Math.round(Math.max(cur.len, cur.wid) / GEN_FT_TO_M);
+            if (Math.abs(haveFt - want) < 2) return;
+            const pts = p.pa ? assetTrianglePoints(c.lat, c.lng, want) : assetSquarePoints(c.lat, c.lng, want);
+            todo.push({ p, e, haveFt, want, pts, kind: p.pa ? 'triangle' : (p.thirdParty ? '3rd-party square' : 'square') });
+        });
+        if (!todo.length) { impCommitNote('↻ every created square / triangle already has the current size', '#5fff5f'); return; }
+        const dry = (() => { try { return !!document.getElementById('aim-gen-dryrun').checked; } catch (e) { return true; } })();
+        const hist = {}; todo.forEach(x => { const k = `${x.kind} ${x.haveFt} → ${x.want} ft`; hist[k] = (hist[k] || 0) + 1; });
+        if (dry) { impCommitNote(`DRY RUN — would resize <b>${todo.length}</b> created asset(s) (drawn outlines are never touched): ${impEsc(Object.entries(hist).map(([k, v]) => `${v}× ${k}`).join(' · '))}. Set the sizes in this row, then untick Dry run.`); return; }
+        const csrf = getCsrfToken(); if (!csrf) { impCommitNote('No CSRF token — make one native save anywhere in Percepto first, then retry', '#ff6060'); return; }
+        let siteCfg = null; try { siteCfg = await fetchSiteConfig(sid); } catch (e) {}
+        if (!siteCfg) { impCommitNote('Could not read the site config — nothing written', '#ff6060'); return; }
+        if (!confirm(`Resize ${todo.length} created asset(s) to the current sizes? Only the polygon changes; names, types, notes stay.`)) return;
+        try { downloadJSONFile(`resize-${sid}-${Date.now()}.json`, JSON.stringify({ site: sid, at: new Date().toISOString(), changes: todo.map(x => ({ id: x.e.id, name: x.e.name, from: x.haveFt, to: x.want })), before: todo.map(x => x.e) }, null, 1)); } catch (e) {}
+        let ok = 0, fail = 0; const done = [];
+        for (let i = 0; i < todo.length; i++) {
+            const x = todo[i]; impCommitNote(`↻ ${i + 1}/${todo.length} — "${impEsc(x.e.name)}" ${x.haveFt} → ${x.want} ft…`);
+            try {
+                const body = buildWriteBody(x.e, siteCfg); body.points = x.pts;
+                const rr = await fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) });
+                if (rr.status === 200) { ok++; done.push({ id: x.e.id, name: x.e.name, before: JSON.parse(JSON.stringify(x.e)) }); }
+                else { fail++; const t = await rr.text(); console.warn(`${TAG} ↻ resize "${x.e.name}" ${rr.status} ${t.slice(0, 200)}`); if (rr.status === 403) { impCommitNote(`ABORTED at ${i + 1}/${todo.length} — server 403`, '#ff6060'); break; } }
+            } catch (e) { fail++; console.warn(`${TAG} ↻ resize "${x.e.name}"`, e); }
+            await sleep(DELETE_GAP_MS);
+        }
+        imp.lastUpdated = imp.lastUpdated.concat(done);
+        try { await fetchMapObjects(sid, true); } catch (e) {}
+        imp._rootCache = null; impBuildAssetIndex(); impComputeDups(); impRefreshAfterSelChange(); try { impSaveSession('resize'); } catch (e) {}
+        impCommitNote(`↻ DONE: <b>${ok}</b> resized${fail ? ` · <span style="color:#ff6060">${fail} failed</span>` : ''} · ↩ Undo last import reverts · reload to see them natively`, fail ? '#ffb347' : '#5fff5f');
     }
     // Undo THIS import: delete exactly the ids the last commit created.
     async function impUndoCreate() {

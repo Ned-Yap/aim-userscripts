@@ -1,4 +1,6 @@
-## 2026-10-23 — 🚫 AVOID - 3rd Party Pad — Site Setup Tools latest v4.444 → v4.465 (latest only)
+## 2026-10-23 — 🚫 AVOID - 3rd Party Pad — Site Setup Tools latest v4.444 → v4.466 (latest only)
+
+- **v4.466** — **3rd-party size** (default 150 ft) next to Size and P&A size: other operators' AVOID pads get a square that reads as a pad. **⚡ ↻ Resize squares** rewrites the polygon of every asset this session created without a drawn outline to the current sizes, centred where it is; outlines are never touched; dry run, backup, undo.
 
 - **v4.465** — asset notes are capped at 1,000 characters: Percepto rejects longer descriptions with the same "illegal characters" message (the 46 remaining third-party P&A rows were 1,070+). Raw column blocks are dropped first, then the record is shortened; the status line and the import stamp always stay.
 
