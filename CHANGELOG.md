@@ -1,4 +1,6 @@
-## 2026-10-26 — 🧱 Pad model — Site Setup Tools latest v4.470 → v4.471 (latest only)
+## 2026-10-26 — 🧱 Pad model — Site Setup Tools latest v4.470 → v4.472 (latest only)
+
+- **v4.472** — name matching is strict again: a non-exact match is accepted only when the existing asset is the row's name plus wrapper words (`Pad`, `Battery`), never when the two merely share words, and never in the reverse direction (a short asset name inside a longer row name — `HUGHES` must not match `BOREN PAN AM HUGHES C 2`). New **👁 🔍 Audit placements**: lists wells created more than 1,500 ft from their pad, with a delete for exactly those.
 
 - **v4.471** — pad model: the External ID is cleared with an empty string (the server ignores null); wells that exist but are not nested under their pad get re-parented.
 

@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.471
+// @version      4.472
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.471';
+    const SCRIPT_VERSION = '4.472';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -24664,6 +24664,11 @@
                 }
             }
             if (nm && p.thirdParty && !p.statusWas) { guarded = `third-party point — never updates the client's asset "${nm.name}"; created as its own AVOID asset`; }   // v4.444
+            if (nm && !guarded && nmM.tier === 3) {                                           // v4.472: STRICT — the asset must be the row's name plus wrapper words only
+                const st = impNameTokens(p.name), at = nm.tokens || [];
+                const okWrap = at.length > st.length && impTokensContain(at, st) && at.filter(t => !st.includes(t)).every(t => /^(pad|battery|batt|tank|tb)$/.test(t));
+                if (!okWrap) guarded = `"${nm.name}" only shares words with this row (not a Pad - / Battery wrapper of it) — created as NEW`;
+            }
             if (nm && !guarded && nmM.tier === 3 && nmM.ambiguous) {                      // v4.455/v4.456: ambiguous containment
                 const st = impNameTokens(p.name).length, gap = (a) => Math.abs((a.tokens || []).length - st);
                 const o2 = (nmM.others || [])[0];
@@ -26106,6 +26111,7 @@
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#ffd400" title="What happens to a staged point whose NAME matches an asset already on this site. Update = rewrite that asset's TYPE and NOTES from this file, never its shape or position (the quarterly re-run). Copy = create a second asset named …-2. Skip = leave it alone. Points merely inside / near an existing asset are only flagged and always created.">name matches <select id="aim-imp-dupmode" style="background:#1a1d23;border:1px solid rgba(255,212,0,0.45);color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px"><option value="update">update type + notes</option><option value="skip">skip</option><option value="copy">create a copy (-N)</option></select></label>
                 <button id="aim-imp-preflight" style="${btnCss('122,223,230')}" title="👁 Reads only: a plain-text report of everything the importer knows about the run — what Create would do, types, names, flags, Enverus, safety — downloaded and copied to the clipboard for review before writing.">👁 📋 Pre-import report</button><span id="aim-imp-preflight-note" style="flex-basis:100%;font-size:10px;color:#9ad"></span><div id="aim-imp-commit-note" style="flex-basis:100%;font-size:11px;color:#9ad;line-height:1.5;min-height:14px;padding:4px 8px;background:rgba(255,255,255,0.03);border-radius:3px"></div>
                 <button id="aim-imp-commit" style="${btnCss('255,120,60')};font-weight:600" title="WRITES to AIM: creates the selected staged points as real assets (updates type + notes on name matches). Honours Dry run. A backup manifest downloads first; ↩ Undo reverts exactly this run.">⚡ Create selected</button>
+                <button id="aim-imp-audit" style="${btnCss('122,223,230')}" title="👁 Reads only: lists wells this session created more than 1,500 ft from their pad (a far-away row that name-matched a local pad), with a delete for exactly those.">👁 🔍 Audit placements</button>
                 <button id="aim-imp-wrapchild" style="${btnCss('255,120,60')}" title="WRITES to AIM: every row that matched a 'Pad - …' asset → the pad becomes a container (type = tier + Pad, pad-level priority note, External ID removed) and the well itself is created under it from your outline (or as a square) with the row's name, type, notes and External ID. Dry run lists the counts first.">⚡ 🧱 Apply pad model</button>
                 <button id="aim-imp-resize" style="${btnCss('255,120,60')}" title="WRITES to AIM: rewrites the polygon of every asset this session created WITHOUT a drawn outline to the current sizes (Size / 3rd-party size / P&A size), centred where it is. Drawn outlines are never touched. Dry run lists them first.">⚡ ↻ Resize squares</button>
                 <button id="aim-imp-resendtypes" style="${btnCss('255,120,60')}" title="WRITES to AIM: for every asset this session created or updated, compares the stored type with the intended one and re-sends only the type where they differ (declared as new when the site lacks it). Dry run shows the list first.">⚡ ↻ Re-send types</button>
@@ -26273,6 +26279,7 @@
         q('aim-imp-commit').onclick = () => { impCommit(); };
         q('aim-imp-preflight').onclick = () => { impPreflight('download'); };
         q('aim-imp-undocreate').onclick = () => { impUndoCreate(); };
+        q('aim-imp-audit').onclick = () => { impAudit().catch(e => impCommitNote(`🔍 ${impEsc(e && e.message || e)}`, '#ff6060')); };
         q('aim-imp-wrapchild').onclick = () => { impApplyPadModel().catch(e => { console.warn(`${TAG} ↻ outlines`, e); impCommitNote(`↻ ${impEsc(e && e.message || e)}`, '#ff6060'); }); };
         q('aim-imp-resize').onclick = () => { impResizeCreated().catch(e => { console.warn(`${TAG} ↻ resize`, e); impCommitNote(`↻ ${impEsc(e && e.message || e)}`, '#ff6060'); }); };
         q('aim-imp-resendtypes').onclick = () => { impResendTypes().catch(e => { console.warn(`${TAG} ↻ types`, e); impCommitNote(`↻ ${impEsc(e && e.message || e)}`, '#ff6060'); }); };
@@ -28062,6 +28069,40 @@
     }
     function impWrapperOutlineRows() { return impWrapperRows().filter(x => !x.child && !x.p.createdId); }
     // the repair: every wrapper-matched row → pad retyped + pad notes + External ID cleared, and the well created (outline or square) if missing
+    // ---- v4.472 AUDIT — after the pad-model passes: (a) wells created under a pad but far from it (a far-away row that
+    // name-matched a local pad → created at the row's coordinate), (b) created / updated assets whose match was not a strict
+    // wrapper. Each can be reverted: created → deleted, updated → previous body restored. ----
+    function impAuditRows() {
+        const sid = genState.siteID; const ents = (sid && mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+        const byId = new Map(ents.map(e => [e.id, e])); const byName = new Map(ents.filter(e => e.name).map(e => [String(e.name).trim().toLowerCase(), e]));
+        const out = [];
+        ents.filter(e => e.type === 3 && typeof e.parent_asset_name === 'string' && e.parent_asset_name.trim()).forEach(e => {
+            const pad = byName.get(e.parent_asset_name.trim().toLowerCase()); if (!pad) return;
+            const rc = entityCoords(e), rp = entityCoords(pad); if (!rc || !rp || rc.length < 3 || rp.length < 3) return;
+            const ft = Math.round(approxMeters(ringCentroid(rc).lat, ringCentroid(rc).lng, ringCentroid(rp).lat, ringCentroid(rp).lng) / GEN_FT_TO_M);
+            if (ft > 1500 && imp.lastCreated.includes(e.id)) out.push({ kind: 'far', e, pad, ft, why: `created ${ft.toLocaleString()} ft from its pad "${pad.name}"` });
+        });
+        return out;
+    }
+    async function impAuditRevert(list) {
+        if (liteBlockedWrite('revert audited assets')) return;
+        const sid = genState.siteID; const csrf = getCsrfToken(); if (!csrf) { impCommitNote('No CSRF token — make one native save anywhere in Percepto first, then retry', '#ff6060'); return; }
+        if (!confirm(`Delete ${list.length} created asset(s) flagged by the audit?`)) return;
+        try { downloadJSONFile(`audit-revert-${sid}-${Date.now()}.json`, JSON.stringify({ site: sid, at: new Date().toISOString(), deleted: list.map(x => x.e) }, null, 1)); } catch (e) {}
+        let ok = 0, fail = 0;
+        for (const x of list) { try { const r = await fetch(`/map_objects/${encodeURIComponent(x.e.id)}/`, { method: 'DELETE', credentials: 'same-origin', headers: { 'X-CSRFToken': csrf, 'Accept': 'application/json, text/plain, */*' } }); if (r.ok || r.status === 404) { ok++; imp.lastCreated = imp.lastCreated.filter(id => id !== x.e.id); imp.points.forEach(p => { if (p.createdId === x.e.id) { delete p.createdId; p.done = false; p.sel = false; p.selManual = false; } }); } else fail++; } catch (e) { fail++; } await sleep(DELETE_GAP_MS); }
+        try { await fetchMapObjects(sid, true); } catch (e) {}
+        imp._rootCache = null; impBuildAssetIndex(); impComputeDups(); impRefreshAfterSelChange(); try { impSaveSession('audit'); } catch (e) {}
+        impCommitNote(`🔍 audit revert: ${ok} deleted${fail ? ` · <span style="color:#ff6060">${fail} failed</span>` : ''} · the rows are staged again but DESELECTED`, fail ? '#ffb347' : '#5fff5f');
+    }
+    async function impAudit() {
+        const sid = genState.siteID; try { await fetchMapObjects(sid, true); } catch (e) {}
+        const list = impAuditRows();
+        if (!list.length) { impCommitNote('🔍 audit: no well created far from its pad', '#5fff5f'); return; }
+        impCommitNote(`🔍 audit: <b>${list.length}</b> created well(s) sit far from their pad: ${impEsc(list.slice(0, 8).map(x => `${x.e.name} (${x.why})`).join(' · '))}${list.length > 8 ? ' …' : ''} — <button data-impaudit-revert style="background:rgba(255,120,60,0.15);color:#ffb28a;border:1px solid rgba(255,120,60,0.5);border-radius:3px;padding:1px 8px;cursor:pointer;font:inherit;font-size:10px">⚡ delete these ${list.length}</button> <button data-impaudit-zoom style="background:none;border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:3px;padding:1px 8px;cursor:pointer;font:inherit;font-size:10px">🔎 zoom to the first</button>`, '#ffb347');
+        const host = document.getElementById('aim-imp-commit-note');
+        if (host) { const rb = host.querySelector('[data-impaudit-revert]'); if (rb) rb.onclick = () => impAuditRevert(list).catch(e => impCommitNote(`🔍 ${impEsc(e && e.message || e)}`, '#ff6060')); const zb = host.querySelector('[data-impaudit-zoom]'); if (zb) zb.onclick = () => { const x = list[0]; const c = ringCentroid(entityCoords(x.e)); impZoomToPoints([{ lat: c.lat, lng: c.lng, name: x.e.name }], x.e.name); }; }
+    }
     async function impApplyPadModel() {
         if (liteBlockedWrite('apply the pad model')) return;
         const sid = genState.siteID;
