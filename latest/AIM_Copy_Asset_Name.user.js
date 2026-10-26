@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.464
+// @version      4.465
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.464';
+    const SCRIPT_VERSION = '4.465';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -23645,6 +23645,7 @@
     }
     const IMP_STAMP_RE = /^Imported by (.+?) on (\d{4}-\d{2}-\d{2} \d{2}:\d{2}) from (.+?)(?: · (created|updated) by import)?\s*$/m;
     // v4.434: the client's accounting id → Percepto's External ID (asset form field `external_asset_id`, 100 chars)
+    const IMP_NOTES_MAX = 1000;                   // v4.465: server-side description limit (found live 2026-10-26)
     const IMP_EXT_FIELD = 'external_asset_id';   // v4.438: inside `custom` (real asset bodies: custom.external_asset_id), not top-level
     function impExtOfEnt(e) { const c = e && e.custom; return String(c && c[IMP_EXT_FIELD] != null ? c[IMP_EXT_FIELD] : '').trim(); }
     function impSetExtOnBody(body, v) { if (!body.custom || typeof body.custom !== 'object') body.custom = {}; body.custom[IMP_EXT_FIELD] = v; }
@@ -23666,9 +23667,16 @@
             .concat(p.pa ? impPaNotesBlocks(p, dateStr) : [])                                                   // v4.413: why it is here + the full record
             .concat(p.rigWatch && !p.pa ? ['Rig / crane watch\nWorkover rigs and cranes are expected at this type of facility — check for them before each flight'] : []).concat(impClientNotesBlock(p)).concat(impPriNotesBlocks(p, dateStr)).concat(p.pa ? [] : impEnvNotesBlock(p))
             .concat(fromEnv ? [`Status recorded\n${dateStr} · ${p.env.status || '?'}${p.statusWas ? ` (was ${p.statusWas})` : ''}`] : []);   // v4.413: the date this status was read — the future review compares against it
-        impNotesCols().forEach(c => { const v = String(r[c.col] == null ? '' : r[c.col]).trim(); if (v) parts.push(`${c.label || impCleanLabel(c.col)}\n${v}`); });
-        parts.push(`Imported by ${impAuthor() || 'AIM user'} on ${when} from ${imp.fileName || 'file'} · ${how === 'update' ? 'updated' : 'created'} by import`);
-        return impSafeNotes(parts.join('\n\n')).slice(0, 2000);
+        const cols = [];
+        impNotesCols().forEach(c => { const v = String(r[c.col] == null ? '' : r[c.col]).trim(); if (v) cols.push(`${c.label || impCleanLabel(c.col)}\n${v}`); });
+        const stamp = `Imported by ${impAuthor() || 'AIM user'} on ${when} from ${imp.fileName || 'file'} · ${how === 'update' ? 'updated' : 'created'} by import`;
+        // v4.465: Percepto rejects descriptions over ~1,000 characters (same 'illegal characters' message). Fit under the cap by
+        // dropping the raw column blocks from the end first, then shortening the record; the stamp always stays (🕘 Imports reads it).
+        const fit = (core, extra) => impSafeNotes(core.concat(extra, [stamp]).join('\n\n'));
+        let txt = fit(parts, cols);
+        while (txt.length > IMP_NOTES_MAX && cols.length) { cols.pop(); txt = fit(parts, cols); }
+        while (txt.length > IMP_NOTES_MAX && parts.length > 1) { const i = parts.findIndex(x => /^(Well|Facility) record\n/.test(x)); if (i >= 0) { const [h, b] = parts[i].split('\n'); parts[i] = `${h}\n${String(b || '').slice(0, Math.max(40, String(b || '').length - 80))}`; if (String(b || '').length <= 40) parts.splice(i, 1); } else parts.pop(); txt = fit(parts, cols); }
+        return txt.slice(0, IMP_NOTES_MAX);
     }
     // ---- v4.365 UNDO BY STAMP — reads the SITE, not the session. Groups every
     // asset whose notes end in our stamp line by (file · time · author); a

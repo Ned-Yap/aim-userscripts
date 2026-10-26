@@ -1,4 +1,6 @@
-## 2026-10-23 — 🚫 AVOID - 3rd Party Pad — Site Setup Tools latest v4.444 → v4.464 (latest only)
+## 2026-10-23 — 🚫 AVOID - 3rd Party Pad — Site Setup Tools latest v4.444 → v4.465 (latest only)
+
+- **v4.465** — asset notes are capped at 1,000 characters: Percepto rejects longer descriptions with the same "illegal characters" message (the 46 remaining third-party P&A rows were 1,070+). Raw column blocks are dropped first, then the record is shortened; the status line and the import stamp always stay.
 
 - **v4.464** — type registry: the server stores types in lowercase and silently drops a write that declares a type it already has. Types are now matched ignoring case, declared new only when truly absent, and after the first write of a new type the site is re-read until the type is listed before the next asset of that type is written. ↻ Re-send types repeats its pass automatically (up to 4) until everything is stored.
 
