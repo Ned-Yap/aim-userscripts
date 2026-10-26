@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.459
+// @version      4.460
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.459';
+    const SCRIPT_VERSION = '4.460';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -26085,6 +26085,7 @@
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#ffd400" title="What happens to a staged point whose NAME matches an asset already on this site. Update = rewrite that asset's TYPE and NOTES from this file, never its shape or position (the quarterly re-run). Copy = create a second asset named …-2. Skip = leave it alone. Points merely inside / near an existing asset are only flagged and always created.">name matches <select id="aim-imp-dupmode" style="background:#1a1d23;border:1px solid rgba(255,212,0,0.45);color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px"><option value="update">update type + notes</option><option value="skip">skip</option><option value="copy">create a copy (-N)</option></select></label>
                 <button id="aim-imp-preflight" style="${btnCss('122,223,230')}" title="👁 Reads only: a plain-text report of everything the importer knows about the run — what Create would do, types, names, flags, Enverus, safety — downloaded and copied to the clipboard for review before writing.">👁 📋 Pre-import report</button><span id="aim-imp-preflight-note" style="flex-basis:100%;font-size:10px;color:#9ad"></span><div id="aim-imp-commit-note" style="flex-basis:100%;font-size:11px;color:#9ad;line-height:1.5;min-height:14px;padding:4px 8px;background:rgba(255,255,255,0.03);border-radius:3px"></div>
                 <button id="aim-imp-commit" style="${btnCss('255,120,60')};font-weight:600" title="WRITES to AIM: creates the selected staged points as real assets (updates type + notes on name matches). Honours Dry run. A backup manifest downloads first; ↩ Undo reverts exactly this run.">⚡ Create selected</button>
+                <button id="aim-imp-resendtypes" style="${btnCss('255,120,60')}" title="WRITES to AIM: for every asset this session created or updated, compares the stored type with the intended one and re-sends only the type where they differ (declared as new when the site lacks it). Dry run shows the list first.">⚡ ↻ Re-send types</button>
                 <button id="aim-imp-undocreate" style="${btnCss('255,179,71')}" title="WRITES to AIM: deletes exactly the assets the most recent import created (this session) and puts updated ones back. Each delete rides Delete Guard's undo ring when installed.">↩ Undo last import</button>
             </div>
             <div id="aim-imp-extid" style="margin-top:6px"></div>
@@ -26248,6 +26249,7 @@
         q('aim-imp-commit').onclick = () => { impCommit(); };
         q('aim-imp-preflight').onclick = () => { impPreflight('download'); };
         q('aim-imp-undocreate').onclick = () => { impUndoCreate(); };
+        q('aim-imp-resendtypes').onclick = () => { impResendTypes().catch(e => { console.warn(`${TAG} ↻ types`, e); impCommitNote(`↻ ${impEsc(e && e.message || e)}`, '#ff6060'); }); };
         const dmEl = q('aim-imp-delmode');
         dmEl.checked = imp.target === 'assets';
         dmEl.onchange = () => {
@@ -27809,7 +27811,8 @@
         try { impSaveSession('pre-create'); impDownloadSession('before-create'); } catch (e) { console.warn(`${TAG} 📥 pre-create backup:`, e); }   // v4.449: the whole session on disk before the first write
         try { localStorage.setItem(`aim_imp_commit_backup:${sid}`, JSON.stringify(manifest)); } catch (e) {}
         try { downloadJSONFile(`asset-import-${sid}-${Date.now()}.json`, JSON.stringify(manifest, null, 1)); } catch (e) { impCommitNote('backup manifest download failed (localStorage stash still written)'); }
-        // fresh subtypes only need new_poi_type_str on their FIRST create
+        // v4.460: a type the site did not have at the START is declared (new_poi_type_str) on EVERY write of it, like the inline
+        // type edit does per edit — declaring only the first and referencing after cascaded into the OLD type on all later assets
         const knownSubs = new Set([...impSiteSubtypes().keys()]);
         let ok = 0, fail = 0, aborted = false, updOk = 0;
         const created = [], updated = [];
@@ -27828,7 +27831,7 @@
                 let st = 0, raw = '';
                 try { const rr = await fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) }); st = rr.status; raw = await rr.text(); }
                 catch (e) { raw = String(e && e.message || e); }
-                if (st === 200) { updOk++; updated.push({ id: ent.id, name: x.name, before: JSON.parse(JSON.stringify(ent)), point: x.p, subtype: x.subtype, notes: body.description }); knownSubs.add(x.subtype); x.p.done = true; x.p.sel = false; }
+                if (st === 200) { updOk++; updated.push({ id: ent.id, name: x.name, before: JSON.parse(JSON.stringify(ent)), point: x.p, subtype: x.subtype, notes: body.description }); x.p.done = true; x.p.sel = false; }
                 else {
                     fail++; console.warn(`${TAG} 📥 update "${x.name}" failed: ${st} ${raw.slice(0, 200)}`);
                     if (st === 403) { aborted = true; impCommitNote(`ABORTED at ${i + 1}/${plan.length} — server 403 (write permission lost). ${ok} created, ${updOk} updated, rest kept staged.`, '#ff6060'); break; }
@@ -27839,8 +27842,7 @@
             impCommitNote(`creating ${i + 1}/${plan.length} — "${impEsc(x.name)}"…`);
             const r = await createAssetSquare(sid, x.p.lat, x.p.lng, impPointSizeFt(x.p), x.name, x.subtype, !knownSubs.has(x.subtype), x.notes || '', x.p.shape || (x.p.pa ? assetTrianglePoints(x.p.lat, x.p.lng, impPointSizeFt(x.p)) : null), x.ext ? { custom: { [IMP_EXT_FIELD]: x.ext } } : null);   // v4.413: P&A size · v4.416: P&A = triangle unless an outline was drawn
             if (r && r.ok) {
-                ok++; created.push({ id: r.id, name: x.name, point: x.p, ext: x.ext }); x.p.createdId = r.id;
-                knownSubs.add(x.subtype);
+                ok++; created.push({ id: r.id, name: x.name, point: x.p, ext: x.ext, subtype: x.subtype }); x.p.createdId = r.id;
                 x.p.done = true; x.p.sel = false;
             } else {
                 fail++;
@@ -27860,13 +27862,17 @@
         const updVerified = updated.filter(u => { const e = afterById.get(u.id); return e && e.custom && String(e.custom.poi_type_str || '') === u.subtype && String(e.description || '') === u.notes; });
         // v4.434: did the External ID land? (also tells us if the server ignores / renames the field)
         const extWanted = created.filter(c => c.ext && byId.has(c.id)), extOk = extWanted.filter(c => impExtOfEnt(afterById.get(c.id)) === c.ext).length;
+        const typeOkC = created.filter(c => { const e = afterById.get(c.id); return e && e.custom && String(e.custom.poi_type_str || '') === c.subtype; }).length;
+        const typeOkU = updated.filter(u => { const e = afterById.get(u.id); return e && e.custom && String(e.custom.poi_type_str || '') === u.subtype; }).length;
+        const notesOkU = updated.filter(u => { const e = afterById.get(u.id); return e && String(e.description || '') === u.notes; }).length;
+        const typeNote = ` · types stored as sent: ${typeOkC}/${created.length} created, ${typeOkU}/${updated.length} updated${updated.length ? ` · notes stored as sent: ${notesOkU}/${updated.length}` : ''}${(typeOkC < created.length || typeOkU < updated.length) ? ' <span style="color:#ff6060">(↻ Re-send types fixes these)</span>' : ''}`;
         const extNote = extWanted.length ? ` · 🆔 External ID ${extOk}/${extWanted.length} confirmed${extOk < extWanted.length ? ` <span style="color:#ff6060">(server did not echo the field for ${extWanted.length - extOk} — check 🆔 below)</span>` : ''}` : '';
         imp.lastUpdated = updated.map(u => ({ id: u.id, name: u.name, before: u.before }));
         imp._rootCache = null;
         impBuildAssetIndex(); impComputeDups(); impRefreshAfterSelChange();
         try { impSaveSession('import'); } catch (e) {}   // v4.364: the undo record is on disk before the user can reload
         try { impRenderImportsUi(); } catch (e) {}
-        if (!aborted) impCommitNote(`DONE: <b>${ok}</b> created${nUpd ? ` · <b>${updOk}/${nUpd}</b> updated (type + notes)` : ''}${fail ? ` · <span style="color:#ff6060">${fail} FAILED (kept staged + selected)</span>` : ''}${skippedDups ? ` · ${skippedDups} name match(es) skipped` : ''} · verify ${verified.length}/${created.length} created present${nUpd ? `, ${updVerified.length}/${updated.length} updates match` : ''}${extNote} · reload to edit them natively`, (fail || updVerified.length !== updated.length) ? '#ffb347' : '#5fff5f');
+        if (!aborted) impCommitNote(`DONE: <b>${ok}</b> created${nUpd ? ` · <b>${updOk}/${nUpd}</b> updated (type + notes)` : ''}${fail ? ` · <span style="color:#ff6060">${fail} FAILED (kept staged + selected)</span>` : ''}${skippedDups ? ` · ${skippedDups} name match(es) skipped` : ''} · verify ${verified.length}/${created.length} created present${nUpd ? `, ${updVerified.length}/${updated.length} updates match` : ''}${typeNote}${extNote} · reload to edit them natively`, (fail || updVerified.length !== updated.length) ? '#ffb347' : '#5fff5f');
         showToast(fail ? `Import: ${ok} created, ${updOk} updated, ${fail} FAILED — see the importer panel` : `✓ ${ok} created${updOk ? `, ${updOk} updated` : ''}`, fail ? 'rgba(255,96,96,0.55)' : undefined);
     }
     // ---- v4.453 📋 PRE-FLIGHT REPORT — everything the importer knows about the run about to happen, as plain text
@@ -27918,6 +27924,54 @@
         const msg = `📋 report ${saved ? `saved as ${impEsc(name)} and ` : ''}copied to the clipboard — ${txt.split('\n').length} lines${/^!!/m.test(txt) ? ' · <b style="color:#ff6060">contains !! blockers</b>' : ' · no blockers'}`;
         impCommitNote(msg, '#5fff5f');
         try { const host = document.getElementById('aim-imp-preflight-note'); if (host) host.innerHTML = msg; } catch (e) {}
+    }
+    // ---- v4.460 ↻ RE-SEND TYPES — for every asset this session created or updated, compare the stored type with the
+    // intended one (same resolver as Create) and re-POST only the type (declared as new when the site lacked it). ----
+    async function impResendTypes() {
+        if (liteBlockedWrite('re-send asset types')) return;
+        const sid = genState.siteID;
+        impCommitNote('↻ checking stored types against what was intended…');
+        try { await fetchMapObjects(sid, true); } catch (e) {}
+        const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || []; const byId = new Map(ents.map(e => [e.id, e])), byName = new Map(ents.filter(e => e.type === 3).map(e => [e.name, e]));
+        const subCounts = impSiteSubtypes(); const siteSubs = [...subCounts.keys()];
+        const defSub = [...subCounts.entries()].sort((a, b) => b[1] - a[1]).map(x => x[0])[0] || 'well-cluster';
+        const subtypeFor = (p) => { if (p.pa) return impPaType(p); if (p.thirdParty) return p.typeRaw || impThirdType(p.env || {}); let v; if (!imp.mapping || !imp.mapping.type) v = impApplyShield((imp.typeMap['__all__'] || '').trim() || defSub); else { v = impResolveSubtype(p.typeRaw || '', siteSubs).value; if (!v) return ''; } if (p.dup && imp.dupMode === 'update' && (!imp.mapping || !imp.mapping.type) && p.dupSubtype) v = impApplyShield(impTierStrip(p.dupSubtype)); v = impCleanType(impApplyHv(p, v, siteSubs)); return impTierPrefix(p, v); };
+        const todo = [];
+        imp.points.forEach(p => {
+            if (!p.done || p.removed) return;
+            const e = p.createdId ? byId.get(p.createdId) : (p.dupId != null ? byId.get(p.dupId) : byName.get(p.name)); if (!e) return;
+            const want = subtypeFor(p); if (!want) return;
+            const have = String((e.custom && e.custom.poi_type_str) || '').trim();
+            if (have !== want) todo.push({ p, e, want, have });
+        });
+        if (!todo.length) { impCommitNote('↻ every asset this session touched already carries the intended type', '#5fff5f'); return; }
+        const dry = (() => { try { return !!document.getElementById('aim-gen-dryrun').checked; } catch (e) { return true; } })();
+        const hist = {}; todo.forEach(x => { hist[`${x.have || '(none)'} → ${x.want}`] = (hist[`${x.have || '(none)'} → ${x.want}`] || 0) + 1; });
+        if (dry) { impCommitNote(`DRY RUN — <b>${todo.length}</b> asset(s) carry a different type than intended: ${impEsc(Object.entries(hist).sort((a, b) => b[1] - a[1]).slice(0, 12).map(([k, v]) => `${v}× ${k}`).join(' · '))}${Object.keys(hist).length > 12 ? ' …' : ''}. Untick Dry run to re-send.`); return; }
+        const csrf = getCsrfToken(); if (!csrf) { impCommitNote('No CSRF token — make one native save anywhere in Percepto first, then retry', '#ff6060'); return; }
+        let siteCfg = null; try { siteCfg = await fetchSiteConfig(sid); } catch (e) {}
+        if (!siteCfg) { impCommitNote('Could not read the site config — nothing written', '#ff6060'); return; }
+        if (!confirm(`Re-send the TYPE on ${todo.length} asset(s) (only custom.poi_type_str changes; names, notes, shapes untouched)?`)) return;
+        try { downloadJSONFile(`resend-types-${sid}-${Date.now()}.json`, JSON.stringify({ site: sid, at: new Date().toISOString(), changes: todo.map(x => ({ id: x.e.id, name: x.e.name, from: x.have, to: x.want })), before: todo.map(x => x.e) }, null, 1)); } catch (e) {}
+        const known = new Set(siteSubs); let ok = 0, fail = 0; const done = [];
+        for (let i = 0; i < todo.length; i++) {
+            const x = todo[i]; impCommitNote(`↻ ${i + 1}/${todo.length} — "${impEsc(x.e.name)}" → ${impEsc(x.want)}…`);
+            try {
+                const body = buildWriteBody(x.e, siteCfg); if (!body.custom || typeof body.custom !== 'object') body.custom = {};
+                body.custom.poi_type_str = x.want; body.custom.new_poi_type_str = known.has(x.want) ? '' : x.want;
+                const rr = await fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) });
+                if (rr.status === 200) { ok++; done.push({ id: x.e.id, name: x.e.name, before: JSON.parse(JSON.stringify(x.e)), want: x.want }); }
+                else { fail++; const t = await rr.text(); console.warn(`${TAG} ↻ type "${x.e.name}" ${rr.status} ${t.slice(0, 200)}`); if (rr.status === 403) { impCommitNote(`ABORTED at ${i + 1}/${todo.length} — server 403`, '#ff6060'); break; } }
+            } catch (e) { fail++; console.warn(`${TAG} ↻ type "${x.e.name}"`, e); }
+            await sleep(DELETE_GAP_MS);
+        }
+        try { await fetchMapObjects(sid, true); } catch (e) {}
+        const after = new Map(((mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || []).map(e => [e.id, e]));
+        const confirmed = done.filter(d => String(((after.get(d.id) || {}).custom || {}).poi_type_str || '') === d.want).length;
+        const sample = done.find(d => String(((after.get(d.id) || {}).custom || {}).poi_type_str || '') !== d.want);
+        imp.lastUpdated = imp.lastUpdated.concat(done.map(d => ({ id: d.id, name: d.name, before: d.before })));
+        imp._rootCache = null; impBuildAssetIndex(); impComputeDups(); impRefreshAfterSelChange(); try { impSaveSession('resend-types'); } catch (e) {}
+        impCommitNote(`↻ DONE: <b>${ok}</b> re-sent${fail ? ` · <span style="color:#ff6060">${fail} failed</span>` : ''} · stored as sent: <b>${confirmed}/${done.length}</b>${sample ? ` · <span style="color:#ff6060">server kept "${impEsc(String(((after.get(sample.id) || {}).custom || {}).poi_type_str || ''))}" instead of "${impEsc(sample.want)}" on ${impEsc(sample.name)} — the type string itself is being refused</span>` : ''} · ↩ Undo last import reverts`, fail || confirmed < done.length ? '#ffb347' : '#5fff5f');
     }
     // Undo THIS import: delete exactly the ids the last commit created.
     async function impUndoCreate() {
