@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.36
+// @version      3.37
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.36';
+    const SCRIPT_VERSION = '3.37';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -6575,6 +6575,7 @@
                 <button data-gen-bulk-go style="padding:5px 12px;background:#5fff5f;border:none;color:#04220a;border-radius:6px;cursor:pointer;font-weight:800;">⊕ Create</button>
             </div>`;
         document.body.appendChild(p);
+        mbFloatPanel(p, p.firstElementChild, 'aim-mb-gen-panel-geom', { minW: 320, minH: 260 });
         const close = () => genCloseBulkPanel();
         p.querySelector('[data-gen-bulk-close]').onclick = close;
         p.querySelector('[data-gen-bulk-cancel]').onclick = close;
@@ -8242,6 +8243,86 @@
     // every fresh 🧩 toggle-on. macroLayers groups layers per mission id so a
     // single macro can be hidden/shown without a full redraw.
     const mcv = { on: false, busy: false, layers: [], legendEl: null, hidden: new Set(), macroLayers: new Map(), badgeReg: new Map() };
+    // v3.37: lightweight floating-panel helper — drag by a handle, native
+    // resize (CSS resize:both), geometry persisted under a GM key and clamped
+    // to the viewport on restore. Independent of the main panel's panelGeom.
+    function mbFloatPanel(el, handle, key, opts) {
+        opts = opts || {};
+        const minW = opts.minW || 280, minH = opts.minH || 160;
+        el.style.resize = 'both'; el.style.overflow = 'hidden';
+        el.style.minWidth = minW + 'px'; el.style.minHeight = minH + 'px';
+        let g = null;
+        try { g = gmGet(key, null); } catch (e) { console.warn(`${TAG} [float] ${key} read failed`, e); }
+        if (g && typeof g === 'object' && isFinite(g.x) && isFinite(g.y)) {
+            const vw = window.innerWidth, vh = window.innerHeight;
+            const w = Math.max(minW, Math.min(vw - 20, Number(g.w) || el.offsetWidth || minW));
+            const h = Math.max(minH, Math.min(vh - 20, Number(g.h) || el.offsetHeight || minH));
+            el.style.right = 'auto'; el.style.bottom = 'auto'; el.style.maxHeight = 'none';
+            el.style.left = Math.max(0, Math.min(vw - w, Number(g.x))) + 'px';
+            el.style.top = Math.max(0, Math.min(vh - 40, Number(g.y))) + 'px';
+            el.style.width = w + 'px'; el.style.height = h + 'px';
+        }
+        let saveT = null;
+        const save = () => {
+            clearTimeout(saveT);
+            saveT = setTimeout(() => {
+                if (!el.isConnected) return;
+                const r = el.getBoundingClientRect();
+                if (!r.width || !r.height) return;
+                try { gmSet(key, { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) }); } catch (e) { console.warn(`${TAG} [float] ${key} save failed`, e); }
+            }, 400);
+        };
+        let drag = null;
+        handle.style.cursor = 'move'; handle.style.userSelect = 'none';
+        handle.addEventListener('pointerdown', (e) => {
+            if (e.button !== 0 || (e.target.closest && e.target.closest('button,input,select,textarea,a,[data-mcv-x]'))) return;
+            const r = el.getBoundingClientRect();
+            drag = { id: e.pointerId, dx: e.clientX - r.left, dy: e.clientY - r.top };
+            el.style.right = 'auto'; el.style.bottom = 'auto'; el.style.maxHeight = 'none';
+            el.style.left = r.left + 'px'; el.style.top = r.top + 'px'; el.style.width = r.width + 'px'; el.style.height = r.height + 'px';
+            try { handle.setPointerCapture(e.pointerId); } catch (er) {}
+            e.preventDefault();
+        });
+        handle.addEventListener('pointermove', (e) => {
+            if (!drag || e.pointerId !== drag.id) return;
+            el.style.left = Math.max(0, Math.min(window.innerWidth - 60, e.clientX - drag.dx)) + 'px';
+            el.style.top = Math.max(0, Math.min(window.innerHeight - 30, e.clientY - drag.dy)) + 'px';
+        });
+        const stop = (e) => { if (!drag || e.pointerId !== drag.id) return; try { handle.releasePointerCapture(drag.id); } catch (er) {} drag = null; save(); };
+        handle.addEventListener('pointerup', stop); handle.addEventListener('pointercancel', stop);
+        try { new ResizeObserver(() => save()).observe(el); } catch (e) { console.warn(`${TAG} [float] ResizeObserver unavailable`, e); }
+    }
+    // v3.37: "not a macro" marks — missions whose steps brush ≥2 pads (adjacent
+    // pads inside the 150-ft halo) but that the pilot says are one pad's
+    // mission. Per site (envSiteKey), per install. A marked mission is treated
+    // as a SOLO of its primary pad (the pad with the most attributed steps).
+    const MCV_NOT_MACRO_KEY = 'aim-mb-not-macros';
+    function mcvNotMacros() {
+        const sid = getCurrentSiteID();
+        let all = {};
+        try { all = gmGet(MCV_NOT_MACRO_KEY, {}) || {}; } catch (e) { console.warn(`${TAG} [mcv] not-macro read failed`, e); }
+        const arr = sid ? all[envSiteKey(sid)] : null;
+        return new Set((Array.isArray(arr) ? arr : []).map(String));
+    }
+    function mcvSetNotMacro(id, on) {
+        const sid = getCurrentSiteID(); if (!sid) return;
+        let all = {};
+        try { all = gmGet(MCV_NOT_MACRO_KEY, {}) || {}; } catch (e) { console.warn(`${TAG} [mcv] not-macro read failed`, e); }
+        const k = envSiteKey(sid);
+        const set = new Set((Array.isArray(all[k]) ? all[k] : []).map(String));
+        if (on) set.add(String(id)); else set.delete(String(id));
+        all[k] = Array.from(set);
+        try { gmSet(MCV_NOT_MACRO_KEY, all); } catch (e) { console.warn(`${TAG} [mcv] not-macro save failed`, e); }
+        console.log(`${TAG} [mcv] mission ${id} ${on ? 'marked NOT a macro' : 'macro mark restored'} (${set.size} marked on this site)`);
+    }
+    // Re-run detection on the banked entities + missions and redraw (marks changed).
+    function mcvRedetect() {
+        if (!mcv.data) return;
+        try {
+            mcv.data.det = mcvDetect(mcv.data.ent, mcv.data.missions);
+            mcvClear(); mcvDraw(mcv.data.det);
+        } catch (e) { console.warn(`${TAG} [mcv] redetect failed`, e); showToast('Macro coverage redraw failed (see console).', '#ff5252', 4000); }
+    }
     function mcvClear() {
         mcv.layers.forEach(l => { try { l.remove(); } catch (e) {} });
         mcv.layers = [];
@@ -8381,6 +8462,7 @@
         const byIdNest = new Map(assets.map(a => [a.id, a]));
         const rootFold = (a) => { const r = (a && a.rootId != null && a.rootId !== a.id) ? byIdNest.get(a.rootId) : null; return r || a; };
         const pads = assets.filter(a => rootFold(a) === a);
+        const notMacro = mcvNotMacros();
         const tolM = 46;   // 150 ft
         const boxes = assets.map(a => agRingBbox(a.ring, tolM + 5));
         // v2.97: nested rings tie at d=0 — the TIGHTEST polygon must win, or
@@ -8441,6 +8523,15 @@
             const looseSorted = Array.from(touch.values()).sort((x, y) => x.loose - y.loose);
             if (recs.some((t, k) => looseSorted[k] !== t)) {
                 console.log(`${TAG} [macros] "${m.name}": visit order corrected — a nav within 150 ft of a neighboring pad no longer counts as visiting it (first inside-the-ring step wins)`);
+            }
+            if (pads.length >= 2 && notMacro.has(String(m.id))) {
+                // v3.37: pilot says this is ONE pad's mission — keep the pad
+                // with the most attributed steps, drop the brushed neighbours.
+                const cnt = new Map();
+                blocks.forEach(b => { if (b.aId != null) cnt.set(b.aId, (cnt.get(b.aId) || 0) + b.steps.length); });
+                let prim = pads[0];
+                pads.forEach(a => { if ((cnt.get(a.id) || 0) > (cnt.get(prim.id) || 0)) prim = a; });
+                pads.length = 0; pads.push(prim); padIds.clear(); padIds.add(prim.id);
             }
             if (pads.length) missionPads.set(m.id, pads);
             if (pads.length >= 2) {
@@ -8511,9 +8602,11 @@
         });
         // legend (top-left, under the toolbar)
         const el = document.createElement('div');
-        el.style.cssText = 'position:fixed;left:12px;top:70px;z-index:2147483599;max-height:50vh;overflow:auto;background:rgba(16,19,26,0.92);border:1px solid #2a3340;border-radius:8px;padding:8px 11px;color:#e6e6e6;font:11px "Lato","Segoe UI",sans-serif;box-shadow:0 4px 16px rgba(0,0,0,0.6);';
+        el.style.cssText = 'position:fixed;left:12px;top:70px;z-index:2147483599;max-height:60vh;display:flex;flex-direction:column;overflow:hidden;background:rgba(16,19,26,0.92);border:1px solid #2a3340;border-radius:8px;padding:8px 11px;color:#e6e6e6;font:11px "Lato","Segoe UI",sans-serif;box-shadow:0 4px 16px rgba(0,0,0,0.6);';
         const COLORS2 = ['#7adfe6', '#ffd54f', '#ff8ad2', '#9dff8a', '#c39dff', '#ffab73', '#8ab6ff', '#f3ff7a', '#ff9e9e', '#7affc9'];
         el.innerHTML = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;"><b style="color:#7adfe6;">🧩 Macro coverage</b><button data-mcv-report title="Copy the coverage report (Name / Classification / Captured / Battery / Section / Mission / Order) — colored cells, paste into Google Sheets" style="padding:1px 7px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">📋 Report</button><button data-mcv-vis-all title="Show every macro on the map" style="padding:1px 6px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">All</button><button data-mcv-vis-none title="Hide every macro — then re-check just the ones you want" style="padding:1px 6px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">None</button><button data-mcv-split-all title="✂ Split EVERY macro into per-pad micro missions in ONE combined review — pads with existing micros, name collisions, or a better copy in another macro default-skipped. Create-only." style="padding:1px 6px;background:rgba(255,138,210,0.12);border:1px solid rgba(255,138,210,0.45);color:#ff8ad2;border-radius:4px;cursor:pointer;font-size:10px;">✂ All</button><button data-mcv-sto-all title="🪄 Run the Step Optimizer analysis on EVERY macro — one ranked report: route savings, far-first fixes, wrap scrambles, duplicates, standoff violations, nav consolidations. Open any row to review + apply." style="padding:1px 6px;background:rgba(195,157,255,0.12);border:1px solid rgba(195,157,255,0.45);color:#c39dff;border-radius:4px;cursor:pointer;font-size:10px;">🪄 All</button><button data-mcv-remerge-all title="⟳ Re-merge EVERY macro from its pads' current micro missions in one review — only pads whose micro changed are pulled; pad orders, names and ids unchanged. One combined backup, sequential apply with per-macro verify." style="padding:1px 6px;background:rgba(255,213,79,0.12);border:1px solid rgba(255,213,79,0.45);color:#ffd54f;border-radius:4px;cursor:pointer;font-size:10px;">⟳ All</button><span data-mcv-x style="margin-left:auto;cursor:pointer;color:#888;font-weight:800;">✕</span></div>`
+            + `<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;"><input data-mcv-search type="search" placeholder="search missions…" style="flex:1;min-width:120px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;padding:2px 5px;"><span data-mcv-count style="color:#789;font-size:10px;white-space:nowrap;">${det.macros.length} macros</span></div>`
+            + `<div data-mcv-body style="overflow:auto;flex:1;min-height:0;">`
             + (det.macros.length
                 ? det.macros.map((mc, i) => {
                     const au = (mcv.data && mcv.data.audits) ? mcv.data.audits.get(mc.mission.id) : null;
@@ -8558,7 +8651,8 @@
                     const remergeBtn = `<button data-mcv-remerge="${mc.mission.id}" title="⟳ Re-merge — rebuild this macro from its pads' CURRENT micro missions (same pad order, name, id). Pilot fixes go in the micros; this pulls them into the macro. Review panel shows which pads changed; backup + verify on apply." style="padding:0 5px;background:rgba(255,213,79,0.12);border:1px solid rgba(255,213,79,0.45);color:#ffd54f;border-radius:4px;cursor:pointer;font-size:10px;">⟳</button>`;
                     // v2.66: 🪄 step optimizer (feature #244) — always available
                     const stoBtn = `<button data-mcv-sto="${mc.mission.id}" data-mcv-sto-col="${COLORS2[i % COLORS2.length]}" title="🪄 Step Optimizer — reorder the navs/steps INSIDE this macro for the shortest legal route (intertwined pads interleave), flag snapshot standoff (info-only — pairings are pilot-tuned, moves are strictly opt-in), rebuild scrambled wraps, drop stacked duplicates. Preview first; Apply saves in place with backup + verify." style="padding:0 5px;background:rgba(195,157,255,0.12);border:1px solid rgba(195,157,255,0.45);color:#c39dff;border-radius:4px;cursor:pointer;font-size:10px;">🪄</button>`;
-                    return `<div data-mcv-row="${mc.mission.id}" style="display:flex;align-items:center;gap:6px;margin:2px 0;opacity:${vis ? 1 : 0.38};"><input type="checkbox" data-mcv-vis="${mc.mission.id}" ${vis ? 'checked' : ''} title="Show/hide this macro on the map" style="margin:0;cursor:pointer;accent-color:${COLORS2[i % COLORS2.length]};"><span data-mcv-solo="${mc.mission.id}" title="Solo — show ONLY this macro (click again to show all)" style="width:10px;height:10px;border-radius:2px;background:${COLORS2[i % COLORS2.length]};flex:none;cursor:pointer;"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:170px;">${escapeHtml(String(mc.mission.name || ''))}</span>${reBtn}${orderBtn}${remergeBtn}${stoBtn}${splitBtn}<b style="margin-left:auto;padding-left:8px;">${mc.pads.length}</b></div>${auditLine ? auditLine.replace('style="', `style="opacity:${vis ? 1 : 0.38};`) : ''}`;
+                    const nmBtn = `<button data-mcv-notmacro="${mc.mission.id}" title="🚫 Not a macro — this is ONE pad's mission that merely brushes a neighbouring pad's 150-ft halo. Hides it from this list and counts it as that pad's micro (per site, this install; undo at the bottom)." style="padding:0 5px;background:rgba(255,95,95,0.1);border:1px solid rgba(255,95,95,0.4);color:#ff8a8a;border-radius:4px;cursor:pointer;font-size:10px;">🚫</button>`;
+                    return `<div data-mcv-row="${mc.mission.id}" data-mcv-name="${escapeHtml(String(mc.mission.name || '').toLowerCase())}" style="display:flex;align-items:center;gap:6px;margin:2px 0;opacity:${vis ? 1 : 0.38};"><input type="checkbox" data-mcv-vis="${mc.mission.id}" ${vis ? 'checked' : ''} title="Show/hide this macro on the map" style="margin:0;cursor:pointer;accent-color:${COLORS2[i % COLORS2.length]};"><span data-mcv-solo="${mc.mission.id}" title="Solo — show ONLY this macro (click again to show all)" style="width:10px;height:10px;border-radius:2px;background:${COLORS2[i % COLORS2.length]};flex:none;cursor:pointer;"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:170px;">${escapeHtml(String(mc.mission.name || ''))}</span>${reBtn}${orderBtn}${remergeBtn}${stoBtn}${splitBtn}${nmBtn}<b style="margin-left:auto;padding-left:8px;">${mc.pads.length}</b></div>${auditLine ? auditLine.replace('style="', `style="opacity:${vis ? 1 : 0.38};`) : ''}`;
                 }).join('')
                 : '<div style="color:#888;">No macro missions yet (≥2 pads in one mission).</div>')
             + `<div style="color:#ffb74d;margin-top:5px;">⬜ ${det.todo.length} pad(s) with missions, not in any macro</div>`
@@ -8567,8 +8661,42 @@
                 + ` charge <input data-mcv-t="chargeMin" type="number" value="${t.chargeMin}" style="width:38px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">m`
                 + ` ops <input data-mcv-t="opsHrs" type="number" value="${t.opsHrs}" style="width:30px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">h/d`
                 + ` <span style="color:#789;">≈${perDay} fl/day</span></div>`; })()
-            + '<div style="color:#789;margin-top:3px;">Filled = covered · UNfilled = still to do · click-through</div>';
+            + '<div style="color:#789;margin-top:3px;">Filled = covered · UNfilled = still to do · click-through</div>'
+            + (() => {
+                const marked = Array.from(mcvNotMacros());
+                if (!marked.length) return '';
+                const byMid = new Map(((mcv.data && mcv.data.missions) || []).map(m => [String(m.id), m]));
+                return `<div style="margin-top:5px;color:#ff8a8a;">🚫 ${marked.length} marked not-a-macro · <span data-mcv-nm-show style="cursor:pointer;text-decoration:underline;">show</span></div>`
+                    + `<div data-mcv-nm-list style="display:none;margin-left:10px;">${marked.map(id => { const m = byMid.get(id); return `<div style="display:flex;align-items:center;gap:6px;margin:2px 0;color:#bbb;"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:220px;">${escapeHtml(m ? String(m.name || '') : `mission ${id}`)}</span><button data-mcv-nm-undo="${escapeHtml(id)}" title="Count this mission as a macro again" style="padding:0 5px;background:rgba(122,223,230,0.12);border:1px solid rgba(122,223,230,0.4);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">↩</button></div>`; }).join('')}</div>`;
+            })()
+            + '</div>';
         document.body.appendChild(el);
+        mbFloatPanel(el, el.firstElementChild, 'aim-mb-mcv-legend-geom', { minW: 300, minH: 180 });
+        // v3.37: search — filters macro rows (and their audit lines) by mission name
+        const searchEl = el.querySelector('[data-mcv-search]');
+        const countEl = el.querySelector('[data-mcv-count]');
+        const applySearch = () => {
+            const q = (searchEl.value || '').trim().toLowerCase();
+            let shown = 0;
+            el.querySelectorAll('[data-mcv-row]').forEach(row => {
+                const hit = !q || (row.getAttribute('data-mcv-name') || '').indexOf(q) >= 0;
+                row.style.display = hit ? '' : 'none';
+                const au = el.querySelector(`[data-mcv-au="${row.getAttribute('data-mcv-row')}"]`);
+                if (au) au.style.display = hit ? '' : 'none';
+                if (hit) shown++;
+            });
+            if (countEl) countEl.textContent = q ? `${shown} / ${det.macros.length}` : `${det.macros.length} macros`;
+        };
+        searchEl.oninput = applySearch;
+        el.querySelectorAll('[data-mcv-notmacro]').forEach(b => b.onclick = () => {
+            const id = b.getAttribute('data-mcv-notmacro');
+            mcvSetNotMacro(id, true);
+            showToast('🚫 Marked not-a-macro — counted as its main pad\'s micro.', '#ff8a8a', 3000);
+            mcvRedetect();
+        });
+        const nmShow = el.querySelector('[data-mcv-nm-show]');
+        if (nmShow) nmShow.onclick = () => { const l = el.querySelector('[data-mcv-nm-list]'); if (l) l.style.display = l.style.display === 'none' ? '' : 'none'; };
+        el.querySelectorAll('[data-mcv-nm-undo]').forEach(b => b.onclick = () => { mcvSetNotMacro(b.getAttribute('data-mcv-nm-undo'), false); mcvRedetect(); });
         el.querySelector('[data-mcv-x]').onclick = () => { mcv.on = false; mcvClear(); const b = document.querySelector('[data-mcv-toggle]'); if (b) b.classList.remove('active'); };
         el.querySelector('[data-mcv-report]').onclick = () => mcvReport();
         el.querySelectorAll('[data-mcv-reorder]').forEach(b => b.onclick = () => mcvReorder(Number(b.getAttribute('data-mcv-reorder')) || b.getAttribute('data-mcv-reorder')));
@@ -10729,7 +10857,7 @@
     // Section / Mission Name / Order, grouped by mission (uncovered pads at
     // the bottom). Copies rich HTML (colored cells for Sheets) + TSV fallback.
     function mcvSubtypeOf(a) {
-        const p = String(a.poi || '').trim();
+        const p = String(a.poi || '').replace(GEN_TIER_RE, '').trim();   // v3.37: tier prefix is not the classification
         const i = p.indexOf(' - ');
         return ((i >= 0 ? p.slice(0, i) : p) || '').trim();
     }
@@ -10746,8 +10874,23 @@
             if (!macrosOf.has(a.id)) macrosOf.set(a.id, []);
             macrosOf.get(a.id).push({ name: String(mc.mission.name || ''), order: i + 1 });
         }));
+        // v3.37: inventory columns — tier (best over the pad's assets), status
+        // (micro / macro-only / none), micro + macro names, child count, skip state
+        const byIdAll = new Map((ent.assets || []).map(a => [a.id, a]));
+        const microsOf = new Map();
+        det.solos.forEach(sx => { if (!microsOf.has(sx.pad.id)) microsOf.set(sx.pad.id, []); microsOf.get(sx.pad.id).push(String(sx.mission.name || '')); });
         const rows = det.assets.map(a => {
             const r = bat.get(a.id);
+            const micros = microsOf.get(a.id) || [];
+            const macroNames = (macrosOf.get(a.id) || []).map(x => x.name);
+            const inv = {
+                tier: genPadTier(a, byIdAll) || '',
+                status: micros.length ? 'micro' : (macroNames.length ? 'macro-only' : 'none'),
+                micro: micros.join(' | '),
+                macros: macroNames.join(' | '),
+                kids: (a.descendants || []).length,
+                state: genSkipReason(a) || '',
+            };
             const tulip = !!(r && r.status === 'ok' && r.worstFt > agCfg().tattuRadiusFt && r.worstFt <= agCfg().tulipRadiusFt);
             const batLabel = r && r.status === 'ok'
                 ? (r.worstFt <= agCfg().tattuRadiusFt ? 'Tattu' : (tulip ? 'Tulip' : 'Over range'))
@@ -10762,6 +10905,7 @@
                 sec: secName[mbSection(genCentroid(a.ring), ent.base)] || '',
                 mission: pref ? pref.name : '',
                 order: pref ? pref.order : '',
+                inv,
             };
         });
         rows.sort((x, y) => (x.mission || '~').localeCompare(y.mission || '~') || (Number(x.order) || 9999) - (Number(y.order) || 9999) || x.name.localeCompare(y.name));
@@ -10770,7 +10914,7 @@
         const dark = bg => ['#e8d18a'].indexOf(bg) >= 0;
         const td = (txt, bg, fg) => `<td style="border:1px solid #bbb;padding:2px 8px;${bg ? `background:${bg};color:${fg || '#fff'};` : ''}">${escapeHtml(String(txt))}</td>`;
         const html = '<table style="border-collapse:collapse;font-family:Arial;font-size:12px;"><tr>'
-            + ['Name', 'Asset Classification', 'Captured?', 'Battery', 'Section', 'Mission Name', 'Order'].map(h => `<td style="border:1px solid #999;padding:2px 8px;background:#efefef;font-weight:bold;">${h}</td>`).join('')
+            + ['Name', 'Asset Classification', 'Captured?', 'Battery', 'Section', 'Mission Name', 'Order', 'Tier', 'Status', 'Micro', 'Macros', 'Assets', 'State'].map(h => `<td style="border:1px solid #999;padding:2px 8px;background:#efefef;font-weight:bold;">${h}</td>`).join('')
             + '</tr>'
             + rows.map(r2 => {
                 const clsBg = CLS_BG[r2.cls.toLowerCase()] || '#607d8b';
@@ -10783,6 +10927,12 @@
                     + td(r2.sec, secBg, dark(secBg) ? '#333' : '#fff')
                     + td(r2.mission)
                     + td(r2.order)
+                    + td(r2.inv.tier, { P1: '#ffcdd2', P2: '#ffe0b2', P3: '#cfe8ff', P0: '#e0e0e0' }[r2.inv.tier] || '', '#333')
+                    + td(r2.inv.status, { micro: '#c8f7c5', 'macro-only': '#fff3b0', none: '#ffcdd2' }[r2.inv.status] || '', '#333')
+                    + td(r2.inv.micro)
+                    + td(r2.inv.macros)
+                    + td(r2.inv.kids)
+                    + td(r2.inv.state, r2.inv.state ? '#eee' : '', '#333')
                     + '</tr>';
             }).join('')
             + '</table>';
