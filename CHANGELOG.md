@@ -1,4 +1,6 @@
-## 2026-10-26 — 🧱 Pad model — Site Setup Tools latest v4.470 → v4.477 (latest only)
+## 2026-10-26 — 🧱 Pad model — Site Setup Tools latest v4.470 → v4.478 (latest only)
+
+- **v4.478** — P0 only when the client's own data confirms no priority: numbers present and zero, or the client's response marked the well inactive. Enverus-only verdicts and missing numbers stay unprefixed.
 
 - **v4.477** — **P0** = tiered on purpose with no priority (zero production, dead per Enverus, client says inactive, no numbers for the pad): `P0 - V - Pumping Rod`, `P0 - Pad`. An asset with NO P prefix therefore means the tool never processed it. P&A and AVOID assets keep their own types. Tier readers treat P0 as no tier.
 

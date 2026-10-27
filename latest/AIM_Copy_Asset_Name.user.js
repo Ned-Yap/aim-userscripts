@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.477
+// @version      4.478
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.477';
+    const SCRIPT_VERSION = '4.478';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -23434,7 +23434,7 @@
     function impTierPrefix(p, subtype) {
         const base = impTierStrip(subtype);
         if (!imp.pri.on || !p.pri) return base;
-        if (!p.pri.tier) return (p.pa || p.thirdParty) ? base : `P0 - ${base}`;     // v4.477: deliberate 'no priority' is visible; P&A / AVOID keep their own types
+        if (!p.pri.tier) return impClientConfirmedNoPriority(p) ? `P0 - ${base}` : base;   // v4.477/v4.478: P0 ONLY when the client's own data says so; everything else stays unprefixed = look at it
         return `${p.pri.tier} - ${base}`;
     }
     function impRenderPriUi() {
@@ -28057,7 +28057,10 @@
     // ---- v4.470 PAD MODEL (account manager + user, 2026-10-26): a "Pad - X" asset is a CONTAINER. It carries the pad tier as
     // its type ("P2 - Pad"), the same pad-level priority note as every well on it, and NO External ID (only wells carry one).
     // Every well — X included — is its own child asset with its outline (or a square). ----
-    function impPadType(p) { if (!imp.pri.on || !p || !p.pri) return 'Pad'; return `${p.pri.tier || 'P0'} - Pad`; }   // v4.477: P0 - Pad when the pad has no priority
+    function impPadType(p) { if (!imp.pri.on || !p || !p.pri) return 'Pad'; if (p.pri.tier) return `${p.pri.tier} - Pad`; return impClientConfirmedNoPriority(p) ? 'P0 - Pad' : 'Pad'; }   // v4.478: P0 - Pad only when the client's data confirms it
+    // P0 = the CLIENT SHEET confirms no priority: numbers present and zero (oil + water = 0), or the client's response marked it inactive.
+    // Not Enverus' opinion, not missing numbers, not third-party / P&A (those keep their own types).
+    function impClientConfirmedNoPriority(p) { if (!p || p.pa || p.thirdParty || !p.pri) return false; const u = p.pri.untier; return u === 'zero' || u === 'client'; }
     function impComposePadNotes(p, pad, when, nWells) {
         const parts = [`Pad\n${pad.name}${nWells ? ` · ${nWells} well${nWells === 1 ? '' : 's'}` : ''}`].concat(impPriNotesBlocks(p, String(when).slice(0, 10)));
         parts.push(`Imported by ${impAuthor() || 'AIM user'} on ${when} from ${imp.fileName || 'file'} · updated by import`);
