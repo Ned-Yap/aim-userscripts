@@ -1,3 +1,7 @@
+## 2026-10-27 — 🧩 Nested pads in macro coverage + ▣ Generate by tier — Mission Bank Tools latest v3.36 (latest only)
+
+- **v3.36** — **🧩 Macros / 📋 report / 🧠 planner now count PADS on nested-asset sites**: a mission step over a child asset belongs to its parent pad (nested root), so a one-pad mission that shoots two child wells is a micro, not a macro, and the planner finds that pad's micro. **▣ Generate Missions** lists pads only (children folded, count shown per pad), decides "already has a micro" from the mission's real steps (the 🧩 detector) instead of a name match, lists pads that exist only inside a macro separately (✂ Split mints their micro), and adds **tier chips** (P1 / P2 / P3 / P0 / none, persisted; P0 + none off by default) so only the tiers you pick are offered. Skip-state (unreachable / empty) is read from the last type segment again, which a `P1 - ` prefix had broken.
+
 ## 2026-10-27 — 📋 Ask-the-client list — Site Setup Tools latest v4.484 → v4.487 (latest only)
 
 - **v4.487** — the client table gains "pad identity" rows: every `Pad - X` asset still typed as a well (X is not on the sheet) is listed with the sheet wells on or within 300 ft of it and their tiers, asking whether the pad is still theirs and what the well is called now.

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.35
+// @version      3.36
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.35';
+    const SCRIPT_VERSION = '3.36';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -5709,9 +5709,27 @@
     function genSkipReason(asset) {
         if (asset.unshielded) return 'unshielded';
         const p = asset.poi || '';
-        const i = p.indexOf(' - ');
+        // v3.36: the state is the LAST " - " segment ("P1 - v - pumping rod - unreachable");
+        // the first-segment read never matched once types carried a tier prefix.
+        const i = p.lastIndexOf(' - ');
         const suffix = i >= 0 ? p.slice(i + 3).trim().toLowerCase() : '';
         return GEN_SKIP_STATES.indexOf(suffix) >= 0 ? suffix : null;
+    }
+    // v3.36: pad tier for the generator = best rank among the pad's own assets
+    // (root + descendants). P0 only when every tiered asset is P0; '' = no
+    // asset on the pad carries a prefix (never processed by the tiered import).
+    const GEN_TIER_RE = /^P([0-3])\s*[-–—:]/i;
+    const GEN_TIERS_KEY = 'aim-mb-gen-tiers';
+    function genPadTier(root, byId) {
+        const ids = [root.id].concat(root.descendants || []);
+        let best = 9, p0 = false;
+        ids.forEach(id => {
+            const a = byId.get(id); if (!a) return;
+            const m = String(a.poi || '').match(GEN_TIER_RE); if (!m) return;
+            const n = Number(m[1]);
+            if (n === 0) p0 = true; else if (n < best) best = n;
+        });
+        return best < 9 ? `P${best}` : (p0 ? 'P0' : '');
     }
     const genEntCache = {};
     let genLayer = null, genPreviewLayer = null, genOverlayOn = false, genBase = null, genPopupEl = null;
@@ -6435,22 +6453,66 @@
         const siteID = getCurrentSiteID();
         if (!siteID) { showToast('Generator: no site.', '#ff9800'); return; }
         showToast('Loading assets + missions + elevations…', '#9ad', 2200);
-        Promise.all([genFetchEntities(siteID), genFetchMissionNames(siteID)]).then(([{ assets, ffzs }, names]) => {
-            const stateSkip = assets.filter(a => genSkipReason(a));
-            const haveMission = assets.filter(a => !genSkipReason(a) && genHasMission(a, names));
-            const valid = assets.filter(a => !genSkipReason(a) && !genHasMission(a, names));
+        // v3.36: "already has a mission" is GEOMETRY (the 🧩 detector's solos —
+        // a mission whose steps touch exactly this pad), with the old name match
+        // kept as a fallback hint; rows are PADS only (nested roots), children
+        // fold into their pad; pads whose steps live only inside a macro are
+        // listed apart (✂ Split mints their micro — no generation needed).
+        Promise.all([genFetchEntities(siteID), new Promise((res, rej) => {
+            // fetchMissions silently no-ops while a fetch for this site is in flight — fail loudly instead of hanging the panel.
+            if (inFlightFetch === siteID) { rej(new Error('missions still loading for this site — open the generator again in a moment')); return; }
+            fetchMissions(siteID, res, rej);
+        })]).then(([ent, missions]) => {
+            const { assets, ffzs } = ent;
+            const names = (missions || []).map(m => ((m && m.name) || '').trim().toLowerCase()).filter(Boolean);
+            const byId = new Map(assets.map(a => [a.id, a]));
+            const roots = assets.filter(a => a.rootId == null || a.rootId === a.id || !byId.has(a.rootId));
+            const det = mcvDetect(ent, missions);
+            const microOf = new Map();   // pad id → [micro mission names]
+            det.solos.forEach(s => { const k = s.pad.id; if (!microOf.has(k)) microOf.set(k, []); microOf.get(k).push(String(s.mission.name || '')); });
+            const macroOf = new Map();   // pad id → [macro mission names]
+            det.macros.forEach(mc => mc.pads.forEach(a => { if (!macroOf.has(a.id)) macroOf.set(a.id, []); macroOf.get(a.id).push(String(mc.mission.name || '')); }));
+            roots.forEach(a => {
+                a.genTier = genPadTier(a, byId);
+                a.genMicros = microOf.get(a.id) || [];
+                a.genMacros = macroOf.get(a.id) || [];
+                a.genNameHit = !a.genMicros.length && genHasMission(a, names);
+            });
+            const stateSkip = roots.filter(a => genSkipReason(a));
+            const live = roots.filter(a => !genSkipReason(a));
+            const haveMission = live.filter(a => a.genMicros.length || a.genNameHit);
+            const macroOnly = live.filter(a => !a.genMicros.length && !a.genNameHit && a.genMacros.length);
+            const valid = live.filter(a => !a.genMicros.length && !a.genNameHit && !a.genMacros.length);
+            const tierCount = {};
+            valid.forEach(a => { tierCount[a.genTier || 'none'] = (tierCount[a.genTier || 'none'] || 0) + 1; });
+            console.log(`${TAG} [gen-bulk] ${roots.length} pads (${assets.length - roots.length} children folded) · ${valid.length} to create ${JSON.stringify(tierCount)} · ${haveMission.length} have a micro · ${macroOnly.length} macro-only · ${stateSkip.length} skip-state`);
+            const extra = { macroOnly, children: assets.length - roots.length };
             // Only fetch centroids we DON'T already have (exact or a nearby cached
             // DEM point) — most are already cached from Asset Inspector's sampling,
             // so this typically fetches nothing and never touches the rate limit.
             const pts = valid.map(a => genCentroid(a.ring)).filter(p => getElevationFromCache(p.lat, p.lng) == null);
-            const render = () => genRenderBulkPanel(valid, stateSkip, haveMission, ffzs);
+            const render = () => genRenderBulkPanel(valid, stateSkip, haveMission, ffzs, extra);
             if (!pts.length) { render(); return; }
             console.log(`${TAG} [gen-bulk] fetching ${pts.length} uncached elevations (of ${valid.length} assets)`);
             try { bulkFetchElevations(pts).then(render).catch(render); } catch (e) { render(); }
-        }).catch(e => { console.warn(`${TAG} [gen-bulk] load failed`, e); showToast('Generator: failed to load assets (see console).', '#ff5252', 4000); });
+        }).catch(e => { console.warn(`${TAG} [gen-bulk] load failed`, e); showToast(`Generator: failed to load — ${(e && e.message) || e}`, '#ff5252', 5000); });
     }
-    function genRenderBulkPanel(valid, stateSkip, haveMission, ffzs) {
+    const GEN_TIER_COL = { P1: '#ff5f5f', P2: '#ffb347', P3: '#7adfe6', P0: '#8a8a8a', none: '#c39dff' };
+    function genTierBadge(t) {
+        const k = t || 'none';
+        return `<span style="display:inline-block;min-width:22px;text-align:center;padding:0 4px;margin-right:5px;border-radius:3px;font-size:10px;font-weight:800;color:#0b0f14;background:${GEN_TIER_COL[k] || '#999'};">${k === 'none' ? '—' : escapeHtml(k)}</span>`;
+    }
+    function genRenderBulkPanel(valid, stateSkip, haveMission, ffzs, extra) {
         genCloseBulkPanel();
+        extra = extra || {};
+        const macroOnly = extra.macroOnly || [];
+        const kidsOf = a => (a.descendants && a.descendants.length) ? ` <span style="color:#789;font-weight:400;">· ${a.descendants.length} asset${a.descendants.length === 1 ? '' : 's'}</span>` : '';
+        // tier chips: which pad tiers are offered for generation (GM-persisted)
+        const tierDefault = { P1: true, P2: true, P3: true, P0: false, none: false };
+        let tierOn = Object.assign({}, tierDefault);
+        try { const sv = gmGet(GEN_TIERS_KEY, null); if (sv && typeof sv === 'object') tierOn = Object.assign(tierOn, sv); } catch (e) { console.warn(`${TAG} [gen-bulk] tier prefs read failed`, e); }
+        const tierCounts = { P1: 0, P2: 0, P3: 0, P0: 0, none: 0 };
+        valid.forEach(a => { tierCounts[a.genTier || 'none']++; });
         const rows = valid.map((a, i) => {
             const info = genPreviewInfo(a, ffzs);
             const nearFt = genAssetNearestFFZFt(a, ffzs);
@@ -6459,16 +6521,18 @@
             const detail = info.buildable
                 ? `nav ${info.standoffFt} ft @ ${info.navAltFt != null ? info.navAltFt + ' ft' : 'FFZ-min'} · snap ${info.snapAltFt} ft`
                 : (info.ffz ? 'elevation not loaded' : 'no FFZ found — skip');
-            return `<label class="aim-gen-row" data-has-ffz="${hasFFZ ? 1 : 0}" style="display:flex;align-items:flex-start;gap:8px;padding:6px 4px;border-bottom:1px solid #2a2f38;${dis}">
-                <input type="checkbox" data-gen-row="${i}" ${info.buildable ? 'checked' : ''} ${info.buildable ? '' : 'disabled'} style="flex:0 0 auto;margin-top:2px;">
+            const tk = a.genTier || 'none';
+            return `<label class="aim-gen-row" data-has-ffz="${hasFFZ ? 1 : 0}" data-tier="${tk}" style="display:flex;align-items:flex-start;gap:8px;padding:6px 4px;border-bottom:1px solid #2a2f38;${dis}">
+                <input type="checkbox" data-gen-row="${i}" ${info.buildable && tierOn[tk] ? 'checked' : ''} ${info.buildable ? '' : 'disabled'} style="flex:0 0 auto;margin-top:2px;">
                 <div style="flex:1;min-width:0;">
-                    <div style="color:#e6e6e6;font-weight:700;font-size:12px;line-height:1.25;">${escapeHtml(info.name)}</div>
+                    <div style="color:#e6e6e6;font-weight:700;font-size:12px;line-height:1.25;">${genTierBadge(a.genTier)}${escapeHtml(info.name)}${kidsOf(a)}</div>
                     <div style="color:#9ad;font-size:10px;line-height:1.2;margin-top:1px;">${escapeHtml(detail)}</div>
                 </div>
             </label>`;
         }).join('');
         const nm = a => escapeHtml(`${genSection(genCentroid(a.ring))} - ${a.name || a.id}`);
-        const existRows = haveMission.map(a => `<div style="padding:3px 4px;color:#9ad;font-size:11px;border-bottom:1px solid #1b2430;">${nm(a)} <span style="color:#678;">· already has a mission</span></div>`).join('');
+        const existRows = haveMission.map(a => `<div style="padding:3px 4px;color:#9ad;font-size:11px;border-bottom:1px solid #1b2430;">${genTierBadge(a.genTier)}${nm(a)} <span style="color:#678;">· ${a.genMicros && a.genMicros.length ? 'micro: ' + escapeHtml(a.genMicros.join(', ')) : 'name match only — no mission step touches this pad'}</span></div>`).join('');
+        const macroRows = macroOnly.map(a => `<div style="padding:3px 4px;color:#ffd54f;font-size:11px;border-bottom:1px solid #2a2410;">${genTierBadge(a.genTier)}${nm(a)} <span style="color:#a98;">· only in macro: ${escapeHtml(a.genMacros.join(', '))}</span></div>`).join('');
         const skipRows = stateSkip.map(a => `<div style="padding:3px 4px;color:#ff8a8a;font-size:11px;border-bottom:1px solid #241b1b;">${nm(a)} <span style="color:#a66;">· ${escapeHtml(genSkipReason(a))}</span></div>`).join('');
         const p = document.createElement('div');
         p.id = GEN_BULK_PANEL_ID;
@@ -6480,7 +6544,9 @@
                 <button data-gen-bulk-close style="flex:0 0 auto;background:rgba(255,255,255,0.12);border:none;color:#fff;width:22px;height:22px;border-radius:4px;cursor:pointer;">✕</button>
             </div>
             <div style="padding:8px 12px;font-size:11px;color:#bbb;border-bottom:1px solid #2a2f38;">
-                <b style="color:#7dff7d;">${valid.length}</b> to create · <b style="color:#9ad;">${haveMission.length}</b> already have missions · <b style="color:#ff8a8a;">${stateSkip.length}</b> skip-state
+                <b style="color:#7dff7d;">${valid.length}</b> to create · <b style="color:#9ad;">${haveMission.length}</b> have a micro · <b style="color:#ffd54f;">${macroOnly.length}</b> macro-only · <b style="color:#ff8a8a;">${stateSkip.length}</b> skip-state${extra.children ? ` · <span style="color:#789;">${extra.children} child assets folded into pads</span>` : ''}
+                <div style="display:flex;align-items:center;gap:8px;margin-top:7px;flex-wrap:wrap;"><span style="color:#cfe;">Tiers</span>${['P1', 'P2', 'P3', 'P0', 'none'].map(k => `<label style="display:flex;align-items:center;gap:3px;cursor:pointer;color:#cfe;"><input type="checkbox" data-gen-tier="${k}" ${tierOn[k] ? 'checked' : ''}>${genTierBadge(k)}<span style="color:#789;">${tierCounts[k]}</span></label>`).join('')}</div>
+                <div style="color:#789;font-size:10px;margin-top:2px;">— = no tier prefix on any asset of the pad (not processed by the tiered import) · P0 = client-confirmed no priority</div>
                 <label style="display:flex;align-items:center;gap:6px;margin-top:7px;cursor:pointer;color:#cfe;"><input type="checkbox" data-gen-bulk-scan checked> Inspection scan (Thermal/GEM/Wait wrap) on every mission</label>
                 <div style="display:flex;align-items:center;gap:6px;margin-top:7px;"><label style="color:#cfe;white-space:nowrap;">Name</label><input data-gen-bulk-name value="{section} - {asset}" title="Tokens: {section} = N/E/S/W · {asset} = asset name" style="flex:1;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:2px 6px;border-radius:3px;font:inherit;font-size:11px;"></div>
                 <div style="color:#789;font-size:10px;margin-top:2px;">Tokens: <b>{section}</b> = N/E/S/W · <b>{asset}</b> = asset name (e.g. <b>NNE - {asset}</b>)</div>
@@ -6499,7 +6565,8 @@
                 </div>
             </div>
             <div style="overflow:auto;flex:1;padding:2px 10px;">${rows || '<div style="padding:12px;color:#888;">No assets to create.</div>'}
-                ${existRows ? `<div style="margin-top:8px;color:#9ad;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;">Already have missions</div>${existRows}` : ''}
+                ${macroRows ? `<div style="margin-top:8px;color:#ffd54f;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;">In a macro only — no micro (🧩 → ✂ Split mints one from the macro's steps)</div>${macroRows}` : ''}
+                ${existRows ? `<div style="margin-top:8px;color:#9ad;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;">Already have a micro</div>${existRows}` : ''}
                 ${skipRows ? `<div style="margin-top:8px;color:#ff8a8a;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;">Skipped (state)</div>${skipRows}` : ''}
             </div>
             <div style="padding:9px 12px;border-top:1px solid #2a2f38;display:flex;align-items:center;gap:8px;">
@@ -6523,16 +6590,28 @@
         // "Built areas only" filter — hide (and uncheck) assets with no FFZ within
         // GEN_BUILT_FT. Off by default.
         const builtOnly = p.querySelector('[data-gen-bulk-builtonly]');
+        const tierCbs = [...p.querySelectorAll('[data-gen-tier]')];
         const applyBuiltFilter = () => {
             const on = builtOnly.checked;
+            const tiers = {}; tierCbs.forEach(cb => { tiers[cb.getAttribute('data-gen-tier')] = cb.checked; });
             p.querySelectorAll('.aim-gen-row').forEach(row => {
                 const has = row.getAttribute('data-has-ffz') === '1';
-                if (on && !has) { row.style.display = 'none'; const cb = row.querySelector('[data-gen-row]'); if (cb) cb.checked = false; }
+                const tOk = tiers[row.getAttribute('data-tier') || 'none'] !== false;
+                if ((on && !has) || !tOk) { row.style.display = 'none'; const cb = row.querySelector('[data-gen-row]'); if (cb) cb.checked = false; }
                 else row.style.display = '';
             });
             updateGo();
         };
         builtOnly.onchange = applyBuiltFilter;
+        // v3.36 tier chips — unticking hides + unchecks that tier's pads; ticking
+        // shows them (checked only via Select all, so a re-tick never silently
+        // re-arms rows). Choice persists per install.
+        tierCbs.forEach(cb => cb.onchange = () => {
+            const tiers = {}; tierCbs.forEach(c => { tiers[c.getAttribute('data-gen-tier')] = c.checked; });
+            try { gmSet(GEN_TIERS_KEY, tiers); } catch (e) { console.warn(`${TAG} [gen-bulk] tier prefs save failed`, e); }
+            applyBuiltFilter();
+        });
+        applyBuiltFilter();
         // Select all (visible + buildable only) / Deselect all.
         p.querySelector('[data-gen-selall]').onclick = () => {
             p.querySelectorAll('.aim-gen-row').forEach(row => { if (row.style.display === 'none') return; const cb = row.querySelector('[data-gen-row]:not(:disabled)'); if (cb) cb.checked = true; });
@@ -8292,6 +8371,16 @@
     function mcvDetect(ent, missions) {
         const assets = (ent.assets || []).filter(a => a.ring && a.ring.length >= 3);
         const padFold = mbBuildPadFold(assets);
+        // v3.36 (#273 nested assets): a step over a CHILD asset belongs to its
+        // PAD (the nested root). Children are polygons too and the
+        // tightest-polygon rule makes them win the hit-test, so without this a
+        // one-pad mission that shoots two child wells read as a MACRO and a
+        // real micro was keyed to the child id (the 🧠 planner then saw "no
+        // micro"). The hit-test keeps every polygon (children pinpoint the
+        // pad); every OUTPUT (solos/macros/todo/assets) is roots only.
+        const byIdNest = new Map(assets.map(a => [a.id, a]));
+        const rootFold = (a) => { const r = (a && a.rootId != null && a.rootId !== a.id) ? byIdNest.get(a.rootId) : null; return r || a; };
+        const pads = assets.filter(a => rootFold(a) === a);
         const tolM = 46;   // 150 ft
         const boxes = assets.map(a => agRingBbox(a.ring, tolM + 5));
         // v2.97: nested rings tie at d=0 — the TIGHTEST polygon must win, or
@@ -8323,7 +8412,7 @@
                         const d = mbPointToPolygonMeters(p.lat, p.lng, assets[ai].ring);
                         if (d <= tolM && (!best || d < best.d || (d === best.d && areas[ai] < best.area))) best = { a: assets[ai], d, area: areas[ai] };
                     }
-                    if (best) best.a = padFold(best.a);   // v2.94: equipment → its _ID main pad
+                    if (best) best.a = rootFold(padFold(best.a));   // v2.94: equipment → its _ID main pad · v3.36: child → nested root
                     if (best) {
                         curPad = best.a.id;
                         // v2.62: bank both the first LOOSE touch (≤150 ft, the
@@ -8365,8 +8454,9 @@
         // pads that have SOME mission on them but no macro yet
         const touched = new Set();
         missionPads.forEach(pads => pads.forEach(a => touched.add(a.id)));
-        const todo = assets.filter(a => touched.has(a.id) && !covered.has(a.id));
-        return { macros, solos, covered, todo, touched, assets, padCount: assets.length };
+        const todo = pads.filter(a => touched.has(a.id) && !covered.has(a.id));
+        if (pads.length !== assets.length) console.log(`${TAG} [macros] ${assets.length - pads.length} child asset(s) folded into their pads (${pads.length} pads)`);
+        return { macros, solos, covered, todo, touched, assets: pads, padCount: pads.length };
     }
     function mcvDraw(det) {
         const L = composerGetL(), map = getLeafletMap();
