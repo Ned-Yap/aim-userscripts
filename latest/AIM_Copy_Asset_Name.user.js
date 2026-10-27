@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.486
+// @version      4.487
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.486';
+    const SCRIPT_VERSION = '4.487';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -27984,7 +27984,20 @@
         // v4.486: a plain `Pad` whose wells DO have numbers is our side to fix (re-run the pad model), never a client question
         const ours = rows.filter(r => r.g.whole && r.g.pad && !tierOf(r.padType) && ((r.oil || 0) + (r.water || 0)) > 0);
         ours.forEach(r => untouched.unshift({ e: r.g.pad, name: r.pad, type: r.padType, parent: '', note: `${r.n} well(s): ${r.wells}`, ext: '', flag: `pad untiered in AIM but its wells total ${Math.round((r.oil || 0) + (r.water || 0)).toLocaleString()} BLPD on the sheet — our side: re-run ⚡ 🧱 Apply pad model` }));
-        return { rows: rows.filter(r => !ours.includes(r)), untouched, total: cand.length - ours.length };
+        // v4.487: a 'Pad - X' asset still typed as a well = X is not on the sheet at all (renamed well, plugged, or not theirs any
+        // more). That IS a client question: which sheet wells sit on / next to this pad, and what is it called now?
+        const identity = untouched.filter(r => /^pad still/.test(r.flag)).map(r => {
+            const e = r.e, ring = entityCoords(e) || []; if (ring.length < 3) return null; const c = ringCentroid(ring);
+            const near = (imp.points || []).filter(q => !q.removed && !q.pa && !q.thirdParty && isFinite(q.lat) && isFinite(q.lng) && pointToPolygonMeters(q.lat, q.lng, ring) <= 300 * GEN_FT_TO_M)
+                .map(q => ({ q, ft: Math.round(pointToPolygonMeters(q.lat, q.lng, ring) / GEN_FT_TO_M) })).sort((a, b) => a.ft - b.ft).slice(0, 8);
+            const wellOf = String(e.name || '').replace(/^pad\s*-\s*/i, '').trim();
+            let oil = null, water = null; near.forEach(x => { const n = sheetNums(x.q); if (!n) return; if (n.oil != null) oil = (oil || 0) + n.oil; if (n.water != null) water = (water || 0) + n.water; });
+            return { g: { whole: false, pad: e, identity: true }, pad: e.name, padType: typeOf(e), scope: 'pad identity', n: near.length,
+                wells: near.map(x => `${x.q.name}${x.q.pri && x.q.pri.tier ? ` (${x.q.pri.tier})` : ''}${x.ft ? ` ${x.ft} ft away` : ' on the pad'}`).join(', '),
+                why: `this pad in AIM is named after "${wellOf}", which is not on your sheet${near.length ? ' — the sheet wells on or next to it are listed' : ' and no sheet well sits within 300 ft'}. Is it still yours, and what is the well called now?`,
+                oil, water, ans: '', lat: c.lat, lng: c.lng };
+        }).filter(Boolean);
+        return { rows: rows.filter(r => !ours.includes(r)).concat(identity), untouched, total: cand.length - ours.length + identity.length };
     }
     async function impClientAsk() {
         const sid = genState.siteID; if (!sid) { impCommitNote('No site open', '#ff6060'); return; }
@@ -28006,13 +28019,13 @@
         if (rows.length) { saved1 = downloadJSONFile(`ask-the-client-${site}-${stamp}.csv`, csvOf(rows, cols)); try { impExportTable(rows, cols, 'sheets', 'ask-the-client', 'client question'); } catch (e) { console.warn(`${TAG} 📋 clipboard`, e); } }
         const ucols = [{ label: 'Name', val: r => r.name }, { label: 'Type', val: r => r.type }, { label: 'Parent', val: r => r.parent }, { label: 'Why it matters', val: r => r.flag }, { label: 'External ID', val: r => r.ext }, { label: 'Notes (first line)', val: r => r.note }];
         if (untouched.length) saved2 = downloadJSONFile(`never-touched-by-import-${site}-${stamp}.csv`, csvOf(untouched, ucols));
-        const whole = rows.filter(r => r.g.whole).length, part = rows.filter(r => !r.g.whole && r.g.pad).length, lone = rows.filter(r => !r.g.pad).length;
+        const whole = rows.filter(r => r.g.whole).length, ident = rows.filter(r => r.g.identity).length, part = rows.filter(r => !r.g.whole && !r.g.identity && r.g.pad).length, lone = rows.filter(r => !r.g.pad).length;
         const wells = rows.reduce((a, r) => a + r.n, 0);
         const answered = rows.filter(r => r.ans).length;
         const utypes = [...untouched.reduce((m, r) => m.set(r.type || '(no type)', (m.get(r.type || '(no type)') || 0) + 1), new Map()).entries()].sort((a, b) => b[1] - a[1]);
         const padsAsWells = untouched.filter(r => /^pad still/.test(r.flag)), noNums = rows.filter(r => /no production numbers/.test(r.why)).length, padsFix = untouched.filter(r => /^pad untiered/.test(r.flag));
         console.log(`${TAG} 📋 ask-the-client: ${rows.length} rows (${total} assets) · never touched ${untouched.length}`, rows, untouched);
-        impCommitNote(`📋 <b>${rows.length}</b> question row(s) covering <b>${total}</b> asset(s): ${whole} whole pad(s) · ${part} pad(s) where only some wells are P0 · ${lone} standalone · ${wells} well(s) listed${answered ? ` · <b>${answered}</b> already answered earlier (flagged, kept)` : ''}${noNums ? ` · <b>${noNums}</b> row(s) are "no numbers on the sheet"` : ''} — ${saved1 ? 'CSV saved + ' : ''}copied for Sheets.<br>`
+        impCommitNote(`📋 <b>${rows.length}</b> question row(s) covering <b>${total}</b> asset(s): ${whole} whole pad(s) · ${part} pad(s) where only some wells are P0 · ${lone} standalone${ident ? ` · <b>${ident}</b> pad(s) named after a well that is not on the sheet (identity question)` : ''} · ${wells} well(s) listed${answered ? ` · <b>${answered}</b> already answered earlier (flagged, kept)` : ''}${noNums ? ` · <b>${noNums}</b> row(s) are "no numbers on the sheet"` : ''} — ${saved1 ? 'CSV saved + ' : ''}copied for Sheets.<br>`
             + (padsFix.length ? `<b style="color:#ffb347">${padsFix.length} pad(s) untiered in AIM although their wells have numbers</b> — re-run ⚡ 🧱 Apply pad model (dry run first): ${impEsc(padsFix.slice(0, 8).map(r => r.name).join(' · '))}<br>` : '')
             + (padsAsWells.length ? `<b style="color:#ffb347">${padsAsWells.length} pad(s) still typed as a well</b> (the pad model never reached them — sheet row unmatched or outside the boundary): ${impEsc(padsAsWells.slice(0, 12).map(r => r.name).join(' · '))}${padsAsWells.length > 12 ? ' …' : ''}<br>` : '')
             + `For you only: <b>${untouched.length}</b> asset(s) the import never touched${untouched.length ? ` (${saved2 ? 'CSV saved' : 'see console'}): ${impEsc(utypes.slice(0, 8).map(([t, n]) => `${t} ×${n}`).join(' · '))}${utypes.length > 8 ? ' …' : ''}` : ''}`, '#5fff5f');

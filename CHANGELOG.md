@@ -1,4 +1,6 @@
-## 2026-10-27 — 📋 Ask-the-client list — Site Setup Tools latest v4.484 → v4.486 (latest only)
+## 2026-10-27 — 📋 Ask-the-client list — Site Setup Tools latest v4.484 → v4.487 (latest only)
+
+- **v4.487** — the client table gains "pad identity" rows: every `Pad - X` asset still typed as a well (X is not on the sheet) is listed with the sheet wells on or within 300 ft of it and their tiers, asking whether the pad is still theirs and what the well is called now.
 
 - **v4.486** — a container pad's tier now comes from the wells nested under it on the site (sum of their sheet numbers), not from the cluster of whichever row the pad was keyed on (Pad - NICHOLS EAST UNIT 1WB read plain `Pad` with 441 BLPD under it). The ask-the-client list moves such pads to the for-us CSV flagged "re-run Apply pad model" instead of asking the client.
 
