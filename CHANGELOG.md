@@ -1,4 +1,6 @@
-## 2026-10-27 — 📋 Ask-the-client list — Site Setup Tools latest v4.484 → v4.485 (latest only)
+## 2026-10-27 — 📋 Ask-the-client list — Site Setup Tools latest v4.484 → v4.486 (latest only)
+
+- **v4.486** — a container pad's tier now comes from the wells nested under it on the site (sum of their sheet numbers), not from the cluster of whichever row the pad was keyed on (Pad - NICHOLS EAST UNIT 1WB read plain `Pad` with 441 BLPD under it). The ask-the-client list moves such pads to the for-us CSV flagged "re-run Apply pad model" instead of asking the client.
 
 - **v4.485** — the client table also lists processed wells left with no prefix (the sheet had no numbers for them); the for-us CSV now excludes anything the import stamped and adds a *Why it matters* column that flags `Pad - …` assets still typed as a well (the pad model never reached them), batteries with no sheet match, and lone assets.
 

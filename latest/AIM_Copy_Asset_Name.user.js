@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.485
+// @version      4.486
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.485';
+    const SCRIPT_VERSION = '4.486';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -27863,7 +27863,7 @@
                 const body = buildWriteBody(ent, siteCfg);
                 body.description = String(x.notes || '').slice(0, 2000);
                 if (!body.custom || typeof body.custom !== 'object') body.custom = {};
-                if (x.padRow) { x.subtype = impPadType(x.p); body.description = impComposePadNotes(x.p, ent, stamp, x.padRow.nWells); body.custom[IMP_EXT_FIELD] = ''; }   // v4.470: a pad is a container — tier + Pad, pad notes, no External ID
+                if (x.padRow) { const pm = impPadModelFor(ent, x.p); x.subtype = pm.type; body.description = impComposePadNotes(pm.pp, ent, stamp, x.padRow.nWells); body.custom[IMP_EXT_FIELD] = ''; }   // v4.470: a pad is a container — tier + Pad, pad notes, no External ID
                 const refU = impTypeRef(x.subtype, knownSubs); body.custom.poi_type_str = x.subtype;
                 const isNewU = refU.isNew; body.custom.new_poi_type_str = x.subtype;   // v4.481: declared in OUR casing — the lowercase stored spelling is refused on updates   // v4.479: an UPDATE only takes a type that is DECLARED (new_poi_type_str); a plain reference is ignored by the server
                 if (x.ext && !x.padRow) impSetExtOnBody(body, x.ext);                     // v4.434/v4.438: External ID (custom.external_asset_id) from the file; left as it was when the file has none
@@ -27981,7 +27981,10 @@
         }).sort((a, b) => (b.g.whole - a.g.whole) || a.pad.localeCompare(b.pad));
         // v4.485: never-touched = no tier, no import stamp, not P&A / AVOID / pad; a 'Pad - …' asset still typed as a well is flagged (the pad model never reached it)
         const untouched = ents.filter(e => { const t = typeOf(e); return !tierOf(t) && !isPa(t) && !isAvoid(t) && !isPadType(t) && !processed(e); }).map(e => ({ e, name: e.name || '', type: typeOf(e), parent: e.parent_asset_name || '', note: String(e.description || '').split('\n').find(l => l.trim()) || '', ext: impExtOfEnt(e), flag: /^pad\s*-\s/i.test(e.name || '') ? 'pad still typed as a well — sheet row never matched or was outside the boundary' : (/battery/i.test(typeOf(e)) ? 'battery with no sheet match' : (e.parent_asset_name ? '' : 'no parent, no import stamp')) })).sort((a, b) => (b.flag ? 1 : 0) - (a.flag ? 1 : 0) || a.type.localeCompare(b.type) || a.name.localeCompare(b.name));
-        return { rows, untouched, total: cand.length };
+        // v4.486: a plain `Pad` whose wells DO have numbers is our side to fix (re-run the pad model), never a client question
+        const ours = rows.filter(r => r.g.whole && r.g.pad && !tierOf(r.padType) && ((r.oil || 0) + (r.water || 0)) > 0);
+        ours.forEach(r => untouched.unshift({ e: r.g.pad, name: r.pad, type: r.padType, parent: '', note: `${r.n} well(s): ${r.wells}`, ext: '', flag: `pad untiered in AIM but its wells total ${Math.round((r.oil || 0) + (r.water || 0)).toLocaleString()} BLPD on the sheet — our side: re-run ⚡ 🧱 Apply pad model` }));
+        return { rows: rows.filter(r => !ours.includes(r)), untouched, total: cand.length - ours.length };
     }
     async function impClientAsk() {
         const sid = genState.siteID; if (!sid) { impCommitNote('No site open', '#ff6060'); return; }
@@ -28007,9 +28010,10 @@
         const wells = rows.reduce((a, r) => a + r.n, 0);
         const answered = rows.filter(r => r.ans).length;
         const utypes = [...untouched.reduce((m, r) => m.set(r.type || '(no type)', (m.get(r.type || '(no type)') || 0) + 1), new Map()).entries()].sort((a, b) => b[1] - a[1]);
-        const padsAsWells = untouched.filter(r => /^pad still/.test(r.flag)), noNums = rows.filter(r => /no production numbers/.test(r.why)).length;
+        const padsAsWells = untouched.filter(r => /^pad still/.test(r.flag)), noNums = rows.filter(r => /no production numbers/.test(r.why)).length, padsFix = untouched.filter(r => /^pad untiered/.test(r.flag));
         console.log(`${TAG} 📋 ask-the-client: ${rows.length} rows (${total} assets) · never touched ${untouched.length}`, rows, untouched);
         impCommitNote(`📋 <b>${rows.length}</b> question row(s) covering <b>${total}</b> asset(s): ${whole} whole pad(s) · ${part} pad(s) where only some wells are P0 · ${lone} standalone · ${wells} well(s) listed${answered ? ` · <b>${answered}</b> already answered earlier (flagged, kept)` : ''}${noNums ? ` · <b>${noNums}</b> row(s) are "no numbers on the sheet"` : ''} — ${saved1 ? 'CSV saved + ' : ''}copied for Sheets.<br>`
+            + (padsFix.length ? `<b style="color:#ffb347">${padsFix.length} pad(s) untiered in AIM although their wells have numbers</b> — re-run ⚡ 🧱 Apply pad model (dry run first): ${impEsc(padsFix.slice(0, 8).map(r => r.name).join(' · '))}<br>` : '')
             + (padsAsWells.length ? `<b style="color:#ffb347">${padsAsWells.length} pad(s) still typed as a well</b> (the pad model never reached them — sheet row unmatched or outside the boundary): ${impEsc(padsAsWells.slice(0, 12).map(r => r.name).join(' · '))}${padsAsWells.length > 12 ? ' …' : ''}<br>` : '')
             + `For you only: <b>${untouched.length}</b> asset(s) the import never touched${untouched.length ? ` (${saved2 ? 'CSV saved' : 'see console'}): ${impEsc(utypes.slice(0, 8).map(([t, n]) => `${t} ×${n}`).join(' · '))}${utypes.length > 8 ? ' …' : ''}` : ''}`, '#5fff5f');
     }
@@ -28156,6 +28160,28 @@
         return q.padTotal < c.p1Min ? 'P3' : (q.padTotal <= c.p1Max ? 'P1' : 'P2');
     }
     function impPadType(p) { const t = impPadTier(p); return t ? `${t} - Pad` : 'Pad'; }
+    // v4.486: a container pad's tier = the sum over the wells NESTED UNDER IT on the site (plus a row that name-matches the
+    // pad itself), not the cluster of whichever row the pad was keyed on. Pad - NICHOLS EAST UNIT 1WB read plain `Pad`
+    // while its two children carried 441 BLPD: the keying row sat in another cluster. Falls back to impPadTier(row).
+    function impPadModelFor(pad, p) {
+        const c = imp.pri; const fbTier = impPadTier(p); const fb = { tier: fbTier, type: fbTier ? `${fbTier} - Pad` : 'Pad', pp: p, total: null, n: 0 };
+        if (!c.on || !pad || c.priCol) return fb;
+        const pk = String(pad.name || '').trim().toLowerCase();
+        const sid = genState.siteID; const ents = (sid && mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || [];
+        const ids = new Set(ents.filter(e => e.type === 3 && typeof e.parent_asset_name === 'string' && e.parent_asset_name.trim().toLowerCase() === pk).map(e => e.id)); ids.add(pad.id);
+        const seen = new Set(); const members = [];
+        imp.points.forEach(q => {
+            if (q.removed || q.pa || q.thirdParty || !q.pri) return;
+            const id = (q.dup && q.dupId != null && ids.has(q.dupId)) ? q.dupId : ((q.createdId && ids.has(q.createdId)) ? q.createdId : null);
+            if (id == null || seen.has(id)) return; seen.add(id); members.push(q);
+        });
+        const with_ = members.filter(q => q.pri.blpd != null);
+        if (!with_.length) return fb;
+        const total = with_.reduce((a, q) => a + q.pri.blpd, 0);
+        const tier = total === 0 ? 'P0' : impTierFromTotal(total);
+        const pp = { pri: { tier: tier === 'P0' ? '' : tier, untier: tier === 'P0' ? 'zero' : '', padTotal: total, padN: members.length, padWith: with_.length, padName: pad.name, flags: [] }, client: p && p.client };
+        return { tier, type: `${tier} - Pad`, pp, total, n: members.length };
+    }
     // P0 = the CLIENT SHEET confirms no priority: numbers present and zero (oil + water = 0), or the client's response marked it inactive.
     // Not Enverus' opinion, not missing numbers, not third-party / P&A (those keep their own types).
     function impClientConfirmedNoPriority(p) { if (!p || p.pa || p.thirdParty || !p.pri) return false; const u = p.pri.untier; return u === 'zero' || u === 'client'; }
@@ -28249,11 +28275,11 @@
         const rows = impWrapperRows();
         if (!rows.length) { impCommitNote('✓ no pad-matched rows in this import', '#5fff5f'); return; }
         const seenPad = new Set();
-        const todoPad = rows.filter(x => { if (seenPad.has(x.pad.id)) return false; const want = impPadType(x.p); const have = String((x.pad.custom && x.pad.custom.poi_type_str) || '').trim(); const need = have.toLowerCase() !== want.toLowerCase() || impExtOfEnt(x.pad) !== '' || !/^Pad\n/.test(String(x.pad.description || '')); if (need) seenPad.add(x.pad.id); return need; });   // v4.480: one write per pad
+        const todoPad = rows.filter(x => { if (seenPad.has(x.pad.id)) return false; const want = impPadModelFor(x.pad, x.p).type; const have = String((x.pad.custom && x.pad.custom.poi_type_str) || '').trim(); const need = have.toLowerCase() !== want.toLowerCase() || impExtOfEnt(x.pad) !== '' || !/^Pad\n/.test(String(x.pad.description || '')); if (need) seenPad.add(x.pad.id); return need; });   // v4.480: one write per pad
         const todoChild = rows.filter(x => !x.child && !x.p.createdId);
         const todoParent = rows.filter(x => x.child && !String(x.child.parent_asset_name || '').trim());   // v4.471: well exists but is not nested under its pad
         const dry = (() => { try { return !!document.getElementById('aim-gen-dryrun').checked; } catch (e) { return true; } })();
-        if (dry) { impCommitNote(`DRY RUN — pad model: ${todoParent.length ? `<b>${todoParent.length}</b> existing well(s) re-parented under their pad (${impEsc(todoParent.slice(0, 4).map(x => `${x.child.name} → ${x.pad.name}`).join(' · '))}) · ` : ''}<b>${todoPad.length}</b> pad(s) get type "${impEsc(impPadType({ pri: { tier: 'P2' } }))}"-style + pad notes + External ID cleared · <b>${todoChild.length}</b> well(s) created under their pad (${todoChild.filter(x => x.p.shape).length} from drawn outlines, ${todoChild.filter(x => !x.p.shape).length} as squares) · e.g. ${impEsc(todoPad.slice(0, 6).map(x => `${x.pad.name}: ${String((x.pad.custom && x.pad.custom.poi_type_str) || '—')} → ${impPadType(x.p)}${impExtOfEnt(x.pad) ? ' (ext id set)' : ''}${/^Pad\n/.test(String(x.pad.description || '')) ? '' : ' (notes not pad-style)'}`).join(' · '))} …. Untick Dry run to write.`); return; }
+        if (dry) { impCommitNote(`DRY RUN — pad model: ${todoParent.length ? `<b>${todoParent.length}</b> existing well(s) re-parented under their pad (${impEsc(todoParent.slice(0, 4).map(x => `${x.child.name} → ${x.pad.name}`).join(' · '))}) · ` : ''}<b>${todoPad.length}</b> pad(s) get type "${impEsc(impPadType({ pri: { tier: 'P2' } }))}"-style + pad notes + External ID cleared · <b>${todoChild.length}</b> well(s) created under their pad (${todoChild.filter(x => x.p.shape).length} from drawn outlines, ${todoChild.filter(x => !x.p.shape).length} as squares) · e.g. ${impEsc(todoPad.slice(0, 6).map(x => `${x.pad.name}: ${String((x.pad.custom && x.pad.custom.poi_type_str) || '—')} → ${impPadModelFor(x.pad, x.p).type}${impExtOfEnt(x.pad) ? ' (ext id set)' : ''}${/^Pad\n/.test(String(x.pad.description || '')) ? '' : ' (notes not pad-style)'}`).join(' · '))} …. Untick Dry run to write.`); return; }
         const csrf = getCsrfToken(); if (!csrf) { impCommitNote('No CSRF token — make one native save anywhere in Percepto first, then retry', '#ff6060'); return; }
         let siteCfg = null; try { siteCfg = await fetchSiteConfig(sid); } catch (e) {}
         if (!siteCfg) { impCommitNote('Could not read the site config — nothing written', '#ff6060'); return; }
@@ -28264,11 +28290,11 @@
         const known = impSiteTypeSet(); const stamp = impNowStamp(); let okP = 0, okC = 0, fail = 0; const updated = [], created = [];
         const post = async (body) => fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) });
         for (let i = 0; i < todoPad.length; i++) {
-            const x = todoPad[i]; const want = impPadType(x.p); impCommitNote(`pad ${i + 1}/${todoPad.length} — "${impEsc(x.pad.name)}" → ${impEsc(want)}…`);
+            const x = todoPad[i]; const pm = impPadModelFor(x.pad, x.p); const want = pm.type; impCommitNote(`pad ${i + 1}/${todoPad.length} — "${impEsc(x.pad.name)}" → ${impEsc(want)}…`);
             try {
                 const body = buildWriteBody(x.pad, siteCfg); if (!body.custom || typeof body.custom !== 'object') body.custom = {};
                 const ref = impTypeRef(want, known); const isNew = ref.isNew; body.custom.poi_type_str = want; body.custom.new_poi_type_str = want;   // v4.481: our casing   // v4.479: always declared on an update
-                body.custom[IMP_EXT_FIELD] = ''; body.description = impComposePadNotes(x.p, x.pad, stamp, x.nWells);   // v4.471: '' clears it — null was ignored (56/241 verified)
+                body.custom[IMP_EXT_FIELD] = ''; body.description = impComposePadNotes(pm.pp, x.pad, stamp, x.nWells);   // v4.471: '' clears it — null was ignored (56/241 verified)
                 const rr = await post(body); const txt = await rr.text(); let js = null; try { js = JSON.parse(txt); } catch (e) {}
                 if (rr.status === 200) {
                     okP++; updated.push({ id: x.pad.id, name: x.pad.name, before: JSON.parse(JSON.stringify(x.pad)) }); if (isNew && await impConfirmType(sid, want)) known.add(want.toLowerCase());
