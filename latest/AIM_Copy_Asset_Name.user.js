@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.484
+// @version      4.485
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.484';
+    const SCRIPT_VERSION = '4.485';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -27945,6 +27945,7 @@
         const num = (v) => { const n = parseFloat(String(v == null ? '' : v).replace(/[,$\s]/g, '')); return isFinite(n) ? n : null; };
         const sheetNums = (e) => { const p = ptByName.get(nk(e.name)); if (!p) return null; const r = imp.rows[p.i] || {}; const o = oilCol ? num(r[oilCol]) : null, w = waterCol ? num(r[waterCol]) : null; return (o == null && w == null) ? null : { oil: o, water: w }; };
         const priLine = (e) => { const m = String(e.description || '').match(/^Priority\n(.*)$/m); return m ? m[1].trim() : ''; };
+        const processed = (e) => /^(Prioritized|Priority|Original name)\n/m.test(String(e.description || '')) || ptByName.has(nk(e.name));   // v4.485: the import stamps every asset it writes
         const answered = (e) => { const p = ptByName.get(nk(e.name)); const c = p && p.client; if (c && (c.inactive || c.zero || c.planned) && !c.producing) return `${c.at ? c.at.slice(0, 10) : 'earlier'}: you said ${c.status ? c.status.toLowerCase() : (c.planned ? 'not yet drilled' : 'inactive')}`; const l = priLine(e); const m = l.match(/client confirmed (.+)$/i); return m ? `earlier response: ${m[1]}` : ''; };
         const whyOf = (e) => {
             const t = typeOf(e), p = ptByName.get(nk(e.name)), l = priLine(e);
@@ -27954,9 +27955,10 @@
             if (/zero production/i.test(l)) return 'zero production (0 oil, 0 water) on your 9/30 sheet';
             if (isPadType(t) && !tierOf(t)) return 'no production numbers for this pad on your sheet';
             if (tierOf(t) === 'P0') return l ? l.replace(/^not tiered\s*[—-]\s*/i, '') : 'no priority on your sheet';
+            if (!tierOf(t)) return 'no production numbers for this well on your sheet';   // v4.485: processed but left unprefixed = the sheet had no numbers
             return '';
         };
-        const cand = ents.filter(e => { const t = typeOf(e); if (isPa(t) || isAvoid(t)) return false; return tierOf(t) === 'P0' || (isPadType(t) && !tierOf(t)); });
+        const cand = ents.filter(e => { const t = typeOf(e); if (isPa(t) || isAvoid(t)) return false; return tierOf(t) === 'P0' || (isPadType(t) && !tierOf(t)) || (!tierOf(t) && processed(e)); });   // v4.485: + processed wells with no prefix (no numbers)
         const groups = new Map();                                                     // pad key → group
         const groupFor = (pad, key) => { if (!groups.has(key)) groups.set(key, { key, pad, name: pad ? pad.name : key, wells: [], whole: false }); return groups.get(key); };
         cand.forEach(e => {
@@ -27977,7 +27979,8 @@
             const ans = [...new Set(members.map(answered).filter(Boolean))];
             return { g, pad: g.name, padType: padT || (g.pad ? '' : '—'), scope, n: g.wells.length, wells: g.wells.map(e => e.name).sort().join(', '), why: whys.join(' · ') || 'no priority on your sheet', oil, water, ans: ans.join(' · '), lat: g.pad ? ringCentroid(entityCoords(g.pad) || []).lat : (members[0] ? ringCentroid(entityCoords(members[0]) || []).lat : null), lng: g.pad ? ringCentroid(entityCoords(g.pad) || []).lng : (members[0] ? ringCentroid(entityCoords(members[0]) || []).lng : null) };
         }).sort((a, b) => (b.g.whole - a.g.whole) || a.pad.localeCompare(b.pad));
-        const untouched = ents.filter(e => { const t = typeOf(e); return !tierOf(t) && !isPa(t) && !isAvoid(t) && !isPadType(t); }).map(e => ({ e, name: e.name || '', type: typeOf(e), parent: e.parent_asset_name || '', note: String(e.description || '').split('\n').find(l => l.trim()) || '', ext: impExtOfEnt(e) })).sort((a, b) => a.type.localeCompare(b.type) || a.name.localeCompare(b.name));
+        // v4.485: never-touched = no tier, no import stamp, not P&A / AVOID / pad; a 'Pad - …' asset still typed as a well is flagged (the pad model never reached it)
+        const untouched = ents.filter(e => { const t = typeOf(e); return !tierOf(t) && !isPa(t) && !isAvoid(t) && !isPadType(t) && !processed(e); }).map(e => ({ e, name: e.name || '', type: typeOf(e), parent: e.parent_asset_name || '', note: String(e.description || '').split('\n').find(l => l.trim()) || '', ext: impExtOfEnt(e), flag: /^pad\s*-\s/i.test(e.name || '') ? 'pad still typed as a well — sheet row never matched or was outside the boundary' : (/battery/i.test(typeOf(e)) ? 'battery with no sheet match' : (e.parent_asset_name ? '' : 'no parent, no import stamp')) })).sort((a, b) => (b.flag ? 1 : 0) - (a.flag ? 1 : 0) || a.type.localeCompare(b.type) || a.name.localeCompare(b.name));
         return { rows, untouched, total: cand.length };
     }
     async function impClientAsk() {
@@ -27998,14 +28001,16 @@
         const stamp = impNowStamp().replace(/[: ]/g, '-'); const site = String(getCurrentSiteName() || sid).replace(/[^A-Za-z0-9_-]+/g, '_');
         let saved1 = false, saved2 = false;
         if (rows.length) { saved1 = downloadJSONFile(`ask-the-client-${site}-${stamp}.csv`, csvOf(rows, cols)); try { impExportTable(rows, cols, 'sheets', 'ask-the-client', 'client question'); } catch (e) { console.warn(`${TAG} 📋 clipboard`, e); } }
-        const ucols = [{ label: 'Name', val: r => r.name }, { label: 'Type', val: r => r.type }, { label: 'Parent', val: r => r.parent }, { label: 'External ID', val: r => r.ext }, { label: 'Notes (first line)', val: r => r.note }];
+        const ucols = [{ label: 'Name', val: r => r.name }, { label: 'Type', val: r => r.type }, { label: 'Parent', val: r => r.parent }, { label: 'Why it matters', val: r => r.flag }, { label: 'External ID', val: r => r.ext }, { label: 'Notes (first line)', val: r => r.note }];
         if (untouched.length) saved2 = downloadJSONFile(`never-touched-by-import-${site}-${stamp}.csv`, csvOf(untouched, ucols));
         const whole = rows.filter(r => r.g.whole).length, part = rows.filter(r => !r.g.whole && r.g.pad).length, lone = rows.filter(r => !r.g.pad).length;
         const wells = rows.reduce((a, r) => a + r.n, 0);
         const answered = rows.filter(r => r.ans).length;
         const utypes = [...untouched.reduce((m, r) => m.set(r.type || '(no type)', (m.get(r.type || '(no type)') || 0) + 1), new Map()).entries()].sort((a, b) => b[1] - a[1]);
+        const padsAsWells = untouched.filter(r => /^pad still/.test(r.flag)), noNums = rows.filter(r => /no production numbers/.test(r.why)).length;
         console.log(`${TAG} 📋 ask-the-client: ${rows.length} rows (${total} assets) · never touched ${untouched.length}`, rows, untouched);
-        impCommitNote(`📋 <b>${rows.length}</b> question row(s) covering <b>${total}</b> asset(s): ${whole} whole pad(s) · ${part} pad(s) where only some wells are P0 · ${lone} standalone · ${wells} well(s) listed${answered ? ` · <b>${answered}</b> already answered earlier (flagged, kept)` : ''} — ${saved1 ? 'CSV saved + ' : ''}copied for Sheets.<br>`
+        impCommitNote(`📋 <b>${rows.length}</b> question row(s) covering <b>${total}</b> asset(s): ${whole} whole pad(s) · ${part} pad(s) where only some wells are P0 · ${lone} standalone · ${wells} well(s) listed${answered ? ` · <b>${answered}</b> already answered earlier (flagged, kept)` : ''}${noNums ? ` · <b>${noNums}</b> row(s) are "no numbers on the sheet"` : ''} — ${saved1 ? 'CSV saved + ' : ''}copied for Sheets.<br>`
+            + (padsAsWells.length ? `<b style="color:#ffb347">${padsAsWells.length} pad(s) still typed as a well</b> (the pad model never reached them — sheet row unmatched or outside the boundary): ${impEsc(padsAsWells.slice(0, 12).map(r => r.name).join(' · '))}${padsAsWells.length > 12 ? ' …' : ''}<br>` : '')
             + `For you only: <b>${untouched.length}</b> asset(s) the import never touched${untouched.length ? ` (${saved2 ? 'CSV saved' : 'see console'}): ${impEsc(utypes.slice(0, 8).map(([t, n]) => `${t} ×${n}`).join(' · '))}${utypes.length > 8 ? ' …' : ''}` : ''}`, '#5fff5f');
     }
     function impPreflightText() {
