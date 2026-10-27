@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.478
+// @version      4.479
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.478';
+    const SCRIPT_VERSION = '4.479';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -27863,7 +27863,7 @@
                 if (!body.custom || typeof body.custom !== 'object') body.custom = {};
                 if (x.padRow) { x.subtype = impPadType(x.p); body.description = impComposePadNotes(x.p, ent, stamp, x.padRow.nWells); body.custom[IMP_EXT_FIELD] = ''; }   // v4.470: a pad is a container — tier + Pad, pad notes, no External ID
                 const refU = impTypeRef(x.subtype, knownSubs); body.custom.poi_type_str = refU.poi;
-                const isNewU = refU.isNew; body.custom.new_poi_type_str = isNewU ? x.subtype : '';
+                const isNewU = refU.isNew; body.custom.new_poi_type_str = refU.poi;   // v4.479: an UPDATE only takes a type that is DECLARED (new_poi_type_str); a plain reference is ignored by the server
                 if (x.ext && !x.padRow) impSetExtOnBody(body, x.ext);                     // v4.434/v4.438: External ID (custom.external_asset_id) from the file; left as it was when the file has none
                 let st = 0, raw = '';
                 try { const rr = await fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) }); st = rr.status; raw = await rr.text(); }
@@ -28023,7 +28023,7 @@
             try {
                 const body = buildWriteBody(x.e, siteCfg); if (!body.custom || typeof body.custom !== 'object') body.custom = {};
                 const ref = impTypeRef(x.want, known); const isNew = ref.isNew;
-                body.custom.poi_type_str = ref.poi; body.custom.new_poi_type_str = isNew ? x.want : '';
+                body.custom.poi_type_str = ref.poi; body.custom.new_poi_type_str = ref.poi;   // v4.479: always declared on an update
                 const rr = await fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) });
                 const txt = await rr.text(); let js = null; try { js = JSON.parse(txt); } catch (e) {}
                 if (rr.status === 200) {
@@ -28168,7 +28168,7 @@
             const x = todoPad[i]; const want = impPadType(x.p); impCommitNote(`pad ${i + 1}/${todoPad.length} — "${impEsc(x.pad.name)}" → ${impEsc(want)}…`);
             try {
                 const body = buildWriteBody(x.pad, siteCfg); if (!body.custom || typeof body.custom !== 'object') body.custom = {};
-                const ref = impTypeRef(want, known); const isNew = ref.isNew; body.custom.poi_type_str = ref.poi; body.custom.new_poi_type_str = isNew ? want : '';
+                const ref = impTypeRef(want, known); const isNew = ref.isNew; body.custom.poi_type_str = ref.poi; body.custom.new_poi_type_str = ref.poi;   // v4.479: always declared on an update
                 body.custom[IMP_EXT_FIELD] = ''; body.description = impComposePadNotes(x.p, x.pad, stamp, x.nWells);   // v4.471: '' clears it — null was ignored (56/241 verified)
                 const rr = await post(body);
                 if (rr.status === 200) { okP++; updated.push({ id: x.pad.id, name: x.pad.name, before: JSON.parse(JSON.stringify(x.pad)) }); if (isNew && await impConfirmType(sid, want)) known.add(want.toLowerCase()); }

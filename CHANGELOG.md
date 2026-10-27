@@ -1,4 +1,6 @@
-## 2026-10-26 — 🧱 Pad model — Site Setup Tools latest v4.470 → v4.478 (latest only)
+## 2026-10-26 — 🧱 Pad model — Site Setup Tools latest v4.470 → v4.479 (latest only)
+
+- **v4.479** — an update now always DECLARES the type (`new_poi_type_str`, in the server's stored spelling); the server ignores a plain `poi_type_str` reference on an existing asset, which is why every pass stored only the first asset of each type.
 
 - **v4.478** — P0 only when the client's own data confirms no priority: numbers present and zero, or the client's response marked the well inactive. Enverus-only verdicts and missing numbers stay unprefixed.
 
