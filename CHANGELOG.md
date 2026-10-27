@@ -1,4 +1,6 @@
-## 2026-10-26 — 🧱 Pad model — Site Setup Tools latest v4.470 → v4.480 (latest only)
+## 2026-10-26 — 🧱 Pad model — Site Setup Tools latest v4.470 → v4.481 (latest only)
+
+- **v4.481** — updates declare the type in the importer's own casing (`P3 - Pad`), not the server's lowercase display spelling, which the server refuses on updates.
 
 - **v4.480** — pad model writes each pad once, shows the real pending pads in the dry run, logs the server's response for any pad that comes back different, and waits longer before the verify read.
 
