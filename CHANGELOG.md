@@ -1,3 +1,7 @@
+## 2026-10-27 — 📋 Ask-the-client list — Site Setup Tools latest v4.484 (latest only)
+
+- **v4.484** — step 7 gains **👁 📋 Ask-the-client list**: reads the live site and builds the table to send the client — every asset the import deliberately left without a priority (orange `P0 -`: their sheet said zero production, or they told us inactive) plus pads their sheet had no numbers for (pink plain `Pad`), one row per pad with its wells, why we are asking, the sheet's oil / water, anything they already answered (flagged, not dropped) and a blank *Capture? (Y / N)* column. Copied for Sheets + CSV. A second CSV, for us only, lists assets on the site the import never touched (no P prefix, not P&A / AVOID / pad).
+
 ## 2026-10-26 — 🧱 Pad model — Site Setup Tools latest v4.470 → v4.483 (latest only)
 
 - **v4.483** — pad model names the wells it would re-parent in the dry run and logs the server's stored parent for each re-parent write.

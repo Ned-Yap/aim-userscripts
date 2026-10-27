@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.483
+// @version      4.484
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.483';
+    const SCRIPT_VERSION = '4.484';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -26110,7 +26110,8 @@
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#ffd666" title="Square side for other operators' pads (AVOID - 3rd Party Pad) — big enough to read as a pad to avoid, not a wellhead.">3rd-party size <input type="number" id="aim-imp-thirdsize" min="5" max="2000" step="5" style="width:52px;background:#1a1d23;border:1px solid rgba(255,214,102,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px"> ft</label>
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#ff8a80" title="Side of the TRIANGLE a 🩻 P&A asset becomes (plugged / expired / cancelled / retired wells and facilities from the fill-in) — three corners instead of four so it never passes for a normal asset. ↔ Move and ✏ Shape still apply.">P&A size <input type="number" id="aim-imp-pasize" min="5" max="2000" step="5" style="width:52px;background:#1a1d23;border:1px solid rgba(255,138,128,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px"> ft</label>
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#ffd400" title="What happens to a staged point whose NAME matches an asset already on this site. Update = rewrite that asset's TYPE and NOTES from this file, never its shape or position (the quarterly re-run). Copy = create a second asset named …-2. Skip = leave it alone. Points merely inside / near an existing asset are only flagged and always created.">name matches <select id="aim-imp-dupmode" style="background:#1a1d23;border:1px solid rgba(255,212,0,0.45);color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px"><option value="update">update type + notes</option><option value="skip">skip</option><option value="copy">create a copy (-N)</option></select></label>
-                <button id="aim-imp-preflight" style="${btnCss('122,223,230')}" title="👁 Reads only: a plain-text report of everything the importer knows about the run — what Create would do, types, names, flags, Enverus, safety — downloaded and copied to the clipboard for review before writing.">👁 📋 Pre-import report</button><span id="aim-imp-preflight-note" style="flex-basis:100%;font-size:10px;color:#9ad"></span><div id="aim-imp-commit-note" style="flex-basis:100%;font-size:11px;color:#9ad;line-height:1.5;min-height:14px;padding:4px 8px;background:rgba(255,255,255,0.03);border-radius:3px"></div>
+                <button id="aim-imp-preflight" style="${btnCss('122,223,230')}" title="👁 Reads only: a plain-text report of everything the importer knows about the run — what Create would do, types, names, flags, Enverus, safety — downloaded and copied to the clipboard for review before writing.">👁 📋 Pre-import report</button>
+                <button id="aim-imp-askclient" style="${btnCss('122,223,230')}" title="👁 Reads only: builds the list to send the client — every asset on this site the import deliberately left without a priority (P0 = their sheet said zero production or they said inactive) plus pads their sheet had no numbers for, one row per pad with its wells, with a blank Capture? column for them. Copied for Sheets + CSV. A second CSV (for you, not them) lists assets the import never touched.">👁 📋 Ask-the-client list</button><span id="aim-imp-preflight-note" style="flex-basis:100%;font-size:10px;color:#9ad"></span><div id="aim-imp-commit-note" style="flex-basis:100%;font-size:11px;color:#9ad;line-height:1.5;min-height:14px;padding:4px 8px;background:rgba(255,255,255,0.03);border-radius:3px"></div>
                 <button id="aim-imp-commit" style="${btnCss('255,120,60')};font-weight:600" title="WRITES to AIM: creates the selected staged points as real assets (updates type + notes on name matches). Honours Dry run. A backup manifest downloads first; ↩ Undo reverts exactly this run.">⚡ Create selected</button>
                 <button id="aim-imp-audit" style="${btnCss('122,223,230')}" title="👁 Reads only: lists wells this session created more than 1,500 ft from their pad (a far-away row that name-matched a local pad), with a delete for exactly those.">👁 🔍 Audit placements</button>
                 <button id="aim-imp-wrapchild" style="${btnCss('255,120,60')}" title="WRITES to AIM: every row that matched a 'Pad - …' asset → the pad becomes a container (type = tier + Pad, pad-level priority note, External ID removed) and the well itself is created under it from your outline (or as a square) with the row's name, type, notes and External ID. Dry run lists the counts first.">⚡ 🧱 Apply pad model</button>
@@ -26279,6 +26280,7 @@
         dmSel.onchange = () => { imp.dupMode = dmSel.value; imp.includeDups = imp.dupMode === 'copy'; impSaveParams(); impSyncUi(); };
         q('aim-imp-commit').onclick = () => { impCommit(); };
         q('aim-imp-preflight').onclick = () => { impPreflight('download'); };
+        q('aim-imp-askclient').onclick = () => { impClientAsk().catch(e => { console.warn(`${TAG} 📋 ask-client`, e); impCommitNote(`📋 ask-the-client list failed: ${impEsc(e && e.message || e)}`, '#ff6060'); }); };
         q('aim-imp-undocreate').onclick = () => { impUndoCreate(); };
         q('aim-imp-audit').onclick = () => { impAudit().catch(e => impCommitNote(`🔍 ${impEsc(e && e.message || e)}`, '#ff6060')); };
         q('aim-imp-wrapchild').onclick = () => { impApplyPadModel().catch(e => { console.warn(`${TAG} ↻ outlines`, e); impCommitNote(`↻ ${impEsc(e && e.message || e)}`, '#ff6060'); }); };
@@ -27924,6 +27926,88 @@
     }
     // ---- v4.453 📋 PRE-FLIGHT REPORT — everything the importer knows about the run about to happen, as plain text
     // (downloaded + copied), so it can be reviewed or pasted to someone before ⚡ Create. Read-only; same resolvers as the commit. ----
+    // ---- v4.484 (user 2026-10-27) ASK-THE-CLIENT LIST. After the Cobra 01 import the orange (P0) and pink (plain `Pad`)
+    // assets are the ones the client must confirm: capture or not. Built from the LIVE site so it matches the map, one row
+    // per pad with its wells inside (their answer is per pad). Reasons come from the session point when it is still here
+    // (untier reason, sheet numbers, their Oct response) and fall back to the Priority block the import wrote in the notes.
+    // Second table (never sent): type-3 assets with no P prefix that are not P&A / AVOID / pad = never processed by the tool.
+    function impClientAskRows() {
+        const sid = genState.siteID; const ents = (((mapObjectsBySite[sid] || {}).entities) || []).filter(e => e && e.type === 3);
+        const typeOf = (e) => String((e.custom && e.custom.poi_type_str) || '').trim();
+        const tierOf = (t) => { const m = String(t || '').match(IMP_TIER_RE); return m ? `P${m[1]}` : ''; };          // P0..P3 or ''
+        const isPa = (t) => /^pa\s*(asset|3rd party)\b/i.test(t) || /^p&a\b/i.test(t), isAvoid = (t) => /^avoid\b/i.test(t);
+        const isPadType = (t) => /^(P[0-3]\s*[-–—:]\s*)?pad$/i.test(t);
+        const nk = (v) => String(v || '').trim().toLowerCase();
+        const byName = new Map(); ents.forEach(e => { if (e.name) byName.set(nk(e.name), e); });
+        const kidsOf = new Map(); ents.forEach(e => { const pk = nk(e.parent_asset_name); if (!pk) return; if (!kidsOf.has(pk)) kidsOf.set(pk, []); kidsOf.get(pk).push(e); });
+        const ptByName = new Map(); (imp.points || []).forEach(p => { const k = nk(p.name); if (k && !ptByName.has(k)) ptByName.set(k, p); });
+        const oilCol = imp.pri && imp.pri.oilCol, waterCol = imp.pri && imp.pri.waterCol;
+        const num = (v) => { const n = parseFloat(String(v == null ? '' : v).replace(/[,$\s]/g, '')); return isFinite(n) ? n : null; };
+        const sheetNums = (e) => { const p = ptByName.get(nk(e.name)); if (!p) return null; const r = imp.rows[p.i] || {}; const o = oilCol ? num(r[oilCol]) : null, w = waterCol ? num(r[waterCol]) : null; return (o == null && w == null) ? null : { oil: o, water: w }; };
+        const priLine = (e) => { const m = String(e.description || '').match(/^Priority\n(.*)$/m); return m ? m[1].trim() : ''; };
+        const answered = (e) => { const p = ptByName.get(nk(e.name)); const c = p && p.client; if (c && (c.inactive || c.zero || c.planned) && !c.producing) return `${c.at ? c.at.slice(0, 10) : 'earlier'}: you said ${c.status ? c.status.toLowerCase() : (c.planned ? 'not yet drilled' : 'inactive')}`; const l = priLine(e); const m = l.match(/client confirmed (.+)$/i); return m ? `earlier response: ${m[1]}` : ''; };
+        const whyOf = (e) => {
+            const t = typeOf(e), p = ptByName.get(nk(e.name)), l = priLine(e);
+            if (p && p.client && !p.client.producing && (p.client.inactive || p.client.planned)) return p.client.planned && !p.client.inactive ? 'you told us it is not yet drilled' : 'you told us it is inactive';
+            if (p && p.pri && p.pri.untier === 'zero') return 'zero production (0 oil, 0 water) on your 9/30 sheet';
+            if (/client confirmed/i.test(l)) return 'you told us it is inactive';
+            if (/zero production/i.test(l)) return 'zero production (0 oil, 0 water) on your 9/30 sheet';
+            if (isPadType(t) && !tierOf(t)) return 'no production numbers for this pad on your sheet';
+            if (tierOf(t) === 'P0') return l ? l.replace(/^not tiered\s*[—-]\s*/i, '') : 'no priority on your sheet';
+            return '';
+        };
+        const cand = ents.filter(e => { const t = typeOf(e); if (isPa(t) || isAvoid(t)) return false; return tierOf(t) === 'P0' || (isPadType(t) && !tierOf(t)); });
+        const groups = new Map();                                                     // pad key → group
+        const groupFor = (pad, key) => { if (!groups.has(key)) groups.set(key, { key, pad, name: pad ? pad.name : key, wells: [], whole: false }); return groups.get(key); };
+        cand.forEach(e => {
+            const t = typeOf(e);
+            if (isPadType(t)) { const g = groupFor(e, nk(e.name)); g.whole = true; return; }
+            const pk = nk(e.parent_asset_name); const pad = pk ? byName.get(pk) : null;
+            if (pad) { const g = groupFor(pad, pk); if (!g.wells.includes(e)) g.wells.push(e); }
+            else groupFor(null, nk(e.name)).wells.push(e);                            // standalone (battery, SWD, lone well)
+        });
+        // a whole-pad group lists ALL its children, not just the P0 ones
+        groups.forEach(g => { if (g.whole && g.pad) (kidsOf.get(nk(g.pad.name)) || []).forEach(k => { if (!g.wells.includes(k)) g.wells.push(k); }); });
+        const rows = [...groups.values()].map(g => {
+            const padT = g.pad ? typeOf(g.pad) : ''; const padTier = tierOf(padT);
+            const members = g.wells.length ? g.wells : (g.pad ? [g.pad] : []);
+            let oil = null, water = null; members.forEach(e => { const n = sheetNums(e); if (!n) return; if (n.oil != null) oil = (oil || 0) + n.oil; if (n.water != null) water = (water || 0) + n.water; });
+            const whys = [...new Set(members.map(whyOf).concat(g.pad && g.whole ? [whyOf(g.pad)] : []).filter(Boolean))];
+            const scope = g.whole ? (g.wells.length ? 'whole pad' : 'pad (no wells listed under it)') : (g.pad ? `only these ${g.wells.length} well${g.wells.length === 1 ? '' : 's'} — the pad itself is ${padTier || 'tiered'}` : 'standalone asset');
+            const ans = [...new Set(members.map(answered).filter(Boolean))];
+            return { g, pad: g.name, padType: padT || (g.pad ? '' : '—'), scope, n: g.wells.length, wells: g.wells.map(e => e.name).sort().join(', '), why: whys.join(' · ') || 'no priority on your sheet', oil, water, ans: ans.join(' · '), lat: g.pad ? ringCentroid(entityCoords(g.pad) || []).lat : (members[0] ? ringCentroid(entityCoords(members[0]) || []).lat : null), lng: g.pad ? ringCentroid(entityCoords(g.pad) || []).lng : (members[0] ? ringCentroid(entityCoords(members[0]) || []).lng : null) };
+        }).sort((a, b) => (b.g.whole - a.g.whole) || a.pad.localeCompare(b.pad));
+        const untouched = ents.filter(e => { const t = typeOf(e); return !tierOf(t) && !isPa(t) && !isAvoid(t) && !isPadType(t); }).map(e => ({ e, name: e.name || '', type: typeOf(e), parent: e.parent_asset_name || '', note: String(e.description || '').split('\n').find(l => l.trim()) || '', ext: impExtOfEnt(e) })).sort((a, b) => a.type.localeCompare(b.type) || a.name.localeCompare(b.name));
+        return { rows, untouched, total: cand.length };
+    }
+    async function impClientAsk() {
+        const sid = genState.siteID; if (!sid) { impCommitNote('No site open', '#ff6060'); return; }
+        impCommitNote('📋 reading the site…');
+        try { await fetchMapObjects(sid, true); } catch (e) { console.warn(`${TAG} 📋 ask-client refetch`, e); }
+        const { rows, untouched, total } = impClientAskRows();
+        if (!rows.length) { impCommitNote(`📋 nothing to ask — no P0 assets and no untiered pads on this site${untouched.length ? ` · <b>${untouched.length}</b> asset(s) the import never touched (CSV downloaded)` : ''}`, '#5fff5f'); }
+        const fmt = (n) => n == null ? '' : Math.round(n).toLocaleString();
+        const cols = [
+            { label: 'Pad', val: r => r.pad }, { label: 'Pad type in AIM', val: r => r.padType }, { label: 'Question covers', val: r => r.scope },
+            { label: 'Wells', val: r => r.n }, { label: 'Well names', val: r => r.wells }, { label: 'Why we are asking', val: r => r.why },
+            { label: 'Oil on your sheet (90-day avg)', val: r => fmt(r.oil) }, { label: 'Water on your sheet (90-day avg)', val: r => fmt(r.water) },
+            { label: 'Already answered', val: r => r.ans }, { label: 'Capture? (Y / N)', val: () => '' }, { label: 'Your notes', val: () => '' },
+            { label: 'Latitude', val: r => r.lat == null ? '' : r.lat.toFixed(6) }, { label: 'Longitude', val: r => r.lng == null ? '' : r.lng.toFixed(6) },
+        ];
+        const csvOf = (list, cs) => { const q = (v) => { const t = String(v == null ? '' : v); return /[",\n\r]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; }; return '﻿' + [cs.map(c => q(c.label)).join(',')].concat(list.map(r => cs.map(c => q(c.val(r))).join(','))).join('\r\n'); };
+        const stamp = impNowStamp().replace(/[: ]/g, '-'); const site = String(getCurrentSiteName() || sid).replace(/[^A-Za-z0-9_-]+/g, '_');
+        let saved1 = false, saved2 = false;
+        if (rows.length) { saved1 = downloadJSONFile(`ask-the-client-${site}-${stamp}.csv`, csvOf(rows, cols)); try { impExportTable(rows, cols, 'sheets', 'ask-the-client', 'client question'); } catch (e) { console.warn(`${TAG} 📋 clipboard`, e); } }
+        const ucols = [{ label: 'Name', val: r => r.name }, { label: 'Type', val: r => r.type }, { label: 'Parent', val: r => r.parent }, { label: 'External ID', val: r => r.ext }, { label: 'Notes (first line)', val: r => r.note }];
+        if (untouched.length) saved2 = downloadJSONFile(`never-touched-by-import-${site}-${stamp}.csv`, csvOf(untouched, ucols));
+        const whole = rows.filter(r => r.g.whole).length, part = rows.filter(r => !r.g.whole && r.g.pad).length, lone = rows.filter(r => !r.g.pad).length;
+        const wells = rows.reduce((a, r) => a + r.n, 0);
+        const answered = rows.filter(r => r.ans).length;
+        const utypes = [...untouched.reduce((m, r) => m.set(r.type || '(no type)', (m.get(r.type || '(no type)') || 0) + 1), new Map()).entries()].sort((a, b) => b[1] - a[1]);
+        console.log(`${TAG} 📋 ask-the-client: ${rows.length} rows (${total} assets) · never touched ${untouched.length}`, rows, untouched);
+        impCommitNote(`📋 <b>${rows.length}</b> question row(s) covering <b>${total}</b> asset(s): ${whole} whole pad(s) · ${part} pad(s) where only some wells are P0 · ${lone} standalone · ${wells} well(s) listed${answered ? ` · <b>${answered}</b> already answered earlier (flagged, kept)` : ''} — ${saved1 ? 'CSV saved + ' : ''}copied for Sheets.<br>`
+            + `For you only: <b>${untouched.length}</b> asset(s) the import never touched${untouched.length ? ` (${saved2 ? 'CSV saved' : 'see console'}): ${impEsc(utypes.slice(0, 8).map(([t, n]) => `${t} ×${n}`).join(' · '))}${utypes.length > 8 ? ' …' : ''}` : ''}`, '#5fff5f');
+    }
     function impPreflightText() {
         const L = []; const line = (t) => L.push(t == null ? '' : String(t));
         const live = imp.points.filter(p => !p.done), sel = live.filter(p => p.sel);
