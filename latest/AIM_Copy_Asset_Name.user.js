@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.479
+// @version      4.480
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.479';
+    const SCRIPT_VERSION = '4.480';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -28150,11 +28150,12 @@
         impBuildAssetIndex(); impComputeDups();
         const rows = impWrapperRows();
         if (!rows.length) { impCommitNote('✓ no pad-matched rows in this import', '#5fff5f'); return; }
-        const todoPad = rows.filter(x => { const want = impPadType(x.p); const have = String((x.pad.custom && x.pad.custom.poi_type_str) || '').trim(); return have.toLowerCase() !== want.toLowerCase() || impExtOfEnt(x.pad) !== '' || !/^Pad\n/.test(String(x.pad.description || '')); });
+        const seenPad = new Set();
+        const todoPad = rows.filter(x => { if (seenPad.has(x.pad.id)) return false; const want = impPadType(x.p); const have = String((x.pad.custom && x.pad.custom.poi_type_str) || '').trim(); const need = have.toLowerCase() !== want.toLowerCase() || impExtOfEnt(x.pad) !== '' || !/^Pad\n/.test(String(x.pad.description || '')); if (need) seenPad.add(x.pad.id); return need; });   // v4.480: one write per pad
         const todoChild = rows.filter(x => !x.child && !x.p.createdId);
         const todoParent = rows.filter(x => x.child && !String(x.child.parent_asset_name || '').trim());   // v4.471: well exists but is not nested under its pad
         const dry = (() => { try { return !!document.getElementById('aim-gen-dryrun').checked; } catch (e) { return true; } })();
-        if (dry) { impCommitNote(`DRY RUN — pad model: ${todoParent.length ? `<b>${todoParent.length}</b> existing well(s) re-parented under their pad · ` : ''}<b>${todoPad.length}</b> pad(s) get type "${impEsc(impPadType({ pri: { tier: 'P2' } }))}"-style + pad notes + External ID cleared · <b>${todoChild.length}</b> well(s) created under their pad (${todoChild.filter(x => x.p.shape).length} from drawn outlines, ${todoChild.filter(x => !x.p.shape).length} as squares) · e.g. ${impEsc(rows.slice(0, 6).map(x => `${x.pad.name} → ${impPadType(x.p)}${x.child || x.p.createdId ? '' : ` + well ${x.name}`}`).join(' · '))} …. Untick Dry run to write.`); return; }
+        if (dry) { impCommitNote(`DRY RUN — pad model: ${todoParent.length ? `<b>${todoParent.length}</b> existing well(s) re-parented under their pad · ` : ''}<b>${todoPad.length}</b> pad(s) get type "${impEsc(impPadType({ pri: { tier: 'P2' } }))}"-style + pad notes + External ID cleared · <b>${todoChild.length}</b> well(s) created under their pad (${todoChild.filter(x => x.p.shape).length} from drawn outlines, ${todoChild.filter(x => !x.p.shape).length} as squares) · e.g. ${impEsc(todoPad.slice(0, 6).map(x => `${x.pad.name}: ${String((x.pad.custom && x.pad.custom.poi_type_str) || '—')} → ${impPadType(x.p)}${impExtOfEnt(x.pad) ? ' (ext id set)' : ''}${/^Pad\n/.test(String(x.pad.description || '')) ? '' : ' (notes not pad-style)'}`).join(' · '))} …. Untick Dry run to write.`); return; }
         const csrf = getCsrfToken(); if (!csrf) { impCommitNote('No CSRF token — make one native save anywhere in Percepto first, then retry', '#ff6060'); return; }
         let siteCfg = null; try { siteCfg = await fetchSiteConfig(sid); } catch (e) {}
         if (!siteCfg) { impCommitNote('Could not read the site config — nothing written', '#ff6060'); return; }
@@ -28170,9 +28171,13 @@
                 const body = buildWriteBody(x.pad, siteCfg); if (!body.custom || typeof body.custom !== 'object') body.custom = {};
                 const ref = impTypeRef(want, known); const isNew = ref.isNew; body.custom.poi_type_str = ref.poi; body.custom.new_poi_type_str = ref.poi;   // v4.479: always declared on an update
                 body.custom[IMP_EXT_FIELD] = ''; body.description = impComposePadNotes(x.p, x.pad, stamp, x.nWells);   // v4.471: '' clears it — null was ignored (56/241 verified)
-                const rr = await post(body);
-                if (rr.status === 200) { okP++; updated.push({ id: x.pad.id, name: x.pad.name, before: JSON.parse(JSON.stringify(x.pad)) }); if (isNew && await impConfirmType(sid, want)) known.add(want.toLowerCase()); }
-                else { fail++; console.warn(`${TAG} 🧱 pad "${x.pad.name}" ${rr.status} ${(await rr.text()).slice(0, 200)}`); if (rr.status === 403) { impCommitNote('ABORTED — server 403', '#ff6060'); break; } }
+                const rr = await post(body); const txt = await rr.text(); let js = null; try { js = JSON.parse(txt); } catch (e) {}
+                if (rr.status === 200) {
+                    okP++; updated.push({ id: x.pad.id, name: x.pad.name, before: JSON.parse(JSON.stringify(x.pad)) }); if (isNew && await impConfirmType(sid, want)) known.add(want.toLowerCase());
+                    const mo = js && js.map_objects; const sType = mo && mo.custom ? String(mo.custom.poi_type_str || '') : '?', sExt = mo && mo.custom ? mo.custom[IMP_EXT_FIELD] : '?', sDesc = mo ? String(mo.description || '').slice(0, 12) : '?';
+                    if (sType.toLowerCase() !== want.toLowerCase() || (sExt != null && String(sExt) !== '') || !/^Pad\n/.test(String(mo && mo.description || ''))) console.warn(`${TAG} 🧱 PAD REFUSED "${x.pad.name}": sent type "${want}" ext '' pad-notes → stored type "${sType}" ext ${JSON.stringify(sExt)} notes start ${JSON.stringify(sDesc)} · warnings ${JSON.stringify(js && js.warnings)}`);
+                }
+                else { fail++; console.warn(`${TAG} 🧱 pad "${x.pad.name}" ${rr.status} ${txt.slice(0, 200)}`); if (rr.status === 403) { impCommitNote('ABORTED — server 403', '#ff6060'); break; } }
             } catch (e) { fail++; console.warn(`${TAG} 🧱 pad "${x.pad.name}"`, e); }
             await sleep(DELETE_GAP_MS);
         }
@@ -28192,7 +28197,7 @@
             await sleep(DELETE_GAP_MS);
         }
         imp.lastUpdated = imp.lastUpdated.concat(updated); imp.lastCreated = imp.lastCreated.concat(created);
-        await sleep(1500); try { await fetchMapObjects(sid, true); } catch (e) {}
+        await sleep(4000); try { await fetchMapObjects(sid, true); } catch (e) {}
         const after = new Map((((mapObjectsBySite[sid] || {}).entities) || []).map(e => [e.id, e]));
         const padOk = updated.filter(u => { const e = after.get(u.id); return e && impExtOfEnt(e) === '' && /pad$/i.test(String((e.custom && e.custom.poi_type_str) || '')); }).length;
         const nested = created.filter(id => { const e = after.get(id); return e && String(e.parent_asset_name || '').trim(); }).length;

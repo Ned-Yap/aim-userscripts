@@ -1,4 +1,6 @@
-## 2026-10-26 — 🧱 Pad model — Site Setup Tools latest v4.470 → v4.479 (latest only)
+## 2026-10-26 — 🧱 Pad model — Site Setup Tools latest v4.470 → v4.480 (latest only)
+
+- **v4.480** — pad model writes each pad once, shows the real pending pads in the dry run, logs the server's response for any pad that comes back different, and waits longer before the verify read.
 
 - **v4.479** — an update now always DECLARES the type (`new_poi_type_str`, in the server's stored spelling); the server ignores a plain `poi_type_str` reference on an existing asset, which is why every pass stored only the first asset of each type.
 
