@@ -1,4 +1,6 @@
-## 2026-10-26 — 🧱 Pad model — Site Setup Tools latest v4.470 → v4.481 (latest only)
+## 2026-10-26 — 🧱 Pad model — Site Setup Tools latest v4.470 → v4.482 (latest only)
+
+- **v4.482** — a pad's tier comes from the pad total, never from whichever well row came first (a zero well on a producing pad is P0 itself; its pad is not).
 
 - **v4.481** — updates declare the type in the importer's own casing (`P3 - Pad`), not the server's lowercase display spelling, which the server refuses on updates.
 
