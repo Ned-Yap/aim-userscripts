@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.482
+// @version      4.483
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.482';
+    const SCRIPT_VERSION = '4.483';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -28164,7 +28164,7 @@
         const todoChild = rows.filter(x => !x.child && !x.p.createdId);
         const todoParent = rows.filter(x => x.child && !String(x.child.parent_asset_name || '').trim());   // v4.471: well exists but is not nested under its pad
         const dry = (() => { try { return !!document.getElementById('aim-gen-dryrun').checked; } catch (e) { return true; } })();
-        if (dry) { impCommitNote(`DRY RUN — pad model: ${todoParent.length ? `<b>${todoParent.length}</b> existing well(s) re-parented under their pad · ` : ''}<b>${todoPad.length}</b> pad(s) get type "${impEsc(impPadType({ pri: { tier: 'P2' } }))}"-style + pad notes + External ID cleared · <b>${todoChild.length}</b> well(s) created under their pad (${todoChild.filter(x => x.p.shape).length} from drawn outlines, ${todoChild.filter(x => !x.p.shape).length} as squares) · e.g. ${impEsc(todoPad.slice(0, 6).map(x => `${x.pad.name}: ${String((x.pad.custom && x.pad.custom.poi_type_str) || '—')} → ${impPadType(x.p)}${impExtOfEnt(x.pad) ? ' (ext id set)' : ''}${/^Pad\n/.test(String(x.pad.description || '')) ? '' : ' (notes not pad-style)'}`).join(' · '))} …. Untick Dry run to write.`); return; }
+        if (dry) { impCommitNote(`DRY RUN — pad model: ${todoParent.length ? `<b>${todoParent.length}</b> existing well(s) re-parented under their pad (${impEsc(todoParent.slice(0, 4).map(x => `${x.child.name} → ${x.pad.name}`).join(' · '))}) · ` : ''}<b>${todoPad.length}</b> pad(s) get type "${impEsc(impPadType({ pri: { tier: 'P2' } }))}"-style + pad notes + External ID cleared · <b>${todoChild.length}</b> well(s) created under their pad (${todoChild.filter(x => x.p.shape).length} from drawn outlines, ${todoChild.filter(x => !x.p.shape).length} as squares) · e.g. ${impEsc(todoPad.slice(0, 6).map(x => `${x.pad.name}: ${String((x.pad.custom && x.pad.custom.poi_type_str) || '—')} → ${impPadType(x.p)}${impExtOfEnt(x.pad) ? ' (ext id set)' : ''}${/^Pad\n/.test(String(x.pad.description || '')) ? '' : ' (notes not pad-style)'}`).join(' · '))} …. Untick Dry run to write.`); return; }
         const csrf = getCsrfToken(); if (!csrf) { impCommitNote('No CSRF token — make one native save anywhere in Percepto first, then retry', '#ff6060'); return; }
         let siteCfg = null; try { siteCfg = await fetchSiteConfig(sid); } catch (e) {}
         if (!siteCfg) { impCommitNote('Could not read the site config — nothing written', '#ff6060'); return; }
@@ -28202,7 +28202,9 @@
         }
         for (let i = 0; i < todoParent.length; i++) {
             const x = todoParent[i]; impCommitNote(`re-parent ${i + 1}/${todoParent.length} — "${impEsc(x.child.name)}" under ${impEsc(x.pad.name)}…`);
-            try { const body = buildWriteBody(x.child, siteCfg); body.parent_asset_name = x.pad.name; const rr = await post(body); if (rr.status === 200) updated.push({ id: x.child.id, name: x.child.name, before: JSON.parse(JSON.stringify(x.child)) }); else { fail++; console.warn(`${TAG} 🧱 re-parent "${x.child.name}" ${rr.status} ${(await rr.text()).slice(0, 200)}`); } } catch (e) { fail++; console.warn(`${TAG} 🧱 re-parent "${x.child.name}"`, e); }
+            try { const body = buildWriteBody(x.child, siteCfg); body.parent_asset_name = x.pad.name; const rr = await post(body); const txt = await rr.text(); let js = null; try { js = JSON.parse(txt); } catch (e) {}
+                if (rr.status === 200) { updated.push({ id: x.child.id, name: x.child.name, before: JSON.parse(JSON.stringify(x.child)) }); const mo = js && js.map_objects; console.warn(`${TAG} 🧱 RE-PARENT "${x.child.name}" → "${x.pad.name}": server stored parent ${JSON.stringify(mo && mo.parent_asset_name)} · warnings ${JSON.stringify(js && js.warnings)} · child centroid vs pad: ${(() => { try { const c = ringCentroid(entityCoords(x.child)), p = ringCentroid(entityCoords(x.pad)); return Math.round(approxMeters(c.lat, c.lng, p.lat, p.lng) / GEN_FT_TO_M) + ' ft'; } catch (e) { return '?'; } })()}`); }
+                else { fail++; console.warn(`${TAG} 🧱 re-parent "${x.child.name}" ${rr.status} ${txt.slice(0, 200)}`); } } catch (e) { fail++; console.warn(`${TAG} 🧱 re-parent "${x.child.name}"`, e); }
             await sleep(DELETE_GAP_MS);
         }
         imp.lastUpdated = imp.lastUpdated.concat(updated); imp.lastCreated = imp.lastCreated.concat(created);
