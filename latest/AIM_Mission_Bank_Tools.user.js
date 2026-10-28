@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.39
+// @version      3.40
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.39';
+    const SCRIPT_VERSION = '3.40';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -8934,6 +8934,11 @@
         const ent = mcv.data && mcv.data.ent;
         const assets = ((ent && ent.assets) || []).filter(a => a.ring && a.ring.length >= 3);
         const padFold = mbBuildPadFold(assets);   // v2.94: equipment → its _ID main pad
+        // v3.40 (#273): same child → nested-root fold as mcvDetect. Without it a
+        // snapshot over a child well made its own group named after the child
+        // (one pad with 5 wells → up to 6 micros) and "has micro" never matched.
+        const byIdNest = new Map(assets.map(a => [a.id, a]));
+        const rootFold = (a) => { const r = (a && a.rootId != null && a.rootId !== a.id) ? byIdNest.get(a.rootId) : null; return r || a; };
         const ffzs = (ent && ent.ffzs) || [];
         const tolM = 46;   // 150 ft
         const boxes = assets.map(a => agRingBbox(a.ring, tolM + 5));
@@ -8946,7 +8951,7 @@
                 const d = mbPointToPolygonMeters(p.lat, p.lng, assets[i].ring);
                 if (d <= tolM && (!best || d < best.d || (d === best.d && areas[i] < best.area))) best = { a: assets[i], d, area: areas[i] };
             }
-            return best ? padFold(best.a) : null;
+            return best ? rootFold(padFold(best.a)) : null;
         };
         const ffzCache = new Map();   // asset id → adjacent FFZ
         const padFfz = (a) => {
@@ -8962,14 +8967,20 @@
             else if (units.length) units[units.length - 1].steps.push(s);
             else preamble.push(s);
         });
-        // pass 1 — firm: any located non-nav step (snap/flag/…) in a pad wins;
-        // else the nav itself sitting in a pad
+        // pass 1 — firm: the pad that the MOST located non-nav steps
+        // (snap/flag/…) land on wins (v3.40: majority, not first — a unit's
+        // first snapshot can brush a neighbour on a dense site); else the nav
+        // itself sitting in a pad
         units.forEach(u => {
+            const votes = new Map();
             for (const s of u.steps) {
                 if (s === u.nav || !s.location || typeof s.location.lat !== 'number') continue;
                 const a = padOf(s.location);
-                if (a) { u.pad = a; u.firm = true; return; }
+                if (a) { const v = votes.get(a.id) || { a, n: 0 }; v.n++; votes.set(a.id, v); }
             }
+            let top = null;
+            votes.forEach(v => { if (!top || v.n > top.n) top = v; });
+            if (top) { u.pad = top.a; u.firm = true; return; }
             const a = padOf(u.nav.location);
             if (a) { u.pad = a; u.firm = true; }
         });
@@ -9003,6 +9014,21 @@
         }
         return { groups, preamble, dropped, droppedSteps, unitCount: units.length };
     }
+    // v3.40: micro NAME template for ✂ split — site convention is
+    // "<section> - <pad>" ("NNE - SMITH SN 48-37 BATTERY"); the importer's
+    // "Pad - " wrapper is dropped from {pad}. {asset} = the raw asset name.
+    const MCV_SPLIT_NAME_KEY = 'aim-mb-split-name';
+    function mcvSplitNameTpl() { let t = ''; try { t = String(gmGet(MCV_SPLIT_NAME_KEY, '') || ''); } catch (e) { console.warn(`${TAG} [✂] name tpl read failed`, e); } return t.trim() || '{section} - {pad}'; }
+    function mcvSplitName(asset, tpl) {
+        const raw = String(asset.name || ('Pad ' + asset.id)).trim();
+        const pad = raw.replace(/^pad\s*[-–—:]\s*/i, '').trim() || raw;
+        let sec = '';
+        try { sec = genSection(genCentroid(asset.ring)) || ''; } catch (e) { sec = ''; }
+        return String(tpl || mcvSplitNameTpl()).replace(/\{section\}/gi, sec).replace(/\{pad\}/gi, pad).replace(/\{asset\}/gi, raw).replace(/\s+/g, ' ').replace(/^\s*-\s*/, '').trim() || raw;
+    }
+    function mcvSplitNameRow(attr) {
+        return `<div style="display:flex;align-items:center;gap:6px;padding:5px 12px;font-size:10px;color:#cfe;border-bottom:1px solid #2a2f38;"><span style="white-space:nowrap;">Micro name</span><input ${attr} value="${escapeHtml(mcvSplitNameTpl())}" title="Tokens: {section} = N/NE/E… from the base · {pad} = pad name without the importer's 'Pad - ' wrapper · {asset} = raw asset name" style="flex:1;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:2px 6px;border-radius:3px;font:inherit;font-size:10px;"><span style="color:#789;white-space:nowrap;">{section} {pad} {asset}</span></div>`;
+    }
     function mcvOpenSplit(missionId) {
         const old = document.getElementById(MCV_SPLIT_PANEL_ID);
         if (old) { old.remove(); return; }
@@ -9026,16 +9052,18 @@
         p.style.cssText = 'position:fixed;top:60px;right:24px;width:430px;max-height:80vh;display:flex;flex-direction:column;z-index:2147483602;'
             + 'background:#161a20;border:1px solid #ff8ad2;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;';
         let soloSkipped = 0;
+        const tpl0 = mcvSplitNameTpl();
         const rows = plan.groups.map((g, i) => {
-            const name = String(g.asset.name || ('Pad ' + g.asset.id)).trim();
+            const name = mcvSplitName(g.asset, tpl0);
             const dup = taken.has(name.toLowerCase());
             const solos = soloByPad.get(g.asset.id) || [];
             const hasSolo = !dup && solos.length > 0;
             if (hasSolo) soloSkipped++;
             const soloTxt = solos.length ? `has micro: ${solos[0]}${solos.length > 1 ? ` +${solos.length - 1}` : ''}` : '';
+            const kids = (g.asset.descendants || []).length;
             return `<label style="display:flex;align-items:center;gap:6px;padding:3px 4px;border-bottom:1px solid #20262e;${dup ? 'opacity:0.5;' : 'cursor:pointer;'}${hasSolo ? 'opacity:0.75;' : ''}">
                 <input type="checkbox" data-mcvs-pick="${i}" ${dup ? 'disabled' : (hasSolo ? '' : 'checked')} />
-                <span style="flex:1;color:#e6e6e6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(name)}</span>
+                <span data-mcvs-name="${i}" style="flex:1;color:#e6e6e6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(String(g.asset.name || ''))}${kids ? ` · ${kids} nested asset(s)` : ''}">${escapeHtml(name)}</span>
                 <span style="color:#9ad;white-space:nowrap;font-size:11px;">${g.navs} nav · ${g.snaps} snap · ${g.steps.length} steps</span>
                 ${dup ? '<span style="color:#ff9800;font-size:10px;white-space:nowrap;">exists — skipped</span>' : ''}
                 ${hasSolo ? `<span title="${escapeHtml(solos.join('\n'))}" style="color:#7adfe6;font-size:10px;white-space:nowrap;max-width:130px;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(soloTxt)}</span>` : ''}
@@ -9053,6 +9081,7 @@
                 <button data-mcvs-close style="background:rgba(255,255,255,0.12);border:none;color:#fff;width:22px;height:22px;border-radius:4px;cursor:pointer;flex:none;">✕</button>
             </div>
             <div style="padding:6px 12px;font-size:11px;color:#9ad;border-bottom:1px solid #2a2f38;">One mission per pad, named after the pad — create-only, the macro is untouched. Every micro gets the macro's <b>takeoff</b> at the front and <b>returnHome (land)</b> at the end, with that pad's navs/snaps in between. <a data-mcvs-all href="#" style="color:#7adfe6;">all</a> / <a data-mcvs-none href="#" style="color:#7adfe6;">none</a></div>
+            ${mcvSplitNameRow('data-mcvs-tpl')}
             <div style="overflow:auto;flex:1;padding:4px 10px;">${rows}</div>
             ${plan.preamble.length ? `<label style="display:flex;align-items:center;gap:6px;padding:6px 12px;font-size:10px;color:#ffb74d;border-top:1px solid #2a2f38;cursor:pointer;">
                 <input type="checkbox" data-mcvs-pre checked style="margin:0;" />
@@ -9073,6 +9102,12 @@
         };
         p.querySelector('[data-mcvs-close]').onclick = () => { if (!mcvSplitBusy) p.remove(); };
         p.querySelectorAll('input[data-mcvs-pick]').forEach(cb => { cb.onchange = updateGo; });
+        const tplEl = p.querySelector('[data-mcvs-tpl]');
+        tplEl.oninput = () => {
+            const t = tplEl.value.trim() || '{section} - {pad}';
+            try { gmSet(MCV_SPLIT_NAME_KEY, t); } catch (e) { console.warn(`${TAG} [✂] name tpl save failed`, e); }
+            plan.groups.forEach((g, i) => { const sp = p.querySelector(`[data-mcvs-name="${i}"]`); if (sp) { const nm = mcvSplitName(g.asset, t); sp.textContent = nm; sp.style.color = taken.has(nm.toLowerCase()) ? '#ff9800' : '#e6e6e6'; } });
+        };
         p.querySelector('[data-mcvs-all]').onclick = (ev) => { ev.preventDefault(); p.querySelectorAll('input[data-mcvs-pick]:not(:disabled)').forEach(cb => { cb.checked = true; }); updateGo(); };
         p.querySelector('[data-mcvs-none]').onclick = (ev) => { ev.preventDefault(); p.querySelectorAll('input[data-mcvs-pick]').forEach(cb => { if (!cb.disabled) cb.checked = false; }); updateGo(); };
         goBtn.onclick = () => {
@@ -9096,9 +9131,13 @@
         mcvSplitBusy = true; updateGo();
         renameSuppressAutoAgl++;
         try {
+            const tplEl = panel.querySelector('[data-mcvs-tpl]');
+            const tpl = (tplEl && tplEl.value.trim()) || mcvSplitNameTpl();
+            const taken = new Set(((mcv.data && mcv.data.missions) || []).map(m => String((m && m.name) || '').trim().toLowerCase()));
             for (let i = 0; i < picks.length; i++) {
                 const g = picks[i];
-                const name = String(g.asset.name || ('Pad ' + g.asset.id)).trim();
+                const name = mcvSplitName(g.asset, tpl);
+                if (taken.has(name.toLowerCase())) { fail++; console.warn(`${TAG} [mcv] ✂ skipped "${name}" — a mission with that name already exists`); continue; }
                 if (statusEl) statusEl.textContent = `Creating ${i + 1}/${picks.length} — ${name}…`;
                 try {
                     await ctx.saveApp({ id: null, type: 1, instructions: [to].concat(pre, g.steps.map(pcmNormStep), [rh]), data_report_object_arr: [] }, name);
@@ -9141,13 +9180,14 @@
             if (!b || g.steps.length > b.steps) best.set(g.asset.id, { mi, gi, steps: g.steps.length });
         }));
         const COLORS = ['#7adfe6', '#ffd54f', '#ff8ad2', '#9dff8a', '#c39dff', '#ffab73', '#8ab6ff', '#f3ff7a', '#ff9e9e', '#7affc9'];
+        const tplAll = mcvSplitNameTpl();
         let soloSkipped = 0, sharedSkipped = 0, totalDropped = 0, totalDroppedSteps = 0, anyPre = false;
         const sections = entries.map((e, mi) => {
             const col = COLORS[det.macros.indexOf(e.mc) % COLORS.length];
             if (e.plan.preamble.length) anyPre = true;
             totalDropped += e.plan.dropped; totalDroppedSteps += e.plan.droppedSteps;
             const rows = e.plan.groups.map((g, gi) => {
-                const name = String(g.asset.name || ('Pad ' + g.asset.id)).trim();
+                const name = mcvSplitName(g.asset, tplAll);
                 const dup = taken.has(name.toLowerCase());
                 const solos = soloByPad.get(g.asset.id) || [];
                 const hasSolo = !dup && solos.length > 0;
@@ -9186,6 +9226,7 @@
                 <button data-mcvs-close style="background:rgba(255,255,255,0.12);border:none;color:#fff;width:22px;height:22px;border-radius:4px;cursor:pointer;flex:none;">✕</button>
             </div>
             <div style="padding:6px 12px;font-size:11px;color:#9ad;border-bottom:1px solid #2a2f38;">One mission per pad, named after the pad — create-only, every macro is untouched. Each micro gets its macro's <b>takeoff</b> front and <b>returnHome (land)</b> end. <a data-mcvs-all href="#" style="color:#7adfe6;">all</a> / <a data-mcvs-none href="#" style="color:#7adfe6;">none</a></div>
+            ${mcvSplitNameRow('data-mcvs-tpl')}
             <div style="overflow:auto;flex:1;padding:4px 10px;">${sections}</div>
             ${anyPre ? `<label style="display:flex;align-items:center;gap:6px;padding:6px 12px;font-size:10px;color:#ffb74d;border-top:1px solid #2a2f38;cursor:pointer;">
                 <input type="checkbox" data-mcvsa-pre checked style="margin:0;" />
@@ -9205,6 +9246,8 @@
         };
         p.querySelector('[data-mcvs-close]').onclick = () => { if (!mcvSplitBusy) p.remove(); };
         p.querySelectorAll('input[data-mcvsa-pick]').forEach(cb => { cb.onchange = updateGo; });
+        const tplEl = p.querySelector('[data-mcvs-tpl]');
+        tplEl.onchange = () => { try { gmSet(MCV_SPLIT_NAME_KEY, tplEl.value.trim() || '{section} - {pad}'); } catch (e) { console.warn(`${TAG} [✂] name tpl save failed`, e); } p.remove(); mcvOpenSplitAll(); };
         p.querySelector('[data-mcvs-all]').onclick = (ev) => { ev.preventDefault(); p.querySelectorAll('input[data-mcvsa-pick]:not(:disabled)').forEach(cb => { cb.checked = true; }); updateGo(); };
         p.querySelector('[data-mcvs-none]').onclick = (ev) => { ev.preventDefault(); p.querySelectorAll('input[data-mcvsa-pick]').forEach(cb => { if (!cb.disabled) cb.checked = false; }); updateGo(); };
         goBtn.onclick = () => mcvSplitAllCommit(entries, p, updateGo);
@@ -9229,6 +9272,9 @@
         const totalN = work.reduce((a, w) => a + w.picked.length, 0);
         if (!window.confirm(`Create ${totalN} micro mission(s) from ${work.length} macro(s)?\n\nCreate-only — the macros are untouched.`)) return;
         const statusEl = panel.querySelector('[data-mcvs-status]');
+        const tplEl = panel.querySelector('[data-mcvs-tpl]');
+        const tpl = (tplEl && tplEl.value.trim()) || mcvSplitNameTpl();
+        const takenNow = new Set(((mcv.data && mcv.data.missions) || []).map(m => String((m && m.name) || '').trim().toLowerCase()));
         let ok = 0, fail = 0, done = 0;
         mcvSplitBusy = true; updateGo();
         renameSuppressAutoAgl++;
@@ -9239,8 +9285,10 @@
                 const rh = pcmNormStep((Array.from(ins).reverse().find(i => i && i.type === 99)) || mbMakeStep(99));
                 const pre = preOn ? w.plan.preamble.map(pcmNormStep) : [];
                 for (const g of w.picked) {
-                    const name = String(g.asset.name || ('Pad ' + g.asset.id)).trim();
+                    const name = mcvSplitName(g.asset, tpl);
                     done++;
+                    if (takenNow.has(name.toLowerCase())) { fail++; console.warn(`${TAG} [mcv] ✂all skipped "${name}" — a mission with that name already exists`); continue; }
+                    takenNow.add(name.toLowerCase());
                     if (statusEl) statusEl.textContent = `Creating ${done}/${totalN} — ${name}…`;
                     try {
                         await ctx.saveApp({ id: null, type: 1, instructions: [to].concat(pre, g.steps.map(pcmNormStep), [rh]), data_report_object_arr: [] }, name);
