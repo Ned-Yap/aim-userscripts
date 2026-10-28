@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.40
+// @version      3.41
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.40';
+    const SCRIPT_VERSION = '3.41';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -8961,9 +8961,9 @@
         // units: a located nav + everything until the next nav; body steps
         // before the first nav = shared preamble (camera setup etc.)
         const preamble = [], units = [];
-        ((mc.mission && mc.mission.instructions) || []).forEach(s => {
+        ((mc.mission && mc.mission.instructions) || []).forEach((s, si) => {
             if (!s || s.type === 0 || s.type === 99) return;
-            if (s.type === 1 && s.location && typeof s.location.lat === 'number') units.push({ nav: s, steps: [s], pad: null, firm: false });
+            if (s.type === 1 && s.location && typeof s.location.lat === 'number') units.push({ nav: s, steps: [s], pad: null, firm: false, idx: si });
             else if (units.length) units[units.length - 1].steps.push(s);
             else preamble.push(s);
         });
@@ -8994,6 +8994,23 @@
             for (let j = i - 1; j >= 0 && !prv; j--) if (units[j].firm) prv = units[j].pad;
             u.pad = fits(nxt) || fits(prv);
         });
+        // v3.41: units on NO pad are not silently dropped — they are FLAGS.
+        // Each one names the macro step, its neighbouring pads and the nearest
+        // pad + distance; the pads on either side default-untick until fixed.
+        const pads = assets.filter(a => rootFold(a) === a);
+        const transit = [];
+        const flaggedPads = new Set();
+        units.forEach((u, i) => {
+            if (u.pad) return;
+            let prv = null, nxt = null;
+            for (let j = i - 1; j >= 0 && !prv; j--) if (units[j].pad) prv = units[j].pad;
+            for (let j = i + 1; j < units.length && !nxt; j++) if (units[j].pad) nxt = units[j].pad;
+            let near = null;
+            pads.forEach(a => { const d = mbPointToPolygonMeters(u.nav.location.lat, u.nav.location.lng, a.ring); if (!near || d < near.d) near = { a, d }; });
+            transit.push({ unit: u, idx: u.idx, steps: u.steps.length, prev: prv, next: nxt, near: near ? near.a : null, nearFt: near ? Math.round(near.d * 3.28084) : null, loc: u.nav.location });
+            if (prv) flaggedPads.add(prv.id);
+            if (nxt) flaggedPads.add(nxt.id);
+        });
         // group by pad in first-appearance (flight) order
         const order = [], byPad = new Map();
         let dropped = 0, droppedSteps = 0;
@@ -9012,7 +9029,31 @@
         if (noId.length && assets.some(a => /_id\s*\d+/i.test(a.name || ''))) {
             console.log(`${TAG} [✂] ${groups.length} pad group(s) · ${noId.length} without an _ID main pad: ${noId.map(g => `"${g.asset.name}"`).join(' · ')}`);
         }
-        return { groups, preamble, dropped, droppedSteps, unitCount: units.length };
+        return { groups, preamble, dropped, droppedSteps, unitCount: units.length, transit, flaggedPads };
+    }
+    // v3.41 — flag list markup shared by both split panels + the jump/pulse
+    function mcvTransitRows(plan, missionName) {
+        return plan.transit.map(t => `<div style="display:flex;align-items:center;gap:6px;padding:2px 4px 2px 14px;font-size:10px;color:#ffb74d;">
+            <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(String(missionName || ''))}">⚠ step #${t.idx + 1} nav (${t.steps} step${t.steps === 1 ? '' : 's'}) on no pad — ${t.near ? `${t.nearFt} ft from ${escapeHtml(String(t.near.name || ''))}` : 'no pad near'}${t.prev ? ` · after ${escapeHtml(String(t.prev.name || ''))}` : ''}${t.next ? ` · before ${escapeHtml(String(t.next.name || ''))}` : ''}</span>
+            <button data-mcvs-jump="${t.loc.lat},${t.loc.lng}" title="Pan the map to this nav and pulse it" style="padding:0 5px;background:rgba(255,183,77,0.12);border:1px solid rgba(255,183,77,0.45);color:#ffb74d;border-radius:4px;cursor:pointer;font-size:10px;">📍</button>
+        </div>`).join('');
+    }
+    function mcvJumpTo(lat, lng) {
+        const L = composerGetL(), map = getLeafletMap();
+        if (!L || !map) { showToast('Map not found.', '#ff9800', 2500); return; }
+        try {
+            map.setView([lat, lng], Math.max(map.getZoom(), 18));
+            const ring = L.circleMarker([lat, lng], { radius: 14, color: '#ffb74d', weight: 3, fill: false, interactive: false }).addTo(map);
+            let r = 14, n = 0;
+            const iv = setInterval(() => { r = 14 + ((n++ * 4) % 24); try { ring.setRadius(r); } catch (e) {} }, 100);
+            setTimeout(() => { clearInterval(iv); try { map.removeLayer(ring); } catch (e) {} }, 5000);
+        } catch (e) { console.warn(`${TAG} [✂] jump failed`, e); }
+    }
+    function mcvWireFlagPanel(p, goBtn, updateGo, flagCount) {
+        p.querySelectorAll('[data-mcvs-jump]').forEach(b => b.onclick = (ev) => { ev.preventDefault(); const [la, ln] = b.getAttribute('data-mcvs-jump').split(',').map(Number); mcvJumpTo(la, ln); });
+        const rv = p.querySelector('[data-mcvs-reviewed]');
+        if (rv) rv.onchange = updateGo;
+        return () => !flagCount || (rv && rv.checked);
     }
     // v3.40: micro NAME template for ✂ split — site convention is
     // "<section> - <pad>" ("NNE - SMITH SN 48-37 BATTERY"); the importer's
@@ -9061,8 +9102,10 @@
             if (hasSolo) soloSkipped++;
             const soloTxt = solos.length ? `has micro: ${solos[0]}${solos.length > 1 ? ` +${solos.length - 1}` : ''}` : '';
             const kids = (g.asset.descendants || []).length;
+            const flagged = plan.flaggedPads.has(g.asset.id);
             return `<label style="display:flex;align-items:center;gap:6px;padding:3px 4px;border-bottom:1px solid #20262e;${dup ? 'opacity:0.5;' : 'cursor:pointer;'}${hasSolo ? 'opacity:0.75;' : ''}">
-                <input type="checkbox" data-mcvs-pick="${i}" ${dup ? 'disabled' : (hasSolo ? '' : 'checked')} />
+                <input type="checkbox" data-mcvs-pick="${i}" ${dup ? 'disabled' : ((hasSolo || flagged) ? '' : 'checked')} />
+                ${flagged ? '<span title="A nav next to this pad in the macro sits on no pad — fix it in the macro first (see the ⚠ list), or tick to create the micro without it." style="color:#ffb74d;font-size:10px;">⚠</span>' : ''}
                 <span data-mcvs-name="${i}" style="flex:1;color:#e6e6e6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(String(g.asset.name || ''))}${kids ? ` · ${kids} nested asset(s)` : ''}">${escapeHtml(name)}</span>
                 <span style="color:#9ad;white-space:nowrap;font-size:11px;">${g.navs} nav · ${g.snaps} snap · ${g.steps.length} steps</span>
                 ${dup ? '<span style="color:#ff9800;font-size:10px;white-space:nowrap;">exists — skipped</span>' : ''}
@@ -9071,7 +9114,11 @@
         }).join('');
         const notes = []
             .concat(soloSkipped ? [`${soloSkipped} pad(s) already have their own micro mission (cyan "has micro") — unticked by default so you don't duplicate them. Tick one back on to create anyway.`] : [])
-            .concat(plan.dropped ? [`⚠ ${plan.dropped} transit nav(s) (${plan.droppedSteps} step${plan.droppedSteps === 1 ? '' : 's'}) outside every pad's FFZ — dropped (corridor legs between pads).`] : []);
+            .concat(plan.dropped ? [`⚠ ${plan.dropped} nav(s) (${plan.droppedSteps} step${plan.droppedSteps === 1 ? '' : 's'}) sit on no pad — listed below; the pads on either side are unticked until you review. Those navs are NOT copied into any micro.`] : []);
+        const flagHtml = plan.transit.length
+            ? `<div style="border-top:1px solid #2a2f38;padding:4px 0 2px;"><div style="padding:2px 12px;color:#ffb74d;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;">⚠ ${plan.transit.length} nav(s) on no pad — review</div>${mcvTransitRows(plan, mc.mission.name)}
+               <label style="display:flex;align-items:center;gap:6px;padding:4px 12px;font-size:10px;color:#ffb74d;cursor:pointer;"><input type="checkbox" data-mcvs-reviewed style="margin:0;"> I reviewed the flags — enable Create</label></div>`
+            : '';
         // v2.57: name the pre-first-nav steps so "setup steps" isn't a mystery,
         // and let the user leave them out entirely.
         const preLabels = plan.preamble.map(s => srmLabel(s)).join(', ');
@@ -9083,6 +9130,7 @@
             <div style="padding:6px 12px;font-size:11px;color:#9ad;border-bottom:1px solid #2a2f38;">One mission per pad, named after the pad — create-only, the macro is untouched. Every micro gets the macro's <b>takeoff</b> at the front and <b>returnHome (land)</b> at the end, with that pad's navs/snaps in between. <a data-mcvs-all href="#" style="color:#7adfe6;">all</a> / <a data-mcvs-none href="#" style="color:#7adfe6;">none</a></div>
             ${mcvSplitNameRow('data-mcvs-tpl')}
             <div style="overflow:auto;flex:1;padding:4px 10px;">${rows}</div>
+            ${flagHtml}
             ${plan.preamble.length ? `<label style="display:flex;align-items:center;gap:6px;padding:6px 12px;font-size:10px;color:#ffb74d;border-top:1px solid #2a2f38;cursor:pointer;">
                 <input type="checkbox" data-mcvs-pre checked style="margin:0;" />
                 <span>The macro has ${plan.preamble.length} step(s) between takeoff and the first nav — <b>${escapeHtml(preLabels)}</b>. Copy them into each micro right after its takeoff (untick to drop them).</span>
@@ -9095,11 +9143,14 @@
         document.body.appendChild(p);
         mbPanelMovable(p, p.firstElementChild);
         const goBtn = p.querySelector('[data-mcvs-go]');
+        let reviewedOk = () => true;
         const updateGo = () => {
             const n = p.querySelectorAll('input[data-mcvs-pick]:checked').length;
             goBtn.textContent = `✂ Create ${n}`;
-            goBtn.disabled = mcvSplitBusy || !n;
+            goBtn.disabled = mcvSplitBusy || !n || !reviewedOk();
+            goBtn.title = reviewedOk() ? '' : 'Tick "I reviewed the flags" first';
         };
+        reviewedOk = mcvWireFlagPanel(p, goBtn, updateGo, plan.transit.length);
         p.querySelector('[data-mcvs-close]').onclick = () => { if (!mcvSplitBusy) p.remove(); };
         p.querySelectorAll('input[data-mcvs-pick]').forEach(cb => { cb.onchange = updateGo; });
         const tplEl = p.querySelector('[data-mcvs-tpl]');
@@ -9181,6 +9232,7 @@
         }));
         const COLORS = ['#7adfe6', '#ffd54f', '#ff8ad2', '#9dff8a', '#c39dff', '#ffab73', '#8ab6ff', '#f3ff7a', '#ff9e9e', '#7affc9'];
         const tplAll = mcvSplitNameTpl();
+        const sharedList = [];
         let soloSkipped = 0, sharedSkipped = 0, totalDropped = 0, totalDroppedSteps = 0, anyPre = false;
         const sections = entries.map((e, mi) => {
             const col = COLORS[det.macros.indexOf(e.mc) % COLORS.length];
@@ -9194,10 +9246,12 @@
                 const b = best.get(g.asset.id);
                 const shared = !dup && !hasSolo && b && !(b.mi === mi && b.gi === gi);
                 if (hasSolo) soloSkipped++;
-                if (shared) sharedSkipped++;
+                if (shared) { sharedSkipped++; sharedList.push({ name, here: String(e.mc.mission.name || ''), hereSteps: g.steps.length, there: String(entries[b.mi].mc.mission.name || ''), thereSteps: b.steps }); }
+                const flagged = e.plan.flaggedPads.has(g.asset.id);
                 const soloTxt = solos.length ? `has micro: ${solos[0]}${solos.length > 1 ? ` +${solos.length - 1}` : ''}` : '';
                 return `<label style="display:flex;align-items:center;gap:6px;padding:2px 4px 2px 14px;border-bottom:1px solid #20262e;${dup ? 'opacity:0.5;' : 'cursor:pointer;'}${(hasSolo || shared) ? 'opacity:0.75;' : ''}">
-                    <input type="checkbox" data-mcvsa-pick="${mi}:${gi}" ${dup ? 'disabled' : ((hasSolo || shared) ? '' : 'checked')} />
+                    <input type="checkbox" data-mcvsa-pick="${mi}:${gi}" ${dup ? 'disabled' : ((hasSolo || shared || flagged) ? '' : 'checked')} />
+                    ${flagged ? '<span title="A nav next to this pad in the macro sits on no pad — fix it in the macro first (⚠ list below), or tick to create the micro without it." style="color:#ffb74d;font-size:10px;">⚠</span>' : ''}
                     <span style="flex:1;color:#e6e6e6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(name)}</span>
                     <span style="color:#9ad;white-space:nowrap;font-size:11px;">${g.navs} nav · ${g.snaps} snap · ${g.steps.length} steps</span>
                     ${dup ? '<span style="color:#ff9800;font-size:10px;white-space:nowrap;">exists — skipped</span>' : ''}
@@ -9215,7 +9269,17 @@
         const notes = []
             .concat(soloSkipped ? [`${soloSkipped} pad(s) already have their own micro (cyan) — unticked by default.`] : [])
             .concat(sharedSkipped ? [`${sharedSkipped} pad(s) appear in two macros (purple) — kept in the macro with more steps, unticked in the other.`] : [])
-            .concat(totalDropped ? [`⚠ ${totalDropped} transit nav(s) (${totalDroppedSteps} steps) outside every pad's FFZ — dropped (corridor legs).`] : []);
+            .concat(totalDropped ? [`⚠ ${totalDropped} nav(s) (${totalDroppedSteps} steps) sit on no pad — review list below; neighbouring pads unticked until reviewed; those navs are NOT copied into any micro.`] : []);
+        // v3.41: REVIEW block — shared pads + no-pad navs, with a gate on Create
+        const flagCount = sharedList.length + totalDropped;
+        const reviewHtml = flagCount
+            ? `<div style="border-top:1px solid #2a2f38;max-height:30%;overflow:auto;padding:4px 0 2px;">
+                <div style="padding:2px 12px;color:#ffb74d;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;">⚠ Review before creating — ${flagCount} flag(s)</div>
+                ${sharedList.map(x => `<div style="padding:2px 4px 2px 14px;font-size:10px;color:#c39dff;">⇆ <b>${escapeHtml(x.name)}</b> is in “${escapeHtml(x.here)}” (${x.hereSteps} steps) and “${escapeHtml(x.there)}” (${x.thereSteps} steps) — kept in the one with more steps</div>`).join('')}
+                ${entries.map(e => e.plan.transit.length ? `<div style="padding:2px 12px;font-size:10px;color:#789;">${escapeHtml(String(e.mc.mission.name || ''))}</div>${mcvTransitRows(e.plan, e.mc.mission.name)}` : '').join('')}
+                <label style="display:flex;align-items:center;gap:6px;padding:4px 12px;font-size:10px;color:#ffb74d;cursor:pointer;"><input type="checkbox" data-mcvs-reviewed style="margin:0;"> I reviewed the flags — enable Create</label>
+               </div>`
+            : '';
         const p = document.createElement('div');
         p.id = MCV_SPLIT_PANEL_ID;
         p.style.cssText = 'position:fixed;top:60px;right:24px;width:460px;max-height:84vh;display:flex;flex-direction:column;z-index:2147483602;'
@@ -9228,6 +9292,7 @@
             <div style="padding:6px 12px;font-size:11px;color:#9ad;border-bottom:1px solid #2a2f38;">One mission per pad, named after the pad — create-only, every macro is untouched. Each micro gets its macro's <b>takeoff</b> front and <b>returnHome (land)</b> end. <a data-mcvs-all href="#" style="color:#7adfe6;">all</a> / <a data-mcvs-none href="#" style="color:#7adfe6;">none</a></div>
             ${mcvSplitNameRow('data-mcvs-tpl')}
             <div style="overflow:auto;flex:1;padding:4px 10px;">${sections}</div>
+            ${reviewHtml}
             ${anyPre ? `<label style="display:flex;align-items:center;gap:6px;padding:6px 12px;font-size:10px;color:#ffb74d;border-top:1px solid #2a2f38;cursor:pointer;">
                 <input type="checkbox" data-mcvsa-pre checked style="margin:0;" />
                 <span>Copy each macro's setup steps (between its takeoff and first nav — listed per macro above) into its micros right after takeoff.</span>
@@ -9238,12 +9303,16 @@
                 <button data-mcvs-go style="padding:6px 12px;background:#ff8ad2;border:none;color:#2a0420;border-radius:6px;cursor:pointer;font-weight:800;">✂ Create</button>
             </div>`;
         document.body.appendChild(p);
+        mbPanelMovable(p, p.firstElementChild);
         const goBtn = p.querySelector('[data-mcvs-go]');
+        let reviewedOk = () => true;
         const updateGo = () => {
             const n = p.querySelectorAll('input[data-mcvsa-pick]:checked').length;
             goBtn.textContent = `✂ Create ${n}`;
-            goBtn.disabled = mcvSplitBusy || !n;
+            goBtn.disabled = mcvSplitBusy || !n || !reviewedOk();
+            goBtn.title = reviewedOk() ? '' : 'Tick "I reviewed the flags" first';
         };
+        reviewedOk = mcvWireFlagPanel(p, goBtn, updateGo, flagCount);
         p.querySelector('[data-mcvs-close]').onclick = () => { if (!mcvSplitBusy) p.remove(); };
         p.querySelectorAll('input[data-mcvsa-pick]').forEach(cb => { cb.onchange = updateGo; });
         const tplEl = p.querySelector('[data-mcvs-tpl]');
