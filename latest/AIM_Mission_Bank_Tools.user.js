@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.44
+// @version      3.45
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.44';
+    const SCRIPT_VERSION = '3.45';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -4988,7 +4988,11 @@
         }));
         return Array.from(map.values()).sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
     }
-    function srmBuildPlan(missions, tgt, pairNav) {
+    // v3.45 — opts.afterSnapOnly: for WAIT targets, keep only waits whose previous step is a
+    // snapshot (the "settle before Thermal On" wait of the old 4-step recipe; the wait between
+    // Thermal On / Thermal Off is the dwell and stays).
+    function srmBuildPlan(missions, tgt, pairNav, opts) {
+        const o = opts || {};
         const plan = [];
         missions.forEach(m => {
             const ins = m.instructions || [];
@@ -4996,6 +5000,7 @@
             const claimed = new Set();
             ins.forEach((s, i) => {
                 if (!srmMatch(s, tgt)) return;
+                if (o.afterSnapOnly && !(ins[i - 1] && ins[i - 1].type === 6)) return;
                 const idxs = [];
                 if (tgt.type === 16 && pairNav && i > 0 && ins[i - 1] && ins[i - 1].type === 1 && !claimed.has(i - 1)) idxs.push(i - 1);
                 idxs.push(i);
@@ -5074,6 +5079,10 @@
                     <input type="checkbox" data-srm-pairnav checked />
                     <span>Also remove the <b>nav directly before</b> each flag pole (they were added just for it)</span>
                 </label>
+                <label data-srm-snapwrap style="display:none;align-items:center;gap:6px;margin-top:5px;padding:4px 6px;background:rgba(255,213,79,0.08);border:1px solid rgba(255,213,79,0.3);border-radius:5px;font-size:11px;cursor:pointer;">
+                    <input type="checkbox" data-srm-aftersnap />
+                    <span>Only waits <b>directly after a snapshot</b> (the settle wait before Thermal On) — the wait between Thermal On / Off stays</span>
+                </label>
             </div>
             <div data-srm-review style="overflow:auto;flex:1;padding:4px 10px;font-size:11px;color:#888;">Pick a target above to review the proposed removals.</div>
             </div>
@@ -5087,6 +5096,8 @@
         const goBtn = p.querySelector('[data-srm-go]');
         const pairWrap = p.querySelector('[data-srm-pairwrap]');
         const pairCb = p.querySelector('[data-srm-pairnav]');
+        const snapWrap = p.querySelector('[data-srm-snapwrap]');
+        const snapCb = p.querySelector('[data-srm-aftersnap]');
         let curTgt = null, curPlan = null;
         const updateGo = () => {
             const n = reviewEl.querySelectorAll('input[data-srm-g]:checked').length;
@@ -5097,9 +5108,11 @@
         };
         const renderReview = () => {
             if (!curTgt) return;
-            curPlan = srmBuildPlan(missions, curTgt, curTgt.type === 16 && pairCb.checked);
+            const afterSnapOnly = curTgt.type === 5 && snapCb.checked;
+            curPlan = srmBuildPlan(missions, curTgt, curTgt.type === 16 && pairCb.checked, { afterSnapOnly });
             pairWrap.style.display = curTgt.type === 16 ? 'flex' : 'none';
-            if (!curPlan.length) { reviewEl.innerHTML = '<div style="padding:8px;color:#ff9800;">No matches (unexpected — re-open the panel).</div>'; updateGo(); return; }
+            snapWrap.style.display = curTgt.type === 5 ? 'flex' : 'none';
+            if (!curPlan.length) { reviewEl.innerHTML = `<div style="padding:8px;color:#ff9800;">${afterSnapOnly ? 'No waits directly after a snapshot on this site.' : 'No matches (unexpected — re-open the panel).'}</div>`; updateGo(); return; }
             // v3.42 — 🚩 pre-save check: steps still inside an NFZ / outside the FFZ AFTER this
             // removal make Percepto refuse the whole save ("Instruction #N … within a no-fly zone").
             const pairing = curTgt.type === 16 && pairCb.checked;
@@ -5130,6 +5143,7 @@
             renderReview();
         });
         pairCb.onchange = () => renderReview();
+        snapCb.onchange = () => renderReview();
         goBtn.onclick = () => srmApply(p, curPlan, curTgt, updateGo);
         // ── v3.44 Update waits tab ──
         const uGo = p.querySelector('[data-sru-go]'), uReview = p.querySelector('[data-sru-review]'), uSecs = p.querySelector('[data-sru-secs]');
@@ -5319,10 +5333,12 @@
         try {
             await new Promise(r => setTimeout(r, 1500));
             const after = await mbFetchMissionsFull(sid);
-            remaining = after.reduce((a, m) => a + (m.instructions || []).filter(s => srmMatch(s, tgt)).length, 0);
+            const snapOnly = tgt.type === 5 && !!(panel.querySelector('[data-srm-aftersnap]') || {}).checked;
+            remaining = after.reduce((a, m) => a + (m.instructions || []).filter((s, i, arr) => srmMatch(s, tgt) && (!snapOnly || (arr[i - 1] && arr[i - 1].type === 6))).length, 0);
         } catch (e) { console.warn(`${TAG} [srm] verify fetch failed`, e); }
         srmBusy = false; updateGo();
-        const vTxt = remaining == null ? 'verify fetch failed — check manually' : `${remaining} "${tgt.label}" step(s) left on site (includes any you unticked)`;
+        const snapOnlyTxt = tgt.type === 5 && !!(panel.querySelector('[data-srm-aftersnap]') || {}).checked ? ' directly after a snapshot' : '';
+        const vTxt = remaining == null ? 'verify fetch failed — check manually' : `${remaining} "${tgt.label}" step(s)${snapOnlyTxt} left on site (includes any you unticked)`;
         showToast(`🧹 Removed ${totalSteps} step(s) across ${ok} mission(s)${fail ? ` · ${fail} save(s) FAILED (see console)` : ''} · ${vTxt}.`, fail ? '#ff9800' : '#5fff5f', 9000);
         console.log(`${TAG} [srm] target="${tgt.label}" removed=${totalSteps} ok=${ok} fail=${fail}${failedNames.length ? ` failed=[${failedNames.join(', ')}]` : ''} remaining=${remaining}`);
         try { fetchMissions(sid, () => {}, () => {}); } catch (e) {}

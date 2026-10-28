@@ -1,4 +1,6 @@
-## 2026-10-28 — ✎ Update waits — Mission Bank Tools latest v3.44 (latest only)
+## 2026-10-28 — ✎ Update waits — Mission Bank Tools latest v3.44 → v3.45 (latest only)
+
+- **v3.45** — **Remove tab: "only waits directly after a snapshot".** Web's older 4-step recipe (snapshot → wait → Thermal On → wait → Thermal Off) carried a settle wait before Thermal On that the AM confirmed is no longer needed; with every wait now 4 s it could not be targeted by duration. The new checkbox (shown for wait targets) keeps only waits whose previous step is a snapshot, so the Thermal On / Off dwell stays; the verify count honours the same filter. Diagnosis came from `ShortKeys/AIM_Step_Pattern_Report.js` (console snippet: recipe / wait-context tallies per site).
 
 - **v3.44** — **🧹 Steps now has two tabs: Remove and Update waits** (feature #316, [issue #2](https://github.com/Ned-Yap/aim-userscripts-issues/issues/2)). Update lists every wait duration on the site (2 s / 5 s / 6 s / 8 s …) with a tick each and a "set to N seconds" box, so you can flatten them all to one value or move only one duration (8 s → 4 s) and leave the others. Review is per mission (which durations, how many), waits already at the new value are skipped, 🚩 rows show the navs that would make Percepto refuse that mission's save (those missions start unticked), and Apply runs on the same rails as Remove: confirm → JSON backup → one save per mission → fresh-fetch verify counting old-value waits left. Backup download shared between the two tabs.
 
