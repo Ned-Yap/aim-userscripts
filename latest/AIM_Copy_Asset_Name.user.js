@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.491
+// @version      4.492
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.491';
+    const SCRIPT_VERSION = '4.492';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -41528,9 +41528,6 @@
     }
     function mscInBox(p, b) { return p.lat >= b.s && p.lat <= b.n && p.lng >= b.w && p.lng <= b.e; }
     function mscRingArea(ring) { let a = 0; for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) a += (ring[j].lng + ring[i].lng) * (ring[j].lat - ring[i].lat); return Math.abs(a / 2); }
-    // Distance (m) from a point to a ring's EDGE whether inside or out
-    // (pointToPolygonMeters returns 0 inside — useless for "how far to pull the edge").
-    function mscEdgeMeters(lat, lng, ring) { let best = Infinity; for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) { const d = pointToSegMeters(lat, lng, ring[j], ring[i]); if (d < best) best = d; } return best; }
     function mscStepKind(s) {
         const t = s.type, n = String(s.type_name || '').toLowerCase();
         if (t === 1 || n === 'navigate') return 'nav';
@@ -41538,14 +41535,98 @@
         if (t === 16 || n === 'flag pole') return 'flag pole';
         return n || `type ${t}`;
     }
+    // ====================================================================
+    // [#315 step check — shared core] checkMissionSteps(instructions, nfzs, ffzs, opts).
+    // Copied VERBATIM into Site Setup Tools / Mission Bank Tools (reference copy:
+    // ShortKeys/AIM_Step_Check.js — edit THERE first, then re-paste). Pure: no DOM,
+    // no fetch, no host helpers. Flown steps = navs + flag poles; snapshots are aim
+    // points and never tested; `goes` = deleted by the 🧹 flag-pole removal anyway.
+    // → flag[] = { idx, num, type, kind, tier: nfz|ffz|near, goes, lat, lng, zoneId, zoneName, distM }
+    // ====================================================================
+    function checkMissionSteps(instructions, nfzs, ffzs, opts) {
+        const nearM = (opts && typeof opts.nearM === 'number' && opts.nearM > 0) ? opts.nearM : 0;
+        const ins = Array.isArray(instructions) ? instructions : [];
+        const zones = (list) => (Array.isArray(list) ? list : [])
+            .filter(z => z && Array.isArray(z.ring) && z.ring.length >= 3 && z.ring.every(p => p && typeof p.lat === 'number' && typeof p.lng === 'number'))
+            .map(z => {
+                let s = Infinity, n = -Infinity, w = Infinity, e = -Infinity;
+                z.ring.forEach(p => { if (p.lat < s) s = p.lat; if (p.lat > n) n = p.lat; if (p.lng < w) w = p.lng; if (p.lng > e) e = p.lng; });
+                return { id: z.id != null ? z.id : null, name: z.name || '', ring: z.ring, box: { s, n, w, e } };
+            });
+        const nfz = zones(nfzs), ffz = zones(ffzs);
+        // Equirectangular metres — fine within a site (< 10 km).
+        const metres = (lat1, lng1, lat2, lng2) => {
+            const R = 6371000, phi1 = lat1 * Math.PI / 180;
+            const x = (lng2 - lng1) * Math.PI / 180 * Math.cos(phi1), y = (lat2 - lat1) * Math.PI / 180;
+            return Math.sqrt(x * x + y * y) * R;
+        };
+        const segMetres = (lat, lng, a, b) => {
+            const dx = b.lng - a.lng, dy = b.lat - a.lat, len2 = dx * dx + dy * dy;
+            let t = len2 === 0 ? 0 : ((lng - a.lng) * dx + (lat - a.lat) * dy) / len2;
+            t = Math.max(0, Math.min(1, t));
+            return metres(lat, lng, a.lat + t * dy, a.lng + t * dx);
+        };
+        // Distance to the ring's EDGE whether inside or out (inside → "how far the edge must move").
+        const edgeMetres = (lat, lng, ring) => { let best = Infinity; for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) { const d = segMetres(lat, lng, ring[j], ring[i]); if (d < best) best = d; } return best; };
+        const inBox = (lat, lng, b) => lat >= b.s && lat <= b.n && lng >= b.w && lng <= b.e;
+        const inPoly = (lat, lng, ring) => {
+            let inside = false;
+            for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+                const xi = ring[i].lng, yi = ring[i].lat, xj = ring[j].lng, yj = ring[j].lat;
+                if (((yi > lat) !== (yj > lat)) && (lng < (xj - xi) * (lat - yi) / (yj - yi) + xi)) inside = !inside;
+            }
+            return inside;
+        };
+        const isFlag = (s) => !!s && (s.type === 16 || String(s.type_name || '').toLowerCase() === 'flag pole');
+        const isNav = (s) => !!s && (s.type === 1 || String(s.type_name || '').toLowerCase() === 'navigate');
+        // 🧹 set — mirrors MBT srmBuildPlan(tgt = flag pole, pairNav = true).
+        const goes = new Set();
+        ins.forEach((s, i) => {
+            if (!isFlag(s)) return;
+            if (i > 0 && ins[i - 1] && ins[i - 1].type === 1 && !goes.has(i - 1)) goes.add(i - 1);
+            goes.add(i);
+        });
+        const out = [];
+        ins.forEach((s, i) => {
+            if (!s) return;
+            const kind = isNav(s) ? 'nav' : (isFlag(s) ? 'flag pole' : null);
+            if (!kind) return;                                  // snapshots / waits / camera / takeoff / return: not flown points
+            const l = s.location;
+            if (!l || typeof l.lat !== 'number' || typeof l.lng !== 'number') return;
+            const base = { idx: i, num: i + 1, type: s.type, kind, goes: goes.has(i), lat: l.lat, lng: l.lng };
+            let inside = null, nearest = null;
+            nfz.forEach(z => {
+                const d = edgeMetres(l.lat, l.lng, z.ring);
+                const isIn = inBox(l.lat, l.lng, z.box) && inPoly(l.lat, l.lng, z.ring);
+                if (isIn && (!inside || d > inside.d)) inside = { z, d };   // deepest-inside NFZ = the one that must move most
+                if (!nearest || d < nearest.d) nearest = { z, d };
+            });
+            if (inside) out.push(Object.assign({}, base, { tier: 'nfz', zoneId: inside.z.id, zoneName: inside.z.name, distM: inside.d }));
+            else if (nearM && nearest && nearest.d <= nearM) out.push(Object.assign({}, base, { tier: 'near', zoneId: nearest.z.id, zoneName: nearest.z.name, distM: nearest.d }));
+            const inFfz = ffz.some(f => inBox(l.lat, l.lng, f.box) && inPoly(l.lat, l.lng, f.ring));
+            if (!inFfz) {
+                let near = null;
+                ffz.forEach(f => { const d = edgeMetres(l.lat, l.lng, f.ring); if (!near || d < near.d) near = { f, d }; });
+                out.push(Object.assign({}, base, { tier: 'ffz', zoneId: near ? near.f.id : null, zoneName: near ? near.f.name : '', distM: near ? near.d : Infinity }));
+            }
+        });
+        return out;
+    }
     function mscAnalyze(ents, missionsRaw) {
         const ringOf = (e) => { const r = ringForEntity(e); return (r && r.length >= 3) ? r : null; };
         const nearM = mscNearFt / M_TO_FT;
-        const nfzs = ents.filter(e => e && e.type === 4).map(e => ({ e, ring: ringOf(e) })).filter(x => x.ring).map(x => Object.assign(x, { box: mscBbox(x.ring, 2) }));
-        const ffzs = ents.filter(e => e && e.type === 16).map(e => ({ e, ring: ringOf(e) })).filter(x => x.ring).map(x => Object.assign(x, { box: mscBbox(x.ring, 2) }));
+        const zone = (e) => ({ id: e.id, name: e.name || `${e.type === 4 ? 'NFZ' : 'FFZ'} ${e.id}`, ring: ringOf(e) });
+        const nfzs = ents.filter(e => e && e.type === 4).map(zone).filter(z => z.ring);
+        const ffzs = ents.filter(e => e && e.type === 16).map(zone).filter(z => z.ring);
+        // Pad attribution (SST-only extra, mcvDetect rule): tightest asset polygon within 150 ft, nested child → root.
         const tree = buildAssetTree(ents);
         const assets = ents.filter(e => e && e.type === 3).map(e => ({ e, ring: ringOf(e) })).filter(x => x.ring).map(x => Object.assign(x, { box: mscBbox(x.ring, MSC_TOL_M + 5), area: mscRingArea(x.ring) }));
         const rootOf = (e) => { const n = tree.byId.get(e.id); const r = (n && n.rootId != null && n.rootId !== e.id) ? tree.byId.get(n.rootId) : null; return r ? r.ent : e; };
+        const padOf = (lat, lng) => {
+            let pad = null;
+            assets.forEach(a => { if (!mscInBox({ lat, lng }, a.box)) return; const d = pointToPolygonMeters(lat, lng, a.ring); if (d <= MSC_TOL_M && (!pad || d < pad.d || (d === pad.d && a.area < pad.area))) pad = { a, d, area: a.area }; });
+            return pad ? (rootOf(pad.a.e).name || '') : '';
+        };
         const flags = [], missions = [];
         const hit = new Set(), left = new Set();
         const stats = { missions: 0, steps: 0, nfz: 0, ffz: 0, near: 0, goes: 0, nfzLeft: 0, ffzLeft: 0, nfzCount: nfzs.length, ffzCount: ffzs.length, skipped: 0 };
@@ -41554,47 +41635,28 @@
             const ins = Array.isArray(m.instructions) ? m.instructions : [];
             const mid = String(m.id != null ? m.id : m.name);
             const name = m.name || `#${m.id}`;
+            // Route overlay = every located step (snapshots included, for context).
             const route = [];
-            // 🧹 what MBT's step removal deletes when the target is "flag pole" with
-            // paired navs (srmBuildPlan): every flag pole + the nav DIRECTLY before it
-            // (a nav is claimed once). A flag on one of those steps needs no NFZ fix —
-            // it leaves with the flag pole. Flags on the SURVIVING steps are what still
-            // blocks that mission's save.
-            const goes = new Set();
             ins.forEach((s, i) => {
-                if (!s || !(s.type === 16 || String(s.type_name || '').toLowerCase() === 'flag pole')) return;
-                if (i > 0 && ins[i - 1] && ins[i - 1].type === 1 && !goes.has(i - 1)) goes.add(i - 1);
-                goes.add(i);
-            });
-            ins.forEach((s, i) => {
-                if (!s || s.type === 0 || s.type === 99) return;   // start / return carry no plannable point
+                if (!s || s.type === 0 || s.type === 99) return;
                 const l = s.location;
                 if (!l || typeof l.lat !== 'number' || typeof l.lng !== 'number') return;
                 const kind = mscStepKind(s);
                 route.push({ lat: l.lat, lng: l.lng, idx: i, kind });
-                // FLOWN points only (2026-10-27): navs and flag poles (a flag pole is a nav
-                // with scanning added). A snapshot's location is the AIM point — on the pad,
-                // inside its NFZ by design — so it is drawn on the route but never tested.
-                if (kind === 'snapshot') return;
-                stats.steps++;
-                let inside = null, nearest = null;
-                nfzs.forEach(z => {
-                    const d = mscEdgeMeters(l.lat, l.lng, z.ring);
-                    const isIn = mscInBox(l, z.box) && pointInPolygon(l.lat, l.lng, z.ring);
-                    if (isIn && (!inside || d > inside.d)) inside = { z, d };   // deepest-inside NFZ = the one that must move most
-                    if (!nearest || d < nearest.d) nearest = { z, d };
-                });
-                const inFfz = ffzs.some(f => mscInBox(l, f.box) && pointInPolygon(l.lat, l.lng, f.ring));
-                let ffzNear = Infinity;
-                if (!inFfz) ffzs.forEach(f => { const d = mscEdgeMeters(l.lat, l.lng, f.ring); if (d < ffzNear) ffzNear = d; });
-                let pad = null;
-                assets.forEach(a => { if (!mscInBox(l, a.box)) return; const d = pointToPolygonMeters(l.lat, l.lng, a.ring); if (d <= MSC_TOL_M && (!pad || d < pad.d || (d === pad.d && a.area < pad.area))) pad = { a, d, area: a.area }; });
-                const base = { mid, mname: name, idx: i, num: i + 1, kind, goes: goes.has(i), lat: l.lat, lng: l.lng, pad: pad ? (rootOf(pad.a.e).name || '') : '',
-                    nfzName: nearest ? (nearest.z.e.name || `NFZ ${nearest.z.e.id}`) : '', nfzId: nearest ? nearest.z.e.id : null, nfzDist: nearest ? nearest.d : Infinity, ffzDist: ffzNear };
-                const g = base.goes;
-                if (inside) { flags.push(Object.assign({}, base, { tier: 'nfz', nfzName: inside.z.e.name || `NFZ ${inside.z.e.id}`, nfzId: inside.z.e.id, nfzDist: inside.d })); stats.nfz++; hit.add(mid); if (g) stats.goes++; else { stats.nfzLeft++; left.add(mid); } }
-                else if (nearest && nearest.d <= nearM) { flags.push(Object.assign({}, base, { tier: 'near' })); stats.near++; if (g) stats.goes++; }
-                if (!inFfz) { flags.push(Object.assign({}, base, { tier: 'ffz' })); stats.ffz++; hit.add(mid); if (g) stats.goes++; else { stats.ffzLeft++; left.add(mid); } }
+                if (kind !== 'snapshot') stats.steps++;
+            });
+            // The shared core does the actual test (navs + flag poles vs NFZ / FFZ).
+            checkMissionSteps(ins, nfzs, ffzs, { nearM }).forEach(f => {
+                const pad = padOf(f.lat, f.lng);
+                const g = f.goes;
+                if (f.tier === 'ffz') {
+                    flags.push({ mid, mname: name, idx: f.idx, num: f.num, kind: f.kind, goes: g, lat: f.lat, lng: f.lng, pad, tier: 'ffz', nfzId: null, nfzName: '', nfzDist: Infinity, ffzDist: f.distM });
+                    stats.ffz++; hit.add(mid); if (g) stats.goes++; else { stats.ffzLeft++; left.add(mid); }
+                } else {
+                    flags.push({ mid, mname: name, idx: f.idx, num: f.num, kind: f.kind, goes: g, lat: f.lat, lng: f.lng, pad, tier: f.tier, nfzId: f.zoneId, nfzName: f.zoneName, nfzDist: f.distM, ffzDist: Infinity });
+                    if (f.tier === 'nfz') { stats.nfz++; hit.add(mid); if (g) stats.goes++; else { stats.nfzLeft++; left.add(mid); } }
+                    else { stats.near++; if (g) stats.goes++; }
+                }
             });
             missions.push({ mid, name, route });
             stats.missions++;
