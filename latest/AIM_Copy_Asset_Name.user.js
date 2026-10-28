@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.490
+// @version      4.491
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.490';
+    const SCRIPT_VERSION = '4.491';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -41515,7 +41515,7 @@
     // ============================================================
     const MSC_PANEL_ID = 'aim-msc-panel';
     const MSC_TOL_M = 46;   // 150 ft pad-attribution halo (mcvDetect)
-    const msc = { sid: null, flags: [], missions: [], stats: null, cur: -1, show: { nfz: true, ffz: true, near: true },
+    const msc = { sid: null, flags: [], missions: [], stats: null, cur: -1, show: { nfz: true, ffz: true, near: true, goes: false },
         layers: [], renderer: null, pulseIv: null, pulseT: null, pos: null, running: false, rerun: false, pendingT: null, err: null, lastAt: 0 };
 
     function mscEsc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch])); }
@@ -41547,14 +41547,25 @@
         const assets = ents.filter(e => e && e.type === 3).map(e => ({ e, ring: ringOf(e) })).filter(x => x.ring).map(x => Object.assign(x, { box: mscBbox(x.ring, MSC_TOL_M + 5), area: mscRingArea(x.ring) }));
         const rootOf = (e) => { const n = tree.byId.get(e.id); const r = (n && n.rootId != null && n.rootId !== e.id) ? tree.byId.get(n.rootId) : null; return r ? r.ent : e; };
         const flags = [], missions = [];
-        const hit = new Set();
-        const stats = { missions: 0, steps: 0, nfz: 0, ffz: 0, near: 0, nfzCount: nfzs.length, ffzCount: ffzs.length, skipped: 0 };
+        const hit = new Set(), left = new Set();
+        const stats = { missions: 0, steps: 0, nfz: 0, ffz: 0, near: 0, goes: 0, nfzLeft: 0, ffzLeft: 0, nfzCount: nfzs.length, ffzCount: ffzs.length, skipped: 0 };
         missionsRaw.forEach(m => {
             if (!m || typeof m !== 'object') { stats.skipped++; return; }
             const ins = Array.isArray(m.instructions) ? m.instructions : [];
             const mid = String(m.id != null ? m.id : m.name);
             const name = m.name || `#${m.id}`;
             const route = [];
+            // 🧹 what MBT's step removal deletes when the target is "flag pole" with
+            // paired navs (srmBuildPlan): every flag pole + the nav DIRECTLY before it
+            // (a nav is claimed once). A flag on one of those steps needs no NFZ fix —
+            // it leaves with the flag pole. Flags on the SURVIVING steps are what still
+            // blocks that mission's save.
+            const goes = new Set();
+            ins.forEach((s, i) => {
+                if (!s || !(s.type === 16 || String(s.type_name || '').toLowerCase() === 'flag pole')) return;
+                if (i > 0 && ins[i - 1] && ins[i - 1].type === 1 && !goes.has(i - 1)) goes.add(i - 1);
+                goes.add(i);
+            });
             ins.forEach((s, i) => {
                 if (!s || s.type === 0 || s.type === 99) return;   // start / return carry no plannable point
                 const l = s.location;
@@ -41578,16 +41589,18 @@
                 if (!inFfz) ffzs.forEach(f => { const d = mscEdgeMeters(l.lat, l.lng, f.ring); if (d < ffzNear) ffzNear = d; });
                 let pad = null;
                 assets.forEach(a => { if (!mscInBox(l, a.box)) return; const d = pointToPolygonMeters(l.lat, l.lng, a.ring); if (d <= MSC_TOL_M && (!pad || d < pad.d || (d === pad.d && a.area < pad.area))) pad = { a, d, area: a.area }; });
-                const base = { mid, mname: name, idx: i, num: i + 1, kind, lat: l.lat, lng: l.lng, pad: pad ? (rootOf(pad.a.e).name || '') : '',
+                const base = { mid, mname: name, idx: i, num: i + 1, kind, goes: goes.has(i), lat: l.lat, lng: l.lng, pad: pad ? (rootOf(pad.a.e).name || '') : '',
                     nfzName: nearest ? (nearest.z.e.name || `NFZ ${nearest.z.e.id}`) : '', nfzId: nearest ? nearest.z.e.id : null, nfzDist: nearest ? nearest.d : Infinity, ffzDist: ffzNear };
-                if (inside) { flags.push(Object.assign({}, base, { tier: 'nfz', nfzName: inside.z.e.name || `NFZ ${inside.z.e.id}`, nfzId: inside.z.e.id, nfzDist: inside.d })); stats.nfz++; hit.add(mid); }
-                else if (nearest && nearest.d <= nearM) { flags.push(Object.assign({}, base, { tier: 'near' })); stats.near++; }
-                if (!inFfz) { flags.push(Object.assign({}, base, { tier: 'ffz' })); stats.ffz++; hit.add(mid); }
+                const g = base.goes;
+                if (inside) { flags.push(Object.assign({}, base, { tier: 'nfz', nfzName: inside.z.e.name || `NFZ ${inside.z.e.id}`, nfzId: inside.z.e.id, nfzDist: inside.d })); stats.nfz++; hit.add(mid); if (g) stats.goes++; else { stats.nfzLeft++; left.add(mid); } }
+                else if (nearest && nearest.d <= nearM) { flags.push(Object.assign({}, base, { tier: 'near' })); stats.near++; if (g) stats.goes++; }
+                if (!inFfz) { flags.push(Object.assign({}, base, { tier: 'ffz' })); stats.ffz++; hit.add(mid); if (g) stats.goes++; else { stats.ffzLeft++; left.add(mid); } }
             });
             missions.push({ mid, name, route });
             stats.missions++;
         });
         stats.hitMissions = hit.size;
+        stats.leftMissions = left.size;
         flags.forEach(f => { f.label = `${f.mname} #${f.num}`; });
         return { flags, missions, stats };
     }
@@ -41673,7 +41686,7 @@
         } catch (e) { console.warn(`${TAG} 🚩 draw failed:`, e); }
         if (pan) { try { map.setView([f.lat, f.lng], Math.max(18, map.getZoom())); } catch (e) { console.warn(`${TAG} 🚩 setView threw:`, e); } }
     }
-    function mscVisible() { return msc.flags.map((f, i) => i).filter(i => msc.show[msc.flags[i].tier]); }
+    function mscVisible() { return msc.flags.map((f, i) => i).filter(i => msc.show[msc.flags[i].tier] && (msc.show.goes || !msc.flags[i].goes)); }
     function mscSelect(i, pan) {
         if (!msc.flags[i]) return;
         msc.cur = i;
@@ -41692,12 +41705,13 @@
         const st = msc.stats || {};
         const out = [`🚩 Mission step check — site ${msc.sid} — ${new Date().toLocaleString()}`,
             `${st.missions || 0} missions · ${st.steps || 0} navs + flag poles tested · ${st.nfzCount || 0} NFZ / ${st.ffzCount || 0} FFZ polygons`,
-            `${st.nfz || 0} inside an NFZ (save refused) · ${st.ffz || 0} outside every FFZ · ${st.near || 0} within ${mscNearFt} ft of an NFZ edge`, ''];
+            `${st.nfz || 0} inside an NFZ (save refused) · ${st.ffz || 0} outside every FFZ · ${st.near || 0} within ${mscNearFt} ft of an NFZ edge`,
+            `after 🧹 (flag poles + paired navs removed): ${st.leftMissions || 0} mission(s) still blocked — ${st.nfzLeft || 0} inside NFZ · ${st.ffzLeft || 0} no FFZ · ${st.goes || 0} flag(s) go away`, ''];
         let last = null;
         msc.flags.forEach(f => {
             if (f.mid !== last) { last = f.mid; out.push(f.mname); }
             const why = f.tier === 'nfz' ? `inside NFZ "${f.nfzName}" (${mscFt(f.nfzDist)} to its edge)` : f.tier === 'ffz' ? `no FFZ${isFinite(f.ffzDist) ? ` (${mscFt(f.ffzDist)} to the nearest)` : ''}` : `${mscFt(f.nfzDist)} from NFZ "${f.nfzName}" (outside)`;
-            out.push(`  #${f.num} ${f.kind} — ${why}${f.pad ? ` · pad ${f.pad}` : ''}`);
+            out.push(`  ${f.goes ? '🧹 ' : ''}#${f.num} ${f.kind} — ${why}${f.pad ? ` · pad ${f.pad}` : ''}${f.goes ? ' (removed with the flag pole — no fix needed)' : ''}`);
         });
         if (!msc.flags.length) out.push('No flags ✓');
         return out.join('\n');
@@ -41741,10 +41755,11 @@
             const f = msc.flags[i];
             if (f.mid !== lastMid) {
                 lastMid = f.mid;
-                const n = vis.filter(j => msc.flags[j].mid === f.mid).length;
-                rows += `<div style="color:#7adfe6;font-weight:600;margin:6px 0 2px;border-bottom:1px solid rgba(122,223,230,0.25);padding-bottom:1px">${mscEsc(f.mname)} <span style="color:#8a949e;font-weight:400">· ${n} flag${n === 1 ? '' : 's'}</span></div>`;
+                const all = msc.flags.filter(x => x.mid === f.mid && msc.show[x.tier]);
+                const block = all.filter(x => !x.goes && x.tier !== 'near').length, gone = all.filter(x => x.goes).length;
+                rows += `<div style="color:#7adfe6;font-weight:600;margin:6px 0 2px;border-bottom:1px solid rgba(122,223,230,0.25);padding-bottom:1px">${mscEsc(f.mname)} <span style="color:#8a949e;font-weight:400">· ${block ? `<span style="color:#ff8080">${block} still block${block === 1 ? 's' : ''} the save</span>` : '<span style="color:#5fff5f">saves once 🧹 runs</span>'}${gone ? ` · ${gone} 🧹` : ''}</span></div>`;
             }
-            rows += `<div data-msc-row="${i}" class="${i === msc.cur ? 'cur' : ''}" title="click = pan to this step (route drawn, step pulses)">${dot[f.tier]}<span style="flex:none;color:#e6e6e6;font-weight:700;min-width:34px">#${f.num}</span><span style="flex:none;color:#9ad;min-width:62px">${mscEsc(f.kind)}</span><span style="flex:1;min-width:0;color:#cfd6dc">${why(f)}${f.pad ? `<span style="color:#8a949e"> · pad ${mscEsc(f.pad)}</span>` : ''}</span></div>`;
+            rows += `<div data-msc-row="${i}" class="${i === msc.cur ? 'cur' : ''}" title="${f.goes ? '🧹 this step is deleted by the flag-pole removal (flag pole, or the nav directly before one) — no NFZ fix needed. ' : ''}click = pan to this step (route drawn, step pulses)"${f.goes ? ' style="opacity:0.55"' : ''}>${f.goes ? '<span title="removed with the flag pole">🧹</span>' : dot[f.tier]}<span style="flex:none;color:#e6e6e6;font-weight:700;min-width:34px">#${f.num}</span><span style="flex:none;color:#9ad;min-width:62px">${mscEsc(f.kind)}</span><span style="flex:1;min-width:0;color:#cfd6dc">${why(f)}${f.pad ? `<span style="color:#8a949e"> · pad ${mscEsc(f.pad)}</span>` : ''}</span></div>`;
         });
         const summary = st
             ? `${st.missions} mission${st.missions === 1 ? '' : 's'} · ${st.steps.toLocaleString()} navs + flag poles tested · ${st.nfzCount} NFZ / ${st.ffzCount} FFZ${st.skipped ? ` · ${st.skipped} unreadable mission record(s) skipped` : ''}`
@@ -41752,6 +41767,7 @@
         const verdict = st
             ? (msc.flags.length
                 ? `<span style="color:#ff5555;font-weight:700">${st.nfz} flown step${st.nfz === 1 ? '' : 's'} inside an NFZ</span> in ${st.hitMissions} mission${st.hitMissions === 1 ? '' : 's'}${st.ffz ? ` · <span style="color:#ff9dff">${st.ffz} outside every FFZ</span>` : ''}${st.near ? ` · <span style="color:#ffb347">${st.near} near</span>` : ''}`
+                    + `<div style="margin-top:2px">after 🧹 (flag poles + their paired navs removed): ${(st.nfzLeft || st.ffzLeft) ? `<span style="color:#ff8080;font-weight:700">${st.leftMissions} mission${st.leftMissions === 1 ? '' : 's'} still blocked</span> — <span style="color:#ff8080">${st.nfzLeft} inside NFZ</span> · <span style="color:#ff9dff">${st.ffzLeft} no FFZ</span> on surviving steps` : '<span style="color:#5fff5f;font-weight:700">every mission saves ✓</span>'}${st.goes ? ` · <span style="color:#8a949e">${st.goes} flag${st.goes === 1 ? '' : 's'} go away with the 🧹</span>` : ''}</div>`
                 : '<span style="color:#5fff5f;font-weight:700">No nav / flag pole inside an NFZ or outside the FFZs ✓</span>')
             : '';
         const warn = st && !st.nfzCount ? '<div style="color:#ffb347;margin-top:2px">⚠ This site has no NFZ polygons — only the FFZ check applies.</div>' : '';
@@ -41777,13 +41793,14 @@
                     ${chip('nfz', 'inside NFZ', '#ff5555', st ? st.nfz : 0)}
                     ${chip('ffz', 'no FFZ', '#ff9dff', st ? st.ffz : 0)}
                     ${chip('near', `near (&lt; ${mscNearFt} ft)`, '#ffb347', st ? st.near : 0)}
+                    <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;color:#8a949e" title="Also list steps the flag-pole 🧹 deletes (flag poles + the nav directly before each). Hidden by default — they need no NFZ fix."><input type="checkbox" data-msc-show="goes" ${msc.show.goes ? 'checked' : ''} style="accent-color:#8a949e;margin:0">show 🧹 <b>${st ? st.goes : 0}</b></label>
                     <span style="flex:1"></span>
                     <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;color:#9ad" title="Re-run after every successful Site Setup save (NFZ reshape) while this panel is open"><input type="checkbox" data-msc-auto ${mscAutoRecheck ? 'checked' : ''} style="accent-color:#7adfe6;margin:0">auto re-check</label>
                 </div>
                 <div style="font-size:11px;margin-top:2px;min-height:14px">${statusLine}</div>
             </div>
             <div style="padding:4px 12px 8px;overflow-y:auto;flex:1;min-height:0">${rows || (st ? '<div style="color:#8a949e;padding:6px 0">Nothing to show in the selected tiers.</div>' : '')}</div>
-            <div style="padding:4px 12px 6px;border-top:1px solid rgba(255,255,255,0.06);color:#6f7a85;font-size:10px;flex:none;line-height:1.4">Navs + flag poles only (the flown points) — a snapshot's location is its aim point and sits inside the NFZ by design (drawn on the route, never flagged). Read-only: reshape the NFZ in Site Setup, save, and the list refreshes. #N = the step's 1-based position in the mission (Percepto's "Instruction #N"). Click a row or Prev / Next to pan; the mission's route stays drawn while you edit.</div>`;
+            <div style="padding:4px 12px 6px;border-top:1px solid rgba(255,255,255,0.06);color:#6f7a85;font-size:10px;flex:none;line-height:1.4">Navs + flag poles only (the flown points) — a snapshot's location is its aim point and sits inside the NFZ by design (drawn on the route, never flagged). 🧹 rows = steps MBT's flag-pole removal deletes (flag pole + the nav directly before it); they are hidden unless "show 🧹" is ticked. Read-only: reshape the NFZ in Site Setup, save, and the list refreshes. #N = the step's 1-based position in the mission (Percepto's "Instruction #N"). Click a row or Prev / Next to pan; the mission's route stays drawn while you edit.</div>`;
     }
     function mscPanelClick(e) {
         if (e.target.closest('[data-msc-close]')) { mscClose(); return; }

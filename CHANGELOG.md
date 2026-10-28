@@ -1,5 +1,7 @@
 ## 2026-10-27 — 🚩 Mission step check — Site Setup Tools latest v4.488 (latest only)
 
+- **v4.491** — **🧹 awareness.** Flags on steps that MBT's flag-pole removal deletes anyway (every flag pole + the nav directly before it, the same pairing rule as 🧹) are marked 🧹 and hidden by default — no NFZ fix needed for those. Each mission header now says what matters: **N still block the save** (flags on surviving steps) or **saves once 🧹 runs**. The verdict adds the after-🧹 totals (missions still blocked, inside-NFZ / no-FFZ on surviving steps). "show 🧹" lists the hidden ones.
+
 - **v4.490** — **Flag poles are tested again.** A flag pole is a nav with scanning added, so it is a flown point: it is checked against NFZs and FFZs like a nav. Snapshots stay drawn-only.
 
 - **v4.489** — **Navs only.** Snapshot and flag-pole locations are AIM points — on the pad, inside its NFZ by design — so they are no longer tested (they still appear on the drawn route). Only navs, the points the drone actually flies to, are checked against NFZs and FFZs.
