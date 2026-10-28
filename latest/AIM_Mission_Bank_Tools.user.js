@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.41
+// @version      3.42
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.41';
+    const SCRIPT_VERSION = '3.42';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -3261,6 +3261,10 @@
         { id: 'flightTime', label: 'Flight Time', key: 'flightTimeS', kind: 'time', defaultVisible: true },
         { id: 'steps', label: 'Steps', key: 'steps', kind: 'num', defaultVisible: true },
         // ← dynamic step-type columns inserted here
+        // v3.42 (#315) — 🚩 flown steps inside an NFZ / outside every FFZ (Percepto refuses the save). Click the cell for the rows.
+        { id: 'stepFlags', label: '🚩', key: '__stepFlags', kind: 'num', defaultVisible: true, derived: true,
+            fmt: (row) => { const sid = getCurrentSiteID(); const c = msfCache && msfCache.sid === sid ? msfCache : null; if (!c) return '…'; if (c.failed) return '?'; const r = c.byMission[row.id]; return r ? (r.block ? (r.goes ? `${r.block} (${r.goes}🧹)` : String(r.block)) : '✓') : '—'; },
+            sortVal: (row) => { const sid = getCurrentSiteID(); const r = msfCache && msfCache.sid === sid ? msfCache.byMission[row.id] : null; return r ? r.block : -1; } },
         { id: 'batteryConsumption', label: 'Battery %', key: 'batteryConsumption', kind: 'pct', defaultVisible: true },
         { id: 'estFlights', label: 'Est. Flights', key: '__estFlights', kind: 'num', defaultVisible: true, derived: true },
         { id: 'totalConsumption', label: 'Total Consumption %', key: 'totalConsumption', kind: 'pct', defaultVisible: true },
@@ -3347,12 +3351,19 @@
             // Migrate v0.8 hardcoded step-type IDs → stype:… IDs (bank only;
             // log IDs aren't in the map so this is a no-op for log).
             const migrated = stored.map(id => COLUMN_ID_MIGRATION[id] || id);
-            return migrated.filter(id => byId[id]);
+            const vis = migrated.filter(id => byId[id]);
+            // v3.42 — the 🚩 column is new: seed it into saved prefs once; '!stepFlags' = user hid it.
+            if (byId.stepFlags && !vis.includes('stepFlags') && !stored.includes('!stepFlags')) {
+                const at = vis.indexOf('steps');
+                vis.splice(at >= 0 ? at + 1 : vis.length, 0, 'stepFlags');
+            }
+            return vis;
         }
         return cols.filter(c => c.defaultVisible).map(c => c.id);
     }
 
     function setVisibleColumnIds(ids) {
+        if (activeColById().stepFlags && !ids.includes('stepFlags') && !ids.includes('!stepFlags')) ids = ids.concat('!stepFlags');   // v3.42 — remember a hidden 🚩
         gmSet(visibleColsStorageKey(), ids);
     }
 
@@ -5010,9 +5021,12 @@
         const sid = getCurrentSiteID();
         if (!sid) { showToast('No site loaded.', '#ff5252', 3000); return; }
         showToast('🧹 Fetching all missions…', '#ffd54f', 2000);
-        let missions;
+        let missions, srmEnt = null;
         try { missions = await mbFetchMissionsFull(sid); }
         catch (e) { console.warn(`${TAG} [srm] fetch failed`, e); showToast('🧹 Mission fetch failed — see console.', '#ff5252', 4500); return; }
+        // v3.42 — NFZ/FFZ rings for the 🚩 pre-save check (a miss only hides the warnings).
+        try { srmEnt = await genFetchEntities(sid); }
+        catch (e) { console.warn(`${TAG} [srm] entity fetch failed — 🚩 pre-check unavailable`, e); showToast('🧹 Could not load NFZs/FFZs — the pre-save check is off for this run.', '#ff9800', 4500); }
         if (!missions.length) { showToast('No missions on this site.', '#ff9800', 3000); return; }
         const targets = srmTargets(missions);
         if (!targets.length) { showToast('No removable step types found in any mission.', '#ff9800', 4000); return; }
@@ -5060,14 +5074,25 @@
             curPlan = srmBuildPlan(missions, curTgt, curTgt.type === 16 && pairCb.checked);
             pairWrap.style.display = curTgt.type === 16 ? 'flex' : 'none';
             if (!curPlan.length) { reviewEl.innerHTML = '<div style="padding:8px;color:#ff9800;">No matches (unexpected — re-open the panel).</div>'; updateGo(); return; }
+            // v3.42 — 🚩 pre-save check: steps still inside an NFZ / outside the FFZ AFTER this
+            // removal make Percepto refuse the whole save ("Instruction #N … within a no-fly zone").
+            const pairing = curTgt.type === 16 && pairCb.checked;
+            curPlan.forEach(pm => {
+                const flags = mbStepFlags(pm.m.instructions, srmEnt);
+                pm.block = flags.filter(f => f.tier !== 'near' && !(pairing && f.goes));
+            });
+            const blockedN = curPlan.filter(pm => pm.block.length).length;
             reviewEl.innerHTML = `<div style="padding:3px 2px;color:#9ad;">${curPlan.length} mission(s) · <a data-srm-all href="#" style="color:#7adfe6;">all</a> / <a data-srm-none href="#" style="color:#7adfe6;">none</a> — every ticked row is removed on Apply</div>`
-                + curPlan.map((pm, mi) => `<div style="margin:4px 0 1px;font-weight:700;color:#7adfe6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(String(pm.m.name || ('#' + pm.m.id)))} <span style="color:#789;font-weight:400;">· ${pm.groups.length} removal(s)</span></div>`
+                + (blockedN ? `<div style="margin:2px 0 4px;padding:4px 6px;background:rgba(255,82,82,0.1);border:1px solid rgba(255,82,82,0.4);border-radius:5px;color:#ff8a8a;font-size:10.5px;">🚩 ${blockedN} mission(s) still have navs inside an NFZ / outside the FFZ after this removal — Percepto will REFUSE those saves. Fix them first (📍 jumps there) or untick them.</div>` : (srmEnt ? '' : '<div style="margin:2px 0 4px;color:#ff9800;font-size:10.5px;">🚩 pre-save check unavailable (NFZ/FFZ load failed).</div>'))
+                + curPlan.map((pm, mi) => `<div style="margin:4px 0 1px;font-weight:700;color:#7adfe6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(String(pm.m.name || ('#' + pm.m.id)))} <span style="color:#789;font-weight:400;">· ${pm.groups.length} removal(s)</span>${pm.block.length ? ` <span style="color:#ff8a8a;font-weight:700;">· 🚩 ${pm.block.length} still block the save</span>` : ''}</div>`
+                    + (pm.block.length ? mbStepFlagRows(pm.block, { indent: 12 }) : '')
                     + pm.groups.map((g, gi) => `<label style="display:flex;align-items:center;gap:6px;padding:1px 2px 1px 12px;border-bottom:1px solid #20262e;cursor:pointer;">
                         <input type="checkbox" data-srm-g="${mi}:${gi}" checked />
                         <span style="flex:1;color:#e6e6e6;">${escapeHtml(g.label)}</span>
                         <span style="color:#789;font-size:10px;white-space:nowrap;">${escapeHtml(g.ctx)}</span>
                     </label>${g.warn ? `<div style="margin-left:30px;color:#ffb74d;font-size:10px;">${escapeHtml(g.warn)}</div>` : ''}${g.noNav ? `<div style="margin-left:30px;color:#789;font-size:10px;">${escapeHtml(g.noNav)}</div>` : ''}`).join('')).join('');
             reviewEl.querySelectorAll('input[data-srm-g]').forEach(cb => { cb.onchange = updateGo; });
+            mbWireStepFlagJumps(reviewEl);
             const allA = reviewEl.querySelector('[data-srm-all]'), noneA = reviewEl.querySelector('[data-srm-none]');
             if (allA) allA.onclick = (ev) => { ev.preventDefault(); reviewEl.querySelectorAll('input[data-srm-g]').forEach(cb => { cb.checked = true; }); updateGo(); };
             if (noneA) noneA.onclick = (ev) => { ev.preventDefault(); reviewEl.querySelectorAll('input[data-srm-g]').forEach(cb => { cb.checked = false; }); updateGo(); };
@@ -5129,10 +5154,19 @@
                 const w = work[k];
                 if (statusEl) statusEl.textContent = `Saving ${k + 1}/${work.length} — ${w.m.name}…`;
                 try {
-                    const keep = (w.m.instructions || []).filter((s, i) => !w.remove.has(i)).map(pcmNormStep);
-                    await ctx.saveApp(Object.assign({}, w.m, { instructions: keep }), w.m.name);
+                    const keptIdx = (w.m.instructions || []).map((s, i) => i).filter(i => !w.remove.has(i));
+                    const keep = keptIdx.map(i => pcmNormStep(w.m.instructions[i]));
+                    try {
+                        await ctx.saveApp(Object.assign({}, w.m, { instructions: keep }), w.m.name);
+                    } catch (e) {
+                        // v3.42 — Percepto's "Instruction #N" is the 0-based index into the list it was
+                        // SENT (post-removal); map it back to the step number you see in the editor.
+                        const mm = /Instruction #(\d+)/.exec(String((e && e.message) || e));
+                        if (mm && keptIdx[Number(mm[1])] != null) e.aimStep = keptIdx[Number(mm[1])] + 1;
+                        throw e;
+                    }
                     ok++;
-                } catch (e) { fail++; failedNames.push(w.m.name); console.warn(`${TAG} [srm] save FAILED for "${w.m.name}"`, e); }
+                } catch (e) { fail++; failedNames.push(w.m.name + (e && e.aimStep ? ` (original step #${e.aimStep})` : '')); console.warn(`${TAG} [srm] save FAILED for "${w.m.name}"${e && e.aimStep ? ` — server refused ORIGINAL step #${e.aimStep}` : ''}`, e); }
                 await new Promise(r => setTimeout(r, 150));
             }
         } finally { renameSuppressAutoAgl--; }
@@ -5806,6 +5840,173 @@
         return { byId, roots: nodes.filter(n => n.parentId === null && !n.orphan), orphans: nodes.filter(n => n.orphan) };
     }
 
+    // [#315 step check — shared core] checkMissionSteps(instructions, nfzs, ffzs, opts).
+    // Copied VERBATIM from ShortKeys/AIM_Step_Check.js (also vendored in Site Setup
+    // Tools). Pure: no DOM / fetch / host helpers. Edit the ShortKeys file first, then
+    // re-paste into both scripts. flag = { idx, num, type, kind, tier (nfz|ffz|near),
+    // goes (🧹 flag-pole removal deletes it anyway), lat, lng, zoneId, zoneName, distM }.
+    function checkMissionSteps(instructions, nfzs, ffzs, opts) {
+        const nearM = (opts && typeof opts.nearM === 'number' && opts.nearM > 0) ? opts.nearM : 0;
+        const ins = Array.isArray(instructions) ? instructions : [];
+        const zones = (list) => (Array.isArray(list) ? list : [])
+            .filter(z => z && Array.isArray(z.ring) && z.ring.length >= 3 && z.ring.every(p => p && typeof p.lat === 'number' && typeof p.lng === 'number'))
+            .map(z => {
+                let s = Infinity, n = -Infinity, w = Infinity, e = -Infinity;
+                z.ring.forEach(p => { if (p.lat < s) s = p.lat; if (p.lat > n) n = p.lat; if (p.lng < w) w = p.lng; if (p.lng > e) e = p.lng; });
+                return { id: z.id != null ? z.id : null, name: z.name || '', ring: z.ring, box: { s, n, w, e } };
+            });
+        const nfz = zones(nfzs), ffz = zones(ffzs);
+        // Equirectangular metres — fine within a site (< 10 km).
+        const metres = (lat1, lng1, lat2, lng2) => {
+            const R = 6371000, phi1 = lat1 * Math.PI / 180;
+            const x = (lng2 - lng1) * Math.PI / 180 * Math.cos(phi1), y = (lat2 - lat1) * Math.PI / 180;
+            return Math.sqrt(x * x + y * y) * R;
+        };
+        const segMetres = (lat, lng, a, b) => {
+            const dx = b.lng - a.lng, dy = b.lat - a.lat, len2 = dx * dx + dy * dy;
+            let t = len2 === 0 ? 0 : ((lng - a.lng) * dx + (lat - a.lat) * dy) / len2;
+            t = Math.max(0, Math.min(1, t));
+            return metres(lat, lng, a.lat + t * dy, a.lng + t * dx);
+        };
+        // Distance to the ring's EDGE whether inside or out (inside → "how far the edge must move").
+        const edgeMetres = (lat, lng, ring) => { let best = Infinity; for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) { const d = segMetres(lat, lng, ring[j], ring[i]); if (d < best) best = d; } return best; };
+        const inBox = (lat, lng, b) => lat >= b.s && lat <= b.n && lng >= b.w && lng <= b.e;
+        const inPoly = (lat, lng, ring) => {
+            let inside = false;
+            for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+                const xi = ring[i].lng, yi = ring[i].lat, xj = ring[j].lng, yj = ring[j].lat;
+                if (((yi > lat) !== (yj > lat)) && (lng < (xj - xi) * (lat - yi) / (yj - yi) + xi)) inside = !inside;
+            }
+            return inside;
+        };
+        const isFlag = (s) => !!s && (s.type === 16 || String(s.type_name || '').toLowerCase() === 'flag pole');
+        const isNav = (s) => !!s && (s.type === 1 || String(s.type_name || '').toLowerCase() === 'navigate');
+        // 🧹 set — mirrors MBT srmBuildPlan(tgt = flag pole, pairNav = true).
+        const goes = new Set();
+        ins.forEach((s, i) => {
+            if (!isFlag(s)) return;
+            if (i > 0 && ins[i - 1] && ins[i - 1].type === 1 && !goes.has(i - 1)) goes.add(i - 1);
+            goes.add(i);
+        });
+        const out = [];
+        ins.forEach((s, i) => {
+            if (!s) return;
+            const kind = isNav(s) ? 'nav' : (isFlag(s) ? 'flag pole' : null);
+            if (!kind) return;                                  // snapshots / waits / camera / takeoff / return: not flown points
+            const l = s.location;
+            if (!l || typeof l.lat !== 'number' || typeof l.lng !== 'number') return;
+            const base = { idx: i, num: i + 1, type: s.type, kind, goes: goes.has(i), lat: l.lat, lng: l.lng };
+            let inside = null, nearest = null;
+            nfz.forEach(z => {
+                const d = edgeMetres(l.lat, l.lng, z.ring);
+                const isIn = inBox(l.lat, l.lng, z.box) && inPoly(l.lat, l.lng, z.ring);
+                if (isIn && (!inside || d > inside.d)) inside = { z, d };   // deepest-inside NFZ = the one that must move most
+                if (!nearest || d < nearest.d) nearest = { z, d };
+            });
+            if (inside) out.push(Object.assign({}, base, { tier: 'nfz', zoneId: inside.z.id, zoneName: inside.z.name, distM: inside.d }));
+            else if (nearM && nearest && nearest.d <= nearM) out.push(Object.assign({}, base, { tier: 'near', zoneId: nearest.z.id, zoneName: nearest.z.name, distM: nearest.d }));
+            const inFfz = ffz.some(f => inBox(l.lat, l.lng, f.box) && inPoly(l.lat, l.lng, f.ring));
+            if (!inFfz) {
+                let near = null;
+                ffz.forEach(f => { const d = edgeMetres(l.lat, l.lng, f.ring); if (!near || d < near.d) near = { f, d }; });
+                out.push(Object.assign({}, base, { tier: 'ffz', zoneId: near ? near.f.id : null, zoneName: near ? near.f.name : '', distM: near ? near.d : Infinity }));
+            }
+        });
+        return out;
+    }
+    // v3.42 — MBT side of the 🚩 step check: NFZ (type 4) + FFZ rings from the
+    // entity cache; 10 ft "near" margin like Site Setup Tools. A flag with tier
+    // nfz/ffz blocks Percepto's save ("Instruction #N: One of app points is within
+    // a no-fly zone"); `near` is advisory. Empty entity cache → [] (never throws).
+    const MSF_NEAR_M = 10 / 3.28084;
+    function mbStepFlags(instructions, ent) {
+        if (!ent) return [];
+        try { return checkMissionSteps(instructions, ent.nfzs || [], ent.ffzs || [], { nearM: MSF_NEAR_M }); }
+        catch (e) { console.warn(`${TAG} [🚩] step check failed`, e); return []; }
+    }
+    function mbStepFlagText(f) {
+        const ft = (f.distM === Infinity || typeof f.distM !== 'number') ? null : Math.round(f.distM * 3.28084);
+        const z = f.zoneName ? escapeHtml(f.zoneName) : (f.zoneId != null ? '#' + f.zoneId : '');
+        if (f.tier === 'nfz') return `inside <b style="color:#ff8a8a;">NFZ ${z}</b>${ft != null ? ` · ${ft} ft to its edge` : ''}`;
+        if (f.tier === 'ffz') return `<b style="color:#f9f;">no FFZ</b>${ft != null ? ` · ${ft} ft to the nearest` : ' · site has no FFZ'}`;
+        return `${ft != null ? ft + ' ft from ' : 'near '}<b style="color:#ffb74d;">NFZ ${z}</b> (outside, under the 10 ft margin)`;
+    }
+    // Rows for a flag list. opts.goesNote = true → 🧹 steps are dimmed + tagged "goes with 🧹".
+    function mbStepFlagRows(flags, opts) {
+        const o = opts || {};
+        return flags.map(f => {
+            const dim = o.goesNote && f.goes;
+            const dot = f.tier === 'nfz' ? '#ff5252' : (f.tier === 'ffz' ? '#f9f' : '#ffb74d');
+            return `<div style="display:flex;align-items:center;gap:6px;padding:1px 2px 1px ${o.indent || 12}px;border-bottom:1px solid #20262e;font-size:10.5px;${dim ? 'opacity:0.55;' : ''}">
+                <span style="color:${dot};">${dim ? '🧹' : '●'}</span>
+                <span style="color:#9ad;min-width:30px;">#${f.num}</span>
+                <span style="color:#ccc;min-width:52px;">${escapeHtml(f.kind)}</span>
+                <span style="flex:1;color:#e6e6e6;">${mbStepFlagText(f)}${dim ? ' <span style="color:#789;">· goes with 🧹</span>' : ''}</span>
+                <button data-msf-jump="${f.lat},${f.lng}" title="Pan the map to this step" style="background:none;border:1px solid #456;color:#9ad;border-radius:3px;cursor:pointer;font-size:10px;padding:0 4px;">📍</button>
+            </div>`;
+        }).join('');
+    }
+    function mbWireStepFlagJumps(el) {
+        el.querySelectorAll('[data-msf-jump]').forEach(b => b.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); const [la, ln] = b.getAttribute('data-msf-jump').split(',').map(Number); mcvJumpTo(la, ln); });
+    }
+    // Mission-list 🚩 column cache: { sid, stamp, byMission: { id → { flags, block, goes } } }.
+    let msfCache = null, msfPending = null;
+    function msfEnsure(sid) {
+        const bucket = missionsBySite[sid];
+        if (!bucket) return;
+        const stamp = bucket.fetchedAt;
+        if (msfCache && msfCache.sid === sid && msfCache.stamp === stamp) return;
+        if (msfPending === sid + ':' + stamp) return;
+        msfPending = sid + ':' + stamp;
+        genFetchEntities(sid).then(ent => {
+            const byMission = {};
+            let blocked = 0;
+            (bucket.missions || []).forEach(m => {
+                const flags = mbStepFlags(m.instructions, ent);
+                const block = flags.filter(f => f.tier !== 'near').length;
+                const goes = flags.filter(f => f.tier !== 'near' && f.goes).length;
+                byMission[m.id] = { flags, block, goes };
+                if (block) blocked++;
+            });
+            msfCache = { sid, stamp, byMission };
+            console.log(`${TAG} [🚩] step check: ${blocked} of ${(bucket.missions || []).length} mission(s) have steps in an NFZ / outside the FFZ (site ${sid})`);
+        }).catch(e => {
+            console.warn(`${TAG} [🚩] entity fetch failed — 🚩 column stays empty`, e);
+            msfCache = { sid, stamp, byMission: {}, failed: true };
+        }).then(() => {
+            msfPending = null;
+            try { if (panelState && panelState.mode === 'bank' && getCurrentSiteID() === sid) renderTableView(); } catch (e) { console.warn(`${TAG} [🚩] rerender failed`, e); }
+        });
+    }
+    function msfRecheck(sid) { delete genEntCache[sid]; msfCache = null; msfEnsure(sid); }
+    function msfOpenPopover(anchorCell, missionId) {
+        const old = document.getElementById('aim-mb-msf-pop'); if (old) old.remove();
+        const sid = getCurrentSiteID();
+        const rec = msfCache && msfCache.sid === sid ? msfCache.byMission[missionId] : null;
+        const m = ((missionsBySite[sid] || {}).missions || []).find(x => x.id === missionId);
+        const pop = document.createElement('div');
+        pop.id = 'aim-mb-msf-pop';
+        pop.style.cssText = 'position:fixed;z-index:2147483603;width:460px;max-height:60vh;display:flex;flex-direction:column;background:#161a20;border:1px solid #ff8a8a;border-radius:7px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;';
+        const flags = rec ? rec.flags : [];
+        const hard = flags.filter(f => f.tier !== 'near'), near = flags.filter(f => f.tier === 'near');
+        pop.innerHTML = `<div style="display:flex;align-items:center;gap:8px;padding:7px 10px;border-bottom:1px solid #2a2f38;">
+                <span style="flex:1;font-weight:800;color:#ff8a8a;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">🚩 ${escapeHtml(String((m && m.name) || ('#' + missionId)))}</span>
+                <button data-msf-recheck title="Re-fetch NFZs / FFZs (after a Site Setup fix) and re-check every mission" style="background:rgba(255,255,255,0.08);border:1px solid #456;color:#9ad;border-radius:4px;cursor:pointer;font-size:11px;padding:2px 6px;">⟳ Re-check</button>
+                <button data-msf-close style="background:rgba(255,255,255,0.12);border:none;color:#fff;width:20px;height:20px;border-radius:4px;cursor:pointer;">✕</button>
+            </div>
+            <div style="padding:4px 8px;font-size:11px;color:#9ad;">${rec ? `${hard.length} step(s) block the save${rec.goes ? ` · ${rec.goes} of them go with 🧹 flag-pole removal` : ''}${near.length ? ` · ${near.length} near an NFZ (saves)` : ''}` : 'not checked yet'} — navs must be inside an FFZ and outside every NFZ. Fix the nav here, or the zone in Site Setup.</div>
+            <div style="overflow:auto;flex:1;padding:2px 8px 8px;">${flags.length ? mbStepFlagRows(hard.concat(near), { goesNote: true, indent: 4 }) : '<div style="color:#5fff5f;padding:6px 4px;">✓ every flown step saves.</div>'}</div>`;
+        document.body.appendChild(pop);
+        try {
+            const r = anchorCell.getBoundingClientRect();
+            pop.style.left = Math.max(8, Math.min(window.innerWidth - 470, r.left)) + 'px';
+            pop.style.top = Math.min(window.innerHeight - 120, r.bottom + 4) + 'px';
+        } catch (e) { pop.style.left = '80px'; pop.style.top = '80px'; }
+        mbWireStepFlagJumps(pop);
+        pop.querySelector('[data-msf-close]').onclick = () => pop.remove();
+        pop.querySelector('[data-msf-recheck]').onclick = () => { pop.remove(); showToast('🚩 Re-checking…', '#9ad', 2000); msfRecheck(sid); };
+        setTimeout(() => { const off = (ev) => { if (!pop.contains(ev.target)) { pop.remove(); document.removeEventListener('mousedown', off, true); } }; document.addEventListener('mousedown', off, true); }, 0);
+    }
     function genFetchEntities(siteID) {
         if (genEntCache[siteID]) return Promise.resolve(genEntCache[siteID]);
         const url = `/map_objects/?getPoiMapObjectsAsList=true&site_id=${encodeURIComponent(siteID)}`;
@@ -5842,7 +6043,10 @@
                 const fps = list.filter(e => e && e.type === 15 && Array.isArray(e.arcs));
                 const baseEnts = list.filter(e => e && e.type === 8 && Array.isArray(e.coords) && e.coords[0] && typeof e.coords[0].lat === 'number');
                 const gmBaseEnts = list.filter(e => e && e.type === 19 && e.name && /base/i.test(e.name) && Array.isArray(e.coords) && e.coords[0] && typeof e.coords[0].lat === 'number');
-                const data = { assets, ffzs, base, fps, baseEnts: baseEnts.length ? baseEnts : gmBaseEnts };
+                // v3.42 — NFZs (type 4) for the 🚩 step check (checkMissionSteps).
+                const nfzs = list.filter(e => e && e.type === 4 && Array.isArray(e.coords) && e.coords.length >= 3)
+                    .map(e => ({ id: e.id, name: e.name || '', ring: ring(e) }));
+                const data = { assets, ffzs, nfzs, base, fps, baseEnts: baseEnts.length ? baseEnts : gmBaseEnts };
                 genEntCache[siteID] = data; genBase = base;
                 return data;
             });
@@ -14625,6 +14829,7 @@
 
         const allRows = buildAllRows(sid);
         const rows = filterAndSort(allRows);
+        try { msfEnsure(sid); } catch (e) { console.warn(`${TAG} [🚩] ensure failed`, e); }   // v3.42 — async; re-renders once computed
 
         const visibleColIds = getVisibleColumnIds();
         const visibleCols = visibleColIds.map(id => COL_BY_ID[id]).filter(Boolean);
@@ -14694,6 +14899,10 @@
                 return `<td><span class="aim-mb-dot ${cls}" title="${row[col.key] ? 'Active' : 'Inactive'}"></span></td>`;
             }
             const v = formatCellValue(row, col, panelState.distanceUnit, thresholds);
+            if (col.id === 'stepFlags') {
+                const bad = v !== '✓' && v !== '…' && v !== '—' && v !== '?';
+                return `<td data-msf="${row.id}" title="Steps in an NFZ / outside the FFZ — click for the list" style="cursor:pointer;${bad ? 'color:#ff8a8a;font-weight:700;' : 'color:#5fff5f;'}">${escapeHtml(String(v))}</td>`;
+            }
             if (col.id === 'name' && editableName) {
                 // Click to rename · Tab → next mission's name (server rename via saveApp).
                 return `<td class="aim-mb-name-cell" data-name-edit="${row.id}" title="Click to rename · Tab to next" style="cursor:text;">${escapeHtml(String(v))}</td>`;
@@ -15365,6 +15574,8 @@
                 // Clicking the Name cell starts an inline rename — don't drill into detail.
                 const nameCell = e.target.closest && e.target.closest('[data-name-edit]');
                 if (nameCell) { e.stopPropagation(); startNameEdit(nameCell, nameCell.getAttribute('data-name-edit')); return; }
+                const msfCell = e.target.closest && e.target.closest('[data-msf]');
+                if (msfCell) { e.stopPropagation(); msfOpenPopover(msfCell, Number(msfCell.getAttribute('data-msf'))); return; }
                 const id = Number(tr.dataset.id);
                 const tw = panelEl.querySelector('#aim-mb-table-wrap');
                 if (tw) panelState.tableScrollY = tw.scrollTop;
