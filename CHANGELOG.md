@@ -1,4 +1,6 @@
-## 2026-10-27 — 🧩 Nested pads in macro coverage + ▣ Generate by tier — Mission Bank Tools latest v3.36 → v3.38 (latest only)
+## 2026-10-27 — 🧩 Nested pads in macro coverage + ▣ Generate by tier — Mission Bank Tools latest v3.36 → v3.39 (latest only)
+
+- **v3.39** — **📌 Forced macros**: the legend search now also lists matching missions that are NOT macros, each with its touched-pad count and a 📌 button that forces it into the macro list (skips the name + size rules — for the rare legitimate 1–3-pad macro). Forced rows wear a 📌; an undo list sits at the bottom next to the 🚫 one; the two marks are exclusive. The search query survives redraws.
 
 - **v3.38** — **🧩 classification rules** (legend footer, persisted): a mission **named after a pad** (section prefix stripped, "Pad - " wrapper ignored, child names resolve to their pad) is that pad's micro no matter how many neighbours its steps brush; a mission touching **fewer than N pads** (default 4) is a micro of the pad holding most of its steps; only the rest are macros. The footer shows how many micros came from each rule and flags micros named after a pad their steps never reach. The console `[macros]` group lists every collapsed decision with the dropped neighbours and step counts.
 
