@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.37
+// @version      3.38
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.37';
+    const SCRIPT_VERSION = '3.38';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -8297,6 +8297,51 @@
     // mission. Per site (envSiteKey), per install. A marked mission is treated
     // as a SOLO of its primary pad (the pad with the most attributed steps).
     const MCV_NOT_MACRO_KEY = 'aim-mb-not-macros';
+    // v3.38: classification RULES (GM, CP-free). The site convention is the
+    // signal: a MICRO is named after its pad ("NNE - SMITH SN 48-37 BATTERY"),
+    // a MACRO carries only a section word ("NNE", "North Assets …") and spans
+    // 10–30 pads. Geometry alone can't tell a micro from a macro on a dense
+    // nested site: a micro's nav brushes a neighbour's 150-ft halo and reads
+    // as a 2-pad macro (1637 live: dozens of 2-pad "macros", 45 pads
+    // "macro-only"). Rules, in order: 🚫 mark → name resolves to a pad →
+    // fewer than minMacroPads pads → macro.
+    const MCV_RULES_KEY = 'aim-mb-mcv-rules';
+    function mcvRules() {
+        const d = { minMacroPads: 4, nameRule: true };
+        let s = null;
+        try { s = gmGet(MCV_RULES_KEY, null); } catch (e) { console.warn(`${TAG} [mcv] rules read failed`, e); }
+        const o = Object.assign({}, d, (s && typeof s === 'object') ? s : {});
+        const n = Number(o.minMacroPads); o.minMacroPads = (isFinite(n) && n >= 2) ? Math.floor(n) : d.minMacroPads;
+        o.nameRule = o.nameRule !== false;
+        return o;
+    }
+    // Strip leading section tokens ("NNE - ", "North - ", "W - ") off a mission name.
+    const MCV_SECTION_RE = /^(?:[nsew]{1,3}|north|south|east|west|central|northeast|northwest|southeast|southwest)\s*[-–—:]\s*/i;
+    function mcvStripSection(n) { let x = String(n || '').trim(), g = 0; while (g++ < 3 && MCV_SECTION_RE.test(x)) x = x.replace(MCV_SECTION_RE, ''); return x; }
+    // name → root pad resolver: every root + child name (normalized), with and
+    // without the importer's "Pad - " wrapper, maps to the ROOT asset.
+    function mcvBuildNameIndex(assets, rootFold) {
+        const idx = new Map();
+        const put = (k, a) => { k = mbNormName(k); if (k.length >= 3 && !idx.has(k)) idx.set(k, a); };
+        assets.forEach(a => {
+            const root = rootFold(a);
+            put(a.name, root);
+            const bare = String(a.name || '').replace(/^pad\s*[-–—:]\s*/i, '');
+            if (bare !== a.name) put(bare, root);
+        });
+        return idx;
+    }
+    function mcvPadByName(missionName, idx) {
+        const full = mbNormName(missionName);
+        if (!full) return null;
+        if (idx.has(full)) return idx.get(full);
+        const stripped = mbNormName(mcvStripSection(missionName));
+        if (stripped && idx.has(stripped)) return idx.get(stripped);
+        // "<anything> - <pad name>" (older naming kept the pad last)
+        const parts = full.split(' - ');
+        for (let i = 1; i < parts.length; i++) { const tail = parts.slice(i).join(' - '); if (idx.has(tail)) return idx.get(tail); }
+        return null;
+    }
     function mcvNotMacros() {
         const sid = getCurrentSiteID();
         let all = {};
@@ -8463,6 +8508,10 @@
         const rootFold = (a) => { const r = (a && a.rootId != null && a.rootId !== a.id) ? byIdNest.get(a.rootId) : null; return r || a; };
         const pads = assets.filter(a => rootFold(a) === a);
         const notMacro = mcvNotMacros();
+        const rules = mcvRules();
+        const nameIdx = rules.nameRule ? mcvBuildNameIndex(assets, rootFold) : null;
+        const why = { single: 0, name: 0, small: 0, marked: 0, macro: 0, nameOff: 0 };
+        const smallLog = [];
         const tolM = 46;   // 150 ft
         const boxes = assets.map(a => agRingBbox(a.ring, tolM + 5));
         // v2.97: nested rings tie at d=0 — the TIGHTEST polygon must win, or
@@ -8524,15 +8573,33 @@
             if (recs.some((t, k) => looseSorted[k] !== t)) {
                 console.log(`${TAG} [macros] "${m.name}": visit order corrected — a nav within 150 ft of a neighboring pad no longer counts as visiting it (first inside-the-ring step wins)`);
             }
-            if (pads.length >= 2 && notMacro.has(String(m.id))) {
-                // v3.37: pilot says this is ONE pad's mission — keep the pad
-                // with the most attributed steps, drop the brushed neighbours.
-                const cnt = new Map();
-                blocks.forEach(b => { if (b.aId != null) cnt.set(b.aId, (cnt.get(b.aId) || 0) + b.steps.length); });
-                let prim = pads[0];
-                pads.forEach(a => { if ((cnt.get(a.id) || 0) > (cnt.get(prim.id) || 0)) prim = a; });
-                pads.length = 0; pads.push(prim); padIds.clear(); padIds.add(prim.id);
-            }
+            // v3.38 classification: 🚫 mark → name resolves to a pad → fewer
+            // than minMacroPads → macro. A collapsed mission keeps ONE pad
+            // (name-matched pad, else the pad with the most attributed steps).
+            const stepCount = new Map();
+            blocks.forEach(b => { if (b.aId != null) stepCount.set(b.aId, (stepCount.get(b.aId) || 0) + b.steps.length); });
+            const primaryPad = () => { let prim = pads[0]; pads.forEach(a => { if ((stepCount.get(a.id) || 0) > (stepCount.get(prim.id) || 0)) prim = a; }); return prim; };
+            const collapseTo = (a) => { const dropped = pads.filter(x => x.id !== a.id); pads.length = 0; pads.push(a); padIds.clear(); padIds.add(a.id); return dropped; };
+            const namedPad = nameIdx ? mcvPadByName(m.name, nameIdx) : null;
+            if (namedPad) {
+                // name is authoritative — a micro named after a pad IS that pad's micro
+                const touchesNamed = pads.some(a => a.id === namedPad.id);
+                if (!touchesNamed) { why.nameOff++; smallLog.push(`⚠ "${m.name}" is named after "${namedPad.name}" but no step is within 150 ft of it (steps touch: ${pads.map(a => a.name).join(', ') || 'nothing'})`); }
+                if (pads.length !== 1 || !touchesNamed) {
+                    const dropped = collapseTo(namedPad);
+                    if (dropped.length) smallLog.push(`name "${m.name}" → ${namedPad.name} (dropped ${dropped.map(a => `${a.name}·${stepCount.get(a.id) || 0}st`).join(', ')})`);
+                }
+                why.name++;
+            } else if (pads.length >= 2 && notMacro.has(String(m.id))) {
+                const prim = primaryPad(); const dropped = collapseTo(prim);
+                smallLog.push(`🚫 "${m.name}" → ${prim.name} (dropped ${dropped.map(a => a.name).join(', ')})`);
+                why.marked++;
+            } else if (pads.length >= 2 && pads.length < rules.minMacroPads) {
+                const prim = primaryPad(); const dropped = collapseTo(prim);
+                smallLog.push(`small "${m.name}" (${dropped.length + 1} pads < ${rules.minMacroPads}) → ${prim.name}·${stepCount.get(prim.id) || 0}st (dropped ${dropped.map(a => `${a.name}·${stepCount.get(a.id) || 0}st`).join(', ')})`);
+                why.small++;
+            } else if (pads.length >= 2) why.macro++;
+            else if (pads.length === 1) why.single++;
             if (pads.length) missionPads.set(m.id, pads);
             if (pads.length >= 2) {
                 macros.push({ mission: m, pads, blocks });
@@ -8547,7 +8614,9 @@
         missionPads.forEach(pads => pads.forEach(a => touched.add(a.id)));
         const todo = pads.filter(a => touched.has(a.id) && !covered.has(a.id));
         if (pads.length !== assets.length) console.log(`${TAG} [macros] ${assets.length - pads.length} child asset(s) folded into their pads (${pads.length} pads)`);
-        return { macros, solos, covered, todo, touched, assets: pads, padCount: pads.length };
+        console.log(`${TAG} [macros] classified ${(missions || []).length} missions: ${why.macro} macros (≥${rules.minMacroPads} pads) · micros: ${why.single} single-pad + ${why.name} by name${why.nameOff ? ` (${why.nameOff} named after a pad their steps don't touch ⚠)` : ''} + ${why.small} small multi-pad (<${rules.minMacroPads}) + ${why.marked} 🚫 marked`);
+        if (smallLog.length) { console.groupCollapsed(`${TAG} [macros] ${smallLog.length} collapsed-to-one-pad decision(s) — expand to see why`); smallLog.forEach(l => console.log(l)); console.groupEnd(); }
+        return { macros, solos, covered, todo, touched, assets: pads, padCount: pads.length, why, rules };
     }
     function mcvDraw(det) {
         const L = composerGetL(), map = getLeafletMap();
@@ -8661,6 +8730,10 @@
                 + ` charge <input data-mcv-t="chargeMin" type="number" value="${t.chargeMin}" style="width:38px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">m`
                 + ` ops <input data-mcv-t="opsHrs" type="number" value="${t.opsHrs}" style="width:30px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">h/d`
                 + ` <span style="color:#789;">≈${perDay} fl/day</span></div>`; })()
+            + (() => { const r = det.rules || mcvRules(); const w = det.why || {}; return `<div style="display:flex;gap:5px;align-items:center;margin-top:4px;font-size:10px;color:#9ad;flex-wrap:wrap;" title="How a mission is classified: 🚫 mark → named after a pad = that pad's micro → fewer than N pads = micro of its main pad → macro. Console [macros] lines list every collapsed decision.">`
+                + `macro ≥ <input data-mcv-r="minMacroPads" type="number" min="2" value="${r.minMacroPads}" style="width:30px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;"> pads`
+                + ` · <label style="display:flex;align-items:center;gap:3px;cursor:pointer;"><input data-mcv-r="nameRule" type="checkbox" ${r.nameRule ? 'checked' : ''} style="margin:0;">pad-named = micro</label>`
+                + ` <span style="color:#789;">micros: ${w.single || 0} single · ${w.name || 0} by name · ${w.small || 0} small${w.nameOff ? ` · <span style="color:#ffb74d;">⚠${w.nameOff} named off-pad</span>` : ''}</span></div>`; })()
             + '<div style="color:#789;margin-top:3px;">Filled = covered · UNfilled = still to do · click-through</div>'
             + (() => {
                 const marked = Array.from(mcvNotMacros());
@@ -8727,6 +8800,12 @@
         });
         el.querySelector('[data-mcv-vis-all]').onclick = () => mcvAllVis(true);
         el.querySelector('[data-mcv-vis-none]').onclick = () => mcvAllVis(false);
+        el.querySelectorAll('[data-mcv-r]').forEach(inp => inp.onchange = () => {
+            const patch = {}; const k = inp.getAttribute('data-mcv-r');
+            patch[k] = inp.type === 'checkbox' ? inp.checked : Number(inp.value);
+            try { gmSet(MCV_RULES_KEY, Object.assign({}, mcvRules(), patch)); } catch (e) { console.warn(`${TAG} [mcv] rules save failed`, e); }
+            mcvRedetect();
+        });
         el.querySelectorAll('[data-mcv-t]').forEach(inp => inp.onchange = () => {
             const patch = {}; patch[inp.getAttribute('data-mcv-t')] = Number(inp.value);
             gmSet(MCV_TIME_KEY, Object.assign({}, mcvTimeCfg(), patch));

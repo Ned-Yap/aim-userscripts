@@ -1,4 +1,6 @@
-## 2026-10-27 — 🧩 Nested pads in macro coverage + ▣ Generate by tier — Mission Bank Tools latest v3.36 → v3.37 (latest only)
+## 2026-10-27 — 🧩 Nested pads in macro coverage + ▣ Generate by tier — Mission Bank Tools latest v3.36 → v3.38 (latest only)
+
+- **v3.38** — **🧩 classification rules** (legend footer, persisted): a mission **named after a pad** (section prefix stripped, "Pad - " wrapper ignored, child names resolve to their pad) is that pad's micro no matter how many neighbours its steps brush; a mission touching **fewer than N pads** (default 4) is a micro of the pad holding most of its steps; only the rest are macros. The footer shows how many micros came from each rule and flags micros named after a pad their steps never reach. The console `[macros]` group lists every collapsed decision with the dropped neighbours and step counts.
 
 - **v3.37** — **🧩 Macro coverage legend**: header bar stays put while the list scrolls, a search box narrows the list by mission name, every row gets **🚫 Not a macro** (a one-pad mission that merely brushes a neighbouring pad's 150-ft halo is then counted as that pad's micro; per site, undo list at the bottom), and the legend is **movable + resizable** (position remembered). **▣ Generate Missions** is movable + resizable too. **📋 Report** gains inventory columns — Tier · Status (micro / macro-only / none) · Micro · Macros · Assets (children) · State — and the classification column no longer shows the tier prefix.
 
