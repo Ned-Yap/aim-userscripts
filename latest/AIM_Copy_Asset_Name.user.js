@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.492
+// @version      4.493
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.492';
+    const SCRIPT_VERSION = '4.493';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -41569,6 +41569,26 @@
         // Distance to the ring's EDGE whether inside or out (inside → "how far the edge must move").
         const edgeMetres = (lat, lng, ring) => { let best = Infinity; for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) { const d = segMetres(lat, lng, ring[j], ring[i]); if (d < best) best = d; } return best; };
         const inBox = (lat, lng, b) => lat >= b.s && lat <= b.n && lng >= b.w && lng <= b.e;
+        // Lower bound (m) from a point to a zone's bbox — 0 inside the box. Lets the nearest-edge
+        // search skip rings that cannot beat the best so far (442 NFZ × 3,000 steps × every vertex
+        // froze the tab on Web 1637 before this).
+        const boxMetres = (lat, lng, b) => {
+            const dLat = lat < b.s ? b.s - lat : (lat > b.n ? lat - b.n : 0);
+            const dLng = lng < b.w ? b.w - lng : (lng > b.e ? lng - b.e : 0);
+            return (dLat || dLng) ? metres(lat, lng, lat + dLat, lng + dLng) : 0;
+        };
+        // Exact nearest zone by edge distance, bbox-pruned: walk rings in bbox-distance order and
+        // stop as soon as the next bbox is already farther than the best edge found.
+        const nearestEdge = (lat, lng, list) => {
+            const order = list.map(z => ({ z, lb: boxMetres(lat, lng, z.box) })).sort((a, b) => a.lb - b.lb);
+            let best = null;
+            for (let k = 0; k < order.length; k++) {
+                if (best && order[k].lb >= best.d) break;
+                const d = edgeMetres(lat, lng, order[k].z.ring);
+                if (!best || d < best.d) best = { z: order[k].z, d };
+            }
+            return best;
+        };
         const inPoly = (lat, lng, ring) => {
             let inside = false;
             for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
@@ -41594,25 +41614,27 @@
             const l = s.location;
             if (!l || typeof l.lat !== 'number' || typeof l.lng !== 'number') return;
             const base = { idx: i, num: i + 1, type: s.type, kind, goes: goes.has(i), lat: l.lat, lng: l.lng };
-            let inside = null, nearest = null;
+            let inside = null;
             nfz.forEach(z => {
+                if (!inBox(l.lat, l.lng, z.box) || !inPoly(l.lat, l.lng, z.ring)) return;
                 const d = edgeMetres(l.lat, l.lng, z.ring);
-                const isIn = inBox(l.lat, l.lng, z.box) && inPoly(l.lat, l.lng, z.ring);
-                if (isIn && (!inside || d > inside.d)) inside = { z, d };   // deepest-inside NFZ = the one that must move most
-                if (!nearest || d < nearest.d) nearest = { z, d };
+                if (!inside || d > inside.d) inside = { z, d };   // deepest-inside NFZ = the one that must move most
             });
             if (inside) out.push(Object.assign({}, base, { tier: 'nfz', zoneId: inside.z.id, zoneName: inside.z.name, distM: inside.d }));
-            else if (nearM && nearest && nearest.d <= nearM) out.push(Object.assign({}, base, { tier: 'near', zoneId: nearest.z.id, zoneName: nearest.z.name, distM: nearest.d }));
+            else if (nearM) {
+                // only rings whose bbox comes within nearM can be "near" — usually none
+                const near = nearestEdge(l.lat, l.lng, nfz.filter(z => boxMetres(l.lat, l.lng, z.box) <= nearM));
+                if (near && near.d <= nearM) out.push(Object.assign({}, base, { tier: 'near', zoneId: near.z.id, zoneName: near.z.name, distM: near.d }));
+            }
             const inFfz = ffz.some(f => inBox(l.lat, l.lng, f.box) && inPoly(l.lat, l.lng, f.ring));
             if (!inFfz) {
-                let near = null;
-                ffz.forEach(f => { const d = edgeMetres(l.lat, l.lng, f.ring); if (!near || d < near.d) near = { f, d }; });
-                out.push(Object.assign({}, base, { tier: 'ffz', zoneId: near ? near.f.id : null, zoneName: near ? near.f.name : '', distM: near ? near.d : Infinity }));
+                const near = nearestEdge(l.lat, l.lng, ffz);
+                out.push(Object.assign({}, base, { tier: 'ffz', zoneId: near ? near.z.id : null, zoneName: near ? near.z.name : '', distM: near ? near.d : Infinity }));
             }
         });
         return out;
     }
-    function mscAnalyze(ents, missionsRaw) {
+    async function mscAnalyze(ents, missionsRaw) {
         const ringOf = (e) => { const r = ringForEntity(e); return (r && r.length >= 3) ? r : null; };
         const nearM = mscNearFt / M_TO_FT;
         const zone = (e) => ({ id: e.id, name: e.name || `${e.type === 4 ? 'NFZ' : 'FFZ'} ${e.id}`, ring: ringOf(e) });
@@ -41630,8 +41652,12 @@
         const flags = [], missions = [];
         const hit = new Set(), left = new Set();
         const stats = { missions: 0, steps: 0, nfz: 0, ffz: 0, near: 0, goes: 0, nfzLeft: 0, ffzLeft: 0, nfzCount: nfzs.length, ffzCount: ffzs.length, skipped: 0 };
-        missionsRaw.forEach(m => {
-            if (!m || typeof m !== 'object') { stats.skipped++; return; }
+        // Cooperative: hand control back every ~16 ms (Web 1637 = 220 missions / 3,000 flown
+        // steps / 442 NFZs — one synchronous pass drew "Page Unresponsive" on auto re-check).
+        let sliceAt = performance.now();
+        for (const m of missionsRaw) {
+            if (performance.now() - sliceAt > 16) { await new Promise(r => setTimeout(r, 0)); sliceAt = performance.now(); }
+            if (!m || typeof m !== 'object') { stats.skipped++; continue; }
             const ins = Array.isArray(m.instructions) ? m.instructions : [];
             const mid = String(m.id != null ? m.id : m.name);
             const name = m.name || `#${m.id}`;
@@ -41660,7 +41686,7 @@
             });
             missions.push({ mid, name, route });
             stats.missions++;
-        });
+        }
         stats.hitMissions = hit.size;
         stats.leftMissions = left.size;
         flags.forEach(f => { f.label = `${f.mname} #${f.num}`; });
@@ -41684,7 +41710,7 @@
             const data = await r.json();
             const missions = Array.isArray(data) ? data : (data && Array.isArray(data.results) ? data.results : null);
             if (!missions) throw new Error('missions response is not a list');
-            const res = mscAnalyze(ents, missions);
+            const res = await mscAnalyze(ents, missions);
             msc.flags = res.flags; msc.missions = res.missions; msc.stats = res.stats; msc.lastAt = Date.now();
             let next = -1;
             if (keep) {

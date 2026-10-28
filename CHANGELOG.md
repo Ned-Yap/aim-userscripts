@@ -4,6 +4,8 @@
 
 ## 2026-10-27 — 🚩 Mission step check — Site Setup Tools latest v4.488 (latest only)
 
+- **v4.493** — **Fix: "Page Unresponsive" on auto re-check.** The step test walked every vertex of all 442 NFZs for each of the 3,000 flown steps on Web 1637 in one synchronous block. The shared core now prunes by bounding box (only rings that can be nearest are walked — a 1637-sized run drops to well under a second), and Site Setup Tools yields to the browser between missions, so the tab stays responsive while a check runs.
+
 - **v4.492** — **Shared core extracted.** The NFZ / FFZ step test now lives in one pure function, `checkMissionSteps`, vendored verbatim from `ShortKeys/AIM_Step_Check.js` so Mission Bank Tools can run the same check before a 🧹 save. No behaviour change; pad attribution and the panel stay in Site Setup Tools.
 
 - **v4.491** — **🧹 awareness.** Flags on steps that MBT's flag-pole removal deletes anyway (every flag pole + the nav directly before it, the same pairing rule as 🧹) are marked 🧹 and hidden by default — no NFZ fix needed for those. Each mission header now says what matters: **N still block the save** (flags on surviving steps) or **saves once 🧹 runs**. The verdict adds the after-🧹 totals (missions still blocked, inside-NFZ / no-FFZ on surviving steps). "show 🧹" lists the hidden ones.
