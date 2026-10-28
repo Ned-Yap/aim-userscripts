@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.488
+// @version      4.489
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.488';
+    const SCRIPT_VERSION = '4.489';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -13554,7 +13554,7 @@
         });
         controlChannel.postMessage({
             type: 'REGISTER', scriptId: MSC_SCRIPT_ID, name: 'Mission step check',
-            description: 'Tests every located mission step (nav / snapshot / flag pole) on the site against the NFZ polygons — a step inside one makes Percepto refuse that mission\'s save ("Instruction #N: One of app points is within a no-fly zone") — and against FFZ containment (step outside every FFZ). Read-only flag list with Prev / Next (pan + pulse, the mission route drawn); re-checks after each Site Setup save so you can reshape the NFZ and watch the flags clear. 🚩 tile in ⊕ Generate.',
+            description: 'Tests every mission NAV on the site (snapshots / flag poles are aim points — drawn, not tested) against the NFZ polygons — a step inside one makes Percepto refuse that mission\'s save ("Instruction #N: One of app points is within a no-fly zone") — and against FFZ containment (step outside every FFZ). Read-only flag list with Prev / Next (pan + pulse, the mission route drawn); re-checks after each Site Setup save so you can reshape the NFZ and watch the flags clear. 🚩 tile in ⊕ Generate.',
             version: SCRIPT_VERSION, group: 'Mission step check', scope: 'site-setup', priority: 37,
             toggles: [
                 { id: 'msc-master', label: 'Enable Mission step check', type: 'boolean', default: true, master: true },
@@ -33286,7 +33286,7 @@
                 </div>
                 <div class="gen-grp">Check</div>
                 <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;margin-bottom:6px">
-                    ${genTile('ext:msc', '🚩', '#ff5fff', 'Mission step check', 'Mission steps inside an NFZ (save refusals) or outside every FFZ — Prev / Next while you reshape the NFZ')}
+                    ${genTile('ext:msc', '🚩', '#ff5fff', 'Mission step check', 'Mission navs inside an NFZ (save refusals) or outside every FFZ — Prev / Next while you reshape the NFZ')}
                 </div>
             </div>
             <div data-gen-sec="ffz" style="margin-bottom:12px;padding:8px 10px;background:rgba(95,255,95,0.06);border:1px dashed rgba(95,255,95,0.3);border-radius:3px;font-size:11px;color:#9ad;line-height:1.5">
@@ -41496,9 +41496,10 @@
     }
 
     // ============================================================
-    // 🚩 MISSION STEP CHECK (#315) — every LOCATED step (nav / snapshot /
-    // flag pole / anything else carrying a location) of every mission on
-    // the site, tested against the site's NFZ polygons and FFZ containment:
+    // 🚩 MISSION STEP CHECK (#315) — every NAV of every mission on the site,
+    // tested against the site's NFZ polygons and FFZ containment. Snapshots /
+    // flag poles are AIM points (on the pad, inside its NFZ by design) — they
+    // are drawn on the route overlay for context but never tested:
     //   • inside an NFZ     → Percepto refuses that mission's save
     //                         ("Instruction #N: One of app points is within a no-fly zone")
     //   • outside every FFZ → "no FFZ"
@@ -41560,6 +41561,9 @@
                 if (!l || typeof l.lat !== 'number' || typeof l.lng !== 'number') return;
                 const kind = mscStepKind(s);
                 route.push({ lat: l.lat, lng: l.lng, idx: i, kind });
+                // NAVS ONLY (2026-10-27): a snapshot / flag pole location is the AIM point —
+                // it sits on the pad, inside its NFZ, by design. Only navs are flown.
+                if (kind !== 'nav') return;
                 stats.steps++;
                 let inside = null, nearest = null;
                 nfzs.forEach(z => {
@@ -41686,7 +41690,7 @@
     function mscReport() {
         const st = msc.stats || {};
         const out = [`🚩 Mission step check — site ${msc.sid} — ${new Date().toLocaleString()}`,
-            `${st.missions || 0} missions · ${st.steps || 0} located steps · ${st.nfzCount || 0} NFZ / ${st.ffzCount || 0} FFZ polygons`,
+            `${st.missions || 0} missions · ${st.steps || 0} navs tested · ${st.nfzCount || 0} NFZ / ${st.ffzCount || 0} FFZ polygons`,
             `${st.nfz || 0} inside an NFZ (save refused) · ${st.ffz || 0} outside every FFZ · ${st.near || 0} within ${mscNearFt} ft of an NFZ edge`, ''];
         let last = null;
         msc.flags.forEach(f => {
@@ -41742,12 +41746,12 @@
             rows += `<div data-msc-row="${i}" class="${i === msc.cur ? 'cur' : ''}" title="click = pan to this step (route drawn, step pulses)">${dot[f.tier]}<span style="flex:none;color:#e6e6e6;font-weight:700;min-width:34px">#${f.num}</span><span style="flex:none;color:#9ad;min-width:62px">${mscEsc(f.kind)}</span><span style="flex:1;min-width:0;color:#cfd6dc">${why(f)}${f.pad ? `<span style="color:#8a949e"> · pad ${mscEsc(f.pad)}</span>` : ''}</span></div>`;
         });
         const summary = st
-            ? `${st.missions} mission${st.missions === 1 ? '' : 's'} · ${st.steps.toLocaleString()} located steps · ${st.nfzCount} NFZ / ${st.ffzCount} FFZ${st.skipped ? ` · ${st.skipped} unreadable mission record(s) skipped` : ''}`
+            ? `${st.missions} mission${st.missions === 1 ? '' : 's'} · ${st.steps.toLocaleString()} navs tested · ${st.nfzCount} NFZ / ${st.ffzCount} FFZ${st.skipped ? ` · ${st.skipped} unreadable mission record(s) skipped` : ''}`
             : '';
         const verdict = st
             ? (msc.flags.length
-                ? `<span style="color:#ff5555;font-weight:700">${st.nfz} step${st.nfz === 1 ? '' : 's'} inside an NFZ</span> in ${st.hitMissions} mission${st.hitMissions === 1 ? '' : 's'}${st.ffz ? ` · <span style="color:#ff9dff">${st.ffz} outside every FFZ</span>` : ''}${st.near ? ` · <span style="color:#ffb347">${st.near} near</span>` : ''}`
-                : '<span style="color:#5fff5f;font-weight:700">No step inside an NFZ or outside the FFZs ✓</span>')
+                ? `<span style="color:#ff5555;font-weight:700">${st.nfz} nav${st.nfz === 1 ? '' : 's'} inside an NFZ</span> in ${st.hitMissions} mission${st.hitMissions === 1 ? '' : 's'}${st.ffz ? ` · <span style="color:#ff9dff">${st.ffz} outside every FFZ</span>` : ''}${st.near ? ` · <span style="color:#ffb347">${st.near} near</span>` : ''}`
+                : '<span style="color:#5fff5f;font-weight:700">No nav inside an NFZ or outside the FFZs ✓</span>')
             : '';
         const warn = st && !st.nfzCount ? '<div style="color:#ffb347;margin-top:2px">⚠ This site has no NFZ polygons — only the FFZ check applies.</div>' : '';
         const statusLine = status ? `<span style="color:#ffd27a">${mscEsc(status)}</span>`
@@ -41778,7 +41782,7 @@
                 <div style="font-size:11px;margin-top:2px;min-height:14px">${statusLine}</div>
             </div>
             <div style="padding:4px 12px 8px;overflow-y:auto;flex:1;min-height:0">${rows || (st ? '<div style="color:#8a949e;padding:6px 0">Nothing to show in the selected tiers.</div>' : '')}</div>
-            <div style="padding:4px 12px 6px;border-top:1px solid rgba(255,255,255,0.06);color:#6f7a85;font-size:10px;flex:none;line-height:1.4">Read-only: reshape the NFZ in Site Setup, save, and the list refreshes. #N = the step's 1-based position in the mission (Percepto's "Instruction #N"). Click a row or Prev / Next to pan; the mission's route stays drawn while you edit.</div>`;
+            <div style="padding:4px 12px 6px;border-top:1px solid rgba(255,255,255,0.06);color:#6f7a85;font-size:10px;flex:none;line-height:1.4">Navs only — snapshot / flag-pole points are aim points and sit inside the NFZ by design (drawn on the route, never flagged). Read-only: reshape the NFZ in Site Setup, save, and the list refreshes. #N = the step's 1-based position in the mission (Percepto's "Instruction #N"). Click a row or Prev / Next to pan; the mission's route stays drawn while you edit.</div>`;
     }
     function mscPanelClick(e) {
         if (e.target.closest('[data-msc-close]')) { mscClose(); return; }
