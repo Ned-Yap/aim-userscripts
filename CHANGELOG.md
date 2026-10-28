@@ -1,3 +1,7 @@
+## 2026-10-28 — ✎ Update waits — Mission Bank Tools latest v3.44 (latest only)
+
+- **v3.44** — **🧹 Steps now has two tabs: Remove and Update waits** ([#316](https://github.com/Ned-Yap/aim-userscripts-issues/issues/316)). Update lists every wait duration on the site (2 s / 5 s / 6 s / 8 s …) with a tick each and a "set to N seconds" box, so you can flatten them all to one value or move only one duration (8 s → 4 s) and leave the others. Review is per mission (which durations, how many), waits already at the new value are skipped, 🚩 rows show the navs that would make Percepto refuse that mission's save (those missions start unticked), and Apply runs on the same rails as Remove: confirm → JSON backup → one save per mission → fresh-fetch verify counting old-value waits left. Backup download shared between the two tabs.
+
 ## 2026-10-28 — 🚩 Step check in Mission Bank — Mission Bank Tools latest v3.42 → v3.43 (latest only)
 
 - **v3.43** — **🚩 Check is manual, chunked and talks.** Live on Web the auto-run took 30–45 s on every page load and froze the panel. The check now runs only from the new **🚩 Check** toolbar button (or ⟳ Re-check in a row's popover), the column shows — until then, missions are checked in chunks with a yield between them so the panel stays usable, the button shows progress (🚩 120/220), and start / done toasts say how many missions have blocking steps. Shared core re-pasted at the bbox-pruned version Site Setup Tools v4.493 uses.

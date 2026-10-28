@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.43
+// @version      3.44
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.43';
+    const SCRIPT_VERSION = '3.44';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -5030,15 +5030,39 @@
         if (!missions.length) { showToast('No missions on this site.', '#ff9800', 3000); return; }
         const targets = srmTargets(missions);
         if (!targets.length) { showToast('No removable step types found in any mission.', '#ff9800', 4000); return; }
+        // v3.44 — Update tab: wait durations present on the site (type 5, grouped by value1).
+        const waitTargets = targets.filter(t => t.type === 5).sort((a, b) => Number(a.value1) - Number(b.value1));
         const p = document.createElement('div');
         p.id = SRM_PANEL_ID;
         p.style.cssText = 'position:fixed;top:60px;right:24px;width:430px;max-height:82vh;display:flex;flex-direction:column;z-index:2147483602;'
             + 'background:#161a20;border:1px solid #ffd54f;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;';
         p.innerHTML = `
             <div style="display:flex;align-items:center;justify-content:space-between;gap:14px;padding:9px 12px;background:rgba(255,213,79,0.08);border-bottom:1px solid rgba(255,213,79,0.3);">
-                <span style="font-weight:800;color:#ffd54f;font-size:13px;">🧹 Remove steps — site ${escapeHtml(String(sid))}</span>
+                <span style="font-weight:800;color:#ffd54f;font-size:13px;">🧹 Steps — site ${escapeHtml(String(sid))}</span>
+                <span style="display:flex;gap:4px;">
+                    <button data-srm-tab="remove" style="background:#2a2a2a;border:1px solid #444;color:#e6e6e6;padding:2px 8px;font-size:11px;cursor:pointer;border-radius:3px;font-weight:600;border-color:#ffd54f;color:#ffd54f;">Remove</button>
+                    <button data-srm-tab="update" style="background:#2a2a2a;border:1px solid #444;color:#e6e6e6;padding:2px 8px;font-size:11px;cursor:pointer;border-radius:3px;font-weight:600;" title="Change every wait of the ticked durations to a new value, across all missions">Update waits</button>
+                </span>
                 <button data-srm-close style="background:rgba(255,255,255,0.12);border:none;color:#fff;width:22px;height:22px;border-radius:4px;cursor:pointer;">✕</button>
             </div>
+            <div data-srm-body="update" style="display:none;flex-direction:column;flex:1;min-height:0;">
+                <div style="padding:7px 12px;border-bottom:1px solid #2a2f38;">
+                    <div style="font-size:10px;color:#9ad;margin-bottom:5px;">Tick the wait durations to change (found across ${missions.length} mission(s)), then set the new value:</div>
+                    ${waitTargets.length ? waitTargets.map(t => `<label style="display:flex;align-items:center;gap:6px;padding:2px 2px;cursor:pointer;font-size:12px;">
+                        <input type="checkbox" data-sru-t="${escapeHtml(t.key)}" />
+                        <span style="flex:1;">${escapeHtml(t.label)}</span>
+                        <span style="color:#9ad;font-size:11px;">${t.count} step(s) · ${t.missionIds.size} mission(s)</span>
+                    </label>`).join('') : '<div style="color:#789;font-size:11px;">No wait steps on this site.</div>'}
+                    <div style="display:flex;align-items:center;gap:8px;margin-top:6px;font-size:12px;">
+                        <span>Set ticked waits to</span>
+                        <input data-sru-secs type="number" min="1" max="600" step="1" value="4" style="width:60px;background:#0f1216;border:1px solid #9cf;color:#fff;border-radius:3px;padding:2px 4px;font:inherit;" />
+                        <span>seconds</span>
+                        <a data-sru-all href="#" style="color:#7adfe6;font-size:11px;margin-left:auto;">all</a> / <a data-sru-none href="#" style="color:#7adfe6;font-size:11px;">none</a>
+                    </div>
+                </div>
+                <div data-sru-review style="overflow:auto;flex:1;padding:4px 10px;font-size:11px;color:#888;">Tick one or more durations above to review the change per mission.</div>
+            </div>
+            <div data-srm-body="remove" style="display:flex;flex-direction:column;flex:1;min-height:0;">
             <div style="padding:7px 12px;border-bottom:1px solid #2a2f38;">
                 <div style="font-size:10px;color:#9ad;margin-bottom:5px;">Pick what to remove (found across ${missions.length} mission(s); waits are split by duration on purpose):</div>
                 ${targets.map(t => `<label style="display:flex;align-items:center;gap:6px;padding:2px 2px;cursor:pointer;font-size:12px;">
@@ -5052,9 +5076,11 @@
                 </label>
             </div>
             <div data-srm-review style="overflow:auto;flex:1;padding:4px 10px;font-size:11px;color:#888;">Pick a target above to review the proposed removals.</div>
+            </div>
             <div style="padding:9px 12px;border-top:1px solid #2a2f38;display:flex;align-items:center;gap:8px;">
                 <span data-srm-status style="flex:1;font-size:11px;color:#9ad;"></span>
                 <button data-srm-go style="padding:6px 12px;background:#ffd54f;border:none;color:#2a2004;border-radius:6px;cursor:pointer;font-weight:800;" disabled>🧹 Remove 0</button>
+                <button data-sru-go style="display:none;padding:6px 12px;background:#7adfe6;border:none;color:#062a2e;border-radius:6px;cursor:pointer;font-weight:800;" disabled>✎ Update 0</button>
             </div>`;
         document.body.appendChild(p);
         const reviewEl = p.querySelector('[data-srm-review]');
@@ -5105,6 +5131,143 @@
         });
         pairCb.onchange = () => renderReview();
         goBtn.onclick = () => srmApply(p, curPlan, curTgt, updateGo);
+        // ── v3.44 Update waits tab ──
+        const uGo = p.querySelector('[data-sru-go]'), uReview = p.querySelector('[data-sru-review]'), uSecs = p.querySelector('[data-sru-secs]');
+        let uPlan = null;
+        const uNewSecs = () => { const v = Number(uSecs.value); return Number.isFinite(v) && v >= 1 ? Math.round(v) : null; };
+        const uUpdateGo = () => {
+            const ticked = uPlan ? uPlan.filter((pm, i) => { const cb = uReview.querySelector(`input[data-sru-m="${i}"]`); return cb && cb.checked; }) : [];
+            const steps = ticked.reduce((a, pm) => a + pm.idxs.length, 0);
+            uGo.textContent = `✎ Update ${steps}`;
+            uGo.disabled = srmBusy || !steps || uNewSecs() == null;
+        };
+        const uRender = () => {
+            const keys = new Set(Array.from(p.querySelectorAll('input[data-sru-t]:checked')).map(cb => cb.getAttribute('data-sru-t')));
+            const secs = uNewSecs();
+            uPlan = [];
+            if (!keys.size) { uReview.innerHTML = '<div style="padding:8px;color:#888;">Tick one or more durations above to review the change per mission.</div>'; uUpdateGo(); return; }
+            const sel = waitTargets.filter(t => keys.has(t.key));
+            missions.forEach(m => {
+                const ins = m.instructions || [];
+                const idxs = [], by = {};
+                ins.forEach((s, i) => {
+                    const t = sel.find(x => srmMatch(s, x));
+                    if (!t) return;
+                    if (secs != null && Number(s.value1) === secs) return;    // already the new value
+                    idxs.push(i); by[t.label] = (by[t.label] || 0) + 1;
+                });
+                if (idxs.length) uPlan.push({ m, idxs, by });
+            });
+            if (!uPlan.length) { uReview.innerHTML = `<div style="padding:8px;color:#ff9800;">Nothing to change — every ticked wait is already ${secs == null ? 'that value' : secs + ' s'}.</div>`; uUpdateGo(); return; }
+            uPlan.forEach(pm => { pm.block = mbStepFlags(pm.m.instructions, srmEnt).filter(f => f.tier !== 'near'); });
+            const blockedN = uPlan.filter(pm => pm.block.length).length;
+            const total = uPlan.reduce((a, pm) => a + pm.idxs.length, 0);
+            uReview.innerHTML = `<div style="padding:3px 2px;color:#9ad;">${total} wait(s) in ${uPlan.length} mission(s) → <b style="color:#fff;">${secs == null ? '?' : secs + ' s'}</b> · <a data-sru-mall href="#" style="color:#7adfe6;">all</a> / <a data-sru-mnone href="#" style="color:#7adfe6;">none</a> — every ticked mission is saved on Apply</div>`
+                + (blockedN ? `<div style="margin:2px 0 4px;padding:4px 6px;background:rgba(255,82,82,0.1);border:1px solid rgba(255,82,82,0.4);border-radius:5px;color:#ff8a8a;font-size:10.5px;">🚩 ${blockedN} mission(s) have navs inside an NFZ / outside the FFZ — Percepto will REFUSE those saves. Fix them first (📍 jumps there) or untick them.</div>` : (srmEnt ? '' : '<div style="margin:2px 0 4px;color:#ff9800;font-size:10.5px;">🚩 pre-save check unavailable (NFZ/FFZ load failed).</div>'))
+                + uPlan.map((pm, i) => `<label style="display:flex;align-items:center;gap:6px;padding:2px 2px;border-bottom:1px solid #20262e;cursor:pointer;">
+                        <input type="checkbox" data-sru-m="${i}" ${pm.block.length ? '' : 'checked'} />
+                        <span style="flex:1;color:#e6e6e6;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(String(pm.m.name || ('#' + pm.m.id)))}</span>
+                        <span style="color:#9ad;font-size:10px;white-space:nowrap;">${Object.keys(pm.by).map(k => `${k} ×${pm.by[k]}`).join(' · ')}</span>
+                        ${pm.block.length ? `<span style="color:#ff8a8a;font-size:10px;white-space:nowrap;">🚩 ${pm.block.length}</span>` : ''}
+                    </label>${pm.block.length ? mbStepFlagRows(pm.block, { indent: 22 }) : ''}`).join('');
+            uReview.querySelectorAll('input[data-sru-m]').forEach(cb => { cb.onchange = uUpdateGo; });
+            mbWireStepFlagJumps(uReview);
+            const mall = uReview.querySelector('[data-sru-mall]'), mnone = uReview.querySelector('[data-sru-mnone]');
+            if (mall) mall.onclick = (ev) => { ev.preventDefault(); uReview.querySelectorAll('input[data-sru-m]').forEach(cb => { cb.checked = true; }); uUpdateGo(); };
+            if (mnone) mnone.onclick = (ev) => { ev.preventDefault(); uReview.querySelectorAll('input[data-sru-m]').forEach(cb => { cb.checked = false; }); uUpdateGo(); };
+            uUpdateGo();
+        };
+        p.querySelectorAll('input[data-sru-t]').forEach(cb => { cb.onchange = uRender; });
+        uSecs.oninput = uRender;
+        const tAll = p.querySelector('[data-sru-all]'), tNone = p.querySelector('[data-sru-none]');
+        if (tAll) tAll.onclick = (ev) => { ev.preventDefault(); p.querySelectorAll('input[data-sru-t]').forEach(cb => { cb.checked = true; }); uRender(); };
+        if (tNone) tNone.onclick = (ev) => { ev.preventDefault(); p.querySelectorAll('input[data-sru-t]').forEach(cb => { cb.checked = false; }); uRender(); };
+        uGo.onclick = () => srmUpdateApply(p, uPlan, uNewSecs(), uUpdateGo, uReview);
+        p.querySelectorAll('[data-srm-tab]').forEach(b => b.onclick = () => {
+            if (srmBusy) return;
+            const tab = b.getAttribute('data-srm-tab');
+            p.querySelectorAll('[data-srm-tab]').forEach(x => { const on = x === b; x.style.borderColor = on ? '#ffd54f' : '#444'; x.style.color = on ? '#ffd54f' : '#e6e6e6'; });
+            p.querySelectorAll('[data-srm-body]').forEach(x => { x.style.display = x.getAttribute('data-srm-body') === tab ? 'flex' : 'none'; });
+            goBtn.style.display = tab === 'remove' ? '' : 'none';
+            uGo.style.display = tab === 'update' ? '' : 'none';
+        });
+    }
+    // v3.44 — Update waits: same rails as srmApply (confirm → backup → one save per mission → verify).
+    async function srmUpdateApply(panel, plan, secs, updateGo, reviewEl) {
+        if (srmBusy || !plan || secs == null) return;
+        if (document.querySelector('.edit-instruction')) { showToast('Close the open STEP editor first (save or cancel it), then retry.', '#ff9800', 4500); return; }
+        const ctx = findMissionAppCtx();
+        if (!ctx || typeof ctx.saveApp !== 'function') { showToast('Mission context not found — be on the Mission Bank page.', '#ff5252', 4500); return; }
+        const sid = getCurrentSiteID();
+        const work = plan.filter((pm, i) => { const cb = reviewEl.querySelector(`input[data-sru-m="${i}"]`); return cb && cb.checked; });
+        if (!work.length) { showToast('Nothing ticked.', '#ff9800', 2500); return; }
+        const totalSteps = work.reduce((a, pm) => a + pm.idxs.length, 0);
+        if (!window.confirm(`Set ${totalSteps} wait step(s) to ${secs} s across ${work.length} mission(s)?\n\n`
+            + 'A JSON backup of the affected missions downloads first.\nThis SAVES every affected mission. Continue?')) return;
+        if (!srmBackup(sid, work.map(w => w.m), `waits→${secs}s`, 'preupdate')) return;
+        const statusEl = panel.querySelector('[data-srm-status]');
+        let ok = 0, fail = 0; const failedNames = [];
+        srmBusy = true; updateGo();
+        renameSuppressAutoAgl++;
+        try {
+            for (let k = 0; k < work.length; k++) {
+                const w = work[k];
+                if (statusEl) statusEl.textContent = `Saving ${k + 1}/${work.length} — ${w.m.name}…`;
+                try {
+                    const set = new Set(w.idxs);
+                    const next = (w.m.instructions || []).map((s, i) => { const n = pcmNormStep(s); if (set.has(i)) n.value1 = secs; return n; });
+                    try {
+                        await ctx.saveApp(Object.assign({}, w.m, { instructions: next }), w.m.name);
+                    } catch (e) {
+                        const mm = /Instruction #(\d+)/.exec(String((e && e.message) || e));
+                        if (mm) e.aimStep = Number(mm[1]) + 1;   // nothing removed → index + 1 = editor step number
+                        throw e;
+                    }
+                    ok++;
+                } catch (e) { fail++; failedNames.push(w.m.name + (e && e.aimStep ? ` (step #${e.aimStep})` : '')); console.warn(`${TAG} [srm] update save FAILED for "${w.m.name}"${e && e.aimStep ? ` — server refused step #${e.aimStep}` : ''}`, e); }
+                await new Promise(r => setTimeout(r, 150));
+            }
+        } finally { renameSuppressAutoAgl--; }
+        if (statusEl) statusEl.textContent = 'Verifying (fresh fetch)…';
+        let remaining = null;
+        try {
+            await new Promise(r => setTimeout(r, 1500));
+            const after = await mbFetchMissionsFull(sid);
+            const ids = new Set(work.map(w => w.m.id));
+            // waits in the touched missions that still carry one of the OLD values
+            const oldVals = new Set(); work.forEach(w => w.idxs.forEach(i => oldVals.add(String((w.m.instructions[i] || {}).value1))));
+            remaining = after.filter(m => ids.has(m.id)).reduce((a, m) => a + (m.instructions || []).filter(s => s && s.type === 5 && oldVals.has(String(s.value1))).length, 0);
+        } catch (e) { console.warn(`${TAG} [srm] update verify fetch failed`, e); }
+        srmBusy = false; updateGo();
+        const vTxt = remaining == null ? 'verify fetch failed — check manually' : `${remaining} old-value wait(s) left in the touched missions`;
+        showToast(`✎ Set ${totalSteps} wait(s) to ${secs} s across ${ok} mission(s)${fail ? ` · ${fail} save(s) FAILED (see console)` : ''} · ${vTxt}.`, fail ? '#ff9800' : '#5fff5f', 9000);
+        console.log(`${TAG} [srm] update waits→${secs}s changed=${totalSteps} ok=${ok} fail=${fail}${failedNames.length ? ` failed=[${failedNames.join(', ')}]` : ''} remaining=${remaining}`);
+        try { fetchMissions(sid, () => {}, () => {}); } catch (e) {}
+        if (!fail) { try { panel.remove(); } catch (e) {} }
+    }
+    // Shared backup download for the 🧹 panel (remove + update). Returns false when the user aborts.
+    function srmBackup(sid, missionList, label, suffix) {
+        try {
+            const backup = JSON.stringify({ site: sid, savedAt: new Date().toISOString(), target: label, missions: missionList });
+            const blob = new Blob([backup], { type: 'application/json' });
+            const blobUrl = URL.createObjectURL(blob);
+            let downloaded = false;
+            for (const doc of [(window.top || window).document, document]) {
+                if (downloaded) break;
+                try {
+                    const a = doc.createElement('a');
+                    a.href = blobUrl; a.download = `site${sid}_missions_${suffix}_backup.json`;
+                    (doc.body || document.body).appendChild(a); a.click(); a.remove();
+                    downloaded = true;
+                } catch (e) {}
+            }
+            setTimeout(() => { try { URL.revokeObjectURL(blobUrl); } catch (e) {} }, 5000);
+            if (!downloaded) throw new Error('no frame allowed the download');
+            return true;
+        } catch (e) {
+            console.warn(`${TAG} [srm] backup download failed`, e);
+            return window.confirm('Backup download FAILED — continue WITHOUT a backup?');
+        }
     }
     async function srmApply(panel, plan, tgt, updateGo) {
         if (srmBusy || !plan || !tgt) return;
@@ -5125,26 +5288,7 @@
         const totalSteps = work.reduce((a, w) => a + w.remove.size, 0);
         if (!window.confirm(`Remove ${totalSteps} step(s) — target: ${tgt.label}${tgt.type === 16 ? ' (+ paired navs)' : ''} — across ${work.length} mission(s)?\n\n`
             + 'A JSON backup of the affected missions downloads first.\nThis SAVES every affected mission. Continue?')) return;
-        try {
-            const backup = JSON.stringify({ site: sid, savedAt: new Date().toISOString(), target: tgt.label, missions: work.map(w => w.m) });
-            const blob = new Blob([backup], { type: 'application/json' });
-            const blobUrl = URL.createObjectURL(blob);
-            let downloaded = false;
-            for (const doc of [(window.top || window).document, document]) {
-                if (downloaded) break;
-                try {
-                    const a = doc.createElement('a');
-                    a.href = blobUrl; a.download = `site${sid}_missions_preremove_backup.json`;
-                    (doc.body || document.body).appendChild(a); a.click(); a.remove();
-                    downloaded = true;
-                } catch (e) {}
-            }
-            setTimeout(() => { try { URL.revokeObjectURL(blobUrl); } catch (e) {} }, 5000);
-            if (!downloaded) throw new Error('no frame allowed the download');
-        } catch (e) {
-            console.warn(`${TAG} [srm] backup download failed`, e);
-            if (!window.confirm('Backup download FAILED — continue WITHOUT a backup?')) return;
-        }
+        if (!srmBackup(sid, work.map(w => w.m), tgt.label, 'preremove')) return;
         const statusEl = panel.querySelector('[data-srm-status]');
         let ok = 0, fail = 0; const failedNames = [];
         srmBusy = true; updateGo();
@@ -14889,7 +15033,7 @@
                 <button class="aim-mb-tbtn ${rng.on ? 'active' : ''}" data-rng-toggle title="Color every pad's FFZ by the TRUE shortest LEGAL route from base (inside FFZ/FP only, triple-verified: path audit + dense second opinion + lower bound). Overlay is click-through — M2 merge picking still works.">🔋 Range</button>
                 <button class="aim-mb-tbtn ${lasso.armed ? 'active' : ''}" data-lasso-toggle title="Draw a freehand loop around pads → auto-build a furthest→closest merge list (Tulip pads auto-split into a separate '2' mission) and stage it in the merge editor for inspection.">🖊 Lasso</button>
                 <button class="aim-mb-tbtn ${mcv.on ? 'active' : ''}" data-mcv-toggle title="Show which pads are already claimed by macro (merged) missions — each macro gets a color + name chip; white dashed pads have missions but no macro yet. Click-through.">🧩 Macros</button>
-                <button class="aim-mb-tbtn" data-srm-open title="Find every step of a chosen type across ALL missions on this site (flag poles, 1s waits, …) and remove them after a per-row review. Flag poles take their paired nav too. Backup JSON downloads before anything saves.">🧹 Steps</button>
+                <button class="aim-mb-tbtn" data-srm-open title="Remove tab: find every step of a chosen type across ALL missions on this site (flag poles, 1s waits, …) and remove them after a per-row review; flag poles take their paired nav too. Update tab: set every wait of the ticked durations to a new value. Backup JSON downloads before anything saves.">🧹 Steps</button>
                 <button class="aim-mb-tbtn" data-msf-check title="Check every mission's navs + flag poles against the site's NFZs (Percepto refuses the save) and FFZs — fills the 🚩 column. Runs only when clicked; takes a while on big sites but the panel stays usable.">${msfRunning ? '🚩 …' : '🚩 Check'}</button>
                 <button class="aim-mb-tbtn" data-mrs-open title="Restore a mission: re-create one Delete Guard banked in the last 72 h, or restore in place from a backup JSON this script downloaded before a bulk edit. Same write path as every in-place tool; verified by re-fetch.">↩ Restore</button>
                 <button class="aim-mb-tbtn ${panelState.distanceUnit === 'imperial' ? 'active' : ''}" data-unit="imperial">mi</button>
