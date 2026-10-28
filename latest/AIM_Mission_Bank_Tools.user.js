@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.42
+// @version      3.43
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.42';
+    const SCRIPT_VERSION = '3.43';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -3263,7 +3263,7 @@
         // ← dynamic step-type columns inserted here
         // v3.42 (#315) — 🚩 flown steps inside an NFZ / outside every FFZ (Percepto refuses the save). Click the cell for the rows.
         { id: 'stepFlags', label: '🚩', key: '__stepFlags', kind: 'num', defaultVisible: true, derived: true,
-            fmt: (row) => { const sid = getCurrentSiteID(); const c = msfCache && msfCache.sid === sid ? msfCache : null; if (!c) return '…'; if (c.failed) return '?'; const r = c.byMission[row.id]; return r ? (r.block ? (r.goes ? `${r.block} (${r.goes}🧹)` : String(r.block)) : '✓') : '—'; },
+            fmt: (row) => { const sid = getCurrentSiteID(); const c = msfCache && msfCache.sid === sid ? msfCache : null; if (!c) return '—'; if (c.failed) return '?'; const r = c.byMission[row.id]; return r ? (r.block ? (r.goes ? `${r.block} (${r.goes}🧹)` : String(r.block)) : '✓') : '—'; },
             sortVal: (row) => { const sid = getCurrentSiteID(); const r = msfCache && msfCache.sid === sid ? msfCache.byMission[row.id] : null; return r ? r.block : -1; } },
         { id: 'batteryConsumption', label: 'Battery %', key: 'batteryConsumption', kind: 'pct', defaultVisible: true },
         { id: 'estFlights', label: 'Est. Flights', key: '__estFlights', kind: 'num', defaultVisible: true, derived: true },
@@ -5871,6 +5871,26 @@
         // Distance to the ring's EDGE whether inside or out (inside → "how far the edge must move").
         const edgeMetres = (lat, lng, ring) => { let best = Infinity; for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) { const d = segMetres(lat, lng, ring[j], ring[i]); if (d < best) best = d; } return best; };
         const inBox = (lat, lng, b) => lat >= b.s && lat <= b.n && lng >= b.w && lng <= b.e;
+        // Lower bound (m) from a point to a zone's bbox — 0 inside the box. Lets the nearest-edge
+        // search skip rings that cannot beat the best so far (442 NFZ × 3,000 steps × every vertex
+        // froze the tab on Web 1637 before this).
+        const boxMetres = (lat, lng, b) => {
+            const dLat = lat < b.s ? b.s - lat : (lat > b.n ? lat - b.n : 0);
+            const dLng = lng < b.w ? b.w - lng : (lng > b.e ? lng - b.e : 0);
+            return (dLat || dLng) ? metres(lat, lng, lat + dLat, lng + dLng) : 0;
+        };
+        // Exact nearest zone by edge distance, bbox-pruned: walk rings in bbox-distance order and
+        // stop as soon as the next bbox is already farther than the best edge found.
+        const nearestEdge = (lat, lng, list) => {
+            const order = list.map(z => ({ z, lb: boxMetres(lat, lng, z.box) })).sort((a, b) => a.lb - b.lb);
+            let best = null;
+            for (let k = 0; k < order.length; k++) {
+                if (best && order[k].lb >= best.d) break;
+                const d = edgeMetres(lat, lng, order[k].z.ring);
+                if (!best || d < best.d) best = { z: order[k].z, d };
+            }
+            return best;
+        };
         const inPoly = (lat, lng, ring) => {
             let inside = false;
             for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
@@ -5896,20 +5916,22 @@
             const l = s.location;
             if (!l || typeof l.lat !== 'number' || typeof l.lng !== 'number') return;
             const base = { idx: i, num: i + 1, type: s.type, kind, goes: goes.has(i), lat: l.lat, lng: l.lng };
-            let inside = null, nearest = null;
+            let inside = null;
             nfz.forEach(z => {
+                if (!inBox(l.lat, l.lng, z.box) || !inPoly(l.lat, l.lng, z.ring)) return;
                 const d = edgeMetres(l.lat, l.lng, z.ring);
-                const isIn = inBox(l.lat, l.lng, z.box) && inPoly(l.lat, l.lng, z.ring);
-                if (isIn && (!inside || d > inside.d)) inside = { z, d };   // deepest-inside NFZ = the one that must move most
-                if (!nearest || d < nearest.d) nearest = { z, d };
+                if (!inside || d > inside.d) inside = { z, d };   // deepest-inside NFZ = the one that must move most
             });
             if (inside) out.push(Object.assign({}, base, { tier: 'nfz', zoneId: inside.z.id, zoneName: inside.z.name, distM: inside.d }));
-            else if (nearM && nearest && nearest.d <= nearM) out.push(Object.assign({}, base, { tier: 'near', zoneId: nearest.z.id, zoneName: nearest.z.name, distM: nearest.d }));
+            else if (nearM) {
+                // only rings whose bbox comes within nearM can be "near" — usually none
+                const near = nearestEdge(l.lat, l.lng, nfz.filter(z => boxMetres(l.lat, l.lng, z.box) <= nearM));
+                if (near && near.d <= nearM) out.push(Object.assign({}, base, { tier: 'near', zoneId: near.z.id, zoneName: near.z.name, distM: near.d }));
+            }
             const inFfz = ffz.some(f => inBox(l.lat, l.lng, f.box) && inPoly(l.lat, l.lng, f.ring));
             if (!inFfz) {
-                let near = null;
-                ffz.forEach(f => { const d = edgeMetres(l.lat, l.lng, f.ring); if (!near || d < near.d) near = { f, d }; });
-                out.push(Object.assign({}, base, { tier: 'ffz', zoneId: near ? near.f.id : null, zoneName: near ? near.f.name : '', distM: near ? near.d : Infinity }));
+                const near = nearestEdge(l.lat, l.lng, ffz);
+                out.push(Object.assign({}, base, { tier: 'ffz', zoneId: near ? near.z.id : null, zoneName: near ? near.z.name : '', distM: near ? near.d : Infinity }));
             }
         });
         return out;
@@ -5950,35 +5972,56 @@
         el.querySelectorAll('[data-msf-jump]').forEach(b => b.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); const [la, ln] = b.getAttribute('data-msf-jump').split(',').map(Number); mcvJumpTo(la, ln); });
     }
     // Mission-list 🚩 column cache: { sid, stamp, byMission: { id → { flags, block, goes } } }.
-    let msfCache = null, msfPending = null;
-    function msfEnsure(sid) {
+    // v3.43 — MANUAL only (🚩 Check button / ⟳ Re-check): on Web the first run took 30–45 s
+    // and froze the panel. Now the entity fetch is awaited, then missions are checked in
+    // chunks with a yield between them (panel stays usable), with start / progress / done toasts.
+    let msfCache = null, msfRunning = null;
+    function msfRun(sid, opts) {
+        const o = opts || {};
         const bucket = missionsBySite[sid];
-        if (!bucket) return;
-        const stamp = bucket.fetchedAt;
-        if (msfCache && msfCache.sid === sid && msfCache.stamp === stamp) return;
-        if (msfPending === sid + ':' + stamp) return;
-        msfPending = sid + ':' + stamp;
-        genFetchEntities(sid).then(ent => {
+        if (!bucket) { showToast('🚩 Load the mission list first.', '#ff9800', 3000); return Promise.resolve(null); }
+        if (msfRunning) { showToast('🚩 A check is already running…', '#ff9800', 2500); return msfRunning; }
+        if (o.fresh) delete genEntCache[sid];
+        const missions = bucket.missions || [];
+        const t0 = Date.now();
+        showToast(`🚩 Checking ${missions.length} mission(s) against the site's NFZs / FFZs…`, '#9ad', 4000);
+        const headerEl = () => panelEl && panelEl.querySelector('[data-msf-check]');
+        const setBtn = (txt, dis) => { const b = headerEl(); if (b) { b.textContent = txt; b.disabled = !!dis; } };
+        setBtn('🚩 …', true);
+        msfRunning = genFetchEntities(sid).then(async (ent) => {
             const byMission = {};
-            let blocked = 0;
-            (bucket.missions || []).forEach(m => {
-                const flags = mbStepFlags(m.instructions, ent);
-                const block = flags.filter(f => f.tier !== 'near').length;
-                const goes = flags.filter(f => f.tier !== 'near' && f.goes).length;
-                byMission[m.id] = { flags, block, goes };
-                if (block) blocked++;
-            });
-            msfCache = { sid, stamp, byMission };
-            console.log(`${TAG} [🚩] step check: ${blocked} of ${(bucket.missions || []).length} mission(s) have steps in an NFZ / outside the FFZ (site ${sid})`);
+            let blocked = 0, hard = 0;
+            const CHUNK = 10;
+            for (let i = 0; i < missions.length; i += CHUNK) {
+                missions.slice(i, i + CHUNK).forEach(m => {
+                    const flags = mbStepFlags(m.instructions, ent);
+                    const block = flags.filter(f => f.tier !== 'near').length;
+                    const goes = flags.filter(f => f.tier !== 'near' && f.goes).length;
+                    byMission[m.id] = { flags, block, goes };
+                    if (block) { blocked++; hard += block; }
+                });
+                setBtn(`🚩 ${Math.min(i + CHUNK, missions.length)}/${missions.length}`, true);
+                await new Promise(r => setTimeout(r, 0));   // yield — keep the panel usable
+            }
+            msfCache = { sid, stamp: bucket.fetchedAt, byMission };
+            const secs = ((Date.now() - t0) / 1000).toFixed(1);
+            console.log(`${TAG} [🚩] step check: ${blocked} of ${missions.length} mission(s) have ${hard} step(s) in an NFZ / outside the FFZ (site ${sid}, ${secs} s)`);
+            showToast(blocked ? `🚩 ${blocked} of ${missions.length} mission(s) have ${hard} step(s) in an NFZ / outside the FFZ — see the 🚩 column (${secs} s).` : `🚩 All ${missions.length} mission(s) clean — every flown step saves (${secs} s).`, blocked ? '#ff8a8a' : '#5fff5f', 8000);
+            return msfCache;
         }).catch(e => {
-            console.warn(`${TAG} [🚩] entity fetch failed — 🚩 column stays empty`, e);
-            msfCache = { sid, stamp, byMission: {}, failed: true };
-        }).then(() => {
-            msfPending = null;
+            console.warn(`${TAG} [🚩] step check failed`, e);
+            showToast('🚩 Check failed — could not load NFZs/FFZs (see console).', '#ff5252', 5000);
+            msfCache = { sid, stamp: bucket.fetchedAt, byMission: {}, failed: true };
+            return null;
+        }).then(res => {
+            msfRunning = null;
+            setBtn('🚩 Check', false);
             try { if (panelState && panelState.mode === 'bank' && getCurrentSiteID() === sid) renderTableView(); } catch (e) { console.warn(`${TAG} [🚩] rerender failed`, e); }
+            return res;
         });
+        return msfRunning;
     }
-    function msfRecheck(sid) { delete genEntCache[sid]; msfCache = null; msfEnsure(sid); }
+    function msfRecheck(sid) { msfRun(sid, { fresh: true }); }
     function msfOpenPopover(anchorCell, missionId) {
         const old = document.getElementById('aim-mb-msf-pop'); if (old) old.remove();
         const sid = getCurrentSiteID();
@@ -5994,8 +6037,8 @@
                 <button data-msf-recheck title="Re-fetch NFZs / FFZs (after a Site Setup fix) and re-check every mission" style="background:rgba(255,255,255,0.08);border:1px solid #456;color:#9ad;border-radius:4px;cursor:pointer;font-size:11px;padding:2px 6px;">⟳ Re-check</button>
                 <button data-msf-close style="background:rgba(255,255,255,0.12);border:none;color:#fff;width:20px;height:20px;border-radius:4px;cursor:pointer;">✕</button>
             </div>
-            <div style="padding:4px 8px;font-size:11px;color:#9ad;">${rec ? `${hard.length} step(s) block the save${rec.goes ? ` · ${rec.goes} of them go with 🧹 flag-pole removal` : ''}${near.length ? ` · ${near.length} near an NFZ (saves)` : ''}` : 'not checked yet'} — navs must be inside an FFZ and outside every NFZ. Fix the nav here, or the zone in Site Setup.</div>
-            <div style="overflow:auto;flex:1;padding:2px 8px 8px;">${flags.length ? mbStepFlagRows(hard.concat(near), { goesNote: true, indent: 4 }) : '<div style="color:#5fff5f;padding:6px 4px;">✓ every flown step saves.</div>'}</div>`;
+            <div style="padding:4px 8px;font-size:11px;color:#9ad;">${rec ? `${hard.length} step(s) block the save${rec.goes ? ` · ${rec.goes} of them go with 🧹 flag-pole removal` : ''}${near.length ? ` · ${near.length} near an NFZ (saves)` : ''}` : 'not checked yet — click ⟳ Re-check or 🚩 Check in the toolbar'} — navs must be inside an FFZ and outside every NFZ. Fix the nav here, or the zone in Site Setup.</div>
+            <div style="overflow:auto;flex:1;padding:2px 8px 8px;">${flags.length ? mbStepFlagRows(hard.concat(near), { goesNote: true, indent: 4 }) : (rec ? '<div style="color:#5fff5f;padding:6px 4px;">✓ every flown step saves.</div>' : '')}</div>`;
         document.body.appendChild(pop);
         try {
             const r = anchorCell.getBoundingClientRect();
@@ -14829,7 +14872,6 @@
 
         const allRows = buildAllRows(sid);
         const rows = filterAndSort(allRows);
-        try { msfEnsure(sid); } catch (e) { console.warn(`${TAG} [🚩] ensure failed`, e); }   // v3.42 — async; re-renders once computed
 
         const visibleColIds = getVisibleColumnIds();
         const visibleCols = visibleColIds.map(id => COL_BY_ID[id]).filter(Boolean);
@@ -14848,6 +14890,7 @@
                 <button class="aim-mb-tbtn ${lasso.armed ? 'active' : ''}" data-lasso-toggle title="Draw a freehand loop around pads → auto-build a furthest→closest merge list (Tulip pads auto-split into a separate '2' mission) and stage it in the merge editor for inspection.">🖊 Lasso</button>
                 <button class="aim-mb-tbtn ${mcv.on ? 'active' : ''}" data-mcv-toggle title="Show which pads are already claimed by macro (merged) missions — each macro gets a color + name chip; white dashed pads have missions but no macro yet. Click-through.">🧩 Macros</button>
                 <button class="aim-mb-tbtn" data-srm-open title="Find every step of a chosen type across ALL missions on this site (flag poles, 1s waits, …) and remove them after a per-row review. Flag poles take their paired nav too. Backup JSON downloads before anything saves.">🧹 Steps</button>
+                <button class="aim-mb-tbtn" data-msf-check title="Check every mission's navs + flag poles against the site's NFZs (Percepto refuses the save) and FFZs — fills the 🚩 column. Runs only when clicked; takes a while on big sites but the panel stays usable.">${msfRunning ? '🚩 …' : '🚩 Check'}</button>
                 <button class="aim-mb-tbtn" data-mrs-open title="Restore a mission: re-create one Delete Guard banked in the last 72 h, or restore in place from a backup JSON this script downloaded before a bulk edit. Same write path as every in-place tool; verified by re-fetch.">↩ Restore</button>
                 <button class="aim-mb-tbtn ${panelState.distanceUnit === 'imperial' ? 'active' : ''}" data-unit="imperial">mi</button>
                 <button class="aim-mb-tbtn ${panelState.distanceUnit === 'metric' ? 'active' : ''}" data-unit="metric">km</button>
@@ -14901,7 +14944,8 @@
             const v = formatCellValue(row, col, panelState.distanceUnit, thresholds);
             if (col.id === 'stepFlags') {
                 const bad = v !== '✓' && v !== '…' && v !== '—' && v !== '?';
-                return `<td data-msf="${row.id}" title="Steps in an NFZ / outside the FFZ — click for the list" style="cursor:pointer;${bad ? 'color:#ff8a8a;font-weight:700;' : 'color:#5fff5f;'}">${escapeHtml(String(v))}</td>`;
+                const unchecked = v === '—';
+                return `<td data-msf="${row.id}" title="${unchecked ? 'Not checked yet — click 🚩 Check in the toolbar' : 'Steps in an NFZ / outside the FFZ — click for the list'}" style="cursor:pointer;${bad ? 'color:#ff8a8a;font-weight:700;' : (unchecked ? 'color:#789;' : 'color:#5fff5f;')}">${escapeHtml(String(v))}</td>`;
             }
             if (col.id === 'name' && editableName) {
                 // Click to rename · Tab → next mission's name (server rename via saveApp).
@@ -15541,6 +15585,9 @@
         // v3.07 — ↩ mission restore (Delete Guard ring / backup file)
         const mrsBtn = panelEl.querySelector('[data-mrs-open]');
         if (mrsBtn) mrsBtn.onclick = () => mrsOpen();
+        // v3.43 — 🚩 manual step check
+        const msfBtn = panelEl.querySelector('[data-msf-check]');
+        if (msfBtn) { msfBtn.disabled = !!msfRunning; msfBtn.onclick = () => msfRun(getCurrentSiteID(), { fresh: !!(msfCache && msfCache.sid === getCurrentSiteID()) }); }
         const pcmBtn = panelEl.querySelector('[data-pcm-toggle]');
         if (pcmBtn) pcmBtn.onclick = async () => {
             if (pcm.on) { pcmExit(); }
