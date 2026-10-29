@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.61
+// @version      3.62
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.61';
+    const SCRIPT_VERSION = '3.62';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -4508,6 +4508,8 @@
     // leave it) and ≥ SG_MIN_FT from the target's edge (thermal crop: closer and a
     // few degrees of yaw error cuts the asset) — 100–200 ft ideal.
     const SG_TPL_KEY = 'aim-mb-shot-templates';
+    // Ghost key for the open mission: its id, or 'new' for a brand-new unsaved one (v3.62).
+    function sgMid() { return composerMission ? (composerMission.id != null ? composerMission.id : 'new') : null; }
     const SG_GHOST_KEY = 'aim-mb-ghosts';
     const SG_LAST_KEY = 'aim-mb-shot-last';
     const SG_MIN_FT = 80, SG_IDEAL_LO = 100, SG_IDEAL_HI = 200, SG_FFZ_MARGIN_M = 3;
@@ -4561,7 +4563,7 @@
         if (!Object.keys(all[sk]).length) delete all[sk];
         sgGhostsWrite(all);
     }
-    function sgSiteGhosts(sid) { const all = sgGhostsAll(); const s = all[envSiteKey(sid)] || {}; return Object.keys(s).map(k => ({ mid: Number(k), name: s[k].name || '', groups: s[k].groups || [] })).filter(x => x.groups.length); }
+    function sgSiteGhosts(sid) { const all = sgGhostsAll(); const s = all[envSiteKey(sid)] || {}; return Object.keys(s).filter(k => /^\d+$/.test(k)).map(k => ({ mid: Number(k), name: s[k].name || '', groups: s[k].groups || [] })).filter(x => x.groups.length); }
     // ── geometry ──
     function sgOffset(focus, bearingDeg, distM) {
         const b = bearingDeg * Math.PI / 180;
@@ -4844,7 +4846,7 @@
         sgUpdateHud();
     }
     function sgDrawStaged(force) {
-        const mid = composerMission && composerMission.id, sid = getCurrentSiteID();
+        const mid = sgMid(), sid = getCurrentSiteID();
         const groups = (mid && sid) ? sgGhostsFor(sid, mid) : [];
         const key = `${sid}:${mid}:${groups.map(g => g.gid).join(',')}`;
         if (!force && key === sg.stagedKey) return;
@@ -5020,7 +5022,7 @@
         const auto = h.querySelector('[data-sg-auto]'); if (auto) auto.onclick = () => sgAutoOrder();
     }
     function sgStagedListHtml() {
-        const sid = getCurrentSiteID(), mid = composerMission && composerMission.id;
+        const sid = getCurrentSiteID(), mid = sgMid();
         const groups = (sid && mid) ? sgGhostsFor(sid, mid) : [];
         if (!groups.length) return '';
         const btn = (i, act, txt, title) => `<button data-sg-g="${i}" data-sg-act="${act}" title="${title}" style="background:none;border:1px solid #456;color:#cfe;border-radius:3px;cursor:pointer;font-size:10px;padding:0 4px;line-height:1.4;">${txt}</button>`;
@@ -5030,7 +5032,7 @@
         </div>`;
     }
     function sgGroupsMutate(fn) {
-        const sid = getCurrentSiteID(), mid = composerMission && composerMission.id; if (!sid || !mid) return;
+        const sid = getCurrentSiteID(), mid = sgMid(); if (!sid || !mid) return;
         const groups = fn(sgGhostsFor(sid, mid)) || [];
         sgGhostsSet(sid, mid, composerMission.name || '', groups);
         sgDrawStaged(true); sgUpdateBtn(); sgUpdateHud();
@@ -5070,7 +5072,7 @@
         return out;
     }
     function sgAutoOrder() {
-        const sid = getCurrentSiteID(), mid = composerMission && composerMission.id; if (!sid || !mid) return;
+        const sid = getCurrentSiteID(), mid = sgMid(); if (!sid || !mid) return;
         const groups = sgGhostsFor(sid, mid); if (groups.length < 1) return;
         const out = sgOrderGroups(groups, sgArrivalPoint(groups) || groups[0].focus);
         sgGhostsSet(sid, mid, composerMission.name || '', out);
@@ -5095,7 +5097,7 @@
         sgApplyTpl(last || '3-shot 90°');
         sg.active = true; sg.pinned = false; sg.focus = null; sg.targetRing = null; sg.targetName = ''; sg.rot = 0; sg.flip = false;
         sg.dots = []; sg.plan = null; sg.hover = null; sg.hoverName = ''; sg.replace = false;
-        sg.sid = sid; sg.mid = composerMission && composerMission.id;
+        sg.sid = sid; sg.mid = sgMid();
         sg.container = caMapContainer();
         sg.wheelOn = false;   // v3.56: plain wheel keeps zooming the map; Shift+wheel spins
         if (sg.container) {
@@ -5237,7 +5239,7 @@
         if (hard.length) { showToast(`🎯 ${hard.length} nav(s) outside the FFZ / over an NFZ — Percepto would refuse the save. Spin or pull in first.`, '#ff5252', 4000); return; }
         const soft = sg.live.filter(p => p.status === 'red');
         if (soft.length && !confirm(`${soft.length} nav(s) break the ${SG_MIN_FT} ft-from-asset / never-over-an-asset rule (thermal crop risk). Stage anyway?`)) return;
-        const sid = sg.sid, mid = composerMission && composerMission.id;
+        const sid = sg.sid, mid = sgMid();
         if (!sid || !mid) { showToast('No open mission to stage into.', '#ff9800', 3000); return; }
         const groups = sgGhostsFor(sid, mid);
         const gid = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
@@ -5255,7 +5257,7 @@
     function sgStageDots() {
         if (!sg.active || sg.mode !== 'dots') return;
         if (!sg.plan || !sg.plan.navs.length) { showToast('📍 Nothing to stage — drop at least one point with a legal nav spot.', '#ff9800', 3500); return; }
-        const sid = sg.sid, mid = composerMission && composerMission.id;
+        const sid = sg.sid, mid = sgMid();
         if (!sid || !mid) { showToast('No open mission to stage into.', '#ff9800', 3000); return; }
         const short = sg.plan.unmet.reduce((a, u) => a + u.missing, 0);
         if (short && !confirm(`${short} angle(s) have no legal nav spot (FFZ / asset / 80 ft). Stage what fits?`)) return;
@@ -5274,7 +5276,7 @@
         showToast(`➕ Ghost G${groups.length} staged (${navs} nav${navs > 1 ? 's' : ''}, ${snaps} snap${snaps > 1 ? 's' : ''}${sg.replace ? ' · replaces existing shots on commit' : ''}). Esc when done, ⚡ Commit to write.`, '#c39dff', 5000);
     }
     function sgUndoLastGhost() {
-        const sid = getCurrentSiteID(), mid = composerMission && composerMission.id; if (!sid || !mid) return false;
+        const sid = getCurrentSiteID(), mid = sgMid(); if (!sid || !mid) return false;
         const groups = sgGhostsFor(sid, mid); if (!groups.length) return false;
         groups.pop(); sgGhostsSet(sid, mid, composerMission.name || '', groups); sgDrawStaged(true); sgUpdateBtn();
         showToast(`↶ Last ghost removed (${groups.length} left).`, '#888', 2000);
@@ -5402,7 +5404,7 @@
     }
     // ⚡ Commit the OPEN mission's ghosts into the editor working copy (native SAVE finishes it).
     function sgCommitOpen() {
-        const sid = getCurrentSiteID(), mid = composerMission && composerMission.id;
+        const sid = getCurrentSiteID(), mid = sgMid();
         if (!sid || !mid) { showToast('Open a mission first.', '#ff9800', 3000); return; }
         const groups = sgGhostsFor(sid, mid);
         if (!groups.length) { showToast('No ghosts staged on this mission.', '#9ad', 2500); return; }
@@ -5411,11 +5413,63 @@
         const app = ctx.currentApp;
         let instrs = app.instructions || [];
         if (!instrs.length) { try { const lc = findMissionEditorCtx(); if (lc && Array.isArray(lc.instrs) && lc.instrs.length) instrs = lc.instrs; } catch (e) {} }
+        const hasRefs = instrs.some(s => s && (s.type_name === 'navigate' || s.type === 1)) && instrs.some(s => s && (s.type_name === 'snapshot' || s.type === 6));
+        if (!hasRefs) {
+            // v3.62: nothing to copy settings from → build wire steps from defaults and SAVE through the
+            // server (the generator's path); synthesizing editor-shape steps crashes Percepto's editor.
+            sgPickWrap(`${groups.length} ghost group(s) → ${app.id != null ? `"${app.name || mid}"` : 'this NEW mission'} — no steps to copy from, so it is built from defaults and SAVED now`).then(wrap => {
+                if (!wrap) return;
+                sgCommitEmpty(sid, mid, ctx, app, instrs, groups, wrap).catch(e => { console.warn(`${TAG} [🎯] empty-mission commit failed`, e); showToast(`🎯 Commit failed — ${(e && e.message) || e}`, '#ff5252', 6000); });
+            });
+            return;
+        }
         sgPickWrap(`${groups.length} ghost group(s) → "${app.name || mid}" (staged in the editor; SAVE afterwards)`).then(wrap => {
             if (!wrap) return;
             const useWrap = !!wrap.steps.length;
             sgCommitOpenWith(sid, mid, ctx, app, instrs, groups, wrap, useWrap);
         });
+    }
+    async function sgCommitEmpty(sid, mid, ctx, app, instrs, groups, wrap) {
+        if (typeof ctx.saveApp !== 'function') { showToast('Editor save function not found.', '#ff5252', 3500); return; }
+        let name = (app.name || '').trim();
+        if (!name) { try { const el = document.querySelector('.mission-edit__content input, .mission-edit input'); if (el && el.value) name = el.value.trim(); } catch (e) {} }
+        if (!name) name = (prompt('Mission name (letters, digits, space, - and _ only):', '') || '').trim();
+        if (!name) { showToast('🎯 A mission name is required to save.', '#ff9800', 3500); return; }
+        if (!/^[A-Za-z0-9 _-]+$/.test(name)) { showToast('🎯 Name may only use letters, digits, space, - and _ (Percepto refuses others).', '#ff5252', 5000); return; }
+        const ent = genEntCache[sid] || await genFetchEntities(sid);
+        // ground under every focus / aim
+        const pts = [];
+        groups.forEach(g => { if (getElevationFromCache(g.focus.lat, g.focus.lng) == null) pts.push({ lat: g.focus.lat, lng: g.focus.lng }); (g.navs || []).forEach(p => (p.aims || []).forEach(a => { if (getElevationFromCache(a.lat, a.lng) == null) pts.push({ lat: a.lat, lng: a.lng }); })); });
+        if (pts.length) { showToast(`Fetching ${pts.length} elevation(s)…`, '#9ad', 2000); try { await bulkFetchElevations(pts); } catch (e) { console.warn(`${TAG} [🎯] elevation fetch failed`, e); } }
+        // default step settings = what ▣ Generate uses: nav at the FFZ's min alt (else ground + 40 m), snapshot at ground + default AGL, To-GPS, pitch 1001
+        const f0 = groups[0].focus;
+        const ffz = genAssetFFZ(f0, ent.ffzs || []);
+        const g0 = getElevationFromCache(f0.lat, f0.lng);
+        const navAltM = (ffz && ffz.minAltM != null) ? ffz.minAltM : ((g0 != null ? g0 : 0) + 40);
+        const navRef = { type: 1, value1: navAltM, value2: 12, location: null, extra_options: { shouldUseFreezoneMinAlt: true }, polygon_points: null, snapshot_points: null };
+        const snapRef = { type: 6, value1: g0 != null ? g0 + (defaultSnapAglFt / 3.28084) : null, value2: 1, location: null, extra_options: { pitch: 1001 }, polygon_points: null, snapshot_points: null };
+        const built = sgBuildWireSteps(groups, [navRef, snapRef], wrap.steps || [], f => getElevationFromCache(f.lat, f.lng));
+        if (built.error) throw new Error(built.error);
+        const isT = s => s && (s.type_name === 'takeoff' || s.type === 0), isR = s => s && (s.type_name === 'returnHome' || s.type === 99);
+        const shell = [];
+        const t0 = instrs.find(isT), r0 = instrs.find(isR);
+        shell.push(t0 ? pcmNormStep(t0) : { type: 0, value1: 20, value2: null, location: null, extra_options: {}, polygon_points: null, snapshot_points: null });
+        shell.push(r0 ? pcmNormStep(r0) : { type: 99, value1: null, value2: null, location: null, extra_options: {}, polygon_points: null, snapshot_points: null });
+        const next = sgSplice(shell, built.perGroup, s => s && s.type === 1, s => s && s.type === 99);
+        const flags = mbStepFlags(next, ent).filter(f => f.tier !== 'near');
+        if (flags.length && !confirm(`${flags.length} step(s) would be inside an NFZ / outside the FFZ (first: #${flags[0].num}) — Percepto will likely refuse. Try anyway?`)) return;
+        showToast(`Saving "${name}"…`, '#9ad', 2500);
+        const payload = Object.assign({ type: 1, data_report_object_arr: [] }, app, { instructions: next });
+        const res = await ctx.saveApp(payload, name);
+        const saved = (res && res.app) ? res.app : res;
+        sgGhostsSet(sid, mid, name, []); sgDrawStaged(true); sgUpdateBtn();
+        console.log(`${TAG} [🎯] empty-mission commit → saved "${name}" (${next.length} steps)`, saved);
+        try { refreshMissionList(); } catch (e) {}
+        try { if (saved && saved.id != null) ctx.setCurrentApp(saved); } catch (e) { console.warn(`${TAG} [🎯] setCurrentApp failed`, e); }
+        try { const cur = location.hash || ''; const mm = cur.match(/^(.*\/mission-bank)(?:\/\d+)?/); if (mm && saved && saved.id != null && cur !== `${mm[1]}/${saved.id}`) location.hash = `${mm[1]}/${saved.id}`; } catch (e) {}
+        try { fetchMissions(sid, () => {}, () => {}); } catch (e) {}
+        composerMission = null;   // re-match to the real mission on the next tick
+        showToast(`⚡ "${name}" saved with ${next.length} steps (${groups.length} ghost group(s)${(wrap.steps || []).length ? ', wrapped' : ''}).`, '#5fff5f', 6000);
     }
     function sgCommitOpenWith(sid, mid, ctx, app, instrs, groups, wrap, useWrap) {
         const built = sgBuildEditorSteps(groups, instrs, useWrap ? wrap.steps : []);
@@ -5448,7 +5502,7 @@
         if (!list.length) { showToast('No ghosts on this site.', '#9ad', 2500); return; }
         const ctx = findMissionAppCtx();
         if (!ctx || typeof ctx.saveApp !== 'function') { showToast('Mission context not found — be on the Mission Bank page.', '#ff5252', 4000); return; }
-        const openMid = composerMission && composerMission.id;
+        const openMid = sgMid();
         const work = list.filter(x => x.mid !== openMid);
         const skippedOpen = list.length - work.length;
         if (!work.length) { showToast('Only the OPEN mission has ghosts — use ⚡ Commit in the editor.', '#ff9800', 4000); return; }
@@ -5502,7 +5556,7 @@
         const old = document.getElementById(ID); if (old) { old.remove(); return; }
         const sid = getCurrentSiteID(); if (!sid) return;
         const list = sgSiteGhosts(sid);
-        const openMid = composerMission && composerMission.id;
+        const openMid = sgMid();
         const p = document.createElement('div'); p.id = ID;
         p.style.cssText = 'position:fixed;top:60px;right:24px;width:420px;max-height:80vh;display:flex;flex-direction:column;z-index:2147483602;background:#161a20;border:1px solid #c39dff;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;';
         const wrap = sgWrapChoice();
@@ -5530,7 +5584,7 @@
     const SG_BTN_ID = 'aim-mb-sg-btn';
     function sgUpdateBtn() {
         const b = document.getElementById(SG_BTN_ID); if (!b) return;
-        const sid = getCurrentSiteID(), mid = composerMission && composerMission.id;
+        const sid = getCurrentSiteID(), mid = sgMid();
         const n = (sid && mid) ? sgGhostsFor(sid, mid).length : 0;
         b.textContent = sg.active ? '🎯 LIVE' : (n ? `🎯 ⚡ ${n}` : '🎯 Shots');
         b.style.background = sg.active ? 'rgba(255,138,210,0.25)' : (n ? 'rgba(195,157,255,0.2)' : 'rgba(255,138,210,0.1)');
@@ -6840,9 +6894,31 @@
         } catch (e) { try { forceOpenInstructionEdit(draggable); } catch (e2) { console.warn(`${TAG} [composer] open edit failed`, e2); } }
     }
 
+    // v3.62: a brand-new (unsaved) or still-empty mission can't be matched to the server list,
+    // so the editor tools (Click-add, 🎯) never armed. Synthesize a composer target from the
+    // live editor app instead: id = the app id, or 'new' until the first save.
+    function composerSyntheticMission() {
+        try {
+            if (!document.querySelector('.mission-edit__content')) return null;
+            const ctx = findMissionAppCtx(); if (!ctx || !ctx.currentApp) return null;
+            const app = ctx.currentApp;
+            let instrs = app.instructions || [];
+            if (!instrs.length) { try { const lc = findMissionEditorCtx(); if (lc && Array.isArray(lc.instrs)) instrs = lc.instrs; } catch (e) {} }
+            const hasNav = instrs.some(s => s && (s.type_name === 'navigate' || s.type === 1));
+            if (app.id != null && hasNav) return null;   // a real mission with steps — let the normal match handle it
+            const id = app.id != null ? app.id : 'new';
+            if (composerMission && composerMission.__synthetic && String(composerMission.id) === String(id)) { composerMission.instructions = instrs.map(s => Object.assign({}, s)); return composerMission; }
+            console.log(`${TAG} [composer] synthetic target for ${app.id != null ? 'empty mission #' + app.id : 'a NEW unsaved mission'}`);
+            return { id, name: app.name || '', instructions: instrs.map(s => Object.assign({}, s)), __synthetic: true };
+        } catch (e) { console.warn(`${TAG} [composer] synthetic target failed`, e); return null; }
+    }
     function composerEnsureMapMode(silent) {
         identifyOpenMission((data) => {
-            if (!data) { if (!silent) showToast('Map badges: could not match the open mission to the cache.', '#ff9800', 4000); return; }
+            if (!data) {
+                const syn = composerSyntheticMission();
+                if (syn) { composerMission = syn; try { composerStyleNativeMarkers(); } catch (e) {} return; }
+                if (!silent) showToast('Map badges: could not match the open mission to the cache.', '#ff9800', 4000); return;
+            }
             composerMission = data.mission;
             composerStyleNativeMarkers();
         });
@@ -6853,7 +6929,8 @@
         if (!composerMapMode || CONTEXT !== 'IFRAME') return;
         if (!document.querySelector('.mission-edit__content')) return;
         const domIds = composerDomIds();
-        if (!domIds.length) return;
+        if (!domIds.length) { if (!composerMission) { const syn = composerSyntheticMission(); if (syn) { composerMission = syn; try { composerStyleNativeMarkers(); } catch (e) {} } } return; }   // v3.62: empty editor → synthetic target
+        if (composerMission && composerMission.__synthetic) { const syn = composerSyntheticMission(); if (syn) { composerMission = syn; try { composerStyleNativeMarkers(); } catch (e) {} return; } composerMission = null; }   // outgrown the synthetic (first nav / saved) → re-match
         const covered = composerMission && domIds.slice(0, 3).every(d => (composerMission.instructions || []).some(x => String(x.id) === d));
         if (!composerMission || !covered) { composerEnsureMapMode(true); return; }
         try { composerStyleNativeMarkers(); } catch (e) {}
