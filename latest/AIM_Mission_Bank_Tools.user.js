@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.51
+// @version      3.52
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.51';
+    const SCRIPT_VERSION = '3.52';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -4077,6 +4077,13 @@
         caBtn.type = 'button';
         caBtn.style.cssText = 'flex:0 0 auto;margin-left:5px;padding:5px 9px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;';
         caBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); caSetMode(!caModeOn); };
+        // v3.52 — 🎯 shot-template ghosts: L-click = place (toggle), R-click = ⚡ commit, Shift+click = undo last ghost
+        const sgBtn = document.createElement('button');
+        sgBtn.id = SG_BTN_ID;
+        sgBtn.type = 'button';
+        sgBtn.style.cssText = 'flex:0 0 auto;margin-left:5px;padding:5px 9px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;';
+        sgBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); if (e.shiftKey) { if (!sgUndoLastGhost()) showToast('No ghost to undo.', '#888', 1500); return; } if (sg.active) sgStop(); else sgStart(); };
+        sgBtn.oncontextmenu = (e) => { e.preventDefault(); e.stopPropagation(); sgCommitOpen(); };
         const wrapBtn = document.createElement('button');
         wrapBtn.id = WRAP_BTN_ID;
         wrapBtn.type = 'button';
@@ -4085,7 +4092,8 @@
         // Right-click (M2) = toggle AUTO-WRAP for this session (applies the last-used
         // template on every mission SAVE — see applyWrapToBodyStr).
         wrapBtn.oncontextmenu = (e) => { e.preventDefault(); e.stopPropagation(); toggleAutoWrap(); };
-        row2.appendChild(autoBtn); row2.appendChild(stageBtn); row2.appendChild(caBtn); row2.appendChild(wrapBtn);
+        row2.appendChild(autoBtn); row2.appendChild(stageBtn); row2.appendChild(caBtn); row2.appendChild(sgBtn); row2.appendChild(wrapBtn);
+        sgUpdateBtn();
         // Row 3: the Click-to-Add "Insert at" bar (shown only while the mode is ON).
         const row3 = document.createElement('div');
         row3.id = CA_BAR_ID;
@@ -4390,7 +4398,10 @@
         const endIdx = () => { const rh = newInstrs.findIndex(isReturn); return rh < 0 ? newInstrs.length : rh; };
         // Insert at the END of the target group N# (before the next nav) — a nav there
         // becomes N#+1 (rest shifts down); a snapshot lands after N#'s children.
-        const g = caInsertAtNav;
+        // v3.52: no explicit "Insert at N" → the nav group of the step currently OPEN in the
+        // editor (click Nav 13 in the list, Ctrl-click the map → lands after N13's group).
+        let g = caInsertAtNav;
+        if (!g) { try { g = caOpenStepNavGroup(); } catch (e) { g = null; } }
         let insertIdx = (g && g >= 1 && g <= navIdxs.length) ? ((g < navIdxs.length) ? navIdxs[g] : endIdx()) : endIdx();
         newInstrs.splice(insertIdx, 0, c);
         newInstrs.forEach((s, k) => { if (s) s.index_in_app = k; });
@@ -4479,6 +4490,555 @@
         } catch (e) { console.warn(`${TAG} [click-add] delete failed`, e); showToast('Delete failed — see console.', '#ff5252', 3000); }
     }
 
+    // ── 🎯 Shot templates + ghost placement (v3.52, #318) ─────────────────────
+    // A SHOT TEMPLATE is a shape, not a mission: N navs on a ring around one FOCUS
+    // point, each nav followed by its own snapshot(s) aimed at the focus (Percepto
+    // ties a snapshot to the nav before it, so the emitted order is always
+    // Nav1 > Snap1[,Snap1b…] > Nav2 > Snap2 …). Placing one shows a GHOST that
+    // follows the cursor until pinned; wheel spins it, Ctrl+wheel = standoff,
+    // Alt+wheel = fan angle, 1–6 = nav count, Q/E = snaps per nav, F = flip order,
+    // Enter/click = STAGE as ghosts, Esc = drop. Ghosts live in GM per site/mission
+    // (crash-safe) and touch Percepto only on ⚡ Commit — one list hand-off per
+    // mission (open mission: setCurrentApp + native SAVE; others: ctx.saveApp) with
+    // the 🎞 wrap applied after every new snapshot during that commit.
+    // Rails: nav must sit INSIDE an FFZ (slid in along its ray when 100 ft would
+    // leave it) and ≥ SG_MIN_FT from the target's edge (thermal crop: closer and a
+    // few degrees of yaw error cuts the asset) — 100–200 ft ideal.
+    const SG_TPL_KEY = 'aim-mb-shot-templates';
+    const SG_GHOST_KEY = 'aim-mb-ghosts';
+    const SG_LAST_KEY = 'aim-mb-shot-last';
+    const SG_MIN_FT = 80, SG_IDEAL_LO = 100, SG_IDEAL_HI = 200, SG_FFZ_MARGIN_M = 3;
+    const SG_BUILTIN = {
+        'Single': { navs: 1, spreadDeg: 0, distFt: 100, snapsPerNav: 1 },
+        '3-shot 90°': { navs: 3, spreadDeg: 90, distFt: 100, snapsPerNav: 1 },
+        '3-shot 30° fan': { navs: 3, spreadDeg: 30, distFt: 100, snapsPerNav: 1 },
+        '2-shot opposite': { navs: 2, spreadDeg: 180, distFt: 100, snapsPerNav: 1 },
+    };
+    const SG_HUD_ID = 'aim-mb-sg-hud';
+    const sg = { active: false, pinned: false, tplName: '', navs: 3, spreadDeg: 90, distFt: 100, snapsPerNav: 1, rot: 0, flip: false,
+        focus: null, targetRing: null, targetName: '', ent: null, live: [], liveLayers: [], stagedLayers: [], stagedKey: '', canvas: null,
+        container: null, wheelOn: false, sid: null, mid: null };
+    function sgTplAll() {
+        let user = {};
+        try { const o = gmGet(SG_TPL_KEY, {}); if (o && typeof o === 'object') user = o; } catch (e) { console.warn(`${TAG} [🎯] template read failed`, e); }
+        const all = {};
+        Object.keys(SG_BUILTIN).forEach(k => { all[k] = Object.assign({ builtin: true }, SG_BUILTIN[k]); });
+        Object.keys(user).forEach(k => { all[k] = Object.assign({}, user[k]); });
+        return all;
+    }
+    function sgTplSaveUser(name, shape) {
+        let user = {};
+        try { const o = gmGet(SG_TPL_KEY, {}); if (o && typeof o === 'object') user = o; } catch (e) {}
+        user[name] = { navs: shape.navs, spreadDeg: shape.spreadDeg, distFt: shape.distFt, snapsPerNav: shape.snapsPerNav, savedAt: Date.now() };
+        try { gmSet(SG_TPL_KEY, user); } catch (e) { console.warn(`${TAG} [🎯] template save failed`, e); }
+    }
+    function sgTplDelete(name) {
+        let user = {};
+        try { const o = gmGet(SG_TPL_KEY, {}); if (o && typeof o === 'object') user = o; } catch (e) {}
+        delete user[name];
+        try { gmSet(SG_TPL_KEY, user); } catch (e) { console.warn(`${TAG} [🎯] template delete failed`, e); }
+    }
+    // Ghost store: { siteKey: { missionId: { name, groups: [...] } } }
+    function sgGhostsAll() { try { const o = gmGet(SG_GHOST_KEY, {}); return (o && typeof o === 'object') ? o : {}; } catch (e) { console.warn(`${TAG} [🎯] ghost read failed`, e); return {}; } }
+    let sgSaveT = null;
+    function sgGhostsWrite(all) { clearTimeout(sgSaveT); sgSaveT = setTimeout(() => { try { gmSet(SG_GHOST_KEY, all); } catch (e) { console.warn(`${TAG} [🎯] ghost save failed`, e); } }, 300); }
+    function sgGhostsFor(sid, mid) { const all = sgGhostsAll(); const s = all[envSiteKey(sid)] || {}; const m = s[String(mid)]; return m && Array.isArray(m.groups) ? m.groups : []; }
+    function sgGhostsSet(sid, mid, name, groups) {
+        const all = sgGhostsAll(); const sk = envSiteKey(sid);
+        if (!all[sk]) all[sk] = {};
+        if (!groups || !groups.length) delete all[sk][String(mid)]; else all[sk][String(mid)] = { name: name || '', groups };
+        if (!Object.keys(all[sk]).length) delete all[sk];
+        sgGhostsWrite(all);
+    }
+    function sgSiteGhosts(sid) { const all = sgGhostsAll(); const s = all[envSiteKey(sid)] || {}; return Object.keys(s).map(k => ({ mid: Number(k), name: s[k].name || '', groups: s[k].groups || [] })).filter(x => x.groups.length); }
+    // ── geometry ──
+    function sgOffset(focus, bearingDeg, distM) {
+        const b = bearingDeg * Math.PI / 180;
+        const mLat = 110540, mLng = 111320 * Math.cos(focus.lat * Math.PI / 180);
+        return { lat: focus.lat + (Math.cos(b) * distM) / mLat, lng: focus.lng + (Math.sin(b) * distM) / mLng };
+    }
+    function sgInAnyFfz(pt, ffzs) { return (ffzs || []).some(f => f.ring && f.ring.length >= 3 && genPointInPoly(pt, f.ring)); }
+    // Farthest point along the ray (focus → bearing) that is still inside an FFZ, up to distM.
+    function sgClampRay(focus, bearing, distM, ffzs) {
+        const full = sgOffset(focus, bearing, distM);
+        if (sgInAnyFfz(full, ffzs)) return { pt: full, clamped: false, ok: true };
+        let lo = 0, hi = distM, best = null;
+        for (let i = 0; i < 18; i++) { const mid = (lo + hi) / 2; const p = sgOffset(focus, bearing, mid); if (sgInAnyFfz(p, ffzs)) { best = mid; lo = mid; } else hi = mid; }
+        if (best == null) return { pt: full, clamped: true, ok: false };
+        const d = Math.max(0, best - SG_FFZ_MARGIN_M);
+        return { pt: sgOffset(focus, bearing, d), clamped: true, ok: d > 0 };
+    }
+    // Smallest asset / NFZ polygon containing the point = what the shot is "of".
+    function sgFindTarget(pt) {
+        const ent = sg.ent; if (!ent) return null;
+        let best = null, bestA = Infinity;
+        const consider = (list, kind) => (list || []).forEach(a => {
+            if (!a || !Array.isArray(a.ring) || a.ring.length < 3) return;
+            if (!genPointInPoly(pt, a.ring)) return;
+            let area = 0; try { area = mbRingArea(a.ring); } catch (e) { area = a.ring.length; }
+            if (area < bestA) { bestA = area; best = { ring: a.ring, name: a.name || '', kind }; }
+        });
+        consider(ent.assets, 'asset'); consider(ent.nfzs, 'nfz');
+        return best;
+    }
+    function sgShape() { return { navs: sg.navs, spreadDeg: sg.spreadDeg, distFt: sg.distFt, snapsPerNav: sg.snapsPerNav }; }
+    // Compute the live ring: [{lat,lng,bearing,edgeFt,inFfz,clamped,status}]
+    function sgComputeRing(focus, shape, rot, flip, targetRing) {
+        const ffzs = (sg.ent && sg.ent.ffzs) || [];
+        const n = Math.max(1, shape.navs), s = shape.spreadDeg, distM = shape.distFt / 3.28084;
+        const out = [];
+        for (let i = 0; i < n; i++) {
+            const bearing = ((rot + (i - (n - 1) / 2) * s) % 360 + 360) % 360;
+            const c = sgClampRay(focus, bearing, distM, ffzs);
+            const edgeM = targetRing ? mbPointToPolygonMeters(c.pt.lat, c.pt.lng, targetRing) : mbApproxMeters(c.pt.lat, c.pt.lng, focus.lat, focus.lng);
+            const edgeFt = edgeM * 3.28084;
+            const inFfz = c.ok && sgInAnyFfz(c.pt, ffzs);
+            const status = (!inFfz || edgeFt < SG_MIN_FT) ? 'red' : ((edgeFt < SG_IDEAL_LO || edgeFt > SG_IDEAL_HI) ? 'amber' : 'green');
+            out.push({ lat: c.pt.lat, lng: c.pt.lng, bearing, edgeFt, inFfz, clamped: c.clamped, status });
+        }
+        if (flip) out.reverse();
+        return out;
+    }
+    // ── drawing ──
+    function sgCanvas(L) { if (!sg.canvas) { try { sg.canvas = L.canvas({ padding: 0.5 }); } catch (e) { sg.canvas = null; } } return sg.canvas; }
+    function sgEnsureStyle() {
+        if (document.getElementById('aim-mb-sg-style')) return;
+        const st = document.createElement('style'); st.id = 'aim-mb-sg-style';
+        st.textContent = '.aim-mb-sg-chip, .aim-mb-sg-chip * { pointer-events: none !important; }';
+        (document.head || document.documentElement).appendChild(st);
+    }
+    function sgChip(L, lat, lng, text, bg, fg, zi) {
+        return L.marker([lat, lng], { icon: L.divIcon({ className: 'aim-mb-sg-chip', html: `<div style="pointer-events:none;background:${bg};color:${fg};font:800 10px/1 'Lato',sans-serif;padding:2px 4px;border-radius:3px;border:1px solid #10131a;box-shadow:0 1px 4px rgba(0,0,0,0.7);white-space:nowrap;transform:translate(-50%,-50%);">${escapeHtml(text)}</div>`, iconSize: [0, 0], iconAnchor: [0, 0] }), interactive: false, keyboard: false, zIndexOffset: zi || 900 });
+    }
+    function sgClearLayers(list) { const map = getLeafletMap(); list.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} }); list.length = 0; }
+    const SG_COL = { green: '#5fff5f', amber: '#ffb74d', red: '#ff5252' };
+    function sgDrawLive() {
+        sgClearLayers(sg.liveLayers);
+        if (!sg.active || !sg.focus) return;
+        const L = composerGetL(), map = getLeafletMap(); if (!L || !map) return;
+        sgEnsureStyle();
+        const cv = sgCanvas(L);
+        sg.live = sgComputeRing(sg.focus, sgShape(), sg.rot, sg.flip, sg.targetRing);
+        const keep = l => { sg.liveLayers.push(l); l.addTo(map); return l; };
+        try {
+            if (sg.targetRing) keep(L.polygon(sg.targetRing.map(p => [p.lat, p.lng]), { renderer: cv || undefined, interactive: false, color: '#ff8ad2', weight: 2, dashArray: '4 4', fill: false }));
+            keep(L.circleMarker([sg.focus.lat, sg.focus.lng], { renderer: cv || undefined, interactive: false, radius: 7, color: '#ff8ad2', weight: 2, fillColor: '#ff8ad2', fillOpacity: sg.pinned ? 0.9 : 0.35 }));
+            sg.live.forEach((p, i) => {
+                const col = SG_COL[p.status];
+                keep(L.polyline([[sg.focus.lat, sg.focus.lng], [p.lat, p.lng]], { renderer: cv || undefined, interactive: false, color: col, weight: 2, dashArray: '6 5', opacity: 0.9 }));
+                keep(L.circleMarker([p.lat, p.lng], { renderer: cv || undefined, interactive: false, radius: 9, color: col, weight: 3, fillColor: col, fillOpacity: sg.pinned ? 0.5 : 0.2 }));
+                keep(sgChip(L, p.lat, p.lng, `${i + 1}${sg.snapsPerNav > 1 ? '×' + sg.snapsPerNav : ''} · ${Math.round(p.edgeFt)} ft`, col, '#10131a', 950));
+            });
+        } catch (e) { console.warn(`${TAG} [🎯] live draw failed`, e); }
+        sgUpdateHud();
+    }
+    function sgDrawStaged(force) {
+        const mid = composerMission && composerMission.id, sid = getCurrentSiteID();
+        const groups = (mid && sid) ? sgGhostsFor(sid, mid) : [];
+        const key = `${sid}:${mid}:${groups.map(g => g.gid).join(',')}`;
+        if (!force && key === sg.stagedKey) return;
+        sg.stagedKey = key;
+        sgClearLayers(sg.stagedLayers);
+        if (!groups.length) return;
+        const L = composerGetL(), map = getLeafletMap(); if (!L || !map) return;
+        sgEnsureStyle();
+        const cv = sgCanvas(L);
+        const keep = l => { sg.stagedLayers.push(l); l.addTo(map); return l; };
+        groups.forEach((g, gi) => {
+            try {
+                keep(L.circleMarker([g.focus.lat, g.focus.lng], { renderer: cv || undefined, interactive: false, radius: 6, color: '#ff8ad2', weight: 2, fillColor: '#ff8ad2', fillOpacity: 0.7 }));
+                (g.navs || []).forEach((p, i) => {
+                    keep(L.polyline([[g.focus.lat, g.focus.lng], [p.lat, p.lng]], { renderer: cv || undefined, interactive: false, color: '#c39dff', weight: 2, dashArray: '3 5', opacity: 0.8 }));
+                    keep(L.circleMarker([p.lat, p.lng], { renderer: cv || undefined, interactive: false, radius: 8, color: '#c39dff', weight: 2, fillColor: '#c39dff', fillOpacity: 0.35 }));
+                    keep(sgChip(L, p.lat, p.lng, `G${gi + 1}.${i + 1}${(g.snapsPerNav || 1) > 1 ? '×' + g.snapsPerNav : ''}`, '#c39dff', '#10131a', 920));
+                });
+            } catch (e) { console.warn(`${TAG} [🎯] staged draw failed`, e); }
+        });
+    }
+    // ── HUD ──
+    function sgHudEl() {
+        let h = document.getElementById(SG_HUD_ID);
+        const mapC = document.querySelector('.mission-bank__map-container') || document.querySelector('.pr-map-container');
+        if (!mapC) return null;
+        if (!h) {
+            h = document.createElement('div'); h.id = SG_HUD_ID;
+            h.style.cssText = 'position:absolute;top:72px;left:8px;z-index:1200;width:250px;background:rgba(16,19,26,0.95);border:1px solid #ff8ad2;border-radius:7px;color:#e6e6e6;font:11px/1.35 "Lato","Segoe UI",sans-serif;padding:7px 9px;box-shadow:0 4px 16px rgba(0,0,0,0.7);';
+            if (getComputedStyle(mapC).position === 'static') mapC.style.position = 'relative';
+            mapC.appendChild(h);
+            h.addEventListener('mousedown', e => e.stopPropagation());
+            h.addEventListener('wheel', e => e.stopPropagation());
+        }
+        return h;
+    }
+    function sgUpdateHud() {
+        const h = sgHudEl(); if (!h) return;
+        if (!sg.active) { h.remove(); return; }
+        const all = sgTplAll();
+        const worst = sg.live.reduce((w, p) => (p.status === 'red' ? 'red' : (p.status === 'amber' && w !== 'red' ? 'amber' : w)), 'green');
+        const rows = sg.live.map((p, i) => `<span style="color:${SG_COL[p.status]};">${i + 1}: ${Math.round(p.edgeFt)} ft${p.clamped ? ' ⤵' : ''}${!p.inFfz ? ' ✕FFZ' : ''}</span>`).join(' · ');
+        const sel = `<select data-sg-tpl style="flex:1;min-width:0;background:#0f1216;border:1px solid #ff8ad2;color:#fff;border-radius:3px;font:inherit;font-size:11px;padding:1px 3px;">${Object.keys(all).map(n => `<option value="${escapeHtml(n)}" ${n === sg.tplName ? 'selected' : ''}>${escapeHtml(n)}${all[n].builtin ? '' : ' ·'}</option>`).join('')}</select>`;
+        h.innerHTML = `<div style="display:flex;align-items:center;gap:5px;margin-bottom:5px;"><b style="color:#ff8ad2;">🎯</b>${sel}<button data-sg-save title="Save the current shape (navs / fan / standoff / snaps) as a template" style="background:none;border:1px solid #456;color:#9ad;border-radius:3px;cursor:pointer;font-size:11px;padding:1px 5px;">💾</button><button data-sg-del title="Delete this template" style="background:none;border:1px solid #456;color:#9ad;border-radius:3px;cursor:pointer;font-size:11px;padding:1px 5px;">🗑</button></div>
+            <div style="display:grid;grid-template-columns:auto 1fr;gap:1px 8px;color:#cfe;">
+                <span>Navs <b style="color:#789;">1–6</b></span><b>${sg.navs}</b>
+                <span>Fan <b style="color:#789;">Alt+wheel</b></span><b>${sg.spreadDeg}°</b>
+                <span>Standoff <b style="color:#789;">Ctrl+wheel</b></span><b>${sg.distFt} ft</b>
+                <span>Spin <b style="color:#789;">wheel</b></span><b>${Math.round(sg.rot)}°</b>
+                <span>Snaps/nav <b style="color:#789;">Q/E</b></span><b>${sg.snapsPerNav}</b>
+                <span>Order <b style="color:#789;">F</b></span><b>${sg.flip ? 'last → first' : 'first → last'}</b>
+            </div>
+            <div style="margin-top:5px;color:#9ad;">${sg.pinned ? `📌 ${sg.targetName ? escapeHtml(sg.targetName) : 'focus pinned'} <span style="color:#789;">· R-click = unpin</span>` : 'move the mouse · <b>click</b> the asset to pin'}</div>
+            <div style="margin-top:3px;">${rows || '<span style="color:#789;">—</span>'}</div>
+            <div style="margin-top:6px;display:flex;gap:5px;">
+                <button data-sg-stage ${(!sg.pinned || worst === 'red') ? 'disabled' : ''} title="Enter" style="flex:1;background:${worst === 'red' ? '#3a2020' : '#2a3a2a'};border:1px solid ${worst === 'red' ? '#ff5252' : '#5fff5f'};color:${worst === 'red' ? '#ff8a8a' : '#7dff7d'};border-radius:4px;cursor:pointer;font-weight:800;padding:3px 6px;">➕ Stage ghost</button>
+                <button data-sg-cancel title="Esc" style="background:none;border:1px solid #456;color:#cfe;border-radius:4px;cursor:pointer;padding:3px 6px;">Esc</button>
+            </div>
+            ${worst === 'red' ? `<div style="margin-top:4px;color:#ff8a8a;">red = outside the FFZ or under ${SG_MIN_FT} ft from the asset — spin / push out first</div>` : ''}`;
+        h.querySelector('[data-sg-tpl]').onchange = (ev) => { sgApplyTpl(ev.target.value); sgDrawLive(); };
+        h.querySelector('[data-sg-save]').onclick = () => {
+            const nm = (prompt('Template name (navs / fan / standoff / snaps per nav are saved; spin is per placement):', sg.tplName && !sgTplAll()[sg.tplName].builtin ? sg.tplName : '') || '').trim();
+            if (!nm) return;
+            if (SG_BUILTIN[nm]) { showToast('That name is a built-in — pick another.', '#ff9800', 3000); return; }
+            sgTplSaveUser(nm, sgShape()); sg.tplName = nm; try { gmSet(SG_LAST_KEY, nm); } catch (e) {}
+            showToast(`🎯 Template "${nm}" saved.`, '#5fff5f', 3000); sgUpdateHud();
+        };
+        h.querySelector('[data-sg-del]').onclick = () => {
+            const nm = sg.tplName; const all2 = sgTplAll();
+            if (!nm || !all2[nm] || all2[nm].builtin) { showToast('Built-in templates can\'t be deleted.', '#9ad', 2500); return; }
+            if (!confirm(`Delete template "${nm}"?`)) return;
+            sgTplDelete(nm); sgApplyTpl('3-shot 90°'); sgDrawLive(); showToast(`Template "${nm}" deleted.`, '#888', 2500);
+        };
+        h.querySelector('[data-sg-stage]').onclick = () => sgStage();
+        h.querySelector('[data-sg-cancel]').onclick = () => sgStop(true);
+    }
+    function sgApplyTpl(name) {
+        const all = sgTplAll(); const t = all[name] || all['3-shot 90°'];
+        sg.tplName = all[name] ? name : '3-shot 90°';
+        sg.navs = t.navs; sg.spreadDeg = t.spreadDeg; sg.distFt = t.distFt; sg.snapsPerNav = t.snapsPerNav || 1;
+        try { gmSet(SG_LAST_KEY, sg.tplName); } catch (e) {}
+    }
+    // ── mode ──
+    function sgStart() {
+        if (CONTEXT !== 'IFRAME') return;
+        if (!caEditing()) { showToast('Open a mission in the editor first.', '#ff9800', 3500); return; }
+        const sid = getCurrentSiteID(); if (!sid) return;
+        const map = getLeafletMap(); if (!map) { showToast('Map not found.', '#ff9800', 3000); return; }
+        let last = ''; try { last = String(gmGet(SG_LAST_KEY, '') || ''); } catch (e) {}
+        sgApplyTpl(last || '3-shot 90°');
+        sg.active = true; sg.pinned = false; sg.focus = null; sg.targetRing = null; sg.targetName = ''; sg.rot = 0; sg.flip = false;
+        sg.sid = sid; sg.mid = composerMission && composerMission.id;
+        sg.container = caMapContainer();
+        try { if (map.scrollWheelZoom && map.scrollWheelZoom.enabled()) { map.scrollWheelZoom.disable(); sg.wheelOn = true; } } catch (e) {}
+        if (sg.container) {
+            sg.container.addEventListener('mousemove', sgOnMove, true);
+            sg.container.addEventListener('click', sgOnClick, true);
+            sg.container.addEventListener('contextmenu', sgOnContext, true);
+            sg.container.addEventListener('wheel', sgOnWheel, { capture: true, passive: false });
+        }
+        window.addEventListener('keydown', sgOnKey, true);
+        try { document.documentElement.setAttribute('data-aim-clickadd', '1'); } catch (e) {}   // other scripts' M2 handlers stand down
+        genFetchEntities(sid).then(ent => { sg.ent = ent; sgDrawLive(); }).catch(e => { console.warn(`${TAG} [🎯] entity load failed`, e); showToast('🎯 Could not load FFZs/assets — rails are off.', '#ff9800', 4000); sg.ent = { assets: [], ffzs: [], nfzs: [] }; });
+        sgUpdateHud(); sgUpdateBtn();
+        showToast('🎯 Ghost live — move to the asset, click to pin, wheel = spin · Ctrl+wheel = standoff · Alt+wheel = fan · 1–6 navs · Q/E snaps · F flip · Enter = stage · Esc = drop.', '#ff8ad2', 7000);
+    }
+    function sgStop(silent) {
+        if (!sg.active) return;
+        sg.active = false; sg.pinned = false; sg.focus = null; sg.targetRing = null;
+        if (sg.container) {
+            try { sg.container.removeEventListener('mousemove', sgOnMove, true); sg.container.removeEventListener('click', sgOnClick, true); sg.container.removeEventListener('contextmenu', sgOnContext, true); sg.container.removeEventListener('wheel', sgOnWheel, { capture: true }); } catch (e) {}
+        }
+        window.removeEventListener('keydown', sgOnKey, true);
+        try { if (!caModeOn) document.documentElement.removeAttribute('data-aim-clickadd'); } catch (e) {}
+        try { const map = getLeafletMap(); if (map && sg.wheelOn && map.scrollWheelZoom) map.scrollWheelZoom.enable(); } catch (e) {}
+        sg.wheelOn = false;
+        sgClearLayers(sg.liveLayers);
+        sgUpdateHud(); sgUpdateBtn();
+        if (!silent) showToast('🎯 Ghost dropped.', '#888', 1500);
+    }
+    function sgOnMove(e) { if (!sg.active || sg.pinned) return; const ll = caClickToLatLng(e); if (!ll) return; sg.focus = { lat: ll.lat, lng: ll.lng }; sgDrawLive(); }
+    function sgOnClick(e) {
+        if (!sg.active) return;
+        if (e.target && e.target.closest && e.target.closest('#' + SG_HUD_ID + ', [id^="aim-"], button, input, select')) return;
+        e.preventDefault(); e.stopPropagation();
+        const ll = caClickToLatLng(e); if (!ll) return;
+        if (!sg.pinned) { sgPin(ll); return; }
+        sgStage();
+    }
+    function sgOnContext(e) { if (!sg.active) return; e.preventDefault(); e.stopPropagation(); if (sg.pinned) { sg.pinned = false; sg.targetRing = null; sg.targetName = ''; const ll = caClickToLatLng(e); if (ll) sg.focus = { lat: ll.lat, lng: ll.lng }; sgDrawLive(); } }
+    function sgPin(ll) {
+        sg.focus = { lat: ll.lat, lng: ll.lng }; sg.pinned = true;
+        const t = sgFindTarget(sg.focus); sg.targetRing = t ? t.ring : null; sg.targetName = t ? `${t.kind === 'nfz' ? 'NFZ ' : ''}${t.name}` : '';
+        try { fetchElevation(ll.lat, ll.lng); } catch (e) {}   // warm the DEM cache for the snapshot altitude at commit
+        sgDrawLive();
+    }
+    function sgOnWheel(e) {
+        if (!sg.active) return;
+        if (e.target && e.target.closest && e.target.closest('#' + SG_HUD_ID)) return;
+        e.preventDefault(); e.stopPropagation();
+        const dir = e.deltaY > 0 ? 1 : -1;
+        if (e.ctrlKey) sg.distFt = Math.max(20, Math.min(600, sg.distFt + dir * 5));
+        else if (e.altKey) sg.spreadDeg = Math.max(0, Math.min(180, sg.spreadDeg + dir * 5));
+        else sg.rot = ((sg.rot + dir * (e.shiftKey ? 1 : 5)) % 360 + 360) % 360;
+        sgDrawLive();
+    }
+    function sgOnKey(e) {
+        if (!sg.active || caIsTypingTarget(e.target)) return;
+        const k = e.key;
+        let used = true;
+        if (k === 'Escape') sgStop();
+        else if (k === 'Enter') sgStage();
+        else if (/^[1-6]$/.test(k)) sg.navs = Number(k);
+        else if (k === 'q' || k === 'Q') sg.snapsPerNav = Math.max(1, sg.snapsPerNav - 1);
+        else if (k === 'e' || k === 'E') sg.snapsPerNav = Math.min(6, sg.snapsPerNav + 1);
+        else if (k === 'f' || k === 'F') sg.flip = !sg.flip;
+        else if (k === 'ArrowLeft') sg.rot = ((sg.rot - 5) % 360 + 360) % 360;
+        else if (k === 'ArrowRight') sg.rot = ((sg.rot + 5) % 360 + 360) % 360;
+        else if (k === 'ArrowUp') sg.distFt = Math.min(600, sg.distFt + 5);
+        else if (k === 'ArrowDown') sg.distFt = Math.max(20, sg.distFt - 5);
+        else used = false;
+        if (!used) return;
+        e.preventDefault(); e.stopPropagation();
+        if (sg.active) sgDrawLive();
+    }
+    // Insert-after target for a new group: the Click-to-Add "Insert at N" box, else the
+    // nav group of the step currently open in the editor, else end.
+    function sgInsertAfterNav() {
+        if (caInsertAtNav) return caInsertAtNav;
+        try { const g = caOpenStepNavGroup(); if (g) return g; } catch (e) {}
+        return null;
+    }
+    function sgStage() {
+        if (!sg.active || !sg.pinned || !sg.focus) return;
+        if (sg.live.some(p => p.status === 'red')) { showToast('🎯 A nav is red (outside the FFZ or under 80 ft) — spin or push out first.', '#ff5252', 4000); return; }
+        const sid = sg.sid, mid = composerMission && composerMission.id;
+        if (!sid || !mid) { showToast('No open mission to stage into.', '#ff9800', 3000); return; }
+        const groups = sgGhostsFor(sid, mid);
+        const gid = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+        groups.push({ gid, focus: { lat: sg.focus.lat, lng: sg.focus.lng }, navs: sg.live.map(p => ({ lat: p.lat, lng: p.lng })), snapsPerNav: sg.snapsPerNav, afterNav: sgInsertAfterNav(), target: sg.targetName || '', tpl: sg.tplName, createdAt: Date.now() });
+        sgGhostsSet(sid, mid, (composerMission && composerMission.name) || '', groups);
+        sgDrawStaged(true);
+        // stay live for the next asset: unpin, keep the shape + spin
+        sg.pinned = false; sg.targetRing = null; sg.targetName = '';
+        sgDrawLive(); sgUpdateBtn();
+        showToast(`➕ Ghost G${groups.length} staged (${sg.navs} nav${sg.navs > 1 ? 's' : ''} × ${sg.snapsPerNav} snap). Click the next asset, Esc when done, ⚡ Commit to write.`, '#c39dff', 4500);
+    }
+    function sgUndoLastGhost() {
+        const sid = getCurrentSiteID(), mid = composerMission && composerMission.id; if (!sid || !mid) return false;
+        const groups = sgGhostsFor(sid, mid); if (!groups.length) return false;
+        groups.pop(); sgGhostsSet(sid, mid, composerMission.name || '', groups); sgDrawStaged(true); sgUpdateBtn();
+        showToast(`↶ Last ghost removed (${groups.length} left).`, '#888', 2000);
+        return true;
+    }
+    // ── building steps ──
+    // Editor shape (open mission): copies of the last nav / snapshot like Click-to-Add.
+    function sgBuildEditorSteps(groups, instrs, wrapPresetInstrs) {
+        const isNav = s => s && (s.type_name === 'navigate' || s.type === 1);
+        const isSnap = s => s && (s.type_name === 'snapshot' || s.type === 6);
+        const pickRef = (pred) => { const list = instrs.filter(pred); if (!list.length) return null; for (let i = list.length - 1; i >= 0; i--) { if (list[i].location && list[i].location.lat != null) return list[i]; } return list[list.length - 1]; };
+        const navRef = pickRef(isNav), snapRef = pickRef(isSnap);
+        if (!navRef || !snapRef) return { error: 'needs an existing Navigate + Snapshot to copy settings from' };
+        const nextId = () => 9000000000 + (((Date.now ? Date.now() : 1) % 1000000) * 100) + (caIdBump++);
+        const ids = [];
+        const copy = (ref, loc) => { const c = Object.assign({}, ref); c.id = nextId(); ids.push(c.id); if (c.extra_options) c.extra_options = Object.assign({}, c.extra_options); if (loc) c.location = { lat: loc.lat, lng: loc.lng }; return c; };
+        const perGroup = groups.map(g => {
+            const steps = [];
+            const ground = getElevationFromCache(g.focus.lat, g.focus.lng);
+            g.navs.forEach(p => {
+                steps.push(copy(navRef, p));
+                for (let k = 0; k < (g.snapsPerNav || 1); k++) {
+                    const sc = copy(snapRef, g.focus);
+                    sc.value2 = 1; sc.extra_options = Object.assign({}, sc.extra_options || {}, { pitch: (sc.extra_options && sc.extra_options.pitch != null) ? sc.extra_options.pitch : 1001 });
+                    if (ground != null) sc.value1 = ground + (defaultSnapAglFt / 3.28084);
+                    steps.push(sc);
+                    (wrapPresetInstrs || []).forEach(w => { const c = JSON.parse(JSON.stringify(w)); c.id = nextId(); ids.push(c.id); if (c.location && c.location.lat != null) c.location = { lat: g.focus.lat, lng: g.focus.lng }; steps.push(c); });
+                }
+            });
+            return { g, steps };
+        });
+        return { perGroup, ids };
+    }
+    // Wire shape (fetched mission): type numbers, no ids; pcmNormStep at the end.
+    function sgBuildWireSteps(groups, instrs, wrapPresetInstrs, groundOf) {
+        const navRef = [...instrs].reverse().find(s => s && s.type === 1 && s.location && s.location.lat != null) || [...instrs].reverse().find(s => s && s.type === 1);
+        const snapRef = [...instrs].reverse().find(s => s && s.type === 6 && s.location && s.location.lat != null) || [...instrs].reverse().find(s => s && s.type === 6);
+        if (!navRef || !snapRef) return { error: 'needs an existing nav + snapshot to copy settings from' };
+        const perGroup = groups.map(g => {
+            const steps = [];
+            const ground = groundOf(g.focus);
+            g.navs.forEach(p => {
+                const n = pcmNormStep(navRef); n.location = { lat: p.lat, lng: p.lng }; steps.push(n);
+                for (let k = 0; k < (g.snapsPerNav || 1); k++) {
+                    const s = pcmNormStep(snapRef); s.location = { lat: g.focus.lat, lng: g.focus.lng }; s.value2 = 1;
+                    s.extra_options = Object.assign({}, s.extra_options || {}, { pitch: (s.extra_options && s.extra_options.pitch != null) ? s.extra_options.pitch : 1001 });
+                    if (ground != null) s.value1 = ground + (defaultSnapAglFt / 3.28084);
+                    steps.push(s);
+                    (wrapPresetInstrs || []).forEach(w => { const c = pcmNormStep(w); if (c.location && c.location.lat != null) c.location = { lat: g.focus.lat, lng: g.focus.lng }; steps.push(c); });
+                }
+            });
+            return { g, steps };
+        });
+        return { perGroup };
+    }
+    // Splice each group's steps at the end of its target nav group (before the next nav), else before returnHome.
+    function sgSplice(instrs, perGroup, isNavFn, isReturnFn) {
+        let out = instrs.slice();
+        perGroup.forEach(({ g, steps }) => {
+            const navIdxs = []; out.forEach((s, k) => { if (isNavFn(s)) navIdxs.push(k); });
+            const rh = out.findIndex(isReturnFn); const end = rh < 0 ? out.length : rh;
+            const a = g.afterNav;
+            const at = (a && a >= 1 && a <= navIdxs.length) ? ((a < navIdxs.length) ? navIdxs[a] : end) : end;
+            out = out.slice(0, at).concat(steps, out.slice(at));
+        });
+        return out;
+    }
+    function sgWrapChoice() {
+        // last-used 🎞 template if it resolves; '' = none
+        const r = wrapResolveLast();
+        return r.error ? { name: '', steps: [], note: r.error } : { name: r.name, steps: r.steps, note: '' };
+    }
+    // ⚡ Commit the OPEN mission's ghosts into the editor working copy (native SAVE finishes it).
+    function sgCommitOpen() {
+        const sid = getCurrentSiteID(), mid = composerMission && composerMission.id;
+        if (!sid || !mid) { showToast('Open a mission first.', '#ff9800', 3000); return; }
+        const groups = sgGhostsFor(sid, mid);
+        if (!groups.length) { showToast('No ghosts staged on this mission.', '#9ad', 2500); return; }
+        const ctx = findMissionAppCtx();
+        if (!ctx || typeof ctx.setCurrentApp !== 'function' || !ctx.currentApp) { showToast('Editor context not found.', '#ff5252', 3500); return; }
+        const app = ctx.currentApp;
+        let instrs = app.instructions || [];
+        if (!instrs.length) { try { const lc = findMissionEditorCtx(); if (lc && Array.isArray(lc.instrs) && lc.instrs.length) instrs = lc.instrs; } catch (e) {} }
+        const wrap = sgWrapChoice();
+        const useWrap = wrap.steps.length ? confirm(`Commit ${groups.length} ghost group(s) into "${app.name || mid}" and wrap every new snapshot with 🎞 "${wrap.name}"?\n\nCancel = commit WITHOUT the wrap.`) : (confirm(`Commit ${groups.length} ghost group(s) into "${app.name || mid}"?\n\n(No 🎞 wrap template to apply — ${wrap.note}.)`) ? false : null);
+        if (useWrap === null) return;
+        const built = sgBuildEditorSteps(groups, instrs, useWrap ? wrap.steps : []);
+        if (built.error) { showToast(`🎯 Can't commit — this mission ${built.error}.`, '#ff5252', 5000); return; }
+        const isNav = s => s && (s.type_name === 'navigate' || s.type === 1);
+        const isReturn = s => s && (s.type_name === 'returnHome' || s.type === 99);
+        const newInstrs = sgSplice(instrs.map(s => Object.assign({}, s)), built.perGroup, isNav, isReturn);
+        newInstrs.forEach((s, k) => { if (s) s.index_in_app = k; });
+        try {
+            ctx.setCurrentApp(Object.assign({}, app, { instructions: newInstrs }));
+            try { composerStyleNativeMarkers(); } catch (e) {}
+            if (caUndoStack.length && caUndoStack[caUndoStack.length - 1].appId !== app.id) caUndoStack = [];
+            caUndoStack.push({ op: 'tpl', ids: built.ids, name: '🎯 ghosts', appId: app.id });
+            sgGhostsSet(sid, mid, app.name || '', []); sgDrawStaged(true); sgUpdateBtn();
+            const added = built.perGroup.reduce((a, p) => a + p.steps.length, 0);
+            console.log(`${TAG} [🎯] committed ${groups.length} group(s) → ${added} step(s) into "${app.name}"${useWrap ? ` with wrap "${wrap.name}"` : ''}`);
+            showToast(`⚡ ${groups.length} ghost group(s) → ${added} step(s) staged in the editor${useWrap ? ' (wrapped)' : ''}. Ctrl+Z removes the batch · SAVE when done.`, '#5fff5f', 6500);
+        } catch (e) { console.warn(`${TAG} [🎯] setCurrentApp failed`, e); showToast('Commit failed — see console.', '#ff5252', 3500); }
+    }
+    // ⚡ Commit EVERY mission's ghosts on the site (one save each). The mission open in
+    // the editor is skipped (commit it from the editor so unsaved edits aren't clobbered).
+    async function sgCommitAll(panel) {
+        const sid = getCurrentSiteID(); if (!sid) return;
+        const list = sgSiteGhosts(sid);
+        if (!list.length) { showToast('No ghosts on this site.', '#9ad', 2500); return; }
+        const ctx = findMissionAppCtx();
+        if (!ctx || typeof ctx.saveApp !== 'function') { showToast('Mission context not found — be on the Mission Bank page.', '#ff5252', 4000); return; }
+        const openMid = composerMission && composerMission.id;
+        const work = list.filter(x => x.mid !== openMid);
+        const skippedOpen = list.length - work.length;
+        if (!work.length) { showToast('Only the OPEN mission has ghosts — use ⚡ Commit in the editor.', '#ff9800', 4000); return; }
+        const wrap = sgWrapChoice();
+        const totalGroups = work.reduce((a, x) => a + x.groups.length, 0);
+        const useWrap = wrap.steps.length ? confirm(`Commit ${totalGroups} ghost group(s) across ${work.length} mission(s)${skippedOpen ? ` (the open mission is skipped — commit it from the editor)` : ''}, wrapping every new snapshot with 🎞 "${wrap.name}"?\n\nA JSON backup downloads first. Cancel = commit WITHOUT the wrap.`) : (confirm(`Commit ${totalGroups} ghost group(s) across ${work.length} mission(s)?\n\n(No 🎞 wrap template to apply — ${wrap.note}.) A JSON backup downloads first.`) ? false : null);
+        if (useWrap === null) return;
+        const statusEl = panel && panel.querySelector('[data-sg-status]');
+        const setStatus = t => { if (statusEl) statusEl.textContent = t; };
+        setStatus('Fetching missions…');
+        let missions;
+        try { missions = await mbFetchMissionsFull(sid); } catch (e) { console.warn(`${TAG} [🎯] fetch failed`, e); showToast('Fetch failed — see console.', '#ff5252', 4000); return; }
+        const byId = new Map(missions.map(m => [m.id, m]));
+        const todo = work.map(x => ({ x, m: byId.get(x.mid) })).filter(t => t.m);
+        const gone = work.length - todo.length;
+        if (!srmBackup(sid, todo.map(t => t.m), '🎯 ghosts', 'preghosts')) return;
+        // elevations for every focus (snapshot altitude = ground + default AGL)
+        const pts = []; todo.forEach(t => t.x.groups.forEach(g => { if (getElevationFromCache(g.focus.lat, g.focus.lng) == null) pts.push({ lat: g.focus.lat, lng: g.focus.lng }); }));
+        if (pts.length) { setStatus(`Fetching ${pts.length} elevation(s)…`); try { await bulkFetchElevations(pts); } catch (e) { console.warn(`${TAG} [🎯] elevation fetch failed`, e); } }
+        let ok = 0, fail = 0; const failed = [];
+        renameSuppressAutoAgl++;
+        try {
+            for (let i = 0; i < todo.length; i++) {
+                const { x, m } = todo[i];
+                setStatus(`Saving ${i + 1}/${todo.length} — ${m.name}…`);
+                try {
+                    const built = sgBuildWireSteps(x.groups, m.instructions || [], useWrap ? wrap.steps : [], f => getElevationFromCache(f.lat, f.lng));
+                    if (built.error) throw new Error(built.error);
+                    const base = (m.instructions || []).map(pcmNormStep);
+                    const next = sgSplice(base, built.perGroup, s => s && s.type === 1, s => s && s.type === 99);
+                    const flags = mbStepFlags(next, genEntCache[sid] || null).filter(f => f.tier !== 'near');
+                    if (flags.length) throw new Error(`${flags.length} step(s) would be inside an NFZ / outside the FFZ (first: #${flags[0].num}) — fix in the editor`);
+                    await ctx.saveApp(Object.assign({}, m, { instructions: next }), m.name);
+                    sgGhostsSet(sid, x.mid, m.name, []);
+                    ok++;
+                } catch (e) { fail++; failed.push(m.name); console.warn(`${TAG} [🎯] commit FAILED for "${m.name}"`, e); }
+                await new Promise(r => setTimeout(r, 150));
+            }
+        } finally { renameSuppressAutoAgl--; }
+        setStatus('');
+        showToast(`⚡ Ghosts committed: ${ok} mission(s)${fail ? ` · ${fail} FAILED (see console)` : ''}${gone ? ` · ${gone} mission(s) no longer exist (ghosts kept)` : ''}${skippedOpen ? ' · open mission skipped' : ''}.`, fail ? '#ff9800' : '#5fff5f', 8000);
+        console.log(`${TAG} [🎯] commit-all ok=${ok} fail=${fail}${failed.length ? ` failed=[${failed.join(', ')}]` : ''} gone=${gone} skippedOpen=${skippedOpen}`);
+        try { fetchMissions(sid, () => {}, () => {}); } catch (e) {}
+        sgDrawStaged(true); sgUpdateBtn();
+        if (panel) { try { panel.remove(); } catch (e) {} sgOpenPanel(); }
+    }
+    // Site panel: every mission with ghosts, group counts, ⚡ Commit all, 🗑 per mission.
+    function sgOpenPanel() {
+        const ID = 'aim-mb-sg-panel';
+        const old = document.getElementById(ID); if (old) { old.remove(); return; }
+        const sid = getCurrentSiteID(); if (!sid) return;
+        const list = sgSiteGhosts(sid);
+        const openMid = composerMission && composerMission.id;
+        const p = document.createElement('div'); p.id = ID;
+        p.style.cssText = 'position:fixed;top:60px;right:24px;width:420px;max-height:80vh;display:flex;flex-direction:column;z-index:2147483602;background:#161a20;border:1px solid #c39dff;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;';
+        const wrap = sgWrapChoice();
+        p.innerHTML = `<div style="display:flex;align-items:center;justify-content:space-between;gap:14px;padding:9px 12px;background:rgba(195,157,255,0.08);border-bottom:1px solid rgba(195,157,255,0.3);">
+                <span style="font-weight:800;color:#c39dff;font-size:13px;">🎯 Ghosts — site ${escapeHtml(String(sid))}</span>
+                <button data-sg-close style="background:rgba(255,255,255,0.12);border:none;color:#fff;width:22px;height:22px;border-radius:4px;cursor:pointer;">✕</button>
+            </div>
+            <div style="padding:6px 12px;font-size:11px;color:#9ad;border-bottom:1px solid #2a2f38;">${list.length} mission(s) with staged ghosts · ${list.reduce((a, x) => a + x.groups.length, 0)} group(s) · wrap on commit: <b style="color:#fff;">${wrap.name ? escapeHtml(wrap.name) : 'none'}</b>${wrap.note ? ` <span style="color:#ff9800;">(${escapeHtml(wrap.note)})</span>` : ''} <span style="color:#789;">· 🎞 Apply a template once to change it</span></div>
+            <div style="overflow:auto;flex:1;padding:4px 10px;font-size:11px;">${list.length ? list.map(x => `<div style="display:flex;align-items:center;gap:6px;padding:3px 2px;border-bottom:1px solid #20262e;">
+                    <span style="flex:1;color:#e6e6e6;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(x.name || ('#' + x.mid))}${x.mid === openMid ? ' <span style="color:#7adfe6;font-weight:400;">· open in editor</span>' : ''}</span>
+                    <span style="color:#9ad;white-space:nowrap;">${x.groups.length} group(s) · ${x.groups.reduce((a, g) => a + g.navs.length, 0)} navs · ${x.groups.reduce((a, g) => a + g.navs.length * (g.snapsPerNav || 1), 0)} snaps</span>
+                    <button data-sg-drop="${x.mid}" title="Drop this mission's ghosts" style="background:none;border:1px solid #456;color:#ff8a8a;border-radius:3px;cursor:pointer;font-size:10px;padding:0 4px;">🗑</button>
+                </div>`).join('') : '<div style="padding:10px;color:#888;">No ghosts yet — open a mission, 🎯 in the editor toolbar, click assets.</div>'}</div>
+            <div style="padding:9px 12px;border-top:1px solid #2a2f38;display:flex;align-items:center;gap:8px;">
+                <span data-sg-status style="flex:1;font-size:11px;color:#9ad;"></span>
+                <button data-sg-commit-all ${list.length ? '' : 'disabled'} style="padding:6px 12px;background:#c39dff;border:none;color:#1a0f2e;border-radius:6px;cursor:pointer;font-weight:800;">⚡ Commit all</button>
+            </div>`;
+        document.body.appendChild(p);
+        mbPanelMovable(p, p.firstElementChild);
+        p.querySelector('[data-sg-close]').onclick = () => p.remove();
+        p.querySelectorAll('[data-sg-drop]').forEach(b => b.onclick = () => { const mid = Number(b.getAttribute('data-sg-drop')); if (!confirm('Drop every ghost on this mission?')) return; sgGhostsSet(sid, mid, '', []); sgDrawStaged(true); sgUpdateBtn(); p.remove(); sgOpenPanel(); });
+        p.querySelector('[data-sg-commit-all]').onclick = () => sgCommitAll(p);
+    }
+    // Editor toolbar button state: 🎯 (idle) / 🎯 LIVE / ⚡ N ghosts to commit.
+    const SG_BTN_ID = 'aim-mb-sg-btn';
+    function sgUpdateBtn() {
+        const b = document.getElementById(SG_BTN_ID); if (!b) return;
+        const sid = getCurrentSiteID(), mid = composerMission && composerMission.id;
+        const n = (sid && mid) ? sgGhostsFor(sid, mid).length : 0;
+        b.textContent = sg.active ? '🎯 LIVE' : (n ? `🎯 ⚡ ${n}` : '🎯 Shots');
+        b.style.background = sg.active ? 'rgba(255,138,210,0.25)' : (n ? 'rgba(195,157,255,0.2)' : 'rgba(255,138,210,0.1)');
+        b.style.border = `1px solid ${sg.active ? '#ff8ad2' : (n ? '#c39dff' : 'rgba(255,138,210,0.5)')}`;
+        b.style.color = sg.active ? '#ffb0e0' : (n ? '#d8c3ff' : '#ff8ad2');
+        b.title = sg.active ? 'Ghost is live — Esc drops it. Right-click = ⚡ Commit staged ghosts.' : (n ? `${n} ghost group(s) staged on this mission — LEFT-click = place more, RIGHT-click = ⚡ Commit into the editor (then SAVE). Shift+click = undo last ghost.` : 'Shot template ghost: click = start placing (wheel spin · Ctrl+wheel standoff · Alt+wheel fan · 1–6 navs · Q/E snaps · F flip · Enter stage · Esc drop). Right-click = ⚡ Commit staged ghosts.');
+    }
+    // Per-tick: keep the staged ghosts drawn for the open mission (cheap key compare).
+    function sgTick() {
+        if (CONTEXT !== 'IFRAME') return;
+        try { if (caEditing()) sgDrawStaged(false); else if (sg.stagedLayers.length || sg.active) { sgStop(true); sgClearLayers(sg.stagedLayers); sg.stagedKey = ''; } } catch (e) {}
+    }
+    // Nav group (1-based) of the step currently open in the editor — Click-to-Add + 🎯 insert after it.
+    function caOpenStepNavGroup() {
+        const id = getOpenStepId(); if (id == null) return null;
+        const ctx = findMissionAppCtx(); if (!ctx || !ctx.currentApp) return null;
+        let instrs = ctx.currentApp.instructions || [];
+        if (!instrs.length) { try { const lc = findMissionEditorCtx(); if (lc && Array.isArray(lc.instrs)) instrs = lc.instrs; } catch (e) {} }
+        const isNav = s => s && (s.type_name === 'navigate' || s.type === 1);
+        let g = 0;
+        for (let i = 0; i < instrs.length; i++) { if (isNav(instrs[i])) g++; if (instrs[i] && String(instrs[i].id) === String(id)) return g || null; }
+        return null;
+    }
     // ── 🎞 Wrap templates: the Click-to-Add finisher ─────────────────────────
     // A wrap template is a NAMED, ORDERED sequence of saved step presets (the
     // 📋-captured ones from ➕ Stage — Camera Thermal, GEM On, Wait, GEM Off…).
@@ -5541,6 +6101,7 @@
         if (!map || typeof map.eachLayer !== 'function') return;
         composerBindMapEvents();
         caBindMap();          // (re)attach Click-to-Add handlers to the current map container
+        try { sgTick(); sgUpdateBtn(); } catch (e) {}   // v3.52 — keep staged 🎯 ghosts drawn for the open mission
         updateCaBanner();     // keep the armed banner present if the container rebuilt
         caUpdateBoxZoom();    // keep Shift+drag box-zoom OFF while the editor is open
         installComposerMarkerEvents();
@@ -15188,6 +15749,7 @@
                 <button class="aim-mb-tbtn ${mcv.on ? 'active' : ''}" data-mcv-toggle title="Show which pads are already claimed by macro (merged) missions — each macro gets a color + name chip; white dashed pads have missions but no macro yet. Click-through.">🧩 Macros</button>
                 <button class="aim-mb-tbtn" data-srm-open title="Remove tab: find every step of a chosen type across ALL missions on this site (flag poles, 1s waits, …) and remove them after a per-row review; flag poles take their paired nav too. Update tab: set every wait of the ticked durations to a new value. Backup JSON downloads before anything saves.">🧹 Steps</button>
                 <button class="aim-mb-tbtn" data-msf-check title="Check every mission's navs + flag poles against the site's NFZs (Percepto refuses the save) and FFZs — fills the 🚩 column. Runs only when clicked; takes a while on big sites but the panel stays usable.">${msfRunning ? '🚩 …' : '🚩 Check'}</button>
+                <button class="aim-mb-tbtn" data-sg-open title="🎯 Ghosts staged on this site's missions (shot templates placed in the editor but not committed yet) — review, drop, or ⚡ Commit all: one save per mission with the 🎞 wrap applied after every new snapshot.">🎯 Ghosts</button>
                 <button class="aim-mb-tbtn" data-mrs-open title="Restore a mission: re-create one Delete Guard banked in the last 72 h, or restore in place from a backup JSON this script downloaded before a bulk edit. Same write path as every in-place tool; verified by re-fetch.">↩ Restore</button>
                 <button class="aim-mb-tbtn ${panelState.distanceUnit === 'imperial' ? 'active' : ''}" data-unit="imperial">mi</button>
                 <button class="aim-mb-tbtn ${panelState.distanceUnit === 'metric' ? 'active' : ''}" data-unit="metric">km</button>
@@ -15882,6 +16444,9 @@
         // v3.07 — ↩ mission restore (Delete Guard ring / backup file)
         const mrsBtn = panelEl.querySelector('[data-mrs-open]');
         if (mrsBtn) mrsBtn.onclick = () => mrsOpen();
+        // v3.52 — 🎯 ghosts panel
+        const sgOpenBtn = panelEl.querySelector('[data-sg-open]');
+        if (sgOpenBtn) sgOpenBtn.onclick = () => sgOpenPanel();
         // v3.43 — 🚩 manual step check
         const msfBtn = panelEl.querySelector('[data-msf-check]');
         if (msfBtn) { msfBtn.disabled = !!msfRunning; msfBtn.onclick = () => msfRun(getCurrentSiteID(), { fresh: !!(msfCache && msfCache.sid === getCurrentSiteID()) }); }
