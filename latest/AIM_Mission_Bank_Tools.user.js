@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.71
+// @version      3.72
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.71';
+    const SCRIPT_VERSION = '3.72';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -8286,7 +8286,8 @@
                         <span title="Shots on one aim must be at least this far apart in bearing (90° is tried first)">min angle</span><input data-gen-auto-sep type="number" min="5" max="180" step="5" style="width:46px;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px;"><span>°</span>
                         <span title="A nav may shoot at most this many aims">· max aims/nav</span><input data-gen-auto-maxnav type="number" min="1" max="6" style="width:40px;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px;">
                     </div>
-                    <div style="color:#9a8bb8;font-size:10px;margin-top:3px;">Rows (wells within row ≤): trios → broadside navs on both sides with one shot per gap (two wells per image) + one end-on shot of the group. Lone assets: distance (band) → angle (≥ min, 90° first) → count → sharing (≤ max/nav). Never outside the FFZ / over an asset or NFZ · ordered from base · 🎞 wrap at Create · review list after.</div>
+                    <label style="display:flex;align-items:center;gap:6px;margin-top:5px;cursor:pointer;color:#d8c3ff;" title="Create the mission with only the stock centroid shot and stage the plan as ghosts on it: open the mission, reorder ↑↓ / drop ✕ / ⟲ auto-order in the 🎯 HUD, then ⚡ commit (the stock shot is replaced, wrap chosen at commit)"><input type="checkbox" data-gen-auto-ghost> 👻 Stage as ghosts — review / reorder in the editor, ⚡ commit when ready</label>
+                    <div style="color:#9a8bb8;font-size:10px;margin-top:3px;">Rows (wells within row ≤): trios → broadside navs on both sides with one shot per gap (two wells per image) + one end-on shot of the group. Lone assets: distance (band) → angle (≥ min, 90° first) → count → sharing (≤ max/nav). Never outside the FFZ / over an asset or NFZ · ordered from base · 🎞 wrap at Create (or at commit for ghosts) · review list after.</div>
                 </div>
                 <div style="display:flex;align-items:center;gap:6px;margin-top:7px;"><label style="color:#cfe;white-space:nowrap;">Name</label><input data-gen-bulk-name value="{section} - {asset}" title="Tokens: {section} = N/E/S/W · {asset} = asset name" style="flex:1;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:2px 6px;border-radius:3px;font:inherit;font-size:11px;"></div>
                 <div style="color:#789;font-size:10px;margin-top:2px;">Tokens: <b>{section}</b> = N/E/S/W · <b>{asset}</b> = asset name (e.g. <b>NNE - {asset}</b>)</div>
@@ -8421,17 +8422,18 @@
         };
         refreshTpls('');
         // v3.59 — 🎯 Auto-shots controls (GM-persisted)
-        const autoCb = p.querySelector('[data-gen-auto]'), autoTpl = p.querySelector('[data-gen-auto-tpl]'), autoPair = p.querySelector('[data-gen-auto-pair]'), autoLo = p.querySelector('[data-gen-auto-lo]'), autoHi = p.querySelector('[data-gen-auto-hi]'), autoSep = p.querySelector('[data-gen-auto-sep]'), autoMaxNav = p.querySelector('[data-gen-auto-maxnav]');
+        const autoCb = p.querySelector('[data-gen-auto]'), autoTpl = p.querySelector('[data-gen-auto-tpl]'), autoPair = p.querySelector('[data-gen-auto-pair]'), autoLo = p.querySelector('[data-gen-auto-lo]'), autoHi = p.querySelector('[data-gen-auto-hi]'), autoSep = p.querySelector('[data-gen-auto-sep]'), autoMaxNav = p.querySelector('[data-gen-auto-maxnav]'), autoGhost = p.querySelector('[data-gen-auto-ghost]');
         const ap = genAutoPrefs();
-        autoCb.checked = !!ap.on; autoPair.value = String(ap.pairFt); autoLo.value = String(ap.shareLo); autoHi.value = String(ap.shareHi); autoSep.value = String(ap.minSep); autoMaxNav.value = String(ap.maxPerNav);
+        autoCb.checked = !!ap.on; autoPair.value = String(ap.pairFt); autoLo.value = String(ap.shareLo); autoHi.value = String(ap.shareHi); autoSep.value = String(ap.minSep); autoMaxNav.value = String(ap.maxPerNav); autoGhost.checked = !!ap.ghost;
         autoTpl.innerHTML = Object.keys(sgTplAll()).map(k => `<option value="${escapeHtml(k)}" ${k === ap.tpl ? 'selected' : ''}>${escapeHtml(k)}</option>`).join('');
         const autoSync = () => {
             const on = autoCb.checked;
             scanCb.disabled = on; tplSel.disabled = on;
             goBtn.textContent = on ? '🎯 Create' : '⊕ Create';
-            genAutoSavePrefs({ on, tpl: autoTpl.value, pairFt: Number(autoPair.value), shareLo: Number(autoLo.value), shareHi: Number(autoHi.value), minSep: Number(autoSep.value), maxPerNav: Number(autoMaxNav.value) });
+            genAutoSavePrefs({ on, tpl: autoTpl.value, pairFt: Number(autoPair.value), shareLo: Number(autoLo.value), shareHi: Number(autoHi.value), minSep: Number(autoSep.value), maxPerNav: Number(autoMaxNav.value), ghost: !!autoGhost.checked });
+            goBtn.textContent = on ? (autoGhost.checked ? '👻 Create + stage' : '🎯 Create') : '⊕ Create';
         };
-        autoCb.onchange = autoSync; autoTpl.onchange = autoSync; autoPair.onchange = autoSync; autoLo.onchange = autoSync; autoHi.onchange = autoSync; autoSep.onchange = autoSync; autoMaxNav.onchange = autoSync;
+        autoCb.onchange = autoSync; autoTpl.onchange = autoSync; autoPair.onchange = autoSync; autoLo.onchange = autoSync; autoHi.onchange = autoSync; autoSep.onchange = autoSync; autoMaxNav.onchange = autoSync; autoGhost.onchange = autoSync;
         autoSync();
         goBtn.onclick = async () => {
             if (genBulkBusy) return;
@@ -8441,10 +8443,14 @@
             const template = tplSel.value ? (tplLoadAll()[tplSel.value] || null) : null;
             let auto = null;
             if (autoCb.checked) {
-                const wrap = await sgPickWrap(`🎯 Auto-shots on ${picked.length} pad(s) · template "${autoTpl.value}" · wrap after every snapshot`);
-                if (!wrap) return;
                 const ap2 = genAutoPrefs();
-                auto = { tpl: autoTpl.value, pairFt: ap2.pairFt, shareLo: ap2.shareLo, shareHi: ap2.shareHi, minSep: ap2.minSep, maxPerNav: ap2.maxPerNav, wrapSteps: wrap.steps || [] };
+                let wrapSteps = [];
+                if (!ap2.ghost) {
+                    const wrap = await sgPickWrap(`🎯 Auto-shots on ${picked.length} pad(s) · template "${autoTpl.value}" · wrap after every snapshot`);
+                    if (!wrap) return;
+                    wrapSteps = wrap.steps || [];
+                }
+                auto = { tpl: autoTpl.value, pairFt: ap2.pairFt, shareLo: ap2.shareLo, shareHi: ap2.shareHi, minSep: ap2.minSep, maxPerNav: ap2.maxPerNav, ghost: !!ap2.ghost, wrapSteps };
             }
             genBulkCommit(picked, ffzs, { inspectionScan: scan, nameTemplate, template, auto }, p.querySelector('[data-gen-bulk-status]'), goBtn);
         };
@@ -8463,7 +8469,7 @@
     const GEN_AUTO_KEY = 'aim-mb-gen-auto';
     const GEN_AUTO_BIG_FT = 60;      // a child longer than this → "centroid may be wrong" flag
     function genAutoPrefs() {
-        const d = { on: false, tpl: '3-shot 90°', pairFt: 30, shareLo: 95, shareHi: 110, minSep: 45, maxPerNav: 2 };
+        const d = { on: false, tpl: '3-shot 90°', pairFt: 30, shareLo: 95, shareHi: 110, minSep: 45, maxPerNav: 2, ghost: false };
         try { const sv = gmGet(GEN_AUTO_KEY, null); if (sv && typeof sv === 'object') Object.assign(d, sv); } catch (e) { console.warn(`${TAG} [gen-auto] prefs read failed`, e); }
         d.pairFt = Number(d.pairFt); if (!Number.isFinite(d.pairFt) || d.pairFt < 0) d.pairFt = 30;
         d.shareLo = Number(d.shareLo); if (!Number.isFinite(d.shareLo) || d.shareLo < SG_MIN_FT) d.shareLo = 95;
@@ -8669,12 +8675,15 @@
             report.fallback++; report.flags.push(`no legal spot for any aim — single stock nav at ${Math.round(nav.standoffFt)} ft`);
             groups.push({ gid: 'auto', focus: { lat: d0.lat, lng: d0.lng }, navs: [{ lat: nav.point.lat, lng: nav.point.lng, snaps: 1 }], snapsPerNav: 1, target: d0.name || 'pad', tpl: 'fallback' });
         }
+        // v3.72 ghost form: one ghost group per nav (reorder ↑↓ / drop ✕ / ⟲ auto-order in the 🎯 HUD), the first
+        // carries the aim dots for drawing and `replace` so the commit strips the stock centroid shot.
+        const ghostGroups = groups.length ? groups[0].navs.map((n, i) => ({ gid: `auto${i}${Date.now().toString(36)}`, focus: (n.aims && n.aims[0]) || groups[0].focus, navs: [n], snapsPerNav: 1, target: `N${i + 1}`, tpl: groups[0].tpl, dots: i === 0 ? (groups[0].dots || []) : [], replace: i === 0, createdAt: Date.now() })) : [];
         const built = sgBuildWireSteps(groups, stock.instructions, opts.wrapSteps || [], f => getElevationFromCache(f.lat, f.lng));
-        if (built.error) { report.flags.push(`build error: ${built.error}`); return { instructions: stock.instructions, name: stock.name, report }; }
+        if (built.error) { report.flags.push(`build error: ${built.error}`); return { instructions: stock.instructions, name: stock.name, report, stock: stock.instructions, ghostGroups }; }
         const shell = stock.instructions.filter(s => s.type === 0 || s.type === 99);   // takeoff + returnHome
         const next = sgSplice(shell, built.perGroup, s => s && s.type === 1, s => s && s.type === 99);
         report.navs = next.filter(s => s.type === 1).length; report.snaps = next.filter(s => s.type === 6).length;
-        return { instructions: next, name: stock.name, report };
+        return { instructions: next, name: stock.name, report, stock: stock.instructions, ghostGroups };
     }
     // Review list after an Auto-shots run: flagged pads first, copyable.
     function genAutoReport(reports, created) {
@@ -8731,7 +8740,16 @@
                 const flags = mbStepFlags(built.instructions, ent).filter(f => f.tier !== 'near');
                 if (flags.length) { fail++; built.report.flags.push(`${flags.length} step(s) inside an NFZ / outside the FFZ — not created`); built.report.created = false; reports.push(built.report); continue; }
             }
-            try { const res = await ctx.saveApp({ id: null, type: 1, instructions: built.instructions, data_report_object_arr: [] }, built.name); ok++; if (built.report) { const saved = (res && res.app) ? res.app : res; built.report.mid = (saved && saved.id != null) ? saved.id : null; built.report.created = true; reports.push(built.report); } }
+            const ghostMode = !!(auto && auto.ghost && built.ghostGroups && built.ghostGroups.length && built.stock);
+            try {
+                const res = await ctx.saveApp({ id: null, type: 1, instructions: ghostMode ? built.stock : built.instructions, data_report_object_arr: [] }, built.name); ok++;
+                const saved = (res && res.app) ? res.app : res;
+                if (ghostMode) {
+                    if (saved && saved.id != null) { sgGhostsSet(getCurrentSiteID(), saved.id, built.name, built.ghostGroups); if (built.report) built.report.flags.push(`staged as ${built.ghostGroups.length} ghost nav(s) — open it, review / reorder in 🎯, then ⚡ commit (the stock centroid shot is replaced)`); }
+                    else if (built.report) built.report.flags.push('saved, but no mission id came back — ghosts NOT staged (stock centroid shot only)');
+                }
+                if (built.report) { built.report.mid = (saved && saved.id != null) ? saved.id : null; built.report.created = true; reports.push(built.report); }
+            }
             catch (e) { fail++; console.warn(`${TAG} [gen-bulk] failed "${built.name}"`, e); if (built.report) { built.report.flags.push(`save failed: ${(e && e.message) || e}`); built.report.created = false; reports.push(built.report); } }
             if (auto) await new Promise(r => setTimeout(r, 120));
         }
