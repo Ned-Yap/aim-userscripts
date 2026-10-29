@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.67
+// @version      3.68
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.67';
+    const SCRIPT_VERSION = '3.68';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -4527,11 +4527,11 @@
         focus: null, targetRing: null, targetName: '', ent: null, live: [], liveLayers: [], stagedLayers: [], stagedKey: '', canvas: null,
         container: null, wheelOn: false, sid: null, mid: null, downAt: null, gap: [], gapFt: 50, fine: false,
         // v3.60 📍 Points mode: the user drops the aim points, the solver places the fewest navs
-        mode: 'ring', dots: [], plan: null, dotK: 3, shareLo: 95, shareHi: 110, pairFt: 30, hover: null, hoverName: '', replace: false };
+        mode: 'ring', dots: [], plan: null, dotK: 3, shareLo: 95, shareHi: 110, pairFt: 30, minSep: 45, maxPerNav: 2, hover: null, hoverName: '', replace: false };
     const SG_GAP_KEY = 'aim-mb-sg-gap', SG_MODE_KEY = 'aim-mb-sg-mode', SG_DOTK_KEY = 'aim-mb-sg-dotk', SG_BAND_KEY = 'aim-mb-sg-band';
     try { const m = String(gmGet(SG_MODE_KEY, 'ring') || 'ring'); if (m === 'dots') sg.mode = 'dots'; const k = Number(gmGet(SG_DOTK_KEY, 3)); if (Number.isFinite(k) && k >= 1 && k <= 6) sg.dotK = k; } catch (e) {}
-    try { const b = gmGet(SG_BAND_KEY, null); if (b && typeof b === 'object') { if (Number(b.lo) >= SG_MIN_FT) sg.shareLo = Number(b.lo); if (Number(b.hi) > sg.shareLo) sg.shareHi = Number(b.hi); if (Number(b.pair) >= 0) sg.pairFt = Number(b.pair); } } catch (e) {}
-    function sgBandSave() { try { gmSet(SG_BAND_KEY, { lo: sg.shareLo, hi: sg.shareHi, pair: sg.pairFt }); } catch (e) {} }
+    try { const b = gmGet(SG_BAND_KEY, null); if (b && typeof b === 'object') { if (Number(b.lo) >= SG_MIN_FT) sg.shareLo = Number(b.lo); if (Number(b.hi) > sg.shareLo) sg.shareHi = Number(b.hi); if (Number(b.pair) >= 0) sg.pairFt = Number(b.pair); if (Number(b.sep) >= 5) sg.minSep = Number(b.sep); if (Number(b.max) >= 1) sg.maxPerNav = Number(b.max); } } catch (e) {}
+    function sgBandSave() { try { gmSet(SG_BAND_KEY, { lo: sg.shareLo, hi: sg.shareHi, pair: sg.pairFt, sep: sg.minSep, max: sg.maxPerNav }); } catch (e) {} }
     try { const g = Number(gmGet(SG_GAP_KEY, 50)); if (Number.isFinite(g) && g > 0) sg.gapFt = g; } catch (e) {}
     function sgTplAll() {
         let user = {};
@@ -4700,39 +4700,50 @@
     // can shoot every dot whose edge is within [80 ft, maxFt] of it, so neighbouring dots share
     // navs. Greedy set cover: the candidate that satisfies the most outstanding (dot, angle)
     // needs wins, ties → nearest the standoff; repeat until nothing helps.
-    // v3.67: `band` = {lo, hi} ft — a nav may shoot an aim ONLY when it sits inside the band from
-    // that aim's edge (default 95–110: the 100 ft shot is the product; sharing is allowed only
-    // when it keeps every covered aim in the band). A dot may carry several rings (a PAIR of
-    // assets shot from between them) — its edge distance is the nearest of them.
+    // v3.68 — the solver's priorities, in the user's order: (1) DISTANCE — every shot's
+    // nav→snapshot distance inside the band (default 95–110 ft; the 100 ft picture is the
+    // product) with the asset edge never under SG_MIN_FT; (2) ANGLE — shots on one point at
+    // least `minSep`° apart (default 45°), 90° tried first; (3) NUMBER of angles — K per
+    // point; (4) EFFICIENCY — a nav may be shared by up to `maxPerNav` points (default 2)
+    // and only when every one of them stays in the band. A dot may carry several rings (a
+    // PAIR of assets shot from between them) — its edge is the nearest of them.
     function sgDotRingsOf(d) { return Array.isArray(d.rings) ? d.rings : (d.ring ? [d.ring] : []); }
-    function sgSolveDots(dots, K, distFt, band, entOv) {
+    function sgSolveDots(dots, K, distFt, band, entOv, opts) {
         const ent = entOv || sg.ent || { assets: [], ffzs: [], nfzs: [] };
         const lo = Math.max(SG_MIN_FT, Number(band && band.lo) || 95), hi = Math.max(lo + 1, Number(band && band.hi) || 110);
+        const minSep = Math.max(5, Math.min(180, Number(opts && opts.minSep) || 45));
+        const maxPerNav = Math.max(1, Math.min(6, Number(opts && opts.maxPerNav) || 2));
         const ffzs = ent.ffzs || [], nfzs = ent.nfzs || [], assets = (ent.assets || []).filter(sgTargetable);
-        const edgeFt = (p, d) => { const rs = sgDotRingsOf(d); if (!rs.length) return mbApproxMeters(p.lat, p.lng, d.lat, d.lng) * 3.28084; return Math.min.apply(null, rs.map(r => mbPointToPolygonMeters(p.lat, p.lng, r))) * 3.28084; };
+        const aimFt = (p, d) => mbApproxMeters(p.lat, p.lng, d.lat, d.lng) * 3.28084;
+        const edgeFt = (p, d) => { const rs = sgDotRingsOf(d); if (!rs.length) return Infinity; return Math.min.apply(null, rs.map(r => mbPointToPolygonMeters(p.lat, p.lng, r))) * 3.28084; };
         const bearingFrom = (d, p) => { const b = Math.atan2((p.lng - d.lng) * Math.cos(d.lat * Math.PI / 180), p.lat - d.lat) * 180 / Math.PI; return (b + 360) % 360; };
         const legal = p => sgInAnyFfz(p, ffzs) && !nfzs.some(z => z.ring && z.ring.length >= 3 && genPointInPoly(p, z.ring)) && !assets.some(a => genPointInPoly(p, a.ring));
+        const angDiff = (a, b) => { let da = Math.abs(a - b); if (da > 180) da = 360 - da; return da; };
+        // candidates: 24 bearings × 4 standoffs around every dot, slid into the FFZ, never over an asset / NFZ
         const cands = [];
         dots.forEach((d, di) => {
             for (let b = 0; b < 360; b += 15) [-5, 0, 5, 10].forEach(extra => {
-                const m = sgEdgeRayM(d, b, distFt + extra, sgDotRingsOf(d));
-                const c = sgClampRay(d, b, m, ffzs);
+                const c = sgClampRay(d, b, (distFt + extra) / 3.28084, ffzs);
                 if (!c.ok || !legal(c.pt)) return;
                 cands.push({ lat: c.pt.lat, lng: c.pt.lng, from: di, clamped: c.clamped });
             });
         });
-        cands.forEach(c => { c.cov = []; dots.forEach((d, j) => { const ft = edgeFt(c, d); const r = Math.round(ft); if (r >= lo && r <= hi) c.cov.push({ j, ft, brg: bearingFrom(d, c) }); }); });
+        // what each candidate may shoot: dots whose nav→snapshot distance is in the band and whose edge is ≥ SG_MIN_FT
+        cands.forEach(c => { c.cov = []; dots.forEach((d, j) => { const ft = aimFt(c, d), r = Math.round(ft); if (r < lo || r > hi) return; if (Math.round(edgeFt(c, d)) < SG_MIN_FT) return; c.cov.push({ j, ft, brg: bearingFrom(d, c) }); }); });
         const need = dots.map(() => K), got = dots.map(() => []);
         const navs = [];
-        [0.75, 0.5].forEach(relax => {
-            const minSep = K > 1 ? relax * 360 / K : 0;
+        const seps = Array.from(new Set([Math.max(minSep, 90), minSep]));   // ideal first, then the floor
+        seps.forEach(sep => {
             for (let guard = 0; guard < 80; guard++) {
                 let best = null;
                 cands.forEach(c => {
-                    const take = c.cov.filter(x => need[x.j] > 0 && got[x.j].every(b => { let da = Math.abs(b - x.brg); if (da > 180) da = 360 - da; return da >= minSep; }));
+                    let take = c.cov.filter(x => need[x.j] > 0 && got[x.j].every(b => angDiff(b, x.brg) >= sep));
                     if (!take.length) return;
-                    const err = take.reduce((a, x) => a + Math.abs(x.ft - distFt), 0) / take.length;
-                    const score = take.length * 1e6 - err * 10 - (c.clamped ? 1 : 0);
+                    take.sort((x, y) => Math.abs(x.ft - distFt) - Math.abs(y.ft - distFt));
+                    if (take.length > maxPerNav) take = take.slice(0, maxPerNav);
+                    const err = Math.max.apply(null, take.map(x => Math.abs(x.ft - distFt)));                       // worst shot's distance miss
+                    const sepQ = Math.min.apply(null, take.map(x => got[x.j].length ? Math.min.apply(null, got[x.j].map(b => angDiff(b, x.brg))) : 180));   // tightest angle to an existing shot
+                    const score = -Math.round(err / 3) * 1e6 + Math.min(sepQ, 120) * 1e3 + take.length * 10 - (c.clamped ? 1 : 0);
                     if (!best || score > best.score) best = { c, take, score };
                 });
                 if (!best) break;
@@ -4763,7 +4774,7 @@
     function sgResolveDots() {
         if (!sg.dots.length) { sg.plan = null; return; }
         try {
-            const plan = sgSolveDots(sg.dots, sg.dotK, sg.distFt, { lo: sg.shareLo, hi: sg.shareHi });
+            const plan = sgSolveDots(sg.dots, sg.dotK, sg.distFt, { lo: sg.shareLo, hi: sg.shareHi }, null, { minSep: sg.minSep, maxPerNav: sg.maxPerNav });
             plan.navs = sgOrderNavs(plan.navs, sgArrivalPoint([]) || sg.dots[0]);
             sg.plan = plan;
         } catch (e) { console.warn(`${TAG} [📍] solve failed`, e); sg.plan = null; showToast('📍 Solver failed — see console.', '#ff5252', 3000); }
@@ -5018,6 +5029,8 @@
                 <span>Standoff ft <b style="color:#789;">Ctrl+wheel</b></span>${inp('data-sg-dotdist', sg.distFt, 50, 'min="80" max="600" step="5"')}
                 <span title="A nav may shoot an aim only from inside this band (ft from the asset edge); sharing happens only when every covered aim stays in it">Band ft</span><span style="white-space:nowrap;">${inp('data-sg-band="lo"', sg.shareLo, 42, `min="${SG_MIN_FT}" step="5"`)}–${inp('data-sg-band="hi"', sg.shareHi, 42, 'min="85" step="5"')}</span>
                 <span title="A click on open ground takes the assets within this distance as a PAIR aim">Pair ≤ ft</span>${inp('data-sg-band="pair"', sg.pairFt, 42, 'min="0" step="5"')}
+                <span title="Shots on one point must be at least this far apart in bearing (90° is tried first)">Min angle°</span>${inp('data-sg-band="sep"', sg.minSep, 42, 'min="5" max="180" step="5"')}
+                <span title="A nav may shoot at most this many points (only when all stay in the band)">Max/nav</span>${inp('data-sg-band="max"', sg.maxPerNav, 42, 'min="1" max="6"')}
             </div>
             <div style="margin-top:5px;color:#9ad;"><b>click</b> = add point${sg.hoverName ? ` <span style="color:#789;">· over ${escapeHtml(sg.hoverName)}</span>` : ''} · <b>R-click</b> a point = remove · <b>Backspace</b> = last · <b>Enter</b> = stage</div>
             <div style="margin-top:4px;color:#cfe;">${n} point${n === 1 ? '' : 's'}${plan ? ` → <b style="color:#c39dff;">${plan.navs.length} nav${plan.navs.length === 1 ? '' : 's'}</b> · ${plan.snaps} snap${plan.snaps === 1 ? '' : 's'}${short ? ` · <span style="color:#ff5252;">${short} angle${short > 1 ? 's' : ''} short (no legal spot)</span>` : ''}` : ''}</div>
@@ -5036,6 +5049,8 @@
             if (k === 'lo') sg.shareLo = Math.max(SG_MIN_FT, Math.min(v, sg.shareHi - 5));
             else if (k === 'hi') sg.shareHi = Math.max(sg.shareLo + 5, v);
             else if (k === 'pair') sg.pairFt = Math.max(0, v);
+            else if (k === 'sep') sg.minSep = Math.max(5, Math.min(180, Math.round(v)));
+            else if (k === 'max') sg.maxPerNav = Math.max(1, Math.min(6, Math.round(v)));
             sgBandSave(); sgResolveDots(); sgDrawLive();
         });
         h.querySelector('[data-sg-replace]').onchange = ev => { sg.replace = !!ev.target.checked; };
@@ -8260,9 +8275,13 @@
                     </div>
                     <div style="display:flex;align-items:center;gap:6px;margin-top:4px;flex-wrap:wrap;color:#cfe;font-size:11px;">
                         <span title="Two assets whose edges sit this close become ONE aim between them — one snapshot catches both (pairs only, never three)">pair ≤</span><input data-gen-auto-pair type="number" min="0" step="5" style="width:46px;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px;"><span>ft</span>
-                        <span title="A nav may shoot an aim only from inside this band (ft from the asset edge); a nav is shared only when every aim it covers stays in the band">· band</span><input data-gen-auto-lo type="number" min="${SG_MIN_FT}" step="5" style="width:46px;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px;"><span>–</span><input data-gen-auto-hi type="number" min="85" step="5" style="width:46px;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px;"><span>ft</span>
+                        <span title="Every shot's nav→snapshot distance must be inside this band; a nav is shared only when every aim it covers stays in the band">· band</span><input data-gen-auto-lo type="number" min="${SG_MIN_FT}" step="5" style="width:46px;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px;"><span>–</span><input data-gen-auto-hi type="number" min="85" step="5" style="width:46px;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px;"><span>ft</span>
                     </div>
-                    <div style="color:#9a8bb8;font-size:10px;margin-top:3px;">Aim per child (close pairs share one aim between them) · every shot inside the band from the asset edge, a nav is shared only when that still holds · never outside the FFZ / over an asset or NFZ · ordered from base · 🎞 wrap chosen at Create · review list after.</div>
+                    <div style="display:flex;align-items:center;gap:6px;margin-top:4px;flex-wrap:wrap;color:#cfe;font-size:11px;">
+                        <span title="Shots on one aim must be at least this far apart in bearing (90° is tried first)">min angle</span><input data-gen-auto-sep type="number" min="5" max="180" step="5" style="width:46px;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px;"><span>°</span>
+                        <span title="A nav may shoot at most this many aims">· max aims/nav</span><input data-gen-auto-maxnav type="number" min="1" max="6" style="width:40px;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px;">
+                    </div>
+                    <div style="color:#9a8bb8;font-size:10px;margin-top:3px;">Priority: distance (band, edge ≥ ${SG_MIN_FT} ft) → angle (≥ min, 90° first) → number of angles → sharing (≤ max/nav, band kept). Close pairs share one aim between them · never outside the FFZ / over an asset or NFZ · ordered from base · 🎞 wrap at Create · review list after.</div>
                 </div>
                 <div style="display:flex;align-items:center;gap:6px;margin-top:7px;"><label style="color:#cfe;white-space:nowrap;">Name</label><input data-gen-bulk-name value="{section} - {asset}" title="Tokens: {section} = N/E/S/W · {asset} = asset name" style="flex:1;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:2px 6px;border-radius:3px;font:inherit;font-size:11px;"></div>
                 <div style="color:#789;font-size:10px;margin-top:2px;">Tokens: <b>{section}</b> = N/E/S/W · <b>{asset}</b> = asset name (e.g. <b>NNE - {asset}</b>)</div>
@@ -8397,17 +8416,17 @@
         };
         refreshTpls('');
         // v3.59 — 🎯 Auto-shots controls (GM-persisted)
-        const autoCb = p.querySelector('[data-gen-auto]'), autoTpl = p.querySelector('[data-gen-auto-tpl]'), autoPair = p.querySelector('[data-gen-auto-pair]'), autoLo = p.querySelector('[data-gen-auto-lo]'), autoHi = p.querySelector('[data-gen-auto-hi]');
+        const autoCb = p.querySelector('[data-gen-auto]'), autoTpl = p.querySelector('[data-gen-auto-tpl]'), autoPair = p.querySelector('[data-gen-auto-pair]'), autoLo = p.querySelector('[data-gen-auto-lo]'), autoHi = p.querySelector('[data-gen-auto-hi]'), autoSep = p.querySelector('[data-gen-auto-sep]'), autoMaxNav = p.querySelector('[data-gen-auto-maxnav]');
         const ap = genAutoPrefs();
-        autoCb.checked = !!ap.on; autoPair.value = String(ap.pairFt); autoLo.value = String(ap.shareLo); autoHi.value = String(ap.shareHi);
+        autoCb.checked = !!ap.on; autoPair.value = String(ap.pairFt); autoLo.value = String(ap.shareLo); autoHi.value = String(ap.shareHi); autoSep.value = String(ap.minSep); autoMaxNav.value = String(ap.maxPerNav);
         autoTpl.innerHTML = Object.keys(sgTplAll()).map(k => `<option value="${escapeHtml(k)}" ${k === ap.tpl ? 'selected' : ''}>${escapeHtml(k)}</option>`).join('');
         const autoSync = () => {
             const on = autoCb.checked;
             scanCb.disabled = on; tplSel.disabled = on;
             goBtn.textContent = on ? '🎯 Create' : '⊕ Create';
-            genAutoSavePrefs({ on, tpl: autoTpl.value, pairFt: Number(autoPair.value), shareLo: Number(autoLo.value), shareHi: Number(autoHi.value) });
+            genAutoSavePrefs({ on, tpl: autoTpl.value, pairFt: Number(autoPair.value), shareLo: Number(autoLo.value), shareHi: Number(autoHi.value), minSep: Number(autoSep.value), maxPerNav: Number(autoMaxNav.value) });
         };
-        autoCb.onchange = autoSync; autoTpl.onchange = autoSync; autoPair.onchange = autoSync; autoLo.onchange = autoSync; autoHi.onchange = autoSync;
+        autoCb.onchange = autoSync; autoTpl.onchange = autoSync; autoPair.onchange = autoSync; autoLo.onchange = autoSync; autoHi.onchange = autoSync; autoSep.onchange = autoSync; autoMaxNav.onchange = autoSync;
         autoSync();
         goBtn.onclick = async () => {
             if (genBulkBusy) return;
@@ -8420,7 +8439,7 @@
                 const wrap = await sgPickWrap(`🎯 Auto-shots on ${picked.length} pad(s) · template "${autoTpl.value}" · wrap after every snapshot`);
                 if (!wrap) return;
                 const ap2 = genAutoPrefs();
-                auto = { tpl: autoTpl.value, pairFt: ap2.pairFt, shareLo: ap2.shareLo, shareHi: ap2.shareHi, wrapSteps: wrap.steps || [] };
+                auto = { tpl: autoTpl.value, pairFt: ap2.pairFt, shareLo: ap2.shareLo, shareHi: ap2.shareHi, minSep: ap2.minSep, maxPerNav: ap2.maxPerNav, wrapSteps: wrap.steps || [] };
             }
             genBulkCommit(picked, ffzs, { inspectionScan: scan, nameTemplate, template, auto }, p.querySelector('[data-gen-bulk-status]'), goBtn);
         };
@@ -8439,11 +8458,13 @@
     const GEN_AUTO_KEY = 'aim-mb-gen-auto';
     const GEN_AUTO_BIG_FT = 60;      // a child longer than this → "centroid may be wrong" flag
     function genAutoPrefs() {
-        const d = { on: false, tpl: '3-shot 90°', pairFt: 30, shareLo: 95, shareHi: 110 };
+        const d = { on: false, tpl: '3-shot 90°', pairFt: 30, shareLo: 95, shareHi: 110, minSep: 45, maxPerNav: 2 };
         try { const sv = gmGet(GEN_AUTO_KEY, null); if (sv && typeof sv === 'object') Object.assign(d, sv); } catch (e) { console.warn(`${TAG} [gen-auto] prefs read failed`, e); }
         d.pairFt = Number(d.pairFt); if (!Number.isFinite(d.pairFt) || d.pairFt < 0) d.pairFt = 30;
         d.shareLo = Number(d.shareLo); if (!Number.isFinite(d.shareLo) || d.shareLo < SG_MIN_FT) d.shareLo = 95;
         d.shareHi = Number(d.shareHi); if (!Number.isFinite(d.shareHi) || d.shareHi <= d.shareLo) d.shareHi = Math.max(110, d.shareLo + 5);
+        d.minSep = Number(d.minSep); if (!Number.isFinite(d.minSep) || d.minSep < 5) d.minSep = 45;
+        d.maxPerNav = Number(d.maxPerNav); if (!Number.isFinite(d.maxPerNav) || d.maxPerNav < 1) d.maxPerNav = 2;
         return d;
     }
     function genAutoSavePrefs(p) { try { gmSet(GEN_AUTO_KEY, p); } catch (e) { console.warn(`${TAG} [gen-auto] prefs save failed`, e); } }
@@ -8492,7 +8513,7 @@
         if (skippedKids.length) report.flags.push(`skipped child: ${skippedKids.join(', ')}`);
         dots.forEach(d => { if (d.pair) report.flags.push(`paired: ${d.name} (one aim between them)`); if (d.kind === 'asset') d.rings.forEach(r => { const sp = genRingSpanFt(r); if (sp > GEN_AUTO_BIG_FT) report.flags.push(`big asset in ${d.name} (${Math.round(sp)} ft) — check the aim`); }); if (d.kind === 'pad') report.flags.push('no child assets — pad centroid aimed'); if (d.kind === 'nfz') report.flags.push(`NFZ ${d.name} aimed as an obstacle`); });
         let plan = null;
-        try { plan = sgSolveDots(dots, K, distFt, band, ent); } catch (e) { console.warn(`${TAG} [gen-auto] solve failed for "${pad.name}"`, e); report.flags.push(`solver error: ${(e && e.message) || e}`); }
+        try { plan = sgSolveDots(dots, K, distFt, band, ent, { minSep: opts.minSep, maxPerNav: opts.maxPerNav }); } catch (e) { console.warn(`${TAG} [gen-auto] solve failed for "${pad.name}"`, e); report.flags.push(`solver error: ${(e && e.message) || e}`); }
         const groups = [];
         if (plan && plan.navs.length) {
             plan.unmet.forEach(u => report.flags.push(`${dots[u.j].name}: ${u.missing} angle(s) short (no legal spot in the ${band.lo}–${band.hi} ft band — FFZ / asset / NFZ)`));
