@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.55
+// @version      3.56
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.55';
+    const SCRIPT_VERSION = '3.56';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -4520,7 +4520,7 @@
     // table edits any row directly. navs/spreadDeg/distFt/snapsPerNav stay as the summary.
     const sg = { active: false, pinned: false, tplName: '', navs: 3, spreadDeg: 90, distFt: 100, snapsPerNav: 1, rot: 0, flip: false, rows: [],
         focus: null, targetRing: null, targetName: '', ent: null, live: [], liveLayers: [], stagedLayers: [], stagedKey: '', canvas: null,
-        container: null, wheelOn: false, sid: null, mid: null, downAt: null, gap: [], gapFt: 50 };
+        container: null, wheelOn: false, sid: null, mid: null, downAt: null, gap: [], gapFt: 50, fine: false };
     const SG_GAP_KEY = 'aim-mb-sg-gap';
     try { const g = Number(gmGet(SG_GAP_KEY, 50)); if (Number.isFinite(g) && g > 0) sg.gapFt = g; } catch (e) {}
     function sgTplAll() {
@@ -4636,7 +4636,7 @@
         if (sg.rows.length) { sg.distFt = Math.round(sg.rows.reduce((a, r) => a + r.distFt, 0) / sg.rows.length); sg.snapsPerNav = sg.rows[0].snaps; }
     }
     // Compute the live ring: [{lat,lng,bearing,edgeFt,inFfz,clamped,status}]
-    function sgFtStatus(ft, inFfz) { return (!inFfz || ft < SG_MIN_FT) ? 'red' : ((ft < SG_IDEAL_LO || ft > SG_IDEAL_HI) ? 'amber' : 'green'); }
+    function sgFtStatus(ft, inFfz) { const r = Math.round(ft); return (!inFfz || r < SG_MIN_FT) ? 'red' : ((r < SG_IDEAL_LO || r > SG_IDEAL_HI) ? 'amber' : 'green'); }
     // Each row → {lat,lng,bearing,focusFt,focusStatus,edgeFt,edgeStatus,status,inFfz,clamped,snaps}
     function sgComputeRing(focus, shape, rot, flip, targetRing) {
         const ffzs = (sg.ent && sg.ent.ffzs) || [];
@@ -4669,8 +4669,9 @@
     // Chip sits up-right of the point (off the colored circle) on a dark pill; numbers carry
     // their own status colour with a black halo so they read on sand, ortho and shadow alike.
     const SG_HALO = 'text-shadow:0 0 2px #000,0 0 2px #000,1px 1px 0 #000,-1px -1px 0 #000,1px -1px 0 #000,-1px 1px 0 #000;';
-    function sgChip(L, lat, lng, html, border, zi) {
-        return L.marker([lat, lng], { icon: L.divIcon({ className: 'aim-mb-sg-chip', html: `<div style="pointer-events:none;position:absolute;left:12px;top:-22px;background:rgba(10,12,16,0.82);color:#fff;font:800 11px/1.15 'Lato',sans-serif;padding:3px 6px;border-radius:4px;border:1.5px solid ${border};box-shadow:0 1px 5px rgba(0,0,0,0.8);white-space:nowrap;${SG_HALO}">${html}</div>`, iconSize: [0, 0], iconAnchor: [0, 0] }), interactive: false, keyboard: false, zIndexOffset: zi || 900 });
+    function sgChip(L, lat, lng, html, border, zi, pos) {
+        const off = pos === 'dr' ? 'left:12px;top:8px;' : (pos === 'ul' ? 'right:12px;top:-22px;' : (pos === 'dl' ? 'right:12px;top:8px;' : 'left:12px;top:-22px;'));
+        return L.marker([lat, lng], { icon: L.divIcon({ className: 'aim-mb-sg-chip', html: `<div style="pointer-events:none;position:absolute;${off}background:rgba(10,12,16,0.82);color:#fff;font:800 11px/1.15 'Lato',sans-serif;padding:3px 6px;border-radius:4px;border:1.5px solid ${border};box-shadow:0 1px 5px rgba(0,0,0,0.8);white-space:nowrap;${SG_HALO}">${html}</div>`, iconSize: [0, 0], iconAnchor: [0, 0] }), interactive: false, keyboard: false, zIndexOffset: zi || 900 });
     }
     function sgChipText(p, i) {
         const f = `<span style="color:${SG_COL[p.focusStatus]};">${Math.round(p.focusFt)} ft</span> focus`;
@@ -4692,10 +4693,13 @@
             keep(L.circleMarker([sg.focus.lat, sg.focus.lng], { renderer: cv || undefined, interactive: false, radius: 7, color: '#ff8ad2', weight: 2, fillColor: '#ff8ad2', fillOpacity: sg.pinned ? 0.9 : 0.35 }));
             // gap ruler — focus ↔ the two nearest neighbouring assets within gapFt
             sg.gap = sgComputeGap(sg.focus);
-            sg.gap.forEach(gp => {
+            sg.gap.forEach((gp, gi) => {
                 keep(L.polyline([[sg.focus.lat, sg.focus.lng], [gp.pt.lat, gp.pt.lng]], { renderer: cv || undefined, interactive: false, color: '#ffd54f', weight: 2, opacity: 0.95 }));
-                const mid = { lat: (sg.focus.lat + gp.pt.lat) / 2, lng: (sg.focus.lng + gp.pt.lng) / 2 };
-                keep(sgChip(L, mid.lat, mid.lng, `↔ ${Math.round(gp.ft)} ft <span style="color:#9ad;">${escapeHtml(gp.name.slice(0, 22))}</span>`, '#ffd54f', 940));
+                keep(L.circleMarker([gp.pt.lat, gp.pt.lng], { renderer: cv || undefined, interactive: false, radius: 3, color: '#ffd54f', weight: 2, fillColor: '#ffd54f', fillOpacity: 1 }));
+                // chip on the ASSET end, opposite corners per neighbour so two short gaps never stack
+                const dx = gp.pt.lng - sg.focus.lng, dy = gp.pt.lat - sg.focus.lat;
+                const pos = gi === 0 ? (dy >= 0 ? (dx >= 0 ? 'ur' : 'ul') : (dx >= 0 ? 'dr' : 'dl')) : (dy >= 0 ? (dx >= 0 ? 'dr' : 'dl') : (dx >= 0 ? 'ur' : 'ul'));
+                keep(sgChip(L, gp.pt.lat, gp.pt.lng, `↔ ${Math.round(gp.ft)} ft`, '#ffd54f', 940, pos));
             });
             sg.live.forEach((p, i) => {
                 const col = SG_COL[p.status];
@@ -4759,12 +4763,12 @@
                 <span>Fan° <b style="color:#789;">Alt+wheel</b></span>${inp('data-sg-sum="spreadDeg"', sg.spreadDeg, 46, 'min="0" max="180" step="5"')}
                 <span>Standoff ft <b style="color:#789;">Ctrl+wheel</b></span>${inp('data-sg-sum="distFt"', sg.distFt, 50, 'min="20" max="600" step="5"')}
                 <span>Snaps/set <b style="color:#789;">− / +</b></span>${inp('data-sg-sum="snapsPerNav"', sg.snapsPerNav, 36, 'min="1" max="6"')}
-                <span>Spin <b style="color:#789;">wheel</b></span><b>${Math.round(sg.rot)}°</b>
+                <span>Spin <b style="color:#789;">Shift+wheel</b></span><b>${Math.round(sg.rot)}° <span style="color:#789;font-weight:400;">step ${sgSpinStep()}° · X</span></b>
                 <span>Order <b style="color:#789;">F</b></span><button data-sg-flip style="background:none;border:1px solid #456;color:#cfe;border-radius:3px;cursor:pointer;font-size:10px;padding:0 5px;">${sg.flip ? 'last → first' : 'first → last'}</button>
             </div>
             ${table}
             <div style="margin-top:5px;color:#9ad;">${sg.pinned ? `📌 ${sg.targetName ? escapeHtml(sg.targetName) : 'open ground (focus only)'} <span style="color:#789;">· R-click = pick up &amp; move · drag = pan</span>` : `move the mouse · <b>click</b> to pin the focus${sg.targetName ? ` <span style="color:#789;">· over ${escapeHtml(sg.targetName)}</span>` : ' <span style="color:#789;">· open ground</span>'}`}</div>
-            <div style="margin-top:3px;display:flex;align-items:center;gap:5px;color:#ffd54f;">↔ gap ruler ≤ ${inp('data-sg-gapft', sg.gapFt, 44, 'min="5" max="500" step="5"')} ft${sg.gap.length ? ` <span style="color:#cfe;">· ${sg.gap.map(g => `${escapeHtml(g.name.slice(0, 18))} ${Math.round(g.ft)} ft`).join(' · ')}${sg.gap.length === 2 ? ` <span style="color:#789;">(${Math.round(sg.gap[0].ft + sg.gap[1].ft)} ft apart)</span>` : ''}</span>` : ' <span style="color:#789;">· no neighbour that close</span>'}</div>
+            <div style="margin-top:3px;display:flex;align-items:center;gap:5px;color:#ffd54f;">↔ gap ruler ≤ ${inp('data-sg-gapft', sg.gapFt, 44, 'min="5" max="500" step="5"')} ft${sg.gap.length ? ` <span style="color:#cfe;">· ${sg.gap.map(g => `${Math.round(g.ft)} ft`).join(' · ')}${sg.gap.length === 2 ? ` <span style="color:#789;">(${Math.round(sg.gap[0].ft + sg.gap[1].ft)} ft apart)</span>` : ''}</span>` : ' <span style="color:#789;">· no neighbour that close</span>'}</div>
             <div style="margin-top:6px;display:flex;gap:5px;">
                 <button data-sg-stage ${(!sg.pinned || worst === 'red') ? 'disabled' : ''} title="Enter" style="flex:1;background:${worst === 'red' ? '#3a2020' : '#2a3a2a'};border:1px solid ${worst === 'red' ? '#ff5252' : '#5fff5f'};color:${worst === 'red' ? '#ff8a8a' : '#7dff7d'};border-radius:4px;cursor:pointer;font-weight:800;padding:3px 6px;">➕ Stage ghost</button>
                 <button data-sg-cancel title="Esc" style="background:none;border:1px solid #456;color:#cfe;border-radius:4px;cursor:pointer;padding:3px 6px;">Esc</button>
@@ -4826,7 +4830,7 @@
         sg.active = true; sg.pinned = false; sg.focus = null; sg.targetRing = null; sg.targetName = ''; sg.rot = 0; sg.flip = false;
         sg.sid = sid; sg.mid = composerMission && composerMission.id;
         sg.container = caMapContainer();
-        try { if (map.scrollWheelZoom && map.scrollWheelZoom.enabled()) { map.scrollWheelZoom.disable(); sg.wheelOn = true; } } catch (e) {}
+        sg.wheelOn = false;   // v3.56: plain wheel keeps zooming the map; Shift+wheel spins
         if (sg.container) {
             sg.container.addEventListener('mousedown', sgOnDown, true);
             sg.container.addEventListener('mousemove', sgOnMove, true);
@@ -4838,7 +4842,7 @@
         try { document.documentElement.setAttribute('data-aim-clickadd', '1'); } catch (e) {}   // other scripts' M2 handlers stand down
         genFetchEntities(sid).then(ent => { sg.ent = ent; sgDrawLive(); }).catch(e => { console.warn(`${TAG} [🎯] entity load failed`, e); showToast('🎯 Could not load FFZs/assets — rails are off.', '#ff9800', 4000); sg.ent = { assets: [], ffzs: [], nfzs: [] }; });
         sgUpdateHud(); sgUpdateBtn();
-        showToast('🎯 Ghost live — move to the asset, click to pin, wheel = spin · Ctrl+wheel = standoff · Alt+wheel = fan · 1–6 sets · −/+ snaps · F flip · Enter = stage · Esc = drop.', '#ff8ad2', 7000);
+        showToast('🎯 Ghost live — move to the asset, click to pin, Shift+wheel = spin (X = 1° steps) · Ctrl+wheel = standoff · Alt+wheel = fan · 1–6 sets · −/+ snaps · F flip · Enter = stage · Esc = drop.', '#ff8ad2', 7000);
     }
     function sgStop(silent) {
         if (!sg.active) return;
@@ -4848,7 +4852,6 @@
         }
         window.removeEventListener('keydown', sgOnKey, true);
         try { if (!caModeOn) document.documentElement.removeAttribute('data-aim-clickadd'); } catch (e) {}
-        try { const map = getLeafletMap(); if (map && sg.wheelOn && map.scrollWheelZoom) map.scrollWheelZoom.enable(); } catch (e) {}
         sg.wheelOn = false;
         sgClearLayers(sg.liveLayers);
         sgUpdateHud(); sgUpdateBtn();
@@ -4880,14 +4883,17 @@
         try { fetchElevation(ll.lat, ll.lng); } catch (e) {}   // warm the DEM cache for the snapshot altitude at commit
         sgDrawLive();
     }
+    function sgSpinStep() { return sg.fine ? 1 : 5; }
     function sgOnWheel(e) {
         if (!sg.active) return;
         if (e.target && e.target.closest && e.target.closest('#' + SG_HUD_ID)) return;
+        if (!e.shiftKey && !e.ctrlKey && !e.altKey) return;   // plain wheel = map zoom, untouched
         e.preventDefault(); e.stopPropagation();
-        const dir = e.deltaY > 0 ? 1 : -1;
+        // Shift+wheel arrives as deltaX on Windows — read whichever axis moved
+        const d = e.deltaY || e.deltaX; const dir = d > 0 ? 1 : -1;
         if (e.ctrlKey) { sg.rows.forEach(r => { r.distFt = Math.max(20, Math.min(600, r.distFt + dir * 5)); }); sgSyncSummary(); }
         else if (e.altKey) { sg.spreadDeg = Math.max(0, Math.min(180, sg.spreadDeg + dir * 5)); sgRegenRows(); }
-        else sg.rot = ((sg.rot + dir * 5) % 360 + 360) % 360;
+        else sg.rot = ((sg.rot + dir * sgSpinStep()) % 360 + 360) % 360;
         sgDrawLive();
     }
     function sgOnKey(e) {
@@ -4900,8 +4906,9 @@
         else if (k === '-' || k === '_') { sg.rows.forEach(r => { r.snaps = Math.max(1, r.snaps - 1); }); sgSyncSummary(); }   // Q/E belong to Map Nav zoom
         else if (k === '+' || k === '=') { sg.rows.forEach(r => { r.snaps = Math.min(6, r.snaps + 1); }); sgSyncSummary(); }
         else if (k === 'f' || k === 'F') sg.flip = !sg.flip;
-        else if (k === 'ArrowLeft') sg.rot = ((sg.rot - 5) % 360 + 360) % 360;
-        else if (k === 'ArrowRight') sg.rot = ((sg.rot + 5) % 360 + 360) % 360;
+        else if (k === 'x' || k === 'X') { sg.fine = !sg.fine; showToast(`🎯 Spin step ${sg.fine ? '1°' : '5°'}`, '#ff8ad2', 1200); }
+        else if (k === 'ArrowLeft') sg.rot = ((sg.rot - sgSpinStep()) % 360 + 360) % 360;
+        else if (k === 'ArrowRight') sg.rot = ((sg.rot + sgSpinStep()) % 360 + 360) % 360;
         else if (k === 'ArrowUp') { sg.rows.forEach(r => { r.distFt = Math.min(600, r.distFt + 5); }); sgSyncSummary(); }
         else if (k === 'ArrowDown') { sg.rows.forEach(r => { r.distFt = Math.max(20, r.distFt - 5); }); sgSyncSummary(); }
         else used = false;
@@ -5132,7 +5139,7 @@
         b.style.background = sg.active ? 'rgba(255,138,210,0.25)' : (n ? 'rgba(195,157,255,0.2)' : 'rgba(255,138,210,0.1)');
         b.style.border = `1px solid ${sg.active ? '#ff8ad2' : (n ? '#c39dff' : 'rgba(255,138,210,0.5)')}`;
         b.style.color = sg.active ? '#ffb0e0' : (n ? '#d8c3ff' : '#ff8ad2');
-        b.title = sg.active ? 'Ghost is live — Esc drops it. Right-click = ⚡ Commit staged ghosts.' : (n ? `${n} ghost group(s) staged on this mission — LEFT-click = place more, RIGHT-click = ⚡ Commit into the editor (then SAVE). Shift+click = undo last ghost.` : 'Shot template ghost: click = start placing (wheel spin · Ctrl+wheel standoff · Alt+wheel fan · 1–6 sets · −/+ snaps · F flip · Enter stage · Esc drop). Right-click = ⚡ Commit staged ghosts.');
+        b.title = sg.active ? 'Ghost is live — Esc drops it. Right-click = ⚡ Commit staged ghosts.' : (n ? `${n} ghost group(s) staged on this mission — LEFT-click = place more, RIGHT-click = ⚡ Commit into the editor (then SAVE). Shift+click = undo last ghost.` : 'Shot template ghost: click = start placing (Shift+wheel spin, X = 1° steps · Ctrl+wheel standoff · Alt+wheel fan · 1–6 sets · −/+ snaps · F flip · Enter stage · Esc drop). Right-click = ⚡ Commit staged ghosts.');
     }
     // Per-tick: keep the staged ghosts drawn for the open mission (cheap key compare).
     function sgTick() {
