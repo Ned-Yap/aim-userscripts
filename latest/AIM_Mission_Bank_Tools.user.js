@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.56
+// @version      3.57
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.56';
+    const SCRIPT_VERSION = '3.57';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -4307,7 +4307,7 @@
         // on Shift-up, letting the Asset Inspector reclaim the right-click). Clears when
         // Ctrl is actually released. (The sticky toggle sets the flag in caSetMode.)
         const sync = (e) => {
-            if (caModeOn) return; // toggle owns the flag
+            if (caModeOn || sg.active) return; // toggle / live 🎯 ghost owns the flag (v3.57: a key release was clearing it → Inspector M2 menu won)
             try {
                 if (e.ctrlKey && caEditing()) document.documentElement.setAttribute('data-aim-clickadd', '1');
                 else document.documentElement.removeAttribute('data-aim-clickadd');
@@ -4769,6 +4769,7 @@
             ${table}
             <div style="margin-top:5px;color:#9ad;">${sg.pinned ? `📌 ${sg.targetName ? escapeHtml(sg.targetName) : 'open ground (focus only)'} <span style="color:#789;">· R-click = pick up &amp; move · drag = pan</span>` : `move the mouse · <b>click</b> to pin the focus${sg.targetName ? ` <span style="color:#789;">· over ${escapeHtml(sg.targetName)}</span>` : ' <span style="color:#789;">· open ground</span>'}`}</div>
             <div style="margin-top:3px;display:flex;align-items:center;gap:5px;color:#ffd54f;">↔ gap ruler ≤ ${inp('data-sg-gapft', sg.gapFt, 44, 'min="5" max="500" step="5"')} ft${sg.gap.length ? ` <span style="color:#cfe;">· ${sg.gap.map(g => `${Math.round(g.ft)} ft`).join(' · ')}${sg.gap.length === 2 ? ` <span style="color:#789;">(${Math.round(sg.gap[0].ft + sg.gap[1].ft)} ft apart)</span>` : ''}</span>` : ' <span style="color:#789;">· no neighbour that close</span>'}</div>
+            ${sgStagedListHtml()}
             <div style="margin-top:6px;display:flex;gap:5px;">
                 <button data-sg-stage ${(!sg.pinned || worst === 'red') ? 'disabled' : ''} title="Enter" style="flex:1;background:${worst === 'red' ? '#3a2020' : '#2a3a2a'};border:1px solid ${worst === 'red' ? '#ff5252' : '#5fff5f'};color:${worst === 'red' ? '#ff8a8a' : '#7dff7d'};border-radius:4px;cursor:pointer;font-weight:800;padding:3px 6px;">➕ Stage ghost</button>
                 <button data-sg-cancel title="Esc" style="background:none;border:1px solid #456;color:#cfe;border-radius:4px;cursor:pointer;padding:3px 6px;">Esc</button>
@@ -4791,6 +4792,18 @@
         h.querySelector('[data-sg-stage]').onclick = () => sgStage();
         h.querySelector('[data-sg-cancel]').onclick = () => sgStop(true);
         h.querySelector('[data-sg-flip]').onclick = () => { sg.flip = !sg.flip; sgDrawLive(); };
+        h.querySelectorAll('[data-sg-g]').forEach(b => b.onclick = () => {
+            const i = Number(b.getAttribute('data-sg-g')), act = b.getAttribute('data-sg-act');
+            sgGroupsMutate(groups => {
+                if (act === 'up' && i > 0) { const t = groups[i - 1]; groups[i - 1] = groups[i]; groups[i] = t; }
+                else if (act === 'down' && i < groups.length - 1) { const t = groups[i + 1]; groups[i + 1] = groups[i]; groups[i] = t; }
+                else if (act === 'del') groups.splice(i, 1);
+                else if (act === 'rev') groups[i].navs.reverse();
+                return groups;
+            });
+        });
+        const clr = h.querySelector('[data-sg-g-clear]'); if (clr) clr.onclick = () => { if (confirm('Drop every staged ghost on this mission?')) sgGroupsMutate(() => []); };
+        const auto = h.querySelector('[data-sg-auto]'); if (auto) auto.onclick = () => sgAutoOrder();
         h.querySelector('[data-sg-gapft]').onchange = (ev) => { const v = Number(ev.target.value); if (Number.isFinite(v) && v > 0) { sg.gapFt = v; try { gmSet(SG_GAP_KEY, v); } catch (e) {} sgDrawLive(); } };
         // summary edits regenerate the rows; row edits are surgical (focus kept in the field)
         h.querySelectorAll('[data-sg-sum]').forEach(el => el.onchange = () => {
@@ -4810,6 +4823,60 @@
             else if (f === 'snaps') sg.rows[i].snaps = Math.max(1, Math.min(6, Math.round(v)));
             sgSyncSummary(); sgDrawLive();
         });
+    }
+    function sgStagedListHtml() {
+        const sid = getCurrentSiteID(), mid = composerMission && composerMission.id;
+        const groups = (sid && mid) ? sgGhostsFor(sid, mid) : [];
+        if (!groups.length) return '';
+        const btn = (i, act, txt, title) => `<button data-sg-g="${i}" data-sg-act="${act}" title="${title}" style="background:none;border:1px solid #456;color:#cfe;border-radius:3px;cursor:pointer;font-size:10px;padding:0 4px;line-height:1.4;">${txt}</button>`;
+        return `<div style="margin-top:6px;border-top:1px solid #2a2f38;padding-top:4px;">
+            <div style="display:flex;align-items:center;gap:6px;color:#c39dff;font-weight:700;">Staged (${groups.length})<span style="flex:1;"></span><button data-sg-auto title="Re-order the staged groups + each ring's direction by nearest-next from where the drone arrives (the step before the insert point)" style="background:rgba(195,157,255,0.15);border:1px solid #c39dff;color:#d8c3ff;border-radius:3px;cursor:pointer;font-size:10px;padding:0 6px;">⟲ Auto-order</button><button data-sg-g-clear title="Drop every staged ghost on this mission" style="background:none;border:1px solid #456;color:#ff8a8a;border-radius:3px;cursor:pointer;font-size:10px;padding:0 5px;">✕ all</button></div>
+            ${groups.map((g, i) => `<div style="display:flex;align-items:center;gap:4px;padding:1px 0;color:#cfe;"><span style="min-width:24px;color:#c39dff;font-weight:700;">G${i + 1}</span><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${g.navs.length} nav${g.navs.length > 1 ? 's' : ''} · ${g.navs.reduce((a, p) => a + (p.snaps || g.snapsPerNav || 1), 0)} snap${g.target ? ` · <span style="color:#9ad;">${escapeHtml(g.target.slice(0, 20))}</span>` : ''}</span>${btn(i, 'up', '↑', 'Earlier')}${btn(i, 'down', '↓', 'Later')}${btn(i, 'rev', '⇄', 'Reverse this ring\'s nav order')}${btn(i, 'del', '✕', 'Drop this ghost')}</div>`).join('')}
+        </div>`;
+    }
+    function sgGroupsMutate(fn) {
+        const sid = getCurrentSiteID(), mid = composerMission && composerMission.id; if (!sid || !mid) return;
+        const groups = fn(sgGhostsFor(sid, mid)) || [];
+        sgGhostsSet(sid, mid, composerMission.name || '', groups);
+        sgDrawStaged(true); sgUpdateBtn(); sgUpdateHud();
+    }
+    // Where the drone is when the ghosts begin: the nav the groups insert after, else the
+    // mission's last nav before returnHome, else its first located step.
+    function sgArrivalPoint(groups) {
+        const ctx = findMissionAppCtx(); let instrs = (ctx && ctx.currentApp && ctx.currentApp.instructions) || [];
+        if (!instrs.length) { try { const lc = findMissionEditorCtx(); if (lc && Array.isArray(lc.instrs)) instrs = lc.instrs; } catch (e) {} }
+        const isNav = s => s && (s.type_name === 'navigate' || s.type === 1) && s.location && s.location.lat != null;
+        const navs = instrs.filter(isNav);
+        const a = groups.length && groups[0].afterNav;
+        if (a && navs[a - 1]) return { lat: navs[a - 1].location.lat, lng: navs[a - 1].location.lng };
+        if (navs.length) return { lat: navs[navs.length - 1].location.lat, lng: navs[navs.length - 1].location.lng };
+        const first = instrs.find(s => s && s.location && s.location.lat != null);
+        return first ? { lat: first.location.lat, lng: first.location.lng } : null;
+    }
+    // Greedy nearest-next over groups; each ring may run forward or reversed, entering at
+    // the end nearest the drone and leaving from the other — kills the double-backs.
+    function sgAutoOrder() {
+        const sid = getCurrentSiteID(), mid = composerMission && composerMission.id; if (!sid || !mid) return;
+        const groups = sgGhostsFor(sid, mid); if (groups.length < 1) return;
+        let cur = sgArrivalPoint(groups) || groups[0].focus;
+        const left = groups.slice(); const out = [];
+        const d = (p, q) => mbApproxMeters(p.lat, p.lng, q.lat, q.lng);
+        while (left.length) {
+            let bi = 0, bRev = false, bd = Infinity;
+            left.forEach((g, i) => {
+                const f = g.navs[0], l = g.navs[g.navs.length - 1];
+                const df = d(cur, f), dl = d(cur, l);
+                if (df < bd) { bd = df; bi = i; bRev = false; }
+                if (dl < bd) { bd = dl; bi = i; bRev = true; }
+            });
+            const g = left.splice(bi, 1)[0];
+            if (bRev) g.navs.reverse();
+            out.push(g);
+            cur = g.navs[g.navs.length - 1];
+        }
+        sgGhostsSet(sid, mid, composerMission.name || '', out);
+        sgDrawStaged(true); sgUpdateBtn(); sgUpdateHud();
+        showToast(`⟲ ${out.length} ghost group(s) re-ordered nearest-next from the arrival point.`, '#c39dff', 3500);
     }
     function sgApplyTpl(name) {
         const all = sgTplAll(); const t = all[name] || all['3-shot 90°'];
