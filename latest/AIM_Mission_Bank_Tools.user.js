@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.45
+// @version      3.46
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.45';
+    const SCRIPT_VERSION = '3.46';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -6825,7 +6825,7 @@
             buildable: !!(ffz && groundM != null),
         };
     }
-    function genCloseBulkPanel() { const p = document.getElementById(GEN_BULK_PANEL_ID); if (p) p.remove(); }
+    function genCloseBulkPanel() { const p = document.getElementById(GEN_BULK_PANEL_ID); if (p) p.remove(); try { genEyeClear(); } catch (e) {} }
     // Edge-to-edge distance (ft) from an asset pad to its NEAREST FFZ — 0 if the FFZ
     // overlaps/contains the pad (or vice-versa). Used by the "built areas only"
     // filter: an asset counts as built if it has an FFZ inside or ≤ GEN_BUILT_FT of
@@ -6909,6 +6909,58 @@
         const k = t || 'none';
         return `<span style="display:inline-block;min-width:22px;text-align:center;padding:0 4px;margin-right:5px;border-radius:3px;font-size:10px;font-weight:800;color:#0b0f14;background:${GEN_TIER_COL[k] || '#999'};">${k === 'none' ? '—' : escapeHtml(k)}</span>`;
     }
+    // v3.46 — 👁 map overlay for the Generate panel: every pad painted by status so the
+    // eye sees what has a mission and what doesn't. CANVAS renderer (never SVG — the Map
+    // Styler observer rebuilds on every SVG mutation), click-through. Ticked "to create"
+    // pads are solid, unticked ones hollow, so the selection reads on the map live.
+    const GEN_EYE_KEY = 'aim-mb-gen-eye';
+    const GEN_EYE_CLASSES = [
+        { id: 'create', label: 'to create', color: '#5fff5f' },
+        { id: 'have', label: 'have a micro', color: '#7adfe6' },
+        { id: 'macro', label: 'macro-only', color: '#ffd54f' },
+        { id: 'skip', label: 'skip-state', color: '#ff5252' },
+    ];
+    const genEye = { on: false, cls: { create: true, have: true, macro: true, skip: false }, layers: [], byPad: new Map(), canvas: null };
+    try { const sv = gmGet(GEN_EYE_KEY, null); if (sv && typeof sv === 'object') { genEye.on = !!sv.on; Object.assign(genEye.cls, sv.cls || {}); } } catch (e) { console.warn(`${TAG} [gen-eye] prefs read failed`, e); }
+    function genEyeSave() { try { gmSet(GEN_EYE_KEY, { on: genEye.on, cls: genEye.cls }); } catch (e) { console.warn(`${TAG} [gen-eye] prefs save failed`, e); } }
+    function genEyeClear() {
+        const map = getLeafletMap();
+        genEye.layers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        genEye.layers = []; genEye.byPad = new Map();
+    }
+    function genEyeDraw(groups, checkedIds) {
+        genEyeClear();
+        if (!genEye.on) return;
+        const L = composerGetL(), map = getLeafletMap();
+        if (!L || !map) { showToast('👁 Map not found — open the generator from the Mission Bank map page.', '#ff9800', 3500); return; }
+        if (!genEye.canvas) { try { genEye.canvas = L.canvas({ padding: 0.5 }); } catch (e) { console.warn(`${TAG} [gen-eye] canvas renderer failed`, e); genEye.canvas = null; } }
+        let drawn = 0;
+        GEN_EYE_CLASSES.forEach(c => {
+            if (!genEye.cls[c.id]) return;
+            (groups[c.id] || []).forEach(a => {
+                if (!a || !Array.isArray(a.ring) || a.ring.length < 3) return;
+                try {
+                    const ticked = c.id !== 'create' || (checkedIds && checkedIds.has(a.id));
+                    const ly = L.polygon(a.ring.map(p => [p.lat, p.lng]), {
+                        renderer: genEye.canvas || undefined, interactive: false,
+                        color: c.color, weight: ticked ? 3 : 2, opacity: 0.95, dashArray: ticked ? null : '6 6',
+                        fill: true, fillColor: c.color, fillOpacity: ticked ? 0.45 : 0.08,
+                    }).addTo(map);
+                    genEye.layers.push(ly);
+                    if (c.id === 'create') genEye.byPad.set(a.id, { ly, color: c.color });
+                    drawn++;
+                } catch (e) { console.warn(`${TAG} [gen-eye] pad ${a.id} failed`, e); }
+            });
+        });
+        console.log(`${TAG} [gen-eye] drew ${drawn} pad(s)`);
+    }
+    // Live: ticking / unticking a "to create" row restyles its pad without a redraw.
+    function genEyeSync(checkedIds) {
+        genEye.byPad.forEach((rec, id) => {
+            const t = checkedIds.has(id);
+            try { rec.ly.setStyle({ weight: t ? 3 : 2, dashArray: t ? null : '6 6', fillOpacity: t ? 0.45 : 0.08 }); } catch (e) {}
+        });
+    }
     function genRenderBulkPanel(valid, stateSkip, haveMission, ffzs, extra) {
         genCloseBulkPanel();
         extra = extra || {};
@@ -6954,6 +7006,10 @@
                 <b style="color:#7dff7d;">${valid.length}</b> to create · <b style="color:#9ad;">${haveMission.length}</b> have a micro · <b style="color:#ffd54f;">${macroOnly.length}</b> macro-only · <b style="color:#ff8a8a;">${stateSkip.length}</b> skip-state${extra.children ? ` · <span style="color:#789;">${extra.children} child assets folded into pads</span>` : ''}
                 <div style="display:flex;align-items:center;gap:8px;margin-top:7px;flex-wrap:wrap;"><span style="color:#cfe;">Tiers</span>${['P1', 'P2', 'P3', 'P0', 'none'].map(k => `<label style="display:flex;align-items:center;gap:3px;cursor:pointer;color:#cfe;"><input type="checkbox" data-gen-tier="${k}" ${tierOn[k] ? 'checked' : ''}>${genTierBadge(k)}<span style="color:#789;">${tierCounts[k]}</span></label>`).join('')}</div>
                 <div style="color:#789;font-size:10px;margin-top:2px;">— = no tier prefix on any asset of the pad (not processed by the tiered import) · P0 = client-confirmed no priority</div>
+                <div style="display:flex;align-items:center;gap:8px;margin-top:7px;flex-wrap:wrap;">
+                    <button data-gen-eye title="Paint every pad on the map by status (click-through). Ticked 'to create' pads are solid, unticked ones hollow." style="background:${genEye.on ? 'rgba(95,255,95,0.18)' : 'rgba(255,255,255,0.06)'};border:1px solid ${genEye.on ? '#5fff5f' : '#456'};color:${genEye.on ? '#7dff7d' : '#cfe'};border-radius:4px;cursor:pointer;font-size:11px;padding:2px 8px;font-weight:700;">👁 Map</button>
+                    ${GEN_EYE_CLASSES.map(c => `<label style="display:flex;align-items:center;gap:3px;cursor:pointer;color:#cfe;font-size:11px;"><input type="checkbox" data-gen-eye-cls="${c.id}" ${genEye.cls[c.id] ? 'checked' : ''}><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:${c.color};"></span>${c.label}</label>`).join('')}
+                </div>
                 <label style="display:flex;align-items:center;gap:6px;margin-top:7px;cursor:pointer;color:#cfe;"><input type="checkbox" data-gen-bulk-scan checked> Inspection scan (Thermal/GEM/Wait wrap) on every mission</label>
                 <div style="display:flex;align-items:center;gap:6px;margin-top:7px;"><label style="color:#cfe;white-space:nowrap;">Name</label><input data-gen-bulk-name value="{section} - {asset}" title="Tokens: {section} = N/E/S/W · {asset} = asset name" style="flex:1;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:2px 6px;border-radius:3px;font:inherit;font-size:11px;"></div>
                 <div style="color:#789;font-size:10px;margin-top:2px;">Tokens: <b>{section}</b> = N/E/S/W · <b>{asset}</b> = asset name (e.g. <b>NNE - {asset}</b>)</div>
@@ -6988,11 +7044,19 @@
         p.querySelector('[data-gen-bulk-cancel]').onclick = close;
         const goBtn = p.querySelector('[data-gen-bulk-go]');
         const shownEl = p.querySelector('[data-gen-shown]');
+        const checkedIds = () => new Set([...p.querySelectorAll('[data-gen-row]:checked')].map(cb => (valid[Number(cb.getAttribute('data-gen-row'))] || {}).id));
+        const eyeGroups = { create: valid, have: haveMission, macro: macroOnly, skip: stateSkip };
+        const eyeBtn = p.querySelector('[data-gen-eye]');
+        const eyeStyle = () => { if (!eyeBtn) return; eyeBtn.style.background = genEye.on ? 'rgba(95,255,95,0.18)' : 'rgba(255,255,255,0.06)'; eyeBtn.style.borderColor = genEye.on ? '#5fff5f' : '#456'; eyeBtn.style.color = genEye.on ? '#7dff7d' : '#cfe'; };
+        const eyeRedraw = () => { try { genEyeDraw(eyeGroups, checkedIds()); } catch (e) { console.warn(`${TAG} [gen-eye] draw failed`, e); } };
+        if (eyeBtn) eyeBtn.onclick = () => { genEye.on = !genEye.on; genEyeSave(); eyeStyle(); eyeRedraw(); };
+        p.querySelectorAll('[data-gen-eye-cls]').forEach(cb => cb.onchange = () => { genEye.cls[cb.getAttribute('data-gen-eye-cls')] = cb.checked; genEyeSave(); eyeRedraw(); });
         const updateGo = () => {
             const n = p.querySelectorAll('[data-gen-row]:checked').length;
             goBtn.textContent = `⊕ Create ${n}`; goBtn.disabled = !n || genBulkBusy;
             const vis = [...p.querySelectorAll('.aim-gen-row')].filter(r => r.style.display !== 'none').length;
             if (shownEl) shownEl.textContent = `${vis} shown`;
+            if (genEye.on && genEye.byPad.size) { try { genEyeSync(checkedIds()); } catch (e) {} }
         };
         p.querySelectorAll('[data-gen-row]').forEach(cb => cb.onchange = updateGo);
         // "Built areas only" filter — hide (and uncheck) assets with no FFZ within
@@ -7027,6 +7091,7 @@
         };
         p.querySelector('[data-gen-deselall]').onclick = () => { p.querySelectorAll('[data-gen-row]').forEach(cb => cb.checked = false); updateGo(); };
         updateGo();
+        if (genEye.on) eyeRedraw();   // v3.46 — remembered 👁 state paints the map as the panel opens
         // Template picker: "Basic" (existing 1-nav builder) + saved presets. Capture
         // 📋 grabs the mission open in the editor; 🗑 deletes the selected preset.
         const tplSel = p.querySelector('[data-gen-tpl]');

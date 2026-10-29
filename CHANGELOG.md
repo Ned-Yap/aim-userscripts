@@ -1,3 +1,7 @@
+## 2026-10-28 — 👁 Generate map overlay — Mission Bank Tools latest v3.46 (latest only)
+
+- **v3.46** — **▣ Generate: 👁 Map.** A new row under the tier chips paints every pad on the map by status, click-through and on the canvas renderer: green = to create, cyan = already has a micro, yellow = macro-only, red = skip-state (each class has its own tick; skip-state off by default). Ticked "to create" pads are solid, unticked ones hollow and dashed, and they restyle live as you tick rows, so the selection reads on the map before you press Create. The eye state and class ticks are remembered; the overlay clears when the panel closes.
+
 ## 2026-10-28 — ✎ Update waits — Mission Bank Tools latest v3.44 → v3.45 (latest only)
 
 - **v3.45** — **Remove tab: "only waits directly after a snapshot".** Web's older 4-step recipe (snapshot → wait → Thermal On → wait → Thermal Off) carried a settle wait before Thermal On that the AM confirmed is no longer needed; with every wait now 4 s it could not be targeted by duration. The new checkbox (shown for wait targets) keeps only waits whose previous step is a snapshot, so the Thermal On / Off dwell stays; the verify count honours the same filter. Diagnosis came from `ShortKeys/AIM_Step_Pattern_Report.js` (console snippet: recipe / wait-context tallies per site).
