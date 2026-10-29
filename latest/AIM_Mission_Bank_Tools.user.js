@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.54
+// @version      3.55
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.54';
+    const SCRIPT_VERSION = '3.55';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -4520,7 +4520,9 @@
     // table edits any row directly. navs/spreadDeg/distFt/snapsPerNav stay as the summary.
     const sg = { active: false, pinned: false, tplName: '', navs: 3, spreadDeg: 90, distFt: 100, snapsPerNav: 1, rot: 0, flip: false, rows: [],
         focus: null, targetRing: null, targetName: '', ent: null, live: [], liveLayers: [], stagedLayers: [], stagedKey: '', canvas: null,
-        container: null, wheelOn: false, sid: null, mid: null };
+        container: null, wheelOn: false, sid: null, mid: null, downAt: null, gap: [], gapFt: 50 };
+    const SG_GAP_KEY = 'aim-mb-sg-gap';
+    try { const g = Number(gmGet(SG_GAP_KEY, 50)); if (Number.isFinite(g) && g > 0) sg.gapFt = g; } catch (e) {}
     function sgTplAll() {
         let user = {};
         try { const o = gmGet(SG_TPL_KEY, {}); if (o && typeof o === 'object') user = o; } catch (e) { console.warn(`${TAG} [🎯] template read failed`, e); }
@@ -4571,18 +4573,55 @@
         const d = Math.max(0, best - SG_FFZ_MARGIN_M);
         return { pt: sgOffset(focus, bearing, d), clamped: true, ok: d > 0 };
     }
-    // Smallest asset / NFZ polygon containing the point = what the shot is "of".
+    // What the shot is "of": the smallest CHILD / standalone asset polygon containing the
+    // point. A pad (root asset WITH descendants) is graded ground, never a target — a focus
+    // between two children is "open": focus distances only, green unless the FFZ forces it.
+    // An NFZ counts only when the point is inside no asset at all (standalone obstacle).
+    function sgTargetable(a) { return !!a && Array.isArray(a.ring) && a.ring.length >= 3 && !(a.descendants && a.descendants.length); }
     function sgFindTarget(pt) {
         const ent = sg.ent; if (!ent) return null;
-        let best = null, bestA = Infinity;
-        const consider = (list, kind) => (list || []).forEach(a => {
-            if (!a || !Array.isArray(a.ring) || a.ring.length < 3) return;
-            if (!genPointInPoly(pt, a.ring)) return;
+        let best = null, bestA = Infinity, inAnyAsset = false;
+        (ent.assets || []).forEach(a => {
+            if (!a || !Array.isArray(a.ring) || a.ring.length < 3 || !genPointInPoly(pt, a.ring)) return;
+            inAnyAsset = true;
+            if (!sgTargetable(a)) return;
             let area = 0; try { area = mbRingArea(a.ring); } catch (e) { area = a.ring.length; }
-            if (area < bestA) { bestA = area; best = { ring: a.ring, name: a.name || '', kind }; }
+            if (area < bestA) { bestA = area; best = { ring: a.ring, name: a.name || '', kind: 'asset' }; }
         });
-        consider(ent.assets, 'asset'); consider(ent.nfzs, 'nfz');
+        if (best || inAnyAsset) return best;
+        (ent.nfzs || []).forEach(a => {
+            if (!a || !Array.isArray(a.ring) || a.ring.length < 3 || !genPointInPoly(pt, a.ring)) return;
+            let area = 0; try { area = mbRingArea(a.ring); } catch (e) { area = a.ring.length; }
+            if (area < bestA) { bestA = area; best = { ring: a.ring, name: a.name || '', kind: 'nfz' }; }
+        });
         return best;
+    }
+    // Closest point on a ring's edge to pt (for the gap ruler lines).
+    function sgNearestOnRing(pt, ring) {
+        let best = null, bd = Infinity;
+        for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+            const a = ring[j], b = ring[i];
+            const dx = b.lng - a.lng, dy = b.lat - a.lat, l2 = dx * dx + dy * dy;
+            let t = l2 === 0 ? 0 : ((pt.lng - a.lng) * dx + (pt.lat - a.lat) * dy) / l2; t = Math.max(0, Math.min(1, t));
+            const q = { lat: a.lat + t * dy, lng: a.lng + t * dx };
+            const d = mbApproxMeters(pt.lat, pt.lng, q.lat, q.lng);
+            if (d < bd) { bd = d; best = q; }
+        }
+        return best ? { pt: best, m: bd } : null;
+    }
+    // Gap ruler: the two nearest child/standalone assets within gapFt of the focus (not the one it is in).
+    function sgComputeGap(focus) {
+        const ent = sg.ent; if (!ent) return [];
+        const lim = sg.gapFt / 3.28084;
+        const near = [];
+        (ent.assets || []).forEach(a => {
+            if (!sgTargetable(a) || a.ring === sg.targetRing) return;
+            if (genPointInPoly(focus, a.ring)) return;
+            const n = sgNearestOnRing(focus, a.ring);
+            if (n && n.m <= lim) near.push({ name: a.name || '', pt: n.pt, ft: n.m * 3.28084 });
+        });
+        near.sort((x, y) => x.ft - y.ft);
+        return near.slice(0, 2);
     }
     function sgShape() { return { navs: sg.rows.length, spreadDeg: sg.spreadDeg, distFt: sg.distFt, snapsPerNav: sg.snapsPerNav, rows: sg.rows.map(r => Object.assign({}, r)) }; }
     // Even rows from the summary (count / fan / standoff / snaps). Custom per-row edits are
@@ -4602,15 +4641,19 @@
     function sgComputeRing(focus, shape, rot, flip, targetRing) {
         const ffzs = (sg.ent && sg.ent.ffzs) || [];
         const rows = (shape.rows && shape.rows.length) ? shape.rows : [{ angle: 0, distFt: shape.distFt, snaps: shape.snapsPerNav }];
+        const nfzs = (sg.ent && sg.ent.nfzs) || [], assets = ((sg.ent && sg.ent.assets) || []).filter(sgTargetable);
         const out = rows.map(r => {
             const bearing = ((rot + r.angle) % 360 + 360) % 360;
             const c = sgClampRay(focus, bearing, r.distFt / 3.28084, ffzs);
             const inFfz = c.ok && sgInAnyFfz(c.pt, ffzs);
+            const overNfz = nfzs.some(z => z.ring && z.ring.length >= 3 && genPointInPoly(c.pt, z.ring));      // Percepto refuses the save
+            const overAsset = !overNfz && assets.some(a => genPointInPoly(c.pt, a.ring));                     // never fly over an asset
             const focusFt = mbApproxMeters(c.pt.lat, c.pt.lng, focus.lat, focus.lng) * 3.28084;
             const edgeFt = targetRing ? mbPointToPolygonMeters(c.pt.lat, c.pt.lng, targetRing) * 3.28084 : null;
             const focusStatus = sgFtStatus(focusFt, inFfz);
             const edgeStatus = edgeFt == null ? null : sgFtStatus(edgeFt, inFfz);
-            return { lat: c.pt.lat, lng: c.pt.lng, bearing, focusFt, focusStatus, edgeFt, edgeStatus, status: edgeStatus || focusStatus, inFfz, clamped: c.clamped, snaps: r.snaps || 1 };
+            const status = (overNfz || overAsset) ? 'red' : (edgeStatus || focusStatus);
+            return { lat: c.pt.lat, lng: c.pt.lng, bearing, focusFt, focusStatus, edgeFt, edgeStatus, status, inFfz, clamped: c.clamped, overNfz, overAsset, snaps: r.snaps || 1 };
         });
         if (flip) out.reverse();
         return out;
@@ -4632,7 +4675,7 @@
     function sgChipText(p, i) {
         const f = `<span style="color:${SG_COL[p.focusStatus]};">${Math.round(p.focusFt)} ft</span> focus`;
         const e = p.edgeFt == null ? '' : ` · <span style="color:${SG_COL[p.edgeStatus]};">${Math.round(p.edgeFt)} ft</span> asset`;
-        return `N${i + 1}${p.snaps > 1 ? ` · ${p.snaps} snaps` : ''} · ${f}${e}${p.clamped ? ' <span style="color:#ffb74d;">⤵ FFZ</span>' : ''}${!p.inFfz ? ' <span style="color:#ff5252;">✕ FFZ</span>' : ''}`;
+        return `N${i + 1}${p.snaps > 1 ? ` · ${p.snaps} snaps` : ''} · ${f}${e}${p.clamped ? ' <span style="color:#ffb74d;">⤵ FFZ</span>' : ''}${!p.inFfz ? ' <span style="color:#ff5252;">✕ FFZ</span>' : ''}${p.overNfz ? ' <span style="color:#ff5252;">✕ over NFZ</span>' : ''}${p.overAsset ? ' <span style="color:#ff5252;">✕ over asset</span>' : ''}`;
     }
     function sgClearLayers(list) { const map = getLeafletMap(); list.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} }); list.length = 0; }
     const SG_COL = { green: '#5fff5f', amber: '#ffb74d', red: '#ff5252' };
@@ -4647,6 +4690,13 @@
         try {
             if (sg.targetRing) keep(L.polygon(sg.targetRing.map(p => [p.lat, p.lng]), { renderer: cv || undefined, interactive: false, color: '#ff8ad2', weight: 2, dashArray: '4 4', fill: false }));
             keep(L.circleMarker([sg.focus.lat, sg.focus.lng], { renderer: cv || undefined, interactive: false, radius: 7, color: '#ff8ad2', weight: 2, fillColor: '#ff8ad2', fillOpacity: sg.pinned ? 0.9 : 0.35 }));
+            // gap ruler — focus ↔ the two nearest neighbouring assets within gapFt
+            sg.gap = sgComputeGap(sg.focus);
+            sg.gap.forEach(gp => {
+                keep(L.polyline([[sg.focus.lat, sg.focus.lng], [gp.pt.lat, gp.pt.lng]], { renderer: cv || undefined, interactive: false, color: '#ffd54f', weight: 2, opacity: 0.95 }));
+                const mid = { lat: (sg.focus.lat + gp.pt.lat) / 2, lng: (sg.focus.lng + gp.pt.lng) / 2 };
+                keep(sgChip(L, mid.lat, mid.lng, `↔ ${Math.round(gp.ft)} ft <span style="color:#9ad;">${escapeHtml(gp.name.slice(0, 22))}</span>`, '#ffd54f', 940));
+            });
             sg.live.forEach((p, i) => {
                 const col = SG_COL[p.status];
                 keep(L.polyline([[sg.focus.lat, sg.focus.lng], [p.lat, p.lng]], { renderer: cv || undefined, interactive: false, color: col, weight: 2, dashArray: '6 5', opacity: 0.9 }));
@@ -4713,7 +4763,8 @@
                 <span>Order <b style="color:#789;">F</b></span><button data-sg-flip style="background:none;border:1px solid #456;color:#cfe;border-radius:3px;cursor:pointer;font-size:10px;padding:0 5px;">${sg.flip ? 'last → first' : 'first → last'}</button>
             </div>
             ${table}
-            <div style="margin-top:5px;color:#9ad;">${sg.pinned ? `📌 ${sg.targetName ? escapeHtml(sg.targetName) : 'focus pinned'} <span style="color:#789;">· R-click = unpin</span>` : `move the mouse · <b>click</b> to pin the focus${sg.targetName ? ` <span style="color:#789;">· over ${escapeHtml(sg.targetName)}</span>` : ''}`}</div>
+            <div style="margin-top:5px;color:#9ad;">${sg.pinned ? `📌 ${sg.targetName ? escapeHtml(sg.targetName) : 'open ground (focus only)'} <span style="color:#789;">· R-click = pick up &amp; move · drag = pan</span>` : `move the mouse · <b>click</b> to pin the focus${sg.targetName ? ` <span style="color:#789;">· over ${escapeHtml(sg.targetName)}</span>` : ' <span style="color:#789;">· open ground</span>'}`}</div>
+            <div style="margin-top:3px;display:flex;align-items:center;gap:5px;color:#ffd54f;">↔ gap ruler ≤ ${inp('data-sg-gapft', sg.gapFt, 44, 'min="5" max="500" step="5"')} ft${sg.gap.length ? ` <span style="color:#cfe;">· ${sg.gap.map(g => `${escapeHtml(g.name.slice(0, 18))} ${Math.round(g.ft)} ft`).join(' · ')}${sg.gap.length === 2 ? ` <span style="color:#789;">(${Math.round(sg.gap[0].ft + sg.gap[1].ft)} ft apart)</span>` : ''}</span>` : ' <span style="color:#789;">· no neighbour that close</span>'}</div>
             <div style="margin-top:6px;display:flex;gap:5px;">
                 <button data-sg-stage ${(!sg.pinned || worst === 'red') ? 'disabled' : ''} title="Enter" style="flex:1;background:${worst === 'red' ? '#3a2020' : '#2a3a2a'};border:1px solid ${worst === 'red' ? '#ff5252' : '#5fff5f'};color:${worst === 'red' ? '#ff8a8a' : '#7dff7d'};border-radius:4px;cursor:pointer;font-weight:800;padding:3px 6px;">➕ Stage ghost</button>
                 <button data-sg-cancel title="Esc" style="background:none;border:1px solid #456;color:#cfe;border-radius:4px;cursor:pointer;padding:3px 6px;">Esc</button>
@@ -4736,6 +4787,7 @@
         h.querySelector('[data-sg-stage]').onclick = () => sgStage();
         h.querySelector('[data-sg-cancel]').onclick = () => sgStop(true);
         h.querySelector('[data-sg-flip]').onclick = () => { sg.flip = !sg.flip; sgDrawLive(); };
+        h.querySelector('[data-sg-gapft]').onchange = (ev) => { const v = Number(ev.target.value); if (Number.isFinite(v) && v > 0) { sg.gapFt = v; try { gmSet(SG_GAP_KEY, v); } catch (e) {} sgDrawLive(); } };
         // summary edits regenerate the rows; row edits are surgical (focus kept in the field)
         h.querySelectorAll('[data-sg-sum]').forEach(el => el.onchange = () => {
             const k = el.getAttribute('data-sg-sum'); const v = Number(el.value);
@@ -4776,6 +4828,7 @@
         sg.container = caMapContainer();
         try { if (map.scrollWheelZoom && map.scrollWheelZoom.enabled()) { map.scrollWheelZoom.disable(); sg.wheelOn = true; } } catch (e) {}
         if (sg.container) {
+            sg.container.addEventListener('mousedown', sgOnDown, true);
             sg.container.addEventListener('mousemove', sgOnMove, true);
             sg.container.addEventListener('click', sgOnClick, true);
             sg.container.addEventListener('contextmenu', sgOnContext, true);
@@ -4791,7 +4844,7 @@
         if (!sg.active) return;
         sg.active = false; sg.pinned = false; sg.focus = null; sg.targetRing = null;
         if (sg.container) {
-            try { sg.container.removeEventListener('mousemove', sgOnMove, true); sg.container.removeEventListener('click', sgOnClick, true); sg.container.removeEventListener('contextmenu', sgOnContext, true); sg.container.removeEventListener('wheel', sgOnWheel, { capture: true }); } catch (e) {}
+            try { sg.container.removeEventListener('mousedown', sgOnDown, true); sg.container.removeEventListener('mousemove', sgOnMove, true); sg.container.removeEventListener('click', sgOnClick, true); sg.container.removeEventListener('contextmenu', sgOnContext, true); sg.container.removeEventListener('wheel', sgOnWheel, { capture: true }); } catch (e) {}
         }
         window.removeEventListener('keydown', sgOnKey, true);
         try { if (!caModeOn) document.documentElement.removeAttribute('data-aim-clickadd'); } catch (e) {}
@@ -4808,9 +4861,13 @@
         const t = sgFindTarget(sg.focus); sg.targetRing = t ? t.ring : null; sg.targetName = t ? `${t.kind === 'nfz' ? 'NFZ ' : ''}${t.name}` : '';
         sgDrawLive();
     }
+    function sgOnDown(e) { if (!sg.active) return; sg.downAt = { x: e.clientX, y: e.clientY, t: Date.now() }; }
     function sgOnClick(e) {
         if (!sg.active) return;
         if (e.target && e.target.closest && e.target.closest('#' + SG_HUD_ID + ', [id^="aim-"], button, input, select')) return;
+        // a press that travelled is a map pan — never a placement
+        if (sg.downAt && (Math.abs(e.clientX - sg.downAt.x) > 5 || Math.abs(e.clientY - sg.downAt.y) > 5)) { sg.downAt = null; return; }
+        sg.downAt = null;
         e.preventDefault(); e.stopPropagation();
         const ll = caClickToLatLng(e); if (!ll) return;
         if (!sg.pinned) { sgPin(ll); return; }
