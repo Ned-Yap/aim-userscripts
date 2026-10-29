@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.53
+// @version      3.54
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.53';
+    const SCRIPT_VERSION = '3.54';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -4515,7 +4515,10 @@
         '2-shot opposite': { navs: 2, spreadDeg: 180, distFt: 100, snapsPerNav: 1 },
     };
     const SG_HUD_ID = 'aim-mb-sg-hud';
-    const sg = { active: false, pinned: false, tplName: '', navs: 3, spreadDeg: 90, distFt: 100, snapsPerNav: 1, rot: 0, flip: false,
+    // v3.54: the shape is a ROW TABLE — one row per set (nav + its snaps): {angle (° relative to
+    // the spin), distFt, snaps}. Fan / standoff / count regenerate the rows evenly; the HUD
+    // table edits any row directly. navs/spreadDeg/distFt/snapsPerNav stay as the summary.
+    const sg = { active: false, pinned: false, tplName: '', navs: 3, spreadDeg: 90, distFt: 100, snapsPerNav: 1, rot: 0, flip: false, rows: [],
         focus: null, targetRing: null, targetName: '', ent: null, live: [], liveLayers: [], stagedLayers: [], stagedKey: '', canvas: null,
         container: null, wheelOn: false, sid: null, mid: null };
     function sgTplAll() {
@@ -4529,7 +4532,7 @@
     function sgTplSaveUser(name, shape) {
         let user = {};
         try { const o = gmGet(SG_TPL_KEY, {}); if (o && typeof o === 'object') user = o; } catch (e) {}
-        user[name] = { navs: shape.navs, spreadDeg: shape.spreadDeg, distFt: shape.distFt, snapsPerNav: shape.snapsPerNav, savedAt: Date.now() };
+        user[name] = { navs: shape.navs, spreadDeg: shape.spreadDeg, distFt: shape.distFt, snapsPerNav: shape.snapsPerNav, rows: (shape.rows || []).map(r => ({ angle: r.angle, distFt: r.distFt, snaps: r.snaps })), savedAt: Date.now() };
         try { gmSet(SG_TPL_KEY, user); } catch (e) { console.warn(`${TAG} [🎯] template save failed`, e); }
     }
     function sgTplDelete(name) {
@@ -4581,21 +4584,34 @@
         consider(ent.assets, 'asset'); consider(ent.nfzs, 'nfz');
         return best;
     }
-    function sgShape() { return { navs: sg.navs, spreadDeg: sg.spreadDeg, distFt: sg.distFt, snapsPerNav: sg.snapsPerNav }; }
+    function sgShape() { return { navs: sg.rows.length, spreadDeg: sg.spreadDeg, distFt: sg.distFt, snapsPerNav: sg.snapsPerNav, rows: sg.rows.map(r => Object.assign({}, r)) }; }
+    // Even rows from the summary (count / fan / standoff / snaps). Custom per-row edits are
+    // kept until a count or fan change regenerates them.
+    function sgRegenRows() {
+        const n = Math.max(1, Math.min(6, sg.navs | 0));
+        sg.rows = [];
+        for (let i = 0; i < n; i++) sg.rows.push({ angle: Math.round((i - (n - 1) / 2) * sg.spreadDeg), distFt: sg.distFt, snaps: sg.snapsPerNav });
+    }
+    function sgSyncSummary() {
+        sg.navs = sg.rows.length;
+        if (sg.rows.length) { sg.distFt = Math.round(sg.rows.reduce((a, r) => a + r.distFt, 0) / sg.rows.length); sg.snapsPerNav = sg.rows[0].snaps; }
+    }
     // Compute the live ring: [{lat,lng,bearing,edgeFt,inFfz,clamped,status}]
+    function sgFtStatus(ft, inFfz) { return (!inFfz || ft < SG_MIN_FT) ? 'red' : ((ft < SG_IDEAL_LO || ft > SG_IDEAL_HI) ? 'amber' : 'green'); }
+    // Each row → {lat,lng,bearing,focusFt,focusStatus,edgeFt,edgeStatus,status,inFfz,clamped,snaps}
     function sgComputeRing(focus, shape, rot, flip, targetRing) {
         const ffzs = (sg.ent && sg.ent.ffzs) || [];
-        const n = Math.max(1, shape.navs), s = shape.spreadDeg, distM = shape.distFt / 3.28084;
-        const out = [];
-        for (let i = 0; i < n; i++) {
-            const bearing = ((rot + (i - (n - 1) / 2) * s) % 360 + 360) % 360;
-            const c = sgClampRay(focus, bearing, distM, ffzs);
-            const edgeM = targetRing ? mbPointToPolygonMeters(c.pt.lat, c.pt.lng, targetRing) : mbApproxMeters(c.pt.lat, c.pt.lng, focus.lat, focus.lng);
-            const edgeFt = edgeM * 3.28084;
+        const rows = (shape.rows && shape.rows.length) ? shape.rows : [{ angle: 0, distFt: shape.distFt, snaps: shape.snapsPerNav }];
+        const out = rows.map(r => {
+            const bearing = ((rot + r.angle) % 360 + 360) % 360;
+            const c = sgClampRay(focus, bearing, r.distFt / 3.28084, ffzs);
             const inFfz = c.ok && sgInAnyFfz(c.pt, ffzs);
-            const status = (!inFfz || edgeFt < SG_MIN_FT) ? 'red' : ((edgeFt < SG_IDEAL_LO || edgeFt > SG_IDEAL_HI) ? 'amber' : 'green');
-            out.push({ lat: c.pt.lat, lng: c.pt.lng, bearing, edgeFt, inFfz, clamped: c.clamped, status });
-        }
+            const focusFt = mbApproxMeters(c.pt.lat, c.pt.lng, focus.lat, focus.lng) * 3.28084;
+            const edgeFt = targetRing ? mbPointToPolygonMeters(c.pt.lat, c.pt.lng, targetRing) * 3.28084 : null;
+            const focusStatus = sgFtStatus(focusFt, inFfz);
+            const edgeStatus = edgeFt == null ? null : sgFtStatus(edgeFt, inFfz);
+            return { lat: c.pt.lat, lng: c.pt.lng, bearing, focusFt, focusStatus, edgeFt, edgeStatus, status: edgeStatus || focusStatus, inFfz, clamped: c.clamped, snaps: r.snaps || 1 };
+        });
         if (flip) out.reverse();
         return out;
     }
@@ -4607,8 +4623,16 @@
         st.textContent = '.aim-mb-sg-chip, .aim-mb-sg-chip * { pointer-events: none !important; }';
         (document.head || document.documentElement).appendChild(st);
     }
-    function sgChip(L, lat, lng, text, bg, fg, zi) {
-        return L.marker([lat, lng], { icon: L.divIcon({ className: 'aim-mb-sg-chip', html: `<div style="pointer-events:none;background:${bg};color:${fg};font:800 10px/1 'Lato',sans-serif;padding:2px 4px;border-radius:3px;border:1px solid #10131a;box-shadow:0 1px 4px rgba(0,0,0,0.7);white-space:nowrap;transform:translate(-50%,-50%);">${escapeHtml(text)}</div>`, iconSize: [0, 0], iconAnchor: [0, 0] }), interactive: false, keyboard: false, zIndexOffset: zi || 900 });
+    // Chip sits up-right of the point (off the colored circle) on a dark pill; numbers carry
+    // their own status colour with a black halo so they read on sand, ortho and shadow alike.
+    const SG_HALO = 'text-shadow:0 0 2px #000,0 0 2px #000,1px 1px 0 #000,-1px -1px 0 #000,1px -1px 0 #000,-1px 1px 0 #000;';
+    function sgChip(L, lat, lng, html, border, zi) {
+        return L.marker([lat, lng], { icon: L.divIcon({ className: 'aim-mb-sg-chip', html: `<div style="pointer-events:none;position:absolute;left:12px;top:-22px;background:rgba(10,12,16,0.82);color:#fff;font:800 11px/1.15 'Lato',sans-serif;padding:3px 6px;border-radius:4px;border:1.5px solid ${border};box-shadow:0 1px 5px rgba(0,0,0,0.8);white-space:nowrap;${SG_HALO}">${html}</div>`, iconSize: [0, 0], iconAnchor: [0, 0] }), interactive: false, keyboard: false, zIndexOffset: zi || 900 });
+    }
+    function sgChipText(p, i) {
+        const f = `<span style="color:${SG_COL[p.focusStatus]};">${Math.round(p.focusFt)} ft</span> focus`;
+        const e = p.edgeFt == null ? '' : ` · <span style="color:${SG_COL[p.edgeStatus]};">${Math.round(p.edgeFt)} ft</span> asset`;
+        return `N${i + 1}${p.snaps > 1 ? ` · ${p.snaps} snaps` : ''} · ${f}${e}${p.clamped ? ' <span style="color:#ffb74d;">⤵ FFZ</span>' : ''}${!p.inFfz ? ' <span style="color:#ff5252;">✕ FFZ</span>' : ''}`;
     }
     function sgClearLayers(list) { const map = getLeafletMap(); list.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} }); list.length = 0; }
     const SG_COL = { green: '#5fff5f', amber: '#ffb74d', red: '#ff5252' };
@@ -4627,7 +4651,7 @@
                 const col = SG_COL[p.status];
                 keep(L.polyline([[sg.focus.lat, sg.focus.lng], [p.lat, p.lng]], { renderer: cv || undefined, interactive: false, color: col, weight: 2, dashArray: '6 5', opacity: 0.9 }));
                 keep(L.circleMarker([p.lat, p.lng], { renderer: cv || undefined, interactive: false, radius: 9, color: col, weight: 3, fillColor: col, fillOpacity: sg.pinned ? 0.5 : 0.2 }));
-                keep(sgChip(L, p.lat, p.lng, `${i + 1}${sg.snapsPerNav > 1 ? '×' + sg.snapsPerNav : ''} · ${Math.round(p.edgeFt)} ft`, col, '#10131a', 950));
+                keep(sgChip(L, p.lat, p.lng, sgChipText(p, i), col, 950));
             });
         } catch (e) { console.warn(`${TAG} [🎯] live draw failed`, e); }
         sgUpdateHud();
@@ -4650,7 +4674,7 @@
                 (g.navs || []).forEach((p, i) => {
                     keep(L.polyline([[g.focus.lat, g.focus.lng], [p.lat, p.lng]], { renderer: cv || undefined, interactive: false, color: '#c39dff', weight: 2, dashArray: '3 5', opacity: 0.8 }));
                     keep(L.circleMarker([p.lat, p.lng], { renderer: cv || undefined, interactive: false, radius: 8, color: '#c39dff', weight: 2, fillColor: '#c39dff', fillOpacity: 0.35 }));
-                    keep(sgChip(L, p.lat, p.lng, `G${gi + 1}.${i + 1}${(g.snapsPerNav || 1) > 1 ? '×' + g.snapsPerNav : ''}`, '#c39dff', '#10131a', 920));
+                    keep(sgChip(L, p.lat, p.lng, `G${gi + 1} · N${i + 1}${(p.snaps || g.snapsPerNav || 1) > 1 ? ` · ${p.snaps || g.snapsPerNav} snaps` : ''}`, '#c39dff', 920));
                 });
             } catch (e) { console.warn(`${TAG} [🎯] staged draw failed`, e); }
         });
@@ -4673,21 +4697,23 @@
     function sgUpdateHud() {
         const h = sgHudEl(); if (!h) return;
         if (!sg.active) { h.remove(); return; }
+        if (h.contains(document.activeElement) && document.activeElement.tagName === 'INPUT') return;   // typing in the table — don't rebuild under the cursor
         const all = sgTplAll();
         const worst = sg.live.reduce((w, p) => (p.status === 'red' ? 'red' : (p.status === 'amber' && w !== 'red' ? 'amber' : w)), 'green');
-        const rows = sg.live.map((p, i) => `<span style="color:${SG_COL[p.status]};">${i + 1}: ${Math.round(p.edgeFt)} ft${p.clamped ? ' ⤵' : ''}${!p.inFfz ? ' ✕FFZ' : ''}</span>`).join(' · ');
+        const inp = (attr, v, w, extra) => `<input type="number" ${attr} value="${v}" ${extra || ''} style="width:${w}px;background:#0f1216;border:1px solid #456;color:#fff;border-radius:3px;font:inherit;font-size:11px;padding:1px 3px;text-align:right;">`;
+        const table = `<table style="width:100%;border-collapse:collapse;margin-top:4px;font-size:11px;"><thead><tr style="color:#789;"><th style="text-align:left;font-weight:600;">set</th><th style="font-weight:600;">angle°</th><th style="font-weight:600;">ft</th><th style="font-weight:600;">snaps</th><th style="text-align:left;font-weight:600;">focus · asset</th></tr></thead><tbody>${sg.rows.map((r, i) => { const p = sg.live[sg.flip ? sg.rows.length - 1 - i : i]; return `<tr><td style="color:#cfe;">N${i + 1}</td><td>${inp(`data-sg-row="${i}" data-sg-f="angle"`, r.angle, 44, 'step="5"')}</td><td>${inp(`data-sg-row="${i}" data-sg-f="distFt"`, r.distFt, 46, 'min="20" max="600" step="5"')}</td><td>${inp(`data-sg-row="${i}" data-sg-f="snaps"`, r.snaps, 34, 'min="1" max="6"')}</td><td style="white-space:nowrap;">${p ? `<span style="color:${SG_COL[p.focusStatus]};">${Math.round(p.focusFt)}</span>${p.edgeFt != null ? ` · <span style="color:${SG_COL[p.edgeStatus]};">${Math.round(p.edgeFt)}</span>` : ''}${p.clamped ? ' <span style="color:#ffb74d;">⤵</span>' : ''}${!p.inFfz ? ' <span style="color:#ff5252;">✕</span>' : ''}` : '—'}</td></tr>`; }).join('')}</tbody></table>`;
         const sel = `<select data-sg-tpl style="flex:1;min-width:0;background:#0f1216;border:1px solid #ff8ad2;color:#fff;border-radius:3px;font:inherit;font-size:11px;padding:1px 3px;">${Object.keys(all).map(n => `<option value="${escapeHtml(n)}" ${n === sg.tplName ? 'selected' : ''}>${escapeHtml(n)}${all[n].builtin ? '' : ' ·'}</option>`).join('')}</select>`;
         h.innerHTML = `<div style="display:flex;align-items:center;gap:5px;margin-bottom:5px;"><b style="color:#ff8ad2;">🎯</b>${sel}<button data-sg-save title="Save the current shape (navs / fan / standoff / snaps) as a template" style="background:none;border:1px solid #456;color:#9ad;border-radius:3px;cursor:pointer;font-size:11px;padding:1px 5px;">💾</button><button data-sg-del title="Delete this template" style="background:none;border:1px solid #456;color:#9ad;border-radius:3px;cursor:pointer;font-size:11px;padding:1px 5px;">🗑</button></div>
-            <div style="display:grid;grid-template-columns:auto 1fr;gap:1px 8px;color:#cfe;">
-                <span>Navs <b style="color:#789;">1–6</b></span><b>${sg.navs}</b>
-                <span>Fan <b style="color:#789;">Alt+wheel</b></span><b>${sg.spreadDeg}°</b>
-                <span>Standoff <b style="color:#789;">Ctrl+wheel</b></span><b>${sg.distFt} ft</b>
+            <div style="display:grid;grid-template-columns:auto auto auto auto;gap:2px 6px;align-items:center;color:#cfe;">
+                <span>Sets <b style="color:#789;">1–6</b></span>${inp('data-sg-sum="navs"', sg.rows.length, 36, 'min="1" max="6"')}
+                <span>Fan° <b style="color:#789;">Alt+wheel</b></span>${inp('data-sg-sum="spreadDeg"', sg.spreadDeg, 46, 'min="0" max="180" step="5"')}
+                <span>Standoff ft <b style="color:#789;">Ctrl+wheel</b></span>${inp('data-sg-sum="distFt"', sg.distFt, 50, 'min="20" max="600" step="5"')}
+                <span>Snaps/set <b style="color:#789;">− / +</b></span>${inp('data-sg-sum="snapsPerNav"', sg.snapsPerNav, 36, 'min="1" max="6"')}
                 <span>Spin <b style="color:#789;">wheel</b></span><b>${Math.round(sg.rot)}°</b>
-                <span>Snaps/nav <b style="color:#789;">Q/E</b></span><b>${sg.snapsPerNav}</b>
-                <span>Order <b style="color:#789;">F</b></span><b>${sg.flip ? 'last → first' : 'first → last'}</b>
+                <span>Order <b style="color:#789;">F</b></span><button data-sg-flip style="background:none;border:1px solid #456;color:#cfe;border-radius:3px;cursor:pointer;font-size:10px;padding:0 5px;">${sg.flip ? 'last → first' : 'first → last'}</button>
             </div>
-            <div style="margin-top:5px;color:#9ad;">${sg.pinned ? `📌 ${sg.targetName ? escapeHtml(sg.targetName) : 'focus pinned'} <span style="color:#789;">· R-click = unpin</span>` : 'move the mouse · <b>click</b> the asset to pin'}</div>
-            <div style="margin-top:3px;">${rows || '<span style="color:#789;">—</span>'}</div>
+            ${table}
+            <div style="margin-top:5px;color:#9ad;">${sg.pinned ? `📌 ${sg.targetName ? escapeHtml(sg.targetName) : 'focus pinned'} <span style="color:#789;">· R-click = unpin</span>` : `move the mouse · <b>click</b> to pin the focus${sg.targetName ? ` <span style="color:#789;">· over ${escapeHtml(sg.targetName)}</span>` : ''}`}</div>
             <div style="margin-top:6px;display:flex;gap:5px;">
                 <button data-sg-stage ${(!sg.pinned || worst === 'red') ? 'disabled' : ''} title="Enter" style="flex:1;background:${worst === 'red' ? '#3a2020' : '#2a3a2a'};border:1px solid ${worst === 'red' ? '#ff5252' : '#5fff5f'};color:${worst === 'red' ? '#ff8a8a' : '#7dff7d'};border-radius:4px;cursor:pointer;font-weight:800;padding:3px 6px;">➕ Stage ghost</button>
                 <button data-sg-cancel title="Esc" style="background:none;border:1px solid #456;color:#cfe;border-radius:4px;cursor:pointer;padding:3px 6px;">Esc</button>
@@ -4709,11 +4735,32 @@
         };
         h.querySelector('[data-sg-stage]').onclick = () => sgStage();
         h.querySelector('[data-sg-cancel]').onclick = () => sgStop(true);
+        h.querySelector('[data-sg-flip]').onclick = () => { sg.flip = !sg.flip; sgDrawLive(); };
+        // summary edits regenerate the rows; row edits are surgical (focus kept in the field)
+        h.querySelectorAll('[data-sg-sum]').forEach(el => el.onchange = () => {
+            const k = el.getAttribute('data-sg-sum'); const v = Number(el.value);
+            if (!Number.isFinite(v)) return;
+            if (k === 'navs') sg.navs = Math.max(1, Math.min(6, Math.round(v)));
+            else if (k === 'spreadDeg') sg.spreadDeg = Math.max(0, Math.min(180, v));
+            else if (k === 'distFt') sg.distFt = Math.max(20, Math.min(600, v));
+            else if (k === 'snapsPerNav') sg.snapsPerNav = Math.max(1, Math.min(6, Math.round(v)));
+            sgRegenRows(); sgDrawLive();
+        });
+        h.querySelectorAll('[data-sg-row]').forEach(el => el.onchange = () => {
+            const i = Number(el.getAttribute('data-sg-row')); const f = el.getAttribute('data-sg-f'); const v = Number(el.value);
+            if (!sg.rows[i] || !Number.isFinite(v)) return;
+            if (f === 'angle') sg.rows[i].angle = v;
+            else if (f === 'distFt') sg.rows[i].distFt = Math.max(20, Math.min(600, v));
+            else if (f === 'snaps') sg.rows[i].snaps = Math.max(1, Math.min(6, Math.round(v)));
+            sgSyncSummary(); sgDrawLive();
+        });
     }
     function sgApplyTpl(name) {
         const all = sgTplAll(); const t = all[name] || all['3-shot 90°'];
         sg.tplName = all[name] ? name : '3-shot 90°';
         sg.navs = t.navs; sg.spreadDeg = t.spreadDeg; sg.distFt = t.distFt; sg.snapsPerNav = t.snapsPerNav || 1;
+        if (Array.isArray(t.rows) && t.rows.length) { sg.rows = t.rows.map(r => ({ angle: Number(r.angle) || 0, distFt: Number(r.distFt) || sg.distFt, snaps: Math.max(1, Number(r.snaps) || 1) })); sgSyncSummary(); }
+        else sgRegenRows();
         try { gmSet(SG_LAST_KEY, sg.tplName); } catch (e) {}
     }
     // ── mode ──
@@ -4738,7 +4785,7 @@
         try { document.documentElement.setAttribute('data-aim-clickadd', '1'); } catch (e) {}   // other scripts' M2 handlers stand down
         genFetchEntities(sid).then(ent => { sg.ent = ent; sgDrawLive(); }).catch(e => { console.warn(`${TAG} [🎯] entity load failed`, e); showToast('🎯 Could not load FFZs/assets — rails are off.', '#ff9800', 4000); sg.ent = { assets: [], ffzs: [], nfzs: [] }; });
         sgUpdateHud(); sgUpdateBtn();
-        showToast('🎯 Ghost live — move to the asset, click to pin, wheel = spin · Ctrl+wheel = standoff · Alt+wheel = fan · 1–6 navs · Q/E snaps · F flip · Enter = stage · Esc = drop.', '#ff8ad2', 7000);
+        showToast('🎯 Ghost live — move to the asset, click to pin, wheel = spin · Ctrl+wheel = standoff · Alt+wheel = fan · 1–6 sets · −/+ snaps · F flip · Enter = stage · Esc = drop.', '#ff8ad2', 7000);
     }
     function sgStop(silent) {
         if (!sg.active) return;
@@ -4754,7 +4801,13 @@
         sgUpdateHud(); sgUpdateBtn();
         if (!silent) showToast('🎯 Ghost dropped.', '#888', 1500);
     }
-    function sgOnMove(e) { if (!sg.active || sg.pinned) return; const ll = caClickToLatLng(e); if (!ll) return; sg.focus = { lat: ll.lat, lng: ll.lng }; sgDrawLive(); }
+    function sgOnMove(e) {
+        if (!sg.active || sg.pinned) return;
+        const ll = caClickToLatLng(e); if (!ll) return;
+        sg.focus = { lat: ll.lat, lng: ll.lng };
+        const t = sgFindTarget(sg.focus); sg.targetRing = t ? t.ring : null; sg.targetName = t ? `${t.kind === 'nfz' ? 'NFZ ' : ''}${t.name}` : '';
+        sgDrawLive();
+    }
     function sgOnClick(e) {
         if (!sg.active) return;
         if (e.target && e.target.closest && e.target.closest('#' + SG_HUD_ID + ', [id^="aim-"], button, input, select')) return;
@@ -4775,9 +4828,9 @@
         if (e.target && e.target.closest && e.target.closest('#' + SG_HUD_ID)) return;
         e.preventDefault(); e.stopPropagation();
         const dir = e.deltaY > 0 ? 1 : -1;
-        if (e.ctrlKey) sg.distFt = Math.max(20, Math.min(600, sg.distFt + dir * 5));
-        else if (e.altKey) sg.spreadDeg = Math.max(0, Math.min(180, sg.spreadDeg + dir * 5));
-        else sg.rot = ((sg.rot + dir * (e.shiftKey ? 1 : 5)) % 360 + 360) % 360;
+        if (e.ctrlKey) { sg.rows.forEach(r => { r.distFt = Math.max(20, Math.min(600, r.distFt + dir * 5)); }); sgSyncSummary(); }
+        else if (e.altKey) { sg.spreadDeg = Math.max(0, Math.min(180, sg.spreadDeg + dir * 5)); sgRegenRows(); }
+        else sg.rot = ((sg.rot + dir * 5) % 360 + 360) % 360;
         sgDrawLive();
     }
     function sgOnKey(e) {
@@ -4786,14 +4839,14 @@
         let used = true;
         if (k === 'Escape') sgStop();
         else if (k === 'Enter') sgStage();
-        else if (/^[1-6]$/.test(k)) sg.navs = Number(k);
-        else if (k === 'q' || k === 'Q') sg.snapsPerNav = Math.max(1, sg.snapsPerNav - 1);
-        else if (k === 'e' || k === 'E') sg.snapsPerNav = Math.min(6, sg.snapsPerNav + 1);
+        else if (/^[1-6]$/.test(k)) { sg.navs = Number(k); sgRegenRows(); }
+        else if (k === '-' || k === '_') { sg.rows.forEach(r => { r.snaps = Math.max(1, r.snaps - 1); }); sgSyncSummary(); }   // Q/E belong to Map Nav zoom
+        else if (k === '+' || k === '=') { sg.rows.forEach(r => { r.snaps = Math.min(6, r.snaps + 1); }); sgSyncSummary(); }
         else if (k === 'f' || k === 'F') sg.flip = !sg.flip;
         else if (k === 'ArrowLeft') sg.rot = ((sg.rot - 5) % 360 + 360) % 360;
         else if (k === 'ArrowRight') sg.rot = ((sg.rot + 5) % 360 + 360) % 360;
-        else if (k === 'ArrowUp') sg.distFt = Math.min(600, sg.distFt + 5);
-        else if (k === 'ArrowDown') sg.distFt = Math.max(20, sg.distFt - 5);
+        else if (k === 'ArrowUp') { sg.rows.forEach(r => { r.distFt = Math.min(600, r.distFt + 5); }); sgSyncSummary(); }
+        else if (k === 'ArrowDown') { sg.rows.forEach(r => { r.distFt = Math.max(20, r.distFt - 5); }); sgSyncSummary(); }
         else used = false;
         if (!used) return;
         e.preventDefault(); e.stopPropagation();
@@ -4813,13 +4866,14 @@
         if (!sid || !mid) { showToast('No open mission to stage into.', '#ff9800', 3000); return; }
         const groups = sgGhostsFor(sid, mid);
         const gid = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-        groups.push({ gid, focus: { lat: sg.focus.lat, lng: sg.focus.lng }, navs: sg.live.map(p => ({ lat: p.lat, lng: p.lng })), snapsPerNav: sg.snapsPerNav, afterNav: sgInsertAfterNav(), target: sg.targetName || '', tpl: sg.tplName, createdAt: Date.now() });
+        groups.push({ gid, focus: { lat: sg.focus.lat, lng: sg.focus.lng }, navs: sg.live.map(p => ({ lat: p.lat, lng: p.lng, snaps: p.snaps || 1 })), snapsPerNav: sg.snapsPerNav, afterNav: sgInsertAfterNav(), target: sg.targetName || '', tpl: sg.tplName, createdAt: Date.now() });
         sgGhostsSet(sid, mid, (composerMission && composerMission.name) || '', groups);
         sgDrawStaged(true);
         // stay live for the next asset: unpin, keep the shape + spin
         sg.pinned = false; sg.targetRing = null; sg.targetName = '';
         sgDrawLive(); sgUpdateBtn();
-        showToast(`➕ Ghost G${groups.length} staged (${sg.navs} nav${sg.navs > 1 ? 's' : ''} × ${sg.snapsPerNav} snap). Click the next asset, Esc when done, ⚡ Commit to write.`, '#c39dff', 4500);
+        const snapsTotal = sg.live.reduce((a, p) => a + (p.snaps || 1), 0);
+        showToast(`➕ Ghost G${groups.length} staged (${sg.live.length} nav${sg.live.length > 1 ? 's' : ''}, ${snapsTotal} snap${snapsTotal > 1 ? 's' : ''}). Click the next asset, Esc when done, ⚡ Commit to write.`, '#c39dff', 4500);
     }
     function sgUndoLastGhost() {
         const sid = getCurrentSiteID(), mid = composerMission && composerMission.id; if (!sid || !mid) return false;
@@ -4844,7 +4898,7 @@
             const ground = getElevationFromCache(g.focus.lat, g.focus.lng);
             g.navs.forEach(p => {
                 steps.push(copy(navRef, p));
-                for (let k = 0; k < (g.snapsPerNav || 1); k++) {
+                for (let k = 0; k < (p.snaps || g.snapsPerNav || 1); k++) {
                     const sc = copy(snapRef, g.focus);
                     sc.value2 = 1; sc.extra_options = Object.assign({}, sc.extra_options || {}, { pitch: (sc.extra_options && sc.extra_options.pitch != null) ? sc.extra_options.pitch : 1001 });
                     if (ground != null) sc.value1 = ground + (defaultSnapAglFt / 3.28084);
@@ -4866,7 +4920,7 @@
             const ground = groundOf(g.focus);
             g.navs.forEach(p => {
                 const n = pcmNormStep(navRef); n.location = { lat: p.lat, lng: p.lng }; steps.push(n);
-                for (let k = 0; k < (g.snapsPerNav || 1); k++) {
+                for (let k = 0; k < (p.snaps || g.snapsPerNav || 1); k++) {
                     const s = pcmNormStep(snapRef); s.location = { lat: g.focus.lat, lng: g.focus.lng }; s.value2 = 1;
                     s.extra_options = Object.assign({}, s.extra_options || {}, { pitch: (s.extra_options && s.extra_options.pitch != null) ? s.extra_options.pitch : 1001 });
                     if (ground != null) s.value1 = ground + (defaultSnapAglFt / 3.28084);
@@ -4998,7 +5052,7 @@
             <div style="padding:6px 12px;font-size:11px;color:#9ad;border-bottom:1px solid #2a2f38;">${list.length} mission(s) with staged ghosts · ${list.reduce((a, x) => a + x.groups.length, 0)} group(s) · wrap on commit: <b style="color:#fff;">${wrap.name ? escapeHtml(wrap.name) : 'none'}</b>${wrap.note ? ` <span style="color:#ff9800;">(${escapeHtml(wrap.note)})</span>` : ''} <span style="color:#789;">· 🎞 Apply a template once to change it</span></div>
             <div style="overflow:auto;flex:1;padding:4px 10px;font-size:11px;">${list.length ? list.map(x => `<div style="display:flex;align-items:center;gap:6px;padding:3px 2px;border-bottom:1px solid #20262e;">
                     <span style="flex:1;color:#e6e6e6;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(x.name || ('#' + x.mid))}${x.mid === openMid ? ' <span style="color:#7adfe6;font-weight:400;">· open in editor</span>' : ''}</span>
-                    <span style="color:#9ad;white-space:nowrap;">${x.groups.length} group(s) · ${x.groups.reduce((a, g) => a + g.navs.length, 0)} navs · ${x.groups.reduce((a, g) => a + g.navs.length * (g.snapsPerNav || 1), 0)} snaps</span>
+                    <span style="color:#9ad;white-space:nowrap;">${x.groups.length} group(s) · ${x.groups.reduce((a, g) => a + g.navs.length, 0)} navs · ${x.groups.reduce((a, g) => a + g.navs.reduce((b, p) => b + (p.snaps || g.snapsPerNav || 1), 0), 0)} snaps</span>
                     <button data-sg-drop="${x.mid}" title="Drop this mission's ghosts" style="background:none;border:1px solid #456;color:#ff8a8a;border-radius:3px;cursor:pointer;font-size:10px;padding:0 4px;">🗑</button>
                 </div>`).join('') : '<div style="padding:10px;color:#888;">No ghosts yet — open a mission, 🎯 in the editor toolbar, click assets.</div>'}</div>
             <div style="padding:9px 12px;border-top:1px solid #2a2f38;display:flex;align-items:center;gap:8px;">
@@ -5021,7 +5075,7 @@
         b.style.background = sg.active ? 'rgba(255,138,210,0.25)' : (n ? 'rgba(195,157,255,0.2)' : 'rgba(255,138,210,0.1)');
         b.style.border = `1px solid ${sg.active ? '#ff8ad2' : (n ? '#c39dff' : 'rgba(255,138,210,0.5)')}`;
         b.style.color = sg.active ? '#ffb0e0' : (n ? '#d8c3ff' : '#ff8ad2');
-        b.title = sg.active ? 'Ghost is live — Esc drops it. Right-click = ⚡ Commit staged ghosts.' : (n ? `${n} ghost group(s) staged on this mission — LEFT-click = place more, RIGHT-click = ⚡ Commit into the editor (then SAVE). Shift+click = undo last ghost.` : 'Shot template ghost: click = start placing (wheel spin · Ctrl+wheel standoff · Alt+wheel fan · 1–6 navs · Q/E snaps · F flip · Enter stage · Esc drop). Right-click = ⚡ Commit staged ghosts.');
+        b.title = sg.active ? 'Ghost is live — Esc drops it. Right-click = ⚡ Commit staged ghosts.' : (n ? `${n} ghost group(s) staged on this mission — LEFT-click = place more, RIGHT-click = ⚡ Commit into the editor (then SAVE). Shift+click = undo last ghost.` : 'Shot template ghost: click = start placing (wheel spin · Ctrl+wheel standoff · Alt+wheel fan · 1–6 sets · −/+ snaps · F flip · Enter stage · Esc drop). Right-click = ⚡ Commit staged ghosts.');
     }
     // Per-tick: keep the staged ghosts drawn for the open mission (cheap key compare).
     function sgTick() {
