@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.63
+// @version      3.64
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.63';
+    const SCRIPT_VERSION = '3.64';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -4273,7 +4273,7 @@
         try { const c = caMapContainer(), r = c.getBoundingClientRect(); return m.containerPointToLatLng([e.clientX - r.left, e.clientY - r.top]); } catch (_) {}
         return null;
     }
-    function caEditing() { return CONTEXT === 'IFRAME' && composerMapMode && !!composerMission; }
+    function caEditing() { return CONTEXT === 'IFRAME' && composerMapMode && !!composerMission && !!document.querySelector('.mission-edit__content'); }   // v3.64: the editor must be OPEN
     function caOnClick(e) {
         if (!caEditing() || !caArmed(e) || !caIsEmptySpace(e)) return;
         const ll = caClickToLatLng(e); if (!ll) return;
@@ -4563,6 +4563,16 @@
         if (!Object.keys(all[sk]).length) delete all[sk];
         sgGhostsWrite(all);
     }
+    // v3.64: ghosts staged on an UNSAVED mission (key 'new') have no mission to belong to —
+    // purge them at load and whenever that editor closes, never let them resurface.
+    function sgDropNewGhosts() {
+        try {
+            const all = sgGhostsAll(); let hit = false;
+            Object.keys(all).forEach(sk => { if (all[sk] && all[sk].new) { delete all[sk].new; hit = true; if (!Object.keys(all[sk]).length) delete all[sk]; } });
+            if (hit) { try { gmSet(SG_GHOST_KEY, all); } catch (e) { console.warn(`${TAG} [🎯] ghost purge save failed`, e); } sg.stagedKey = ''; }
+        } catch (e) { console.warn(`${TAG} [🎯] ghost purge failed`, e); }
+    }
+    try { sgDropNewGhosts(); } catch (e) {}
     function sgSiteGhosts(sid) { const all = sgGhostsAll(); const s = all[envSiteKey(sid)] || {}; return Object.keys(s).filter(k => /^\d+$/.test(k)).map(k => ({ mid: Number(k), name: s[k].name || '', groups: s[k].groups || [] })).filter(x => x.groups.length); }
     // ── geometry ──
     function sgOffset(focus, bearingDeg, distM) {
@@ -6926,7 +6936,7 @@
     // (idempotent — per-marker early-return when the label is unchanged).
     function composerEnsureMapModeIfNeeded() {
         if (!composerMapMode || CONTEXT !== 'IFRAME') return;
-        if (!document.querySelector('.mission-edit__content')) return;
+        if (!document.querySelector('.mission-edit__content')) { if (composerMission && composerMission.__synthetic) { composerMission = null; sgDropNewGhosts(); } return; }   // v3.64: editor closed → stand-in + its unsaved ghosts go
         const domIds = composerDomIds();
         if (!domIds.length) { if (!composerMission) { const syn = composerSyntheticMission(); if (syn) { composerMission = syn; try { composerStyleNativeMarkers(); } catch (e) {} } } return; }   // v3.62: empty editor → synthetic target
         if (composerMission && composerMission.__synthetic) { const syn = composerSyntheticMission(); if (syn) { composerMission = syn; try { composerStyleNativeMarkers(); } catch (e) {} return; } composerMission = null; }   // outgrown the synthetic (first nav / saved) → re-match
