@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.70
+// @version      3.71
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.70';
+    const SCRIPT_VERSION = '3.71';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -8519,11 +8519,15 @@
     function genVirtualRow(ring, name, spanFt) {
         const c = genCentroid(ring);
         const mLat = 110540, mLng = 111320 * Math.cos(c.lat * Math.PI / 180);
+        // axis = the polygon's LONGEST EDGE (a rectangle's farthest corners are its diagonal — wrong axis, v3.70 bug)
         let u = { x: 1, y: 0 }, far = -1;
-        for (let i = 0; i < ring.length; i++) for (let j = i + 1; j < ring.length; j++) { const dx = (ring[j].lng - ring[i].lng) * mLng, dy = (ring[j].lat - ring[i].lat) * mLat, d = Math.hypot(dx, dy); if (d > far) { far = d; u = { x: dx / d, y: dy / d }; } }
-        const L = spanFt / 3.28084, n = Math.max(2, Math.round(L / (30 / 3.28084))), step = L / n;
+        for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) { const dx = (ring[i].lng - ring[j].lng) * mLng, dy = (ring[i].lat - ring[j].lat) * mLat, d = Math.hypot(dx, dy); if (d > far) { far = d; u = { x: dx / d, y: dy / d }; } }
+        // extent along that axis (vertex projections), units inset half a step from each end
+        let tMin = Infinity, tMax = -Infinity;
+        ring.forEach(p => { const t = (p.lng - c.lng) * mLng * u.x + (p.lat - c.lat) * mLat * u.y; if (t < tMin) tMin = t; if (t > tMax) tMax = t; });
+        const L = Math.max(1, tMax - tMin), tMid = (tMin + tMax) / 2, n = Math.max(2, Math.round(L / (30 / 3.28084))), step = L / n;
         const units = [];
-        for (let i = 0; i < n; i++) { const t = (i - (n - 1) / 2) * step; units.push({ ring, name: `${name} ${i + 1}/${n}`, c: { lat: c.lat + (u.y * t) / mLat, lng: c.lng + (u.x * t) / mLng }, virtual: true }); }
+        for (let i = 0; i < n; i++) { const t = tMid + (i - (n - 1) / 2) * step; units.push({ ring, name: `${name} ${i + 1}/${n}`, c: { lat: c.lat + (u.y * t) / mLat, lng: c.lng + (u.x * t) / mLng }, virtual: true }); }
         return units;
     }
     // ── ROW TEMPLATE (v3.69, from the user's hand-built reference on GRANTHAM WEST) ──
@@ -8564,22 +8568,40 @@
             const dSide = Math.sqrt(Math.max(1, (distFt / 3.28084) ** 2 - halfGap ** 2));
             // broadsides — straight out first; if that spot is illegal (NFZ / asset), keep the distance and
             // swing the bearing (±30°, ±60°) before stepping out (+10 … +40 ft): distance beats angle
+            // v3.71: a spot pulled in below the band by the FFZ edge is a MISS (kept only as a last resort),
+            // swings go in 15° steps so the two gap shots stay near-even, and when they still differ by more
+            // than the band width the nav SPLITS into one nav per gap at the full standoff.
+            const splitFt = Math.max(10, band.hi - band.lo);
             [1, -1].forEach(s => {
                 const base = bearing({ x: n.x * s, y: n.y * s });
-                let placed = null, how = '';
+                let placed = null, how = '', fallback = null, usedBrg = base;
                 outer: for (let extra = 0; extra <= 40; extra += 10) {
-                    for (const off of [0, 30, -30, 60, -60]) {
+                    for (const off of [0, 15, -15, 30, -30, 45, -45, 60, -60, 75, -75]) {
                         const want = Math.sqrt(Math.max(1, ((distFt + extra) / 3.28084) ** 2 - halfGap ** 2));
-                        const c = sgClampRay(C, (base + off + 360) % 360, want, ent.ffzs || []);
+                        const brg = (base + off + 360) % 360;
+                        const c = sgClampRay(C, brg, want, ent.ffzs || []);
                         if (!c.ok || !sgNavLegal(c.pt, ent)) continue;
-                        placed = c; how = `${off ? `swung ${Math.abs(off)}°` : ''}${extra ? `${off ? ', ' : ''}+${extra} ft` : ''}`;
+                        const minFt = Math.min.apply(null, gaps.map(a => aimFt(c.pt, a)));
+                        if (c.clamped && Math.round(minFt) < band.lo) { if (!fallback || minFt > fallback.minFt) fallback = { c, minFt, off, extra, brg }; continue; }   // short — keep looking
+                        placed = c; usedBrg = brg; how = `${off ? `swung ${Math.abs(off)}°` : ''}${extra ? `${off ? ', ' : ''}+${extra} ft` : ''}`;
                         break outer;
                     }
                 }
+                if (!placed && fallback) { placed = fallback.c; usedBrg = fallback.brg; how = `${fallback.off ? `swung ${Math.abs(fallback.off)}°` : ''}`; flags.push(`${label}: broadside pulled in to the FFZ edge (${Math.round(fallback.minFt)} ft) — no spot in the band on that side`); }
                 if (!placed) { flags.push(`${label}: no legal broadside on one side (FFZ / asset / NFZ) — skipped`); return; }
                 const fts = gaps.map(a => Math.round(aimFt(placed.pt, a)));
                 if (how) flags.push(`${label}: broadside ${how} to clear an obstacle (${Math.min.apply(null, fts)}–${Math.max.apply(null, fts)} ft)`);
-                if (placed.clamped) flags.push(`${label}: broadside pulled in to the FFZ edge (${Math.min.apply(null, fts)}–${Math.max.apply(null, fts)} ft)`);
+                // split when the shared nav can't keep both gaps near the standoff
+                if (gaps.length > 1 && Math.max.apply(null, fts) - Math.min.apply(null, fts) > splitFt) {
+                    const singles = [];
+                    for (const a of gaps) {
+                        let one = null;
+                        for (let extra = 0; extra <= 40 && !one; extra += 10) { const c2 = sgClampRay(a, usedBrg, (distFt + extra) / 3.28084, ent.ffzs || []); if (c2.ok && sgNavLegal(c2.pt, ent) && !(c2.clamped && Math.round(aimFt(c2.pt, a)) < band.lo)) one = c2; }
+                        if (!one) break;
+                        singles.push({ lat: one.pt.lat, lng: one.pt.lng, clamped: one.clamped, aims: [{ lat: a.lat, lng: a.lng, ft: aimFt(one.pt, a) }] });
+                    }
+                    if (singles.length === gaps.length) { singles.forEach(sn => navs.push(sn)); snaps += gaps.length; flags.push(`${label}: broadside split into ${gaps.length} navs (gap shots were ${Math.min.apply(null, fts)}–${Math.max.apply(null, fts)} ft apart)`); return; }
+                }
                 navs.push({ lat: placed.pt.lat, lng: placed.pt.lng, clamped: placed.clamped, aims: gaps.map(a => ({ lat: a.lat, lng: a.lng, ft: aimFt(placed.pt, a) })) });
                 snaps += gaps.length;
             });
