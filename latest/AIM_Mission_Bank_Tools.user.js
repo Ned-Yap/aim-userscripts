@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.59
+// @version      3.60
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.59';
+    const SCRIPT_VERSION = '3.60';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -4433,7 +4433,10 @@
         caUndoStack.pop();
         const kl = rec.kind === 'nav' ? 'Nav' : rec.kind === 'flag' ? 'Flag Pole' : 'Snapshot';
         let newInstrs, msg;
-        if (rec.op === 'tpl') {
+        if (rec.op === 'replace') {
+            newInstrs = (rec.prev || []).map(s => Object.assign({}, s));
+            msg = `↩ Restored the steps "${rec.name}" replaced (${newInstrs.length}).`;
+        } else if (rec.op === 'tpl') {
             // A wrap-template apply is one undo unit: strip every step it added.
             const ids = new Set((rec.ids || []).map(String));
             newInstrs = instrs.filter(s => !(s && ids.has(String(s.id)))).map(s => Object.assign({}, s));
@@ -4520,8 +4523,11 @@
     // table edits any row directly. navs/spreadDeg/distFt/snapsPerNav stay as the summary.
     const sg = { active: false, pinned: false, tplName: '', navs: 3, spreadDeg: 90, distFt: 100, snapsPerNav: 1, rot: 0, flip: false, rows: [],
         focus: null, targetRing: null, targetName: '', ent: null, live: [], liveLayers: [], stagedLayers: [], stagedKey: '', canvas: null,
-        container: null, wheelOn: false, sid: null, mid: null, downAt: null, gap: [], gapFt: 50, fine: false };
-    const SG_GAP_KEY = 'aim-mb-sg-gap';
+        container: null, wheelOn: false, sid: null, mid: null, downAt: null, gap: [], gapFt: 50, fine: false,
+        // v3.60 📍 Points mode: the user drops the aim points, the solver places the fewest navs
+        mode: 'ring', dots: [], plan: null, dotK: 3, maxFt: SG_IDEAL_HI, hover: null, hoverName: '', replace: false };
+    const SG_GAP_KEY = 'aim-mb-sg-gap', SG_MODE_KEY = 'aim-mb-sg-mode', SG_DOTK_KEY = 'aim-mb-sg-dotk';
+    try { const m = String(gmGet(SG_MODE_KEY, 'ring') || 'ring'); if (m === 'dots') sg.mode = 'dots'; const k = Number(gmGet(SG_DOTK_KEY, 3)); if (Number.isFinite(k) && k >= 1 && k <= 6) sg.dotK = k; } catch (e) {}
     try { const g = Number(gmGet(SG_GAP_KEY, 50)); if (Number.isFinite(g) && g > 0) sg.gapFt = g; } catch (e) {}
     function sgTplAll() {
         let user = {};
@@ -4659,6 +4665,88 @@
         if (flip) out.reverse();
         return out;
     }
+    // v3.60 — distance (m) along a ray from `focus` at which the point sits wantFt from the
+    // nearest EDGE of `rings` (so a 70 ft tank gets its standoff from its end, not its
+    // centre); plain focus distance when there is no ring. Binary search, 250 m cap.
+    function sgEdgeRayM(focus, bearing, wantFt, rings) {
+        const wantM = wantFt / 3.28084;
+        if (!rings || !rings.length) return wantM;
+        const edge = p => Math.min.apply(null, rings.map(r => mbPointToPolygonMeters(p.lat, p.lng, r)));
+        let lo = 0, hi = 250;
+        if (edge(sgOffset(focus, bearing, hi)) < wantM) return hi;
+        for (let i = 0; i < 16; i++) { const mid = (lo + hi) / 2; if (edge(sgOffset(focus, bearing, mid)) >= wantM) hi = mid; else lo = mid; }
+        return hi;
+    }
+    // ── 📍 Points solver ──
+    // dots: [{lat,lng,ring?,name}] — the aim points. Every dot wants K angles (navs ≥ ~0.75·360/K
+    // apart, relaxed to half that if the FFZ leaves no room). Candidates = 24 bearings × 3
+    // standoffs per dot, edge-based, slid into the FFZ, never over an asset / NFZ. A candidate
+    // can shoot every dot whose edge is within [80 ft, maxFt] of it, so neighbouring dots share
+    // navs. Greedy set cover: the candidate that satisfies the most outstanding (dot, angle)
+    // needs wins, ties → nearest the standoff; repeat until nothing helps.
+    function sgSolveDots(dots, K, distFt, maxFt) {
+        const ent = sg.ent || { assets: [], ffzs: [], nfzs: [] };
+        const ffzs = ent.ffzs || [], nfzs = ent.nfzs || [], assets = (ent.assets || []).filter(sgTargetable);
+        const edgeFt = (p, d) => (d.ring ? mbPointToPolygonMeters(p.lat, p.lng, d.ring) : mbApproxMeters(p.lat, p.lng, d.lat, d.lng)) * 3.28084;
+        const bearingFrom = (d, p) => { const b = Math.atan2((p.lng - d.lng) * Math.cos(d.lat * Math.PI / 180), p.lat - d.lat) * 180 / Math.PI; return (b + 360) % 360; };
+        const legal = p => sgInAnyFfz(p, ffzs) && !nfzs.some(z => z.ring && z.ring.length >= 3 && genPointInPoly(p, z.ring)) && !assets.some(a => genPointInPoly(p, a.ring));
+        const cands = [];
+        dots.forEach((d, di) => {
+            for (let b = 0; b < 360; b += 15) [0, 25, 50].forEach(extra => {
+                const m = sgEdgeRayM(d, b, distFt + extra, d.ring ? [d.ring] : null);
+                const c = sgClampRay(d, b, m, ffzs);
+                if (!c.ok || !legal(c.pt)) return;
+                cands.push({ lat: c.pt.lat, lng: c.pt.lng, from: di, clamped: c.clamped });
+            });
+        });
+        cands.forEach(c => { c.cov = []; dots.forEach((d, j) => { const ft = edgeFt(c, d); if (Math.round(ft) >= SG_MIN_FT && ft <= maxFt) c.cov.push({ j, ft, brg: bearingFrom(d, c) }); }); });
+        const need = dots.map(() => K), got = dots.map(() => []);
+        const navs = [];
+        [0.75, 0.5].forEach(relax => {
+            const minSep = K > 1 ? relax * 360 / K : 0;
+            for (let guard = 0; guard < 80; guard++) {
+                let best = null;
+                cands.forEach(c => {
+                    const take = c.cov.filter(x => need[x.j] > 0 && got[x.j].every(b => { let da = Math.abs(b - x.brg); if (da > 180) da = 360 - da; return da >= minSep; }));
+                    if (!take.length) return;
+                    const err = take.reduce((a, x) => a + Math.abs(x.ft - distFt), 0) / take.length;
+                    const score = take.length * 1e6 - err * 10 - (c.clamped ? 1 : 0);
+                    if (!best || score > best.score) best = { c, take, score };
+                });
+                if (!best) break;
+                best.take.forEach(x => { need[x.j]--; got[x.j].push(x.brg); });
+                navs.push({ lat: best.c.lat, lng: best.c.lng, clamped: best.c.clamped, aims: best.take.map(x => ({ j: x.j, lat: dots[x.j].lat, lng: dots[x.j].lng, ft: x.ft })) });
+            }
+        });
+        const unmet = dots.map((d, j) => ({ j, missing: need[j] })).filter(x => x.missing > 0);
+        return { navs, unmet, snaps: navs.reduce((a, n) => a + n.aims.length, 0) };
+    }
+    // Nearest-next from `start`, then 2-opt — small N, instant.
+    function sgOrderNavs(navs, start) {
+        if (navs.length < 2) return navs.slice();
+        const d = (p, q) => mbApproxMeters(p.lat, p.lng, q.lat, q.lng);
+        let cur = start || navs[0]; const left = navs.slice(); const out = [];
+        while (left.length) { let bi = 0, bd = Infinity; left.forEach((n, i) => { const dd = d(cur, n); if (dd < bd) { bd = dd; bi = i; } }); cur = left.splice(bi, 1)[0]; out.push(cur); }
+        const len = arr => { let t = start ? d(start, arr[0]) : 0; for (let i = 1; i < arr.length; i++) t += d(arr[i - 1], arr[i]); return t; };
+        let improved = true, guard = 0;
+        while (improved && guard++ < 50) {
+            improved = false;
+            for (let i = 0; i < out.length - 1; i++) for (let k = i + 1; k < out.length; k++) {
+                const cand = out.slice(0, i).concat(out.slice(i, k + 1).reverse(), out.slice(k + 1));
+                if (len(cand) + 0.01 < len(out)) { out.splice(0, out.length, ...cand); improved = true; }
+            }
+        }
+        return out;
+    }
+    function sgResolveDots() {
+        if (!sg.dots.length) { sg.plan = null; return; }
+        try {
+            const plan = sgSolveDots(sg.dots, sg.dotK, sg.distFt, sg.maxFt);
+            plan.navs = sgOrderNavs(plan.navs, sgArrivalPoint([]) || sg.dots[0]);
+            sg.plan = plan;
+        } catch (e) { console.warn(`${TAG} [📍] solve failed`, e); sg.plan = null; showToast('📍 Solver failed — see console.', '#ff5252', 3000); }
+    }
+    function sgDotTarget(pt) { const t = sgFindTarget(pt); return t ? { ring: t.ring, name: `${t.kind === 'nfz' ? 'NFZ ' : ''}${t.name}` } : null; }
     // ── drawing ──
     function sgCanvas(L) { if (!sg.canvas) { try { sg.canvas = L.canvas({ padding: 0.5 }); } catch (e) { sg.canvas = null; } } return sg.canvas; }
     function sgEnsureStyle() {
@@ -4681,7 +4769,49 @@
     }
     function sgClearLayers(list) { const map = getLeafletMap(); list.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} }); list.length = 0; }
     const SG_COL = { green: '#5fff5f', amber: '#ffb74d', red: '#ff5252' };
+    // 📍 Points live layer: dots (S#), hover target, planned navs with sightlines + route, unmet dots.
+    function sgDrawDots() {
+        sgClearLayers(sg.liveLayers);
+        if (!sg.active) return;
+        const L = composerGetL(), map = getLeafletMap(); if (!L || !map) return;
+        sgEnsureStyle();
+        const cv = sgCanvas(L);
+        const keep = l => { sg.liveLayers.push(l); l.addTo(map); return l; };
+        try {
+            const unmet = new Map(); if (sg.plan) sg.plan.unmet.forEach(u => unmet.set(u.j, u.missing));
+            sg.dots.forEach((d, i) => {
+                if (d.ring) keep(L.polygon(d.ring.map(p => [p.lat, p.lng]), { renderer: cv || undefined, interactive: false, color: '#ff8ad2', weight: 1.5, dashArray: '4 4', fill: false, opacity: 0.8 }));
+                const miss = unmet.get(i);
+                if (miss) keep(L.circleMarker([d.lat, d.lng], { renderer: cv || undefined, interactive: false, radius: 12, color: '#ff5252', weight: 2, fill: false }));
+                keep(L.circleMarker([d.lat, d.lng], { renderer: cv || undefined, interactive: false, radius: 6, color: '#ff8ad2', weight: 2, fillColor: '#ff8ad2', fillOpacity: 0.9 }));
+                keep(sgChip(L, d.lat, d.lng, `S${i + 1}${miss ? ` <span style="color:#ff5252;">· ${miss} angle${miss > 1 ? 's' : ''} short</span>` : ''}`, miss ? '#ff5252' : '#ff8ad2', 930, 'dl'));
+            });
+            if (sg.hover && !sg.dots.some(d => Math.abs(d.lat - sg.hover.lat) < 1e-7 && Math.abs(d.lng - sg.hover.lng) < 1e-7)) {
+                keep(L.circleMarker([sg.hover.lat, sg.hover.lng], { renderer: cv || undefined, interactive: false, radius: 7, color: '#ff8ad2', weight: 2, fill: false, opacity: 0.7 }));
+                keep(sgChip(L, sg.hover.lat, sg.hover.lng, `S${sg.dots.length + 1} · ${sg.hoverName ? escapeHtml(sg.hoverName) : 'open ground'}`, '#ff8ad2', 925));
+            }
+            if (sg.plan) {
+                const navs = sg.plan.navs;
+                const start = sgArrivalPoint([]);
+                const route = (start ? [[start.lat, start.lng]] : []).concat(navs.map(n => [n.lat, n.lng]));
+                if (route.length > 1) keep(L.polyline(route, { renderer: cv || undefined, interactive: false, color: '#c39dff', weight: 2, dashArray: '2 6', opacity: 0.7 }));
+                navs.forEach((n, i) => {
+                    let worst = 'green';
+                    n.aims.forEach(a => {
+                        const st = sgFtStatus(a.ft, true); if (st === 'amber') worst = 'amber';
+                        keep(L.polyline([[n.lat, n.lng], [a.lat, a.lng]], { renderer: cv || undefined, interactive: false, color: SG_COL[st], weight: 2, dashArray: '6 5', opacity: 0.9 }));
+                    });
+                    const col = SG_COL[worst];
+                    keep(L.circleMarker([n.lat, n.lng], { renderer: cv || undefined, interactive: false, radius: 9, color: col, weight: 3, fillColor: col, fillOpacity: 0.35 }));
+                    const fts = n.aims.map(a => Math.round(a.ft));
+                    keep(sgChip(L, n.lat, n.lng, `N${i + 1} · ${n.aims.map(a => `S${a.j + 1}`).join('+')} · <span style="color:${col};">${Math.min.apply(null, fts)}${fts.length > 1 ? '–' + Math.max.apply(null, fts) : ''} ft</span>${n.clamped ? ' <span style="color:#ffb74d;">⤵ FFZ</span>' : ''}`, col, 950));
+                });
+            }
+        } catch (e) { console.warn(`${TAG} [📍] draw failed`, e); }
+        sgUpdateHud();
+    }
     function sgDrawLive() {
+        if (sg.mode === 'dots') { sgDrawDots(); return; }
         sgClearLayers(sg.liveLayers);
         if (!sg.active || !sg.focus) return;
         const L = composerGetL(), map = getLeafletMap(); if (!L || !map) return;
@@ -4725,11 +4855,15 @@
         const keep = l => { sg.stagedLayers.push(l); l.addTo(map); return l; };
         groups.forEach((g, gi) => {
             try {
-                keep(L.circleMarker([g.focus.lat, g.focus.lng], { renderer: cv || undefined, interactive: false, radius: 6, color: '#ff8ad2', weight: 2, fillColor: '#ff8ad2', fillOpacity: 0.7 }));
+                if (Array.isArray(g.dots) && g.dots.length) {
+                    g.dots.forEach((d, di) => { keep(L.circleMarker([d.lat, d.lng], { renderer: cv || undefined, interactive: false, radius: 5, color: '#ff8ad2', weight: 2, fillColor: '#ff8ad2', fillOpacity: 0.8 })); keep(sgChip(L, d.lat, d.lng, `G${gi + 1} · S${di + 1}`, '#ff8ad2', 915, 'dl')); });
+                } else keep(L.circleMarker([g.focus.lat, g.focus.lng], { renderer: cv || undefined, interactive: false, radius: 6, color: '#ff8ad2', weight: 2, fillColor: '#ff8ad2', fillOpacity: 0.7 }));
                 (g.navs || []).forEach((p, i) => {
-                    keep(L.polyline([[g.focus.lat, g.focus.lng], [p.lat, p.lng]], { renderer: cv || undefined, interactive: false, color: '#c39dff', weight: 2, dashArray: '3 5', opacity: 0.8 }));
+                    const aims = (p.aims && p.aims.length) ? p.aims : [g.focus];
+                    aims.forEach(a => keep(L.polyline([[a.lat, a.lng], [p.lat, p.lng]], { renderer: cv || undefined, interactive: false, color: '#c39dff', weight: 2, dashArray: '3 5', opacity: 0.8 })));
                     keep(L.circleMarker([p.lat, p.lng], { renderer: cv || undefined, interactive: false, radius: 8, color: '#c39dff', weight: 2, fillColor: '#c39dff', fillOpacity: 0.35 }));
-                    keep(sgChip(L, p.lat, p.lng, `G${gi + 1} · N${i + 1}${(p.snaps || g.snapsPerNav || 1) > 1 ? ` · ${p.snaps || g.snapsPerNav} snaps` : ''}`, '#c39dff', 920));
+                    const ns = (p.aims && p.aims.length) ? p.aims.length : (p.snaps || g.snapsPerNav || 1);
+                    keep(sgChip(L, p.lat, p.lng, `G${gi + 1} · N${i + 1}${ns > 1 ? ` · ${ns} snaps` : ''}`, '#c39dff', 920));
                 });
             } catch (e) { console.warn(`${TAG} [🎯] staged draw failed`, e); }
         });
@@ -4753,12 +4887,13 @@
         const h = sgHudEl(); if (!h) return;
         if (!sg.active) { h.remove(); return; }
         if (h.contains(document.activeElement) && document.activeElement.tagName === 'INPUT') return;   // typing in the table — don't rebuild under the cursor
+        if (sg.mode === 'dots') { sgUpdateHudDots(h); return; }
         const all = sgTplAll();
         const worst = sg.live.reduce((w, p) => (p.status === 'red' ? 'red' : (p.status === 'amber' && w !== 'red' ? 'amber' : w)), 'green');
         const inp = (attr, v, w, extra) => `<input type="number" ${attr} value="${v}" ${extra || ''} style="width:${w}px;background:#0f1216;border:1px solid #456;color:#fff;border-radius:3px;font:inherit;font-size:11px;padding:1px 3px;text-align:right;">`;
         const table = `<table style="width:100%;border-collapse:collapse;margin-top:4px;font-size:11px;"><thead><tr style="color:#789;"><th style="text-align:left;font-weight:600;">set</th><th style="font-weight:600;">angle°</th><th style="font-weight:600;">ft</th><th style="font-weight:600;">snaps</th><th style="text-align:left;font-weight:600;">focus · asset</th></tr></thead><tbody>${sg.rows.map((r, i) => { const p = sg.live[sg.flip ? sg.rows.length - 1 - i : i]; return `<tr><td style="color:#cfe;">N${i + 1}</td><td>${inp(`data-sg-row="${i}" data-sg-f="angle"`, r.angle, 44, 'step="5"')}</td><td>${inp(`data-sg-row="${i}" data-sg-f="distFt"`, r.distFt, 46, 'min="20" max="600" step="5"')}</td><td>${inp(`data-sg-row="${i}" data-sg-f="snaps"`, r.snaps, 34, 'min="1" max="6"')}</td><td style="white-space:nowrap;">${p ? `<span style="color:${SG_COL[p.focusStatus]};">${Math.round(p.focusFt)}</span>${p.edgeFt != null ? ` · <span style="color:${SG_COL[p.edgeStatus]};">${Math.round(p.edgeFt)}</span>` : ''}${p.clamped ? ' <span style="color:#ffb74d;">⤵</span>' : ''}${!p.inFfz ? ' <span style="color:#ff5252;">✕</span>' : ''}` : '—'}</td></tr>`; }).join('')}</tbody></table>`;
         const sel = `<select data-sg-tpl style="flex:1;min-width:0;background:#0f1216;border:1px solid #ff8ad2;color:#fff;border-radius:3px;font:inherit;font-size:11px;padding:1px 3px;">${Object.keys(all).map(n => `<option value="${escapeHtml(n)}" ${n === sg.tplName ? 'selected' : ''}>${escapeHtml(n)}${all[n].builtin ? '' : ' ·'}</option>`).join('')}</select>`;
-        h.innerHTML = `<div style="display:flex;align-items:center;gap:5px;margin-bottom:5px;"><b style="color:#ff8ad2;">🎯</b>${sel}<button data-sg-save title="Save the current shape (navs / fan / standoff / snaps) as a template" style="background:none;border:1px solid #456;color:#9ad;border-radius:3px;cursor:pointer;font-size:11px;padding:1px 5px;">💾</button><button data-sg-del title="Delete this template" style="background:none;border:1px solid #456;color:#9ad;border-radius:3px;cursor:pointer;font-size:11px;padding:1px 5px;">🗑</button></div>
+        h.innerHTML = `<div style="display:flex;align-items:center;gap:5px;margin-bottom:5px;">${sgModeBtns()}${sel}<button data-sg-save title="Save the current shape (navs / fan / standoff / snaps) as a template" style="background:none;border:1px solid #456;color:#9ad;border-radius:3px;cursor:pointer;font-size:11px;padding:1px 5px;">💾</button><button data-sg-del title="Delete this template" style="background:none;border:1px solid #456;color:#9ad;border-radius:3px;cursor:pointer;font-size:11px;padding:1px 5px;">🗑</button></div>
             <div style="display:grid;grid-template-columns:auto auto auto auto;gap:2px 6px;align-items:center;color:#cfe;">
                 <span>Sets <b style="color:#789;">1–6</b></span>${inp('data-sg-sum="navs"', sg.rows.length, 36, 'min="1" max="6"')}
                 <span>Fan° <b style="color:#789;">Alt+wheel</b></span>${inp('data-sg-sum="spreadDeg"', sg.spreadDeg, 46, 'min="0" max="180" step="5"')}
@@ -4776,6 +4911,7 @@
                 <button data-sg-cancel title="Esc" style="background:none;border:1px solid #456;color:#cfe;border-radius:4px;cursor:pointer;padding:3px 6px;">Esc</button>
             </div>
             ${worst === 'red' ? `<div style="margin-top:4px;color:#ff8a8a;">red = outside the FFZ or under ${SG_MIN_FT} ft from the asset — spin / push out first</div>` : ''}`;
+        sgWireModeBtns(h);
         h.querySelector('[data-sg-tpl]').onchange = (ev) => { sgApplyTpl(ev.target.value); sgDrawLive(); };
         h.querySelector('[data-sg-save]').onclick = () => {
             const nm = (prompt('Template name (navs / fan / standoff / snaps per nav are saved; spin is per placement):', sg.tplName && !sgTplAll()[sg.tplName].builtin ? sg.tplName : '') || '').trim();
@@ -4824,6 +4960,61 @@
             else if (f === 'snaps') sg.rows[i].snaps = Math.max(1, Math.min(6, Math.round(v)));
             sgSyncSummary(); sgDrawLive();
         });
+    }
+    function sgModeBtns() {
+        const b = (m, txt, title) => `<button data-sg-mode="${m}" title="${title}" style="background:${sg.mode === m ? 'rgba(255,138,210,0.25)' : 'none'};border:1px solid ${sg.mode === m ? '#ff8ad2' : '#456'};color:${sg.mode === m ? '#ffb3e0' : '#9ad'};border-radius:3px;cursor:pointer;font-size:11px;font-weight:800;padding:1px 6px;">${txt}</button>`;
+        return b('ring', '🎯', 'Ring: a template of navs around one focus (P switches)') + b('dots', '📍', 'Points: drop the aim points, the solver places the fewest navs (P switches)');
+    }
+    function sgWireModeBtns(h) {
+        h.querySelectorAll('[data-sg-mode]').forEach(b => b.onclick = () => sgSetMode(b.getAttribute('data-sg-mode')));
+    }
+    function sgSetMode(m) {
+        if (m !== 'ring' && m !== 'dots') return; if (sg.mode === m) return;
+        sg.mode = m; try { gmSet(SG_MODE_KEY, m); } catch (e) {}
+        sg.pinned = false; sg.targetRing = null; sg.targetName = ''; sg.hover = null;
+        sgClearLayers(sg.liveLayers); sgDrawLive(); sgUpdateHud();
+        showToast(m === 'dots' ? '📍 Points — click every spot you want a snapshot of, Enter = stage the plan.' : '🎯 Ring — move to the asset, click to pin.', '#ff8ad2', 3000);
+    }
+    function sgUpdateHudDots(h) {
+        const inp = (attr, v, w, extra) => `<input type="number" ${attr} value="${v}" ${extra || ''} style="width:${w}px;background:#0f1216;border:1px solid #456;color:#fff;border-radius:3px;font:inherit;font-size:11px;padding:1px 3px;text-align:right;">`;
+        const plan = sg.plan, n = sg.dots.length;
+        const short = plan ? plan.unmet.reduce((a, u) => a + u.missing, 0) : 0;
+        h.innerHTML = `<div style="display:flex;align-items:center;gap:5px;margin-bottom:5px;">${sgModeBtns()}<b style="color:#ff8ad2;flex:1;">Points</b><span style="color:#789;font-size:10px;">P = switch</span></div>
+            <div style="display:grid;grid-template-columns:auto auto auto auto;gap:2px 6px;align-items:center;color:#cfe;">
+                <span>Angles/pt <b style="color:#789;">1–6</b></span>${inp('data-sg-dotk', sg.dotK, 36, 'min="1" max="6"')}
+                <span>Standoff ft <b style="color:#789;">Ctrl+wheel</b></span>${inp('data-sg-dotdist', sg.distFt, 50, 'min="80" max="600" step="5"')}
+                <span>Max ft</span>${inp('data-sg-dotmax', sg.maxFt, 50, 'min="100" max="600" step="10"')}
+                <span style="grid-column:span 2;color:#789;font-size:10px;">share a nav when ≤ max from both</span>
+            </div>
+            <div style="margin-top:5px;color:#9ad;"><b>click</b> = add point${sg.hoverName ? ` <span style="color:#789;">· over ${escapeHtml(sg.hoverName)}</span>` : ''} · <b>R-click</b> a point = remove · <b>Backspace</b> = last · <b>Enter</b> = stage</div>
+            <div style="margin-top:4px;color:#cfe;">${n} point${n === 1 ? '' : 's'}${plan ? ` → <b style="color:#c39dff;">${plan.navs.length} nav${plan.navs.length === 1 ? '' : 's'}</b> · ${plan.snaps} snap${plan.snaps === 1 ? '' : 's'}${short ? ` · <span style="color:#ff5252;">${short} angle${short > 1 ? 's' : ''} short (no legal spot)</span>` : ''}` : ''}</div>
+            <label style="display:flex;align-items:center;gap:5px;margin-top:4px;cursor:pointer;color:#ffd54f;"><input type="checkbox" data-sg-replace ${sg.replace ? 'checked' : ''}> Replace this mission's existing shots on commit</label>
+            ${sgStagedListHtml()}
+            <div style="margin-top:6px;display:flex;gap:5px;">
+                <button data-sg-stage ${(!plan || !plan.navs.length) ? 'disabled' : ''} title="Enter" style="flex:1;background:#2a3a2a;border:1px solid #5fff5f;color:#7dff7d;border-radius:4px;cursor:pointer;font-weight:800;padding:3px 6px;">➕ Stage plan</button>
+                <button data-sg-dots-clear ${n ? '' : 'disabled'} style="background:none;border:1px solid #456;color:#ff8a8a;border-radius:4px;cursor:pointer;padding:3px 6px;">✕ pts</button>
+                <button data-sg-cancel title="Esc" style="background:none;border:1px solid #456;color:#cfe;border-radius:4px;cursor:pointer;padding:3px 6px;">Esc</button>
+            </div>`;
+        sgWireModeBtns(h);
+        h.querySelector('[data-sg-dotk]').onchange = ev => { const v = Math.max(1, Math.min(6, Math.round(Number(ev.target.value) || 3))); sg.dotK = v; try { gmSet(SG_DOTK_KEY, v); } catch (e) {} sgResolveDots(); sgDrawLive(); };
+        h.querySelector('[data-sg-dotdist]').onchange = ev => { const v = Number(ev.target.value); if (Number.isFinite(v)) { sg.distFt = Math.max(80, Math.min(600, v)); sg.rows.forEach(r => { r.distFt = sg.distFt; }); sgResolveDots(); sgDrawLive(); } };
+        h.querySelector('[data-sg-dotmax]').onchange = ev => { const v = Number(ev.target.value); if (Number.isFinite(v)) { sg.maxFt = Math.max(100, Math.min(600, v)); sgResolveDots(); sgDrawLive(); } };
+        h.querySelector('[data-sg-replace]').onchange = ev => { sg.replace = !!ev.target.checked; };
+        h.querySelector('[data-sg-stage]').onclick = () => sgStageDots();
+        h.querySelector('[data-sg-dots-clear]').onclick = () => { sg.dots = []; sg.plan = null; sgDrawLive(); };
+        h.querySelector('[data-sg-cancel]').onclick = () => sgStop(true);
+        h.querySelectorAll('[data-sg-g]').forEach(b => b.onclick = () => {
+            const i = Number(b.getAttribute('data-sg-g')), act = b.getAttribute('data-sg-act');
+            sgGroupsMutate(groups => {
+                if (act === 'up' && i > 0) { const t = groups[i - 1]; groups[i - 1] = groups[i]; groups[i] = t; }
+                else if (act === 'down' && i < groups.length - 1) { const t = groups[i + 1]; groups[i + 1] = groups[i]; groups[i] = t; }
+                else if (act === 'del') groups.splice(i, 1);
+                else if (act === 'rev') groups[i].navs.reverse();
+                return groups;
+            });
+        });
+        const clr = h.querySelector('[data-sg-g-clear]'); if (clr) clr.onclick = () => { if (confirm('Drop every staged ghost on this mission?')) sgGroupsMutate(() => []); };
+        const auto = h.querySelector('[data-sg-auto]'); if (auto) auto.onclick = () => sgAutoOrder();
     }
     function sgStagedListHtml() {
         const sid = getCurrentSiteID(), mid = composerMission && composerMission.id;
@@ -4900,6 +5091,7 @@
         let last = ''; try { last = String(gmGet(SG_LAST_KEY, '') || ''); } catch (e) {}
         sgApplyTpl(last || '3-shot 90°');
         sg.active = true; sg.pinned = false; sg.focus = null; sg.targetRing = null; sg.targetName = ''; sg.rot = 0; sg.flip = false;
+        sg.dots = []; sg.plan = null; sg.hover = null; sg.hoverName = ''; sg.replace = false;
         sg.sid = sid; sg.mid = composerMission && composerMission.id;
         sg.container = caMapContainer();
         sg.wheelOn = false;   // v3.56: plain wheel keeps zooming the map; Shift+wheel spins
@@ -4914,11 +5106,12 @@
         try { document.documentElement.setAttribute('data-aim-clickadd', '1'); } catch (e) {}   // other scripts' M2 handlers stand down
         genFetchEntities(sid).then(ent => { sg.ent = ent; sgDrawLive(); }).catch(e => { console.warn(`${TAG} [🎯] entity load failed`, e); showToast('🎯 Could not load FFZs/assets — rails are off.', '#ff9800', 4000); sg.ent = { assets: [], ffzs: [], nfzs: [] }; });
         sgUpdateHud(); sgUpdateBtn();
-        showToast('🎯 Ghost live — move to the asset, click to pin, Shift+wheel = spin (X = 1° steps) · Ctrl+wheel = standoff · Alt+wheel = fan · 1–6 sets · −/+ snaps · F flip · Enter = stage · Esc = drop.', '#ff8ad2', 7000);
+        if (sg.mode === 'dots') showToast('📍 Points — click every spot you want a snapshot of; the plan redraws after each click. R-click a point removes it · 1–6 angles per point · Ctrl+wheel standoff · Enter = stage · P = ring mode · Esc.', '#ff8ad2', 7000);
+        else showToast('🎯 Ghost live — move to the asset, click to pin, Shift+wheel = spin (X = 1° steps) · Ctrl+wheel = standoff · Alt+wheel = fan · 1–6 sets · −/+ snaps · F flip · Enter = stage · P = points mode · Esc = drop.', '#ff8ad2', 7000);
     }
     function sgStop(silent) {
         if (!sg.active) return;
-        sg.active = false; sg.pinned = false; sg.focus = null; sg.targetRing = null;
+        sg.active = false; sg.pinned = false; sg.focus = null; sg.targetRing = null; sg.dots = []; sg.plan = null; sg.hover = null;
         if (sg.container) {
             try { sg.container.removeEventListener('mousedown', sgOnDown, true); sg.container.removeEventListener('mousemove', sgOnMove, true); sg.container.removeEventListener('click', sgOnClick, true); sg.container.removeEventListener('contextmenu', sgOnContext, true); sg.container.removeEventListener('wheel', sgOnWheel, { capture: true }); } catch (e) {}
         }
@@ -4930,7 +5123,14 @@
         if (!silent) showToast('🎯 Ghost dropped.', '#888', 1500);
     }
     function sgOnMove(e) {
-        if (!sg.active || sg.pinned) return;
+        if (!sg.active) return;
+        if (sg.mode === 'dots') {
+            const ll = caClickToLatLng(e); if (!ll) return;
+            sg.hover = { lat: ll.lat, lng: ll.lng };
+            const t = sgDotTarget(sg.hover); sg.hoverName = t ? t.name : '';
+            sgDrawDots(); return;
+        }
+        if (sg.pinned) return;
         const ll = caClickToLatLng(e); if (!ll) return;
         sg.focus = { lat: ll.lat, lng: ll.lng };
         const t = sgFindTarget(sg.focus); sg.targetRing = t ? t.ring : null; sg.targetName = t ? `${t.kind === 'nfz' ? 'NFZ ' : ''}${t.name}` : '';
@@ -4945,10 +5145,28 @@
         sg.downAt = null;
         e.preventDefault(); e.stopPropagation();
         const ll = caClickToLatLng(e); if (!ll) return;
+        if (sg.mode === 'dots') { sgAddDot(ll); return; }
         if (!sg.pinned) { sgPin(ll); return; }
         sgStage();
     }
-    function sgOnContext(e) { if (!sg.active) return; e.preventDefault(); e.stopPropagation(); if (sg.pinned) { sg.pinned = false; sg.targetRing = null; sg.targetName = ''; const ll = caClickToLatLng(e); if (ll) sg.focus = { lat: ll.lat, lng: ll.lng }; sgDrawLive(); } }
+    function sgAddDot(ll) {
+        const t = sgDotTarget(ll);
+        sg.dots.push({ lat: ll.lat, lng: ll.lng, ring: t ? t.ring : null, name: t ? t.name : '' });
+        try { fetchElevation(ll.lat, ll.lng); } catch (e) {}
+        sgResolveDots(); sgDrawLive();
+    }
+    // R-click in points mode: remove the point under the cursor (≤ 14 px), else nothing.
+    function sgRemoveDotAt(e) {
+        const map = getLeafletMap(); if (!map || !sg.dots.length) return false;
+        try {
+            const r = map.getContainer().getBoundingClientRect(); const px = { x: e.clientX - r.left, y: e.clientY - r.top };
+            let bi = -1, bd = 14;
+            sg.dots.forEach((d, i) => { const q = map.latLngToContainerPoint([d.lat, d.lng]); const dd = Math.hypot(q.x - px.x, q.y - px.y); if (dd < bd) { bd = dd; bi = i; } });
+            if (bi < 0) return false;
+            sg.dots.splice(bi, 1); sgResolveDots(); sgDrawLive(); return true;
+        } catch (err) { console.warn(`${TAG} [📍] remove failed`, err); return false; }
+    }
+    function sgOnContext(e) { if (!sg.active) return; e.preventDefault(); e.stopPropagation(); if (sg.mode === 'dots') { sgRemoveDotAt(e); return; } if (sg.pinned) { sg.pinned = false; sg.targetRing = null; sg.targetName = ''; const ll = caClickToLatLng(e); if (ll) sg.focus = { lat: ll.lat, lng: ll.lng }; sgDrawLive(); } }
     function sgPin(ll) {
         sg.focus = { lat: ll.lat, lng: ll.lng }; sg.pinned = true;
         const t = sgFindTarget(sg.focus); sg.targetRing = t ? t.ring : null; sg.targetName = t ? `${t.kind === 'nfz' ? 'NFZ ' : ''}${t.name}` : '';
@@ -4963,6 +5181,7 @@
         e.preventDefault(); e.stopPropagation();
         // Shift+wheel arrives as deltaX on Windows — read whichever axis moved
         const d = e.deltaY || e.deltaX; const dir = d > 0 ? 1 : -1;
+        if (sg.mode === 'dots') { if (e.ctrlKey) { sg.distFt = Math.max(80, Math.min(600, sg.distFt + dir * 5)); sg.rows.forEach(r => { r.distFt = sg.distFt; }); sgResolveDots(); sgDrawLive(); } return; }
         if (e.ctrlKey) { sg.rows.forEach(r => { r.distFt = Math.max(20, Math.min(600, r.distFt + dir * 5)); }); sgSyncSummary(); }
         else if (e.altKey) { sg.spreadDeg = Math.max(0, Math.min(180, sg.spreadDeg + dir * 5)); sgRegenRows(); }
         else sg.rot = ((sg.rot + dir * sgSpinStep()) % 360 + 360) % 360;
@@ -4972,6 +5191,20 @@
         if (!sg.active || caIsTypingTarget(e.target)) return;
         const k = e.key;
         let used = true;
+        if (k === 'p' || k === 'P') { sgSetMode(sg.mode === 'dots' ? 'ring' : 'dots'); e.preventDefault(); e.stopPropagation(); return; }
+        if (sg.mode === 'dots') {
+            if (k === 'Escape') sgStop();
+            else if (k === 'Enter') sgStageDots();
+            else if (/^[1-6]$/.test(k)) { sg.dotK = Number(k); try { gmSet(SG_DOTK_KEY, sg.dotK); } catch (err) {} sgResolveDots(); }
+            else if (k === 'Backspace') { if (sg.dots.length) { sg.dots.pop(); sgResolveDots(); } }
+            else if (k === 'ArrowUp') { sg.distFt = Math.min(600, sg.distFt + 5); sgResolveDots(); }
+            else if (k === 'ArrowDown') { sg.distFt = Math.max(80, sg.distFt - 5); sgResolveDots(); }
+            else used = false;
+            if (!used) return;
+            e.preventDefault(); e.stopPropagation();
+            if (sg.active) sgDrawLive();
+            return;
+        }
         if (k === 'Escape') sgStop();
         else if (k === 'Enter') sgStage();
         else if (/^[1-6]$/.test(k)) { sg.navs = Number(k); sgRegenRows(); }
@@ -5011,6 +5244,29 @@
         const snapsTotal = sg.live.reduce((a, p) => a + (p.snaps || 1), 0);
         showToast(`➕ Ghost G${groups.length} staged (${sg.live.length} nav${sg.live.length > 1 ? 's' : ''}, ${snapsTotal} snap${snapsTotal > 1 ? 's' : ''}). Click the next asset, Esc when done, ⚡ Commit to write.`, '#c39dff', 4500);
     }
+    // Stage the solved plan as ONE ghost group: each nav carries its own aim list (one
+    // snapshot per aim, at that aim). `replace` = strip the mission's existing shots on commit.
+    function sgStageDots() {
+        if (!sg.active || sg.mode !== 'dots') return;
+        if (!sg.plan || !sg.plan.navs.length) { showToast('📍 Nothing to stage — drop at least one point with a legal nav spot.', '#ff9800', 3500); return; }
+        const sid = sg.sid, mid = composerMission && composerMission.id;
+        if (!sid || !mid) { showToast('No open mission to stage into.', '#ff9800', 3000); return; }
+        const short = sg.plan.unmet.reduce((a, u) => a + u.missing, 0);
+        if (short && !confirm(`${short} angle(s) have no legal nav spot (FFZ / asset / 80 ft). Stage what fits?`)) return;
+        const groups = sgGhostsFor(sid, mid);
+        const gid = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+        let lat = 0, lng = 0; sg.dots.forEach(d => { lat += d.lat; lng += d.lng; });
+        groups.push({ gid, focus: { lat: lat / sg.dots.length, lng: lng / sg.dots.length },
+            navs: sg.plan.navs.map(n => ({ lat: n.lat, lng: n.lng, snaps: n.aims.length, aims: n.aims.map(a => ({ lat: a.lat, lng: a.lng })) })),
+            snapsPerNav: 1, afterNav: sg.replace ? null : sgInsertAfterNav(), target: `${sg.dots.length} point${sg.dots.length === 1 ? '' : 's'}`, tpl: 'points',
+            dots: sg.dots.map(d => ({ lat: d.lat, lng: d.lng, name: d.name || '' })), replace: !!sg.replace, createdAt: Date.now() });
+        sgGhostsSet(sid, mid, (composerMission && composerMission.name) || '', groups);
+        sgDrawStaged(true);
+        const navs = sg.plan.navs.length, snaps = sg.plan.snaps;
+        sg.dots = []; sg.plan = null;
+        sgDrawLive(); sgUpdateBtn();
+        showToast(`➕ Ghost G${groups.length} staged (${navs} nav${navs > 1 ? 's' : ''}, ${snaps} snap${snaps > 1 ? 's' : ''}${sg.replace ? ' · replaces existing shots on commit' : ''}). Esc when done, ⚡ Commit to write.`, '#c39dff', 5000);
+    }
     function sgUndoLastGhost() {
         const sid = getCurrentSiteID(), mid = composerMission && composerMission.id; if (!sid || !mid) return false;
         const groups = sgGhostsFor(sid, mid); if (!groups.length) return false;
@@ -5034,12 +5290,16 @@
             const ground = getElevationFromCache(g.focus.lat, g.focus.lng);
             g.navs.forEach(p => {
                 steps.push(copy(navRef, p));
-                for (let k = 0; k < (p.snaps || g.snapsPerNav || 1); k++) {
-                    const sc = copy(snapRef, g.focus);
+                const aims = (p.aims && p.aims.length) ? p.aims : null;   // v3.60 📍 points: one snapshot per aim, at the aim
+                const count = aims ? aims.length : (p.snaps || g.snapsPerNav || 1);
+                for (let k = 0; k < count; k++) {
+                    const at = aims ? aims[k] : g.focus;
+                    const gr = aims ? (getElevationFromCache(at.lat, at.lng) != null ? getElevationFromCache(at.lat, at.lng) : ground) : ground;
+                    const sc = copy(snapRef, at);
                     sc.value2 = 1; sc.extra_options = Object.assign({}, sc.extra_options || {}, { pitch: (sc.extra_options && sc.extra_options.pitch != null) ? sc.extra_options.pitch : 1001 });
-                    if (ground != null) sc.value1 = ground + (defaultSnapAglFt / 3.28084);
+                    if (gr != null) sc.value1 = gr + (defaultSnapAglFt / 3.28084);
                     steps.push(sc);
-                    (wrapPresetInstrs || []).forEach(w => { const c = JSON.parse(JSON.stringify(w)); c.id = nextId(); ids.push(c.id); if (c.location && c.location.lat != null) c.location = { lat: g.focus.lat, lng: g.focus.lng }; steps.push(c); });
+                    (wrapPresetInstrs || []).forEach(w => { const c = JSON.parse(JSON.stringify(w)); c.id = nextId(); ids.push(c.id); if (c.location && c.location.lat != null) c.location = { lat: at.lat, lng: at.lng }; steps.push(c); });
                 }
             });
             return { g, steps };
@@ -5056,12 +5316,16 @@
             const ground = groundOf(g.focus);
             g.navs.forEach(p => {
                 const n = pcmNormStep(navRef); n.location = { lat: p.lat, lng: p.lng }; steps.push(n);
-                for (let k = 0; k < (p.snaps || g.snapsPerNav || 1); k++) {
-                    const s = pcmNormStep(snapRef); s.location = { lat: g.focus.lat, lng: g.focus.lng }; s.value2 = 1;
+                const aims = (p.aims && p.aims.length) ? p.aims : null;   // v3.60 📍 points
+                const count = aims ? aims.length : (p.snaps || g.snapsPerNav || 1);
+                for (let k = 0; k < count; k++) {
+                    const at = aims ? aims[k] : g.focus;
+                    const gr = aims ? (groundOf(at) != null ? groundOf(at) : ground) : ground;
+                    const s = pcmNormStep(snapRef); s.location = { lat: at.lat, lng: at.lng }; s.value2 = 1;
                     s.extra_options = Object.assign({}, s.extra_options || {}, { pitch: (s.extra_options && s.extra_options.pitch != null) ? s.extra_options.pitch : 1001 });
-                    if (ground != null) s.value1 = ground + (defaultSnapAglFt / 3.28084);
+                    if (gr != null) s.value1 = gr + (defaultSnapAglFt / 3.28084);
                     steps.push(s);
-                    (wrapPresetInstrs || []).forEach(w => { const c = pcmNormStep(w); if (c.location && c.location.lat != null) c.location = { lat: g.focus.lat, lng: g.focus.lng }; steps.push(c); });
+                    (wrapPresetInstrs || []).forEach(w => { const c = pcmNormStep(w); if (c.location && c.location.lat != null) c.location = { lat: at.lat, lng: at.lng }; steps.push(c); });
                 }
             });
             return { g, steps };
@@ -5152,13 +5416,18 @@
         if (built.error) { showToast(`🎯 Can't commit — this mission ${built.error}.`, '#ff5252', 5000); return; }
         const isNav = s => s && (s.type_name === 'navigate' || s.type === 1);
         const isReturn = s => s && (s.type_name === 'returnHome' || s.type === 99);
-        const newInstrs = sgSplice(instrs.map(s => Object.assign({}, s)), built.perGroup, isNav, isReturn);
+        const isTakeoff = s => s && (s.type_name === 'takeoff' || s.type === 0);
+        // v3.60 📍 "replace": a points group rebuilds the body — only takeoff + returnHome survive
+        const replace = groups.some(g => g.replace);
+        const base = replace ? instrs.filter(s => isTakeoff(s) || isReturn(s)).map(s => Object.assign({}, s)) : instrs.map(s => Object.assign({}, s));
+        const newInstrs = sgSplice(base, built.perGroup, isNav, isReturn);
         newInstrs.forEach((s, k) => { if (s) s.index_in_app = k; });
         try {
             ctx.setCurrentApp(Object.assign({}, app, { instructions: newInstrs }));
             try { composerStyleNativeMarkers(); } catch (e) {}
             if (caUndoStack.length && caUndoStack[caUndoStack.length - 1].appId !== app.id) caUndoStack = [];
-            caUndoStack.push({ op: 'tpl', ids: built.ids, name: '🎯 ghosts', appId: app.id });
+            if (replace) caUndoStack.push({ op: 'replace', prev: instrs.map(s => Object.assign({}, s)), name: '📍 points (replaced shots)', appId: app.id });
+            else caUndoStack.push({ op: 'tpl', ids: built.ids, name: '🎯 ghosts', appId: app.id });
             sgGhostsSet(sid, mid, app.name || '', []); sgDrawStaged(true); sgUpdateBtn();
             const added = built.perGroup.reduce((a, p) => a + p.steps.length, 0);
             console.log(`${TAG} [🎯] committed ${groups.length} group(s) → ${added} step(s) into "${app.name}"${useWrap ? ` with wrap "${wrap.name}"` : ''}`);
@@ -5191,7 +5460,7 @@
         const gone = work.length - todo.length;
         if (!srmBackup(sid, todo.map(t => t.m), '🎯 ghosts', 'preghosts')) return;
         // elevations for every focus (snapshot altitude = ground + default AGL)
-        const pts = []; todo.forEach(t => t.x.groups.forEach(g => { if (getElevationFromCache(g.focus.lat, g.focus.lng) == null) pts.push({ lat: g.focus.lat, lng: g.focus.lng }); }));
+        const pts = []; todo.forEach(t => t.x.groups.forEach(g => { if (getElevationFromCache(g.focus.lat, g.focus.lng) == null) pts.push({ lat: g.focus.lat, lng: g.focus.lng }); (g.navs || []).forEach(p => (p.aims || []).forEach(a => { if (getElevationFromCache(a.lat, a.lng) == null) pts.push({ lat: a.lat, lng: a.lng }); })); }));
         if (pts.length) { setStatus(`Fetching ${pts.length} elevation(s)…`); try { await bulkFetchElevations(pts); } catch (e) { console.warn(`${TAG} [🎯] elevation fetch failed`, e); } }
         let ok = 0, fail = 0; const failed = [];
         renameSuppressAutoAgl++;
@@ -5202,7 +5471,8 @@
                 try {
                     const built = sgBuildWireSteps(x.groups, m.instructions || [], useWrap ? wrap.steps : [], f => getElevationFromCache(f.lat, f.lng));
                     if (built.error) throw new Error(built.error);
-                    const base = (m.instructions || []).map(pcmNormStep);
+                    let base = (m.instructions || []).map(pcmNormStep);
+                    if (x.groups.some(g => g.replace)) base = base.filter(s => s && (s.type === 0 || s.type === 99));   // 📍 replace: body rebuilt from the points
                     const next = sgSplice(base, built.perGroup, s => s && s.type === 1, s => s && s.type === 99);
                     const flags = mbStepFlags(next, genEntCache[sid] || null).filter(f => f.tier !== 'near');
                     if (flags.length) throw new Error(`${flags.length} step(s) would be inside an NFZ / outside the FFZ (first: #${flags[0].num}) — fix in the editor`);
@@ -7835,7 +8105,7 @@
                 ? `nav ${info.standoffFt} ft @ ${info.navAltFt != null ? info.navAltFt + ' ft' : 'FFZ-min'} · snap ${info.snapAltFt} ft`
                 : (info.ffz ? 'elevation not loaded' : 'no FFZ found — skip');
             const tk = a.genTier || 'none';
-            return `<label class="aim-gen-row" data-has-ffz="${hasFFZ ? 1 : 0}" data-tier="${tk}" style="display:flex;align-items:flex-start;gap:8px;padding:6px 4px;border-bottom:1px solid #2a2f38;${dis}">
+            return `<label class="aim-gen-row" data-has-ffz="${hasFFZ ? 1 : 0}" data-tier="${tk}" style="display:grid;grid-template-columns:auto 1fr;align-items:start;gap:8px;padding:6px 4px;border-bottom:1px solid #2a2f38;${dis}">
                 <input type="checkbox" data-gen-row="${i}" ${info.buildable && tierOn[tk] ? 'checked' : ''} ${info.buildable ? '' : 'disabled'} style="flex:0 0 auto;margin-top:2px;">
                 <div style="flex:1;min-width:0;">
                     <div style="color:#e6e6e6;font-weight:700;font-size:12px;line-height:1.25;">${genTierBadge(a.genTier)}${escapeHtml(info.name)}${kidsOf(a)}</div>
@@ -8051,7 +8321,7 @@
     const GEN_AUTO_KEY = 'aim-mb-gen-auto';
     const GEN_AUTO_BIG_FT = 60;      // a child longer than this → "centroid may be wrong" flag
     function genAutoPrefs() {
-        const d = { on: true, mergeFt: 30, tpl: '3-shot 90°' };
+        const d = { on: false, mergeFt: 30, tpl: '3-shot 90°' };
         try { const sv = gmGet(GEN_AUTO_KEY, null); if (sv && typeof sv === 'object') Object.assign(d, sv); } catch (e) { console.warn(`${TAG} [gen-auto] prefs read failed`, e); }
         d.mergeFt = Number(d.mergeFt); if (!Number.isFinite(d.mergeFt) || d.mergeFt < 0) d.mergeFt = 30;
         return d;
@@ -8115,7 +8385,9 @@
         const single = aim.rings.length === 1 ? aim.rings[0] : null;
         let best = null;
         for (let rot = 0; rot < 360; rot += 10) {
-            const ring = sgComputeRing(aim.focus, shape, rot, false, single, ent).map(p => {
+            // v3.60: standoff measured from the asset EDGE along each ray (a 70 ft tank gets 100 ft from its end, not its centre)
+            const rows2 = shape.rows.map(r => Object.assign({}, r, { distFt: sgEdgeRayM(aim.focus, ((rot + r.angle) % 360 + 360) % 360, r.distFt, aim.rings) * 3.28084 }));
+            const ring = sgComputeRing(aim.focus, Object.assign({}, shape, { rows: rows2 }), rot, false, single, ent).map(p => {
                 let edgeFt = Infinity; aim.rings.forEach(r => { const d = mbPointToPolygonMeters(p.lat, p.lng, r) * 3.28084; if (d < edgeFt) edgeFt = d; });
                 const st = (p.overNfz || p.overAsset) ? 'red' : sgFtStatus(edgeFt, p.inFfz);
                 return Object.assign({}, p, { edgeFt, status: st });
@@ -8139,7 +8411,7 @@
         if (Array.isArray(t.rows) && t.rows.length) shape.rows = t.rows.map(r => ({ angle: Number(r.angle) || 0, distFt: Number(r.distFt) || shape.distFt, snaps: Math.max(1, Number(r.snaps) || 1) }));
         else { const n = Math.max(1, Math.min(6, shape.navs | 0)); for (let i = 0; i < n; i++) shape.rows.push({ angle: Math.round((i - (n - 1) / 2) * shape.spreadDeg), distFt: shape.distFt, snaps: shape.snapsPerNav }); }
         const { aims, skippedKids } = genAutoAims(pad, ent, opts.mergeFt);
-        const report = { pad: pad.name || String(pad.id), name: stock.name, aims: aims.length, navs: 0, snaps: 0, flags: [], fallback: 0 };
+        const report = { pad: pad.name || String(pad.id), name: stock.name, aims: aims.length, navs: 0, snaps: 0, flags: [], fallback: 0, ring: pad.ring, mid: null };
         if (skippedKids.length) report.flags.push(`skipped child: ${skippedKids.join(', ')}`);
         const groups = [];
         const stockNav = stock.instructions.find(s => s.type === 1);
@@ -8176,7 +8448,7 @@
         const flagged = reports.filter(r => r.flags.length), clean = reports.filter(r => !r.flags.length);
         const p = document.createElement('div'); p.id = ID;
         p.style.cssText = 'position:fixed;top:60px;right:24px;width:460px;max-height:82vh;display:flex;flex-direction:column;z-index:2147483603;background:#161a20;border:1px solid #7dff7d;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;';
-        const row = r => `<div style="padding:5px 4px;border-bottom:1px solid #20262e;">
+        const row = r => `<div data-ar-open="${r.mid != null ? r.mid : ''}" title="${r.mid != null ? 'Open this mission in the editor and zoom to the pad' : ''}" style="padding:5px 4px;border-bottom:1px solid #20262e;${r.mid != null ? 'cursor:pointer;' : ''}">
                 <div style="display:flex;gap:8px;align-items:baseline;"><span style="flex:1;font-weight:700;color:${r.flags.length ? '#ffd54f' : '#7dff7d'};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(r.name)}</span><span style="color:#9ad;white-space:nowrap;font-size:10px;">${r.aims} aim${r.aims === 1 ? '' : 's'} · ${r.navs} nav · ${r.snaps} snap${r.created === false ? ' · <b style="color:#ff5252;">NOT CREATED</b>' : ''}</span></div>
                 ${r.flags.map(f => `<div style="color:#cfb;font-size:10px;padding-left:10px;">⚠ ${escapeHtml(f)}</div>`).join('')}
             </div>`;
@@ -8188,6 +8460,12 @@
             <div style="padding:5px 12px;font-size:10px;color:#9ad;border-bottom:1px solid #2a2f38;">Yellow = open it and look (big asset → the centroid may not be the part you care about; dropped / pulled-in angles; merges). Green = built clean.</div>
             <div style="overflow:auto;flex:1;padding:4px 10px;font-size:11px;">${flagged.map(row).join('')}${clean.length ? `<div style="padding:6px 4px 2px;color:#789;font-size:10px;">clean (${clean.length})</div>` + clean.map(row).join('') : ''}</div>`;
         p.querySelector('[data-ar-close]').onclick = () => p.remove();
+        p.querySelectorAll('[data-ar-open]').forEach(el => el.onclick = () => {
+            const mid = el.getAttribute('data-ar-open'); if (!mid) return;
+            const r = reports.find(x => String(x.mid) === mid);
+            try { const cur = location.hash || ''; const mm = cur.match(/^(.*\/mission-bank)(?:\/\d+)?/); if (mm) location.hash = `${mm[1]}/${mid}`; } catch (e) { console.warn(`${TAG} [gen-auto] open failed`, e); }
+            try { const map = getLeafletMap(); if (map && r && r.ring) map.fitBounds(r.ring.map(q => [q.lat, q.lng]), { padding: [60, 60], maxZoom: 19 }); } catch (e) {}
+        });
         p.querySelector('[data-ar-copy]').onclick = () => { try { navigator.clipboard.writeText(text()); showToast('Report copied.', '#5fff5f', 2000); } catch (e) { console.warn(`${TAG} [gen-auto] copy failed`, e); } };
         document.body.appendChild(p);
         try { mbPanelMovable(p, p.firstElementChild); } catch (e) {}
@@ -8218,7 +8496,7 @@
                 const flags = mbStepFlags(built.instructions, ent).filter(f => f.tier !== 'near');
                 if (flags.length) { fail++; built.report.flags.push(`${flags.length} step(s) inside an NFZ / outside the FFZ — not created`); built.report.created = false; reports.push(built.report); continue; }
             }
-            try { await ctx.saveApp({ id: null, type: 1, instructions: built.instructions, data_report_object_arr: [] }, built.name); ok++; if (built.report) { built.report.created = true; reports.push(built.report); } }
+            try { const res = await ctx.saveApp({ id: null, type: 1, instructions: built.instructions, data_report_object_arr: [] }, built.name); ok++; if (built.report) { const saved = (res && res.app) ? res.app : res; built.report.mid = (saved && saved.id != null) ? saved.id : null; built.report.created = true; reports.push(built.report); } }
             catch (e) { fail++; console.warn(`${TAG} [gen-bulk] failed "${built.name}"`, e); if (built.report) { built.report.flags.push(`save failed: ${(e && e.message) || e}`); built.report.created = false; reports.push(built.report); } }
             if (auto) await new Promise(r => setTimeout(r, 120));
         }
