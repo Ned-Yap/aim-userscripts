@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.47
+// @version      3.48
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.47';
+    const SCRIPT_VERSION = '3.48';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -5900,8 +5900,18 @@
     // Skip-state reason for an asset (unreachable/unshielded/empty) or null if
     // it's valid to generate. Ported from the Asset Inspector's assetSkipReason:
     // is_unshielded flag, else the state suffix after " - " in poi_type_str.
+    // v3.48: P&A (plugged / retired — flyable ground, never an inspection target) and AVOID
+    // (third-party pads = obstacles) are TYPE prefixes written by the Asset Importer, not states.
+    const GEN_SKIP_TYPE_RE = /^(?:P&A|PA)\b|^AVOID\b/i;
+    function genSkipType(asset) {
+        const p = String(asset.poi || '');
+        if (!GEN_SKIP_TYPE_RE.test(p)) return null;
+        return /^AVOID/i.test(p) ? 'avoid (3rd party)' : 'P&A';
+    }
     function genSkipReason(asset) {
         if (asset.unshielded) return 'unshielded';
+        const t = genSkipType(asset);
+        if (t) return t;
         const p = asset.poi || '';
         // v3.36: the state is the LAST " - " segment ("P1 - v - pumping rod - unreachable");
         // the first-segment read never matched once types carried a tier prefix.
@@ -7045,10 +7055,13 @@
         const goBtn = p.querySelector('[data-gen-bulk-go]');
         const shownEl = p.querySelector('[data-gen-shown]');
         const checkedIds = () => new Set([...p.querySelectorAll('[data-gen-row]:checked')].map(cb => (valid[Number(cb.getAttribute('data-gen-row'))] || {}).id));
-        const eyeGroups = { create: valid, have: haveMission, macro: macroOnly, skip: stateSkip };
+        // v3.48: rows hidden by the tier chips / built-only filter are NOT candidates — leave them unpainted.
+        const visibleIds = () => new Set([...p.querySelectorAll('.aim-gen-row')].filter(r => r.style.display !== 'none').map(r => (valid[Number(r.querySelector('[data-gen-row]').getAttribute('data-gen-row'))] || {}).id));
+        let eyeVisKey = '';
+        const eyeGroups = () => { const vis = visibleIds(); eyeVisKey = [...vis].sort().join(','); return { create: valid.filter(a => vis.has(a.id)), have: haveMission, macro: macroOnly, skip: stateSkip }; };
         const eyeBtn = p.querySelector('[data-gen-eye]');
         const eyeStyle = () => { if (!eyeBtn) return; eyeBtn.style.background = genEye.on ? 'rgba(95,255,95,0.18)' : 'rgba(255,255,255,0.06)'; eyeBtn.style.borderColor = genEye.on ? '#5fff5f' : '#456'; eyeBtn.style.color = genEye.on ? '#7dff7d' : '#cfe'; };
-        const eyeRedraw = () => { try { genEyeDraw(eyeGroups, checkedIds()); } catch (e) { console.warn(`${TAG} [gen-eye] draw failed`, e); } };
+        const eyeRedraw = () => { try { genEyeDraw(eyeGroups(), checkedIds()); } catch (e) { console.warn(`${TAG} [gen-eye] draw failed`, e); } };
         if (eyeBtn) eyeBtn.onclick = () => { genEye.on = !genEye.on; genEyeSave(); eyeStyle(); eyeRedraw(); };
         p.querySelectorAll('[data-gen-eye-cls]').forEach(cb => cb.onchange = () => { genEye.cls[cb.getAttribute('data-gen-eye-cls')] = cb.checked; genEyeSave(); eyeRedraw(); });
         const updateGo = () => {
@@ -7056,7 +7069,10 @@
             goBtn.textContent = `⊕ Create ${n}`; goBtn.disabled = !n || genBulkBusy;
             const vis = [...p.querySelectorAll('.aim-gen-row')].filter(r => r.style.display !== 'none').length;
             if (shownEl) shownEl.textContent = `${vis} shown`;
-            if (genEye.on && genEye.byPad.size) { try { genEyeSync(checkedIds()); } catch (e) {} }
+            if (genEye.on && genEye.layers.length) {
+                const vk = [...visibleIds()].sort().join(',');
+                if (vk !== eyeVisKey) eyeRedraw(); else { try { genEyeSync(checkedIds()); } catch (e) {} }
+            }
         };
         p.querySelectorAll('[data-gen-row]').forEach(cb => cb.onchange = updateGo);
         // "Built areas only" filter — hide (and uncheck) assets with no FFZ within
