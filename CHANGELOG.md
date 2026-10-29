@@ -2,7 +2,9 @@
 
 - **v0.78** — **The client map, straight from AIM.** New **🖼 Map Export** section → a preview modal that renders what the landing map shows on its own canvas at print size: KML layers (per-layer toggles), cross-reference bands + point marks, site setups (same scope as the map), site names (hidden / matching / all), basemap tiles (Esri dark / light / imagery / USGS — fetched through Tampermonkey, so no screenshot), legend (corner picker), scale bar, north arrow, optional title, date. **Trim dead space** keeps only the grid cells with content plus a one-cell margin and makes the rest transparent — a mostly right-angled cut-out around what matters, so the PNG stays small. **⬇ PNG** at 3,000 / 4,500 / 6,000 / 9,000 px long side; **🌐 HTML** writes a self-contained interactive map (Leaflet, vectors embedded, basemap streamed when opened) that is a few MB and zooms without limit — the one to send when the client wants detail. Preview = the same renderer at screen size, re-rendered on every toggle.
 
-## 2026-10-29 — 🎯 Shot templates + ghost placement — Mission Bank Tools latest v3.52 → v3.57 (latest only)
+## 2026-10-29 — 🎯 Shot templates + ghost placement — Mission Bank Tools latest v3.52 → v3.58 (latest only)
+
+- **v3.58** — **Pick the wrap at commit.** ⚡ Commit (editor and site-wide) opens a chooser listing every saved 🎞 wrap template with its step sequence, plus "No wrap"; the choice is remembered for the next ghost commit, separately from 🎞's own last-used.
 
 - **v3.57** — **M2 pick-up works; staged list; ⟲ Auto-order.** Click-to-Add's key handler was clearing the right-click stand-down flag on every key release while the ghost was live, so the Asset Inspector's menu won — the flag now holds for the whole session. The HUD lists the staged ghosts (G1, G2 …) with ↑ ↓ to reorder, ⇄ to reverse a ring, ✕ per group and ✕ all. **⟲ Auto-order** re-sequences the groups nearest-next from where the drone arrives (the step before the insert point, else the mission's last nav), entering each ring at the end closest to the drone and leaving from the other, which removes the double-backs. Base-aware entry/exit across pads is the next step.
 

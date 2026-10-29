@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.57
+// @version      3.58
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.57';
+    const SCRIPT_VERSION = '3.58';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -5076,9 +5076,54 @@
         return out;
     }
     function sgWrapChoice() {
-        // last-used 🎞 template if it resolves; '' = none
+        // default = the wrap picked last time for a ghost commit, else the 🎞 last-used; '' = none
+        let name = ''; try { name = String(gmGet(SG_WRAP_KEY, '') || ''); } catch (e) {}
+        if (name) { const r = sgWrapResolve(name); if (!r.error) return { name, steps: r.steps, note: '' }; }
         const r = wrapResolveLast();
         return r.error ? { name: '', steps: [], note: r.error } : { name: r.name, steps: r.steps, note: '' };
+    }
+    const SG_WRAP_KEY = 'aim-mb-sg-wrap';
+    function sgWrapResolve(name) {
+        const all = wrapTemplatesLoad(); const tpl = all[name];
+        if (!tpl || !Array.isArray(tpl.steps) || !tpl.steps.length) return { error: 'template has no steps' };
+        const presets = stagePresetsLoad();
+        const missing = tpl.steps.filter(n => !presets[n] || !presets[n].instr);
+        if (missing.length) return { error: `missing preset(s): ${missing.join(', ')}` };
+        return { steps: tpl.steps.map(n => presets[n].instr), summary: tpl.steps.join(' → ') };
+    }
+    // Pick the 🎞 wrap for a ghost commit — every saved wrap template + "none"; remembered.
+    function sgPickWrap(title) {
+        return new Promise(resolve => {
+            const all = wrapTemplatesLoad(); const names = Object.keys(all).sort(wrapOrderCmp(all));
+            const cur = sgWrapChoice();
+            const ID = 'aim-mb-sg-wrappick'; const old = document.getElementById(ID); if (old) old.remove();
+            const p = document.createElement('div'); p.id = ID;
+            p.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:2147483605;width:400px;max-height:70vh;display:flex;flex-direction:column;background:#161a20;border:1px solid #ff8ad2;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.8);color:#e6e6e6;font:12px "Lato","Segoe UI",sans-serif;';
+            const row = (val, label, sub, dis) => `<label style="display:flex;align-items:flex-start;gap:7px;padding:5px 4px;border-bottom:1px solid #20262e;cursor:${dis ? 'not-allowed' : 'pointer'};opacity:${dis ? 0.5 : 1};"><input type="radio" name="sg-wrap" value="${escapeHtml(val)}" ${val === cur.name ? 'checked' : ''} ${dis ? 'disabled' : ''} style="margin-top:2px;"><span><b>${escapeHtml(label)}</b>${sub ? `<div style="color:#9ad;font-size:10.5px;">${escapeHtml(sub)}</div>` : ''}</span></label>`;
+            p.innerHTML = `<div style="padding:9px 12px;border-bottom:1px solid #2a2f38;font-weight:800;color:#ff8ad2;font-size:13px;">🎞 Wrap after every new snapshot</div>
+                <div style="padding:2px 10px;color:#9ad;font-size:10.5px;">${escapeHtml(title || '')}</div>
+                <div style="overflow:auto;flex:1;padding:4px 10px;">
+                    ${row('', 'No wrap', 'snapshots only — wrap later with 🎞', false)}
+                    ${names.map(n => { const r = sgWrapResolve(n); return row(n, n, r.error ? `⚠ ${r.error}` : r.summary, !!r.error); }).join('')}
+                    ${names.length ? '' : '<div style="padding:8px 4px;color:#ff9800;">No wrap templates saved yet — build one in 🎞 Wrap first.</div>'}
+                </div>
+                <div style="padding:9px 12px;border-top:1px solid #2a2f38;display:flex;gap:8px;justify-content:flex-end;">
+                    <button data-w-cancel style="padding:5px 10px;background:none;border:1px solid #456;color:#cfe;border-radius:5px;cursor:pointer;">Cancel</button>
+                    <button data-w-ok style="padding:5px 12px;background:#ff8ad2;border:none;color:#2a0a1e;border-radius:5px;cursor:pointer;font-weight:800;">⚡ Commit</button>
+                </div>`;
+            document.body.appendChild(p);
+            const done = (v) => { p.remove(); resolve(v); };
+            p.querySelector('[data-w-cancel]').onclick = () => done(null);
+            p.querySelector('[data-w-ok]').onclick = () => {
+                const sel = p.querySelector('input[name="sg-wrap"]:checked'); const name = sel ? sel.value : '';
+                try { gmSet(SG_WRAP_KEY, name); } catch (e) {}
+                if (!name) { done({ name: '', steps: [] }); return; }
+                const r = sgWrapResolve(name); if (r.error) { showToast(`🎞 "${name}": ${r.error}`, '#ff5252', 4000); return; }
+                done({ name, steps: r.steps });
+            };
+            p.addEventListener('keydown', e => { if (e.key === 'Escape') done(null); if (e.key === 'Enter') p.querySelector('[data-w-ok]').click(); });
+            setTimeout(() => { const ok = p.querySelector('[data-w-ok]'); if (ok) ok.focus(); }, 0);
+        });
     }
     // ⚡ Commit the OPEN mission's ghosts into the editor working copy (native SAVE finishes it).
     function sgCommitOpen() {
@@ -5091,9 +5136,13 @@
         const app = ctx.currentApp;
         let instrs = app.instructions || [];
         if (!instrs.length) { try { const lc = findMissionEditorCtx(); if (lc && Array.isArray(lc.instrs) && lc.instrs.length) instrs = lc.instrs; } catch (e) {} }
-        const wrap = sgWrapChoice();
-        const useWrap = wrap.steps.length ? confirm(`Commit ${groups.length} ghost group(s) into "${app.name || mid}" and wrap every new snapshot with 🎞 "${wrap.name}"?\n\nCancel = commit WITHOUT the wrap.`) : (confirm(`Commit ${groups.length} ghost group(s) into "${app.name || mid}"?\n\n(No 🎞 wrap template to apply — ${wrap.note}.)`) ? false : null);
-        if (useWrap === null) return;
+        sgPickWrap(`${groups.length} ghost group(s) → "${app.name || mid}" (staged in the editor; SAVE afterwards)`).then(wrap => {
+            if (!wrap) return;
+            const useWrap = !!wrap.steps.length;
+            sgCommitOpenWith(sid, mid, ctx, app, instrs, groups, wrap, useWrap);
+        });
+    }
+    function sgCommitOpenWith(sid, mid, ctx, app, instrs, groups, wrap, useWrap) {
         const built = sgBuildEditorSteps(groups, instrs, useWrap ? wrap.steps : []);
         if (built.error) { showToast(`🎯 Can't commit — this mission ${built.error}.`, '#ff5252', 5000); return; }
         const isNav = s => s && (s.type_name === 'navigate' || s.type === 1);
@@ -5123,10 +5172,10 @@
         const work = list.filter(x => x.mid !== openMid);
         const skippedOpen = list.length - work.length;
         if (!work.length) { showToast('Only the OPEN mission has ghosts — use ⚡ Commit in the editor.', '#ff9800', 4000); return; }
-        const wrap = sgWrapChoice();
         const totalGroups = work.reduce((a, x) => a + x.groups.length, 0);
-        const useWrap = wrap.steps.length ? confirm(`Commit ${totalGroups} ghost group(s) across ${work.length} mission(s)${skippedOpen ? ` (the open mission is skipped — commit it from the editor)` : ''}, wrapping every new snapshot with 🎞 "${wrap.name}"?\n\nA JSON backup downloads first. Cancel = commit WITHOUT the wrap.`) : (confirm(`Commit ${totalGroups} ghost group(s) across ${work.length} mission(s)?\n\n(No 🎞 wrap template to apply — ${wrap.note}.) A JSON backup downloads first.`) ? false : null);
-        if (useWrap === null) return;
+        const wrap = await sgPickWrap(`${totalGroups} ghost group(s) across ${work.length} mission(s)${skippedOpen ? ' · the open mission is skipped (commit it from the editor)' : ''} · one save each, JSON backup first`);
+        if (!wrap) return;
+        const useWrap = !!wrap.steps.length;
         const statusEl = panel && panel.querySelector('[data-sg-status]');
         const setStatus = t => { if (statusEl) statusEl.textContent = t; };
         setStatus('Fetching missions…');
