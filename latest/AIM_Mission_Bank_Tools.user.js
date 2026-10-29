@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.62
+// @version      3.63
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.62';
+    const SCRIPT_VERSION = '3.63';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -5417,7 +5417,7 @@
         if (!hasRefs) {
             // v3.62: nothing to copy settings from → build wire steps from defaults and SAVE through the
             // server (the generator's path); synthesizing editor-shape steps crashes Percepto's editor.
-            sgPickWrap(`${groups.length} ghost group(s) → ${app.id != null ? `"${app.name || mid}"` : 'this NEW mission'} — no steps to copy from, so it is built from defaults and SAVED now`).then(wrap => {
+            sgPickWrap(`${groups.length} ghost group(s) → ${app.id != null ? `"${app.name || mid}"` : 'this NEW mission'} — no steps to copy from, so they are built from defaults (staged in the editor; SAVE afterwards)`).then(wrap => {
                 if (!wrap) return;
                 sgCommitEmpty(sid, mid, ctx, app, instrs, groups, wrap).catch(e => { console.warn(`${TAG} [🎯] empty-mission commit failed`, e); showToast(`🎯 Commit failed — ${(e && e.message) || e}`, '#ff5252', 6000); });
             });
@@ -5429,47 +5429,46 @@
             sgCommitOpenWith(sid, mid, ctx, app, instrs, groups, wrap, useWrap);
         });
     }
+    // v3.63: an empty / brand-new mission — build the steps in the SERVER's own instruction
+    // shape (numeric type + type_name + setmission_dict, exactly what setCurrentApp(saved)
+    // receives after ▣ Generate) and stage them in the editor so SAVE lights up and the
+    // user reviews before anything is written. Defaults = the generator's: nav at the
+    // FFZ minimum altitude (else ground + 40 m), snapshot at ground + default AGL, To-GPS.
+    function sgSynthStep(app, typeName, type, value1, value2, loc, extra, v1name) {
+        const id = 9000000000 + (((Date.now ? Date.now() : 1) % 1000000) * 100) + (caIdBump++);
+        const ll = loc ? { lat: Math.round(loc.lat * 1e7), lon: Math.round(loc.lng * 1e7) } : null;
+        const sm = {};
+        if (typeName === 'takeoff') sm.takeoff = { id, value: value1 };
+        else if (typeName === 'navigate') sm.navigate = { id, value: Object.assign({}, ll, { alt: value1, velocity: value2, droneAiming: { heading: 0, pitch: 2000 }, abs_alt: null }) };
+        else if (typeName === 'snapshot') sm.snapshot = { id, value: Object.assign({}, ll, { alt: value1, abs_alt: null }) };
+        else if (typeName === 'returnHome') sm.returnHome = { id, value: true };
+        return { id, location: loc ? { lat: loc.lat, lng: loc.lng } : null, setmission_dict: sm, value1_name: v1name || null, value1, polygon_points: null, type_name: typeName, extra_options: extra || {}, type, value2: value2 === undefined ? null : value2, ui_only: false, parent_instruction: 0, polygon: null, index_in_app: 0, app: app && app.id != null ? app.id : null };
+    }
     async function sgCommitEmpty(sid, mid, ctx, app, instrs, groups, wrap) {
-        if (typeof ctx.saveApp !== 'function') { showToast('Editor save function not found.', '#ff5252', 3500); return; }
-        let name = (app.name || '').trim();
-        if (!name) { try { const el = document.querySelector('.mission-edit__content input, .mission-edit input'); if (el && el.value) name = el.value.trim(); } catch (e) {} }
-        if (!name) name = (prompt('Mission name (letters, digits, space, - and _ only):', '') || '').trim();
-        if (!name) { showToast('🎯 A mission name is required to save.', '#ff9800', 3500); return; }
-        if (!/^[A-Za-z0-9 _-]+$/.test(name)) { showToast('🎯 Name may only use letters, digits, space, - and _ (Percepto refuses others).', '#ff5252', 5000); return; }
         const ent = genEntCache[sid] || await genFetchEntities(sid);
-        // ground under every focus / aim
         const pts = [];
         groups.forEach(g => { if (getElevationFromCache(g.focus.lat, g.focus.lng) == null) pts.push({ lat: g.focus.lat, lng: g.focus.lng }); (g.navs || []).forEach(p => (p.aims || []).forEach(a => { if (getElevationFromCache(a.lat, a.lng) == null) pts.push({ lat: a.lat, lng: a.lng }); })); });
         if (pts.length) { showToast(`Fetching ${pts.length} elevation(s)…`, '#9ad', 2000); try { await bulkFetchElevations(pts); } catch (e) { console.warn(`${TAG} [🎯] elevation fetch failed`, e); } }
-        // default step settings = what ▣ Generate uses: nav at the FFZ's min alt (else ground + 40 m), snapshot at ground + default AGL, To-GPS, pitch 1001
         const f0 = groups[0].focus;
         const ffz = genAssetFFZ(f0, ent.ffzs || []);
         const g0 = getElevationFromCache(f0.lat, f0.lng);
         const navAltM = (ffz && ffz.minAltM != null) ? ffz.minAltM : ((g0 != null ? g0 : 0) + 40);
-        const navRef = { type: 1, value1: navAltM, value2: 12, location: null, extra_options: { shouldUseFreezoneMinAlt: true }, polygon_points: null, snapshot_points: null };
-        const snapRef = { type: 6, value1: g0 != null ? g0 + (defaultSnapAglFt / 3.28084) : null, value2: 1, location: null, extra_options: { pitch: 1001 }, polygon_points: null, snapshot_points: null };
-        const built = sgBuildWireSteps(groups, [navRef, snapRef], wrap.steps || [], f => getElevationFromCache(f.lat, f.lng));
-        if (built.error) throw new Error(built.error);
+        const navRef = sgSynthStep(app, 'navigate', 1, navAltM, 12, null, { pitch: 2000, shouldUseFreezoneMinAlt: true }, 'm');
+        const snapRef = sgSynthStep(app, 'snapshot', 6, g0 != null ? g0 + (defaultSnapAglFt / 3.28084) : navAltM, 1, null, { pitch: 1001 }, 'm');
         const isT = s => s && (s.type_name === 'takeoff' || s.type === 0), isR = s => s && (s.type_name === 'returnHome' || s.type === 99);
-        const shell = [];
+        const isNav = s => s && (s.type_name === 'navigate' || s.type === 1);
         const t0 = instrs.find(isT), r0 = instrs.find(isR);
-        shell.push(t0 ? pcmNormStep(t0) : { type: 0, value1: 20, value2: null, location: null, extra_options: {}, polygon_points: null, snapshot_points: null });
-        shell.push(r0 ? pcmNormStep(r0) : { type: 99, value1: null, value2: null, location: null, extra_options: {}, polygon_points: null, snapshot_points: null });
-        const next = sgSplice(shell, built.perGroup, s => s && s.type === 1, s => s && s.type === 99);
-        const flags = mbStepFlags(next, ent).filter(f => f.tier !== 'near');
-        if (flags.length && !confirm(`${flags.length} step(s) would be inside an NFZ / outside the FFZ (first: #${flags[0].num}) — Percepto will likely refuse. Try anyway?`)) return;
-        showToast(`Saving "${name}"…`, '#9ad', 2500);
-        const payload = Object.assign({ type: 1, data_report_object_arr: [] }, app, { instructions: next });
-        const res = await ctx.saveApp(payload, name);
-        const saved = (res && res.app) ? res.app : res;
-        sgGhostsSet(sid, mid, name, []); sgDrawStaged(true); sgUpdateBtn();
-        console.log(`${TAG} [🎯] empty-mission commit → saved "${name}" (${next.length} steps)`, saved);
-        try { refreshMissionList(); } catch (e) {}
-        try { if (saved && saved.id != null) ctx.setCurrentApp(saved); } catch (e) { console.warn(`${TAG} [🎯] setCurrentApp failed`, e); }
-        try { const cur = location.hash || ''; const mm = cur.match(/^(.*\/mission-bank)(?:\/\d+)?/); if (mm && saved && saved.id != null && cur !== `${mm[1]}/${saved.id}`) location.hash = `${mm[1]}/${saved.id}`; } catch (e) {}
-        try { fetchMissions(sid, () => {}, () => {}); } catch (e) {}
-        composerMission = null;   // re-match to the real mission on the next tick
-        showToast(`⚡ "${name}" saved with ${next.length} steps (${groups.length} ghost group(s)${(wrap.steps || []).length ? ', wrapped' : ''}).`, '#5fff5f', 6000);
+        const shell = [t0 ? Object.assign({}, t0) : sgSynthStep(app, 'takeoff', 0, 20, null, null, {}, null), r0 ? Object.assign({}, r0) : sgSynthStep(app, 'returnHome', 99, null, null, null, {}, null)];
+        const built = sgBuildEditorSteps(groups, shell.concat([navRef, snapRef]), wrap.steps || []);
+        if (built.error) throw new Error(built.error);
+        const newInstrs = sgSplice(shell, built.perGroup.map(pg => ({ g: Object.assign({}, pg.g, { afterNav: null }), steps: pg.steps })), isNav, isR);
+        newInstrs.forEach((s, k) => { if (s) s.index_in_app = k; });
+        ctx.setCurrentApp(Object.assign({}, app, { instructions: newInstrs }));
+        try { composerStyleNativeMarkers(); } catch (e) {}
+        caUndoStack = [{ op: 'replace', prev: instrs.map(s => Object.assign({}, s)), name: '🎯 ghosts (new mission)', appId: app.id }];
+        sgGhostsSet(sid, mid, app.name || '', []); sgDrawStaged(true); sgUpdateBtn();
+        console.log(`${TAG} [🎯] empty-mission commit → ${newInstrs.length} step(s) staged in the editor (${groups.length} group(s)${(wrap.steps || []).length ? ', wrapped' : ''})`);
+        showToast(`⚡ ${newInstrs.length} step(s) staged in the editor from defaults (nav ${Math.round(navAltM * 3.28084)} ft MSL${ffz && ffz.minAltM != null ? ' = FFZ min' : ''}, snapshots ground + ${defaultSnapAglFt} ft). Review, name it, SAVE. Ctrl+Z clears.`, '#5fff5f', 7000);
     }
     function sgCommitOpenWith(sid, mid, ctx, app, instrs, groups, wrap, useWrap) {
         const built = sgBuildEditorSteps(groups, instrs, useWrap ? wrap.steps : []);
