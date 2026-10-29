@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.76
+// @version      0.77
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
-// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.76: site labels "Only matching / picked" mode (names box or the 📦 Fleet Data pick keep their label, every other site name hidden), 🗺 on-map legend (cross-ref bands + numbers, shown KML layers, site-setup colours) and 📷 Client view (names hidden, legend on, panel + button tucked away for a screenshot; ↩ Exit restores). v0.75: 📊 Fleet Metrics follows the 📦 Fleet Data pick ("picked only" checkbox, on by default; nothing picked → every site) — table, totals, Sheets / CSV and 🛂 Approval FPs. v0.67 (#285): 📡 Coverage — radius circles on the landing map (any Ø, drag centre / edge, live count of sites inside under a fully-inside / centre-inside rule, KML export), footprint of the picked sites (span, convex hull, smallest enclosing circle, site extents + FFZ acreage), 🧠 Best spot (centre covering the MOST sites at a Ø — exact candidate search) + 🗂 Plan all (greedy: how many circles cover every site), 📏 two-click ruler. v0.57 (#274): data check shows whether the skipped no-duration rows carry images / videos (+ first video object), and 🔎 probes one /missions/ page without the field filter to list every server field (hunting an abort / end-reason field). v0.56 (#274): 📋 Copy check button on the data check. v0.55 (#276): Utilization lenses — 🧑‍✈️ Pilots / 🛸 Drones / 📍 Sites / 🏢 Clients (sites + clients: flights, drone-hrs, air, flyable drone-hrs, util %, coverage, sites never flown, incomplete, capture %, gaps); Drones gain flyable hrs + util %. v0.54 (#274): Incomplete flights + Capture % from planned-vs-actual image counts (Pilots / Pilot-days / Flights), raw state codes + mission_data_reports sample in the data check. v0.53 (#274): ⚙ Site rules is a real button. v0.52 (#274): Pilot Utilization hides all-zero / blank columns (panel + Sheets + CSV) with a 'hidden:' note and a checkbox to show them. v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
+// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.77: Site setups scope — draw the FFZs / flight paths / assets of ONLY the sites matching a names box or the 📦 Fleet Data pick (independent of the label filter, "= labels" copies it) so another client's setup never shows on a shared map. v0.76: site labels "Only matching / picked" mode (names box or the 📦 Fleet Data pick keep their label, every other site name hidden), 🗺 on-map legend (cross-ref bands + numbers, shown KML layers, site-setup colours) and 📷 Client view (names hidden, legend on, panel + button tucked away for a screenshot; ↩ Exit restores). v0.75: 📊 Fleet Metrics follows the 📦 Fleet Data pick ("picked only" checkbox, on by default; nothing picked → every site) — table, totals, Sheets / CSV and 🛂 Approval FPs. v0.67 (#285): 📡 Coverage — radius circles on the landing map (any Ø, drag centre / edge, live count of sites inside under a fully-inside / centre-inside rule, KML export), footprint of the picked sites (span, convex hull, smallest enclosing circle, site extents + FFZ acreage), 🧠 Best spot (centre covering the MOST sites at a Ø — exact candidate search) + 🗂 Plan all (greedy: how many circles cover every site), 📏 two-click ruler. v0.57 (#274): data check shows whether the skipped no-duration rows carry images / videos (+ first video object), and 🔎 probes one /missions/ page without the field filter to list every server field (hunting an abort / end-reason field). v0.56 (#274): 📋 Copy check button on the data check. v0.55 (#276): Utilization lenses — 🧑‍✈️ Pilots / 🛸 Drones / 📍 Sites / 🏢 Clients (sites + clients: flights, drone-hrs, air, flyable drone-hrs, util %, coverage, sites never flown, incomplete, capture %, gaps); Drones gain flyable hrs + util %. v0.54 (#274): Incomplete flights + Capture % from planned-vs-actual image counts (Pilots / Pilot-days / Flights), raw state codes + mission_data_reports sample in the data check. v0.53 (#274): ⚙ Site rules is a real button. v0.52 (#274): Pilot Utilization hides all-zero / blank columns (panel + Sheets + CSV) with a 'hidden:' note and a checkbox to show them. v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        *://qa.percepto.app/*
@@ -40,7 +40,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.76';
+    const SCRIPT_VERSION = '0.77';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -114,6 +114,8 @@
             // v0.76: 'filter' label mode — comma-separated name terms, or the 📦 Fleet Data pick
             labelTerms: '', labelPicked: false,
             xrefLegend: false,       // v0.76: 🗺 legend bottom-left of the landing map
+            // v0.77: site-setup scope — 'all' | 'filter' (names terms OR the 📦 Fleet Data pick); independent of the label filter
+            setupScope: 'all', setupTerms: '', setupPicked: false,
             // v0.68 (#287): 📶 FCC cell coverage dots on the landing map
             cellDots: false, cellCarrier: 'best', cellTech: 'lte',
             cellHeat: false, cellHeatOpacity: 0.45,   // v0.69: fleet-wide hex heat map
@@ -146,6 +148,9 @@
             if (typeof s.labelTerms === 'string') d.labelTerms = s.labelTerms;
             if (typeof s.labelPicked === 'boolean') d.labelPicked = s.labelPicked;
             if (typeof s.xrefLegend === 'boolean') d.xrefLegend = s.xrefLegend;
+            if (s.setupScope === 'all' || s.setupScope === 'filter') d.setupScope = s.setupScope;
+            if (typeof s.setupTerms === 'string') d.setupTerms = s.setupTerms;
+            if (typeof s.setupPicked === 'boolean') d.setupPicked = s.setupPicked;
             if (typeof s.cellDots === 'boolean') d.cellDots = s.cellDots;
             if (typeof s.cellHeat === 'boolean') d.cellHeat = s.cellHeat;
             if (typeof s.cellHeatOpacity === 'number') d.cellHeatOpacity = s.cellHeatOpacity;
@@ -1323,6 +1328,7 @@
                 // class = same color; overlapping rings union via nonzero
                 // fill, visually identical.
                 Object.keys(setupGeomBySite).forEach(id => {
+                    if (!setupSiteAllowed(id)) return;   // v0.77: belt-and-braces — never draw an out-of-scope site
                     const dByCls = { ffz: '', fp: '', asset: '' };
                     setupGeomBySite[id].forEach(g => {
                         if (!ftCfg.view[g.cls]) return;
@@ -1716,6 +1722,35 @@
         clearTimeout(labelTermsSaveTimer);
         labelTermsSaveTimer = setTimeout(saveCfg, 500);
     }
+    // v0.77: site-setup scope — which sites may have their FFZs / flight paths /
+    // assets drawn on the landing map. 'filter' = name contains a term of the
+    // setups names box (comma-separated), or, with "picked only", the site is
+    // ticked in 📦 Fleet Data. Fail closed: filter mode with no term and nothing
+    // picked draws NOTHING (a shared map must never leak another client).
+    // Applied twice: at fetch time (refreshSetupLayers never requests an
+    // out-of-scope site) and at render time (a cached site can't slip through).
+    function setupSiteAllowed(id) {
+        if (ftCfg.setupScope !== 'filter') return true;
+        if (ftCfg.setupPicked && fdSelected.size) return fdSelected.has(String(id));
+        const terms = String(ftCfg.setupTerms || '').split(',').map(x => x.trim().toLowerCase()).filter(Boolean);
+        if (!terms.length) return false;
+        const nm = siteName(id).toLowerCase();
+        return terms.some(t => nm.includes(t));
+    }
+    function setupScopeLabel() {
+        if (ftCfg.setupScope !== 'filter') return 'every site in view';
+        if (ftCfg.setupPicked && fdSelected.size) return `only the ${fdSelected.size} picked site(s)`;
+        const t = String(ftCfg.setupTerms || '').trim();
+        return t ? `only names matching "${t}"` : 'NOTHING — type a name term or tick "picked only"';
+    }
+    function onPickChanged() {   // v0.77: a scoped setup view follows the 📦 Fleet Data pick live
+        if (ftCfg.setupScope === 'filter' && ftCfg.setupPicked) { requestRender(); scheduleSetupRefresh(); }
+    }
+    let setupTermsSaveTimer = null;
+    function setupTermsSave() {
+        clearTimeout(setupTermsSaveTimer);
+        setupTermsSaveTimer = setTimeout(saveCfg, 500);
+    }
 
     // ---- v0.76: on-map legend (bottom-left of the landing map) — what the
     // colours mean on a client-facing screenshot: cross-ref bands with their
@@ -1758,7 +1793,7 @@
             let zoom = 0;
             try { zoom = ovMap && ovMap.getZoom ? ovMap.getZoom() : 0; } catch (e) {}
             if (zoom >= SETUP_MIN_ZOOM) {
-                rows.push('<div style="color:#7adfe6;font-weight:700;margin-top:4px">Site setups</div>');
+                rows.push(`<div style="color:#7adfe6;font-weight:700;margin-top:4px">Site setups${ftCfg.setupScope === 'filter' ? ` <span style="color:#888;font-weight:400">(${escapeHtml(setupScopeLabel())})</span>` : ''}</div>`);
                 NB_CLASSES.forEach(c => { if (ftCfg.view[c.key]) rows.push(sw(SETUP_STYLE[c.key].color, c.label, undefined, c.key === 'fp')); });
             }
         }
@@ -1957,6 +1992,7 @@
             if (!box || box.empty) return;
             if (ftIgnore[id]) return;
             if (ftCfg.clientsOff[clientOf(siteName(id))]) return;
+            if (!setupSiteAllowed(id)) return;   // v0.77: setup scope
             if (!bboxIntersects(box, west, south, east, north)) return;
             const dLat = (box.minLat + box.maxLat) / 2 - ctr.lat;
             const dLng = (box.minLng + box.maxLng) / 2 - ctr.lng;
@@ -4802,6 +4838,19 @@
                 : '')
             + (labelOverride ? '<span style="color:#ffa030">📷 client view active — labels forced hidden until ↩ Exit</span>' : '')
             + '</div>'
+            // v0.77: site-setup scope (independent of the label filter)
+            + '<div style="padding:6px 10px;display:flex;gap:14px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;">'
+            + `<label title="Which sites may have their FFZs / flight paths / assets drawn on this map (needs 'Site setups' on + zoom ≥ ${SETUP_MIN_ZOOM}). Independent of the site-label filter.">Site setups <select data-ft-setup-scope style="background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;padding:2px 4px;font:inherit;">`
+            + `<option value="all" ${ftCfg.setupScope === 'all' ? 'selected' : ''}>Every site in view</option>`
+            + `<option value="filter" ${ftCfg.setupScope === 'filter' ? 'selected' : ''}>Only matching / picked</option>`
+            + '</select></label>'
+            + (ftCfg.setupScope === 'filter'
+                ? `<label title="Only sites whose NAME contains one of these comma-separated words get their setup drawn (e.g. Exxon). Empty + nothing picked = nothing drawn.">names: <input type="text" data-ft-setup-terms value="${escapeHtml(ftCfg.setupTerms || '')}" placeholder="e.g. Exxon" ${ftCfg.setupPicked && fdSelected.size ? 'disabled' : ''} style="width:110px;background:#0e1218;color:${ftCfg.setupPicked && fdSelected.size ? '#666' : '#ddd'};border:1px solid #2a3140;border-radius:3px;font:inherit;padding:1px 4px;"></label>`
+                  + `<label title="Only the sites ticked in 📦 Fleet Data get their setup drawn (nothing picked → the names box applies)" style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;"><input type="checkbox" data-ft-flag="setupPicked" ${ftCfg.setupPicked ? 'checked' : ''}> picked only <span style="color:${fdSelected.size ? '#5fff5f' : '#888'}">(${fdSelected.size})</span></label>`
+                  + '<span data-ft="setup-copy-labels" title="Copy the site-label filter (names box + picked only) into the setup scope" style="cursor:pointer;color:#7adfe6">= labels</span>'
+                  + `<span style="color:${ftCfg.setupPicked && fdSelected.size || String(ftCfg.setupTerms || '').trim() ? '#888' : '#ffa030'}">draws ${setupScopeLabel()}</span>`
+                : '')
+            + '</div>'
             + '<div style="padding:6px 10px;display:flex;gap:14px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;">'
             + `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;" title="One dot per site colored by the FCC-modeled minimum signal (−60 strong … −110 edge, grey = no modeled coverage). Build the stats under 📊 Fleet Metrics → 📶 first.">`
             + `<input type="checkbox" data-ft-flag="cellDots" ${ftCfg.cellDots ? 'checked' : ''}> 📶 Cell coverage dots</label>`
@@ -6077,6 +6126,7 @@
         const known = rawSites ? new Set(Object.keys(rawSites)) : null;
         fdSelected.clear(); let missing = 0;
         (pk.ids || []).forEach(id => { if (!known || known.has(String(id))) fdSelected.add(String(id)); else missing++; });
+        onPickChanged();
         fdFilter = typeof pk.filter === 'string' ? pk.filter : '';
         fdPickApplied = kind === 'saved' ? pk.name : pk.label;
         setStatus(`applied ${kind === 'saved' ? `saved pick "${pk.name}"` : 'recent pick'} — ${fdSelected.size} site(s)${missing ? ` · ${missing} no longer in your site list` : ''}`);
@@ -7885,6 +7935,14 @@
                     else if (cmd === 'xr-card') openXrefCard();
                     else if (cmd === 'xr-clear') { xrefSeq++; xrefState = null; closeXrefCard(); renderPanel(); renderOverlay(); renderLegend(); }
                     else if (cmd === 'client-view') enterClientView();
+                    else if (cmd === 'setup-copy-labels') {   // v0.77
+                        ftCfg.setupTerms = ftCfg.labelTerms || '';
+                        ftCfg.setupPicked = !!ftCfg.labelPicked;
+                        saveCfg();
+                        setStatus(`site setups → ${setupScopeLabel()} (copied from the label filter)`);
+                        renderPanel();
+                        refreshSetupLayers();
+                    }
                     else if (cmd === 'run') runSweep();
                     else if (cmd === 'abort') abortSweep();
                     else if (cmd === 'copy') copyText(buildSweepReport(), 'report copied to clipboard');
@@ -7919,8 +7977,8 @@
                     else if (cmd && cmd.startsWith('fc-tab-')) { fcTab = cmd.slice(7); fcOpenFlight = null; renderPanel(); }
                     else if (cmd === 'fd-pick-save') fdSavePick();
                     else if (cmd === 'fd-pick-del') fdDeletePick(act.getAttribute('data-name'));
-                    else if (cmd === 'fd-selall') { fdVisibleSiteIds().forEach(id => fdSelected.add(id)); renderPanel(); }
-                    else if (cmd === 'fd-clear') { fdSelected.clear(); renderPanel(); }
+                    else if (cmd === 'fd-selall') { fdVisibleSiteIds().forEach(id => fdSelected.add(id)); onPickChanged(); renderPanel(); }
+                    else if (cmd === 'fd-clear') { fdSelected.clear(); onPickChanged(); renderPanel(); }
                     else if (cmd === 'fd-wide') { fdWide = !fdWide; renderPanel(); }
                     else if (cmd === 'fd-browse-close') { fdBrowse = null; renderPanel(); }
                     else if (cmd === 'fd-copy') { const { cols, rows } = fdBrowseRows(); copyText(fdCsv(cols, rows), `${rows.length} row(s) copied as CSV`); }
@@ -8067,6 +8125,13 @@
                     applyLabelFilter();
                     return;
                 }
+                if (ev.target.hasAttribute && ev.target.hasAttribute('data-ft-setup-terms')) {   // v0.77: live setup scope, debounced save + refresh
+                    ftCfg.setupTerms = ev.target.value;
+                    setupTermsSave();
+                    requestRender();          // render-time gate hides the now-excluded sites immediately
+                    scheduleSetupRefresh();   // 400 ms debounce — fetch the newly allowed ones
+                    return;
+                }
                 const fdIn = ev.target.hasAttribute && (ev.target.hasAttribute('data-fd-filter') ? 'data-fd-filter' : ev.target.hasAttribute('data-fd-search') ? 'data-fd-search' : null);
                 if (fdIn) {
                     if (fdIn === 'data-fd-filter') fdFilter = ev.target.value; else if (fdBrowse) fdBrowse.search = ev.target.value;
@@ -8095,9 +8160,9 @@
                 const t = ev.target;
                 if (t.hasAttribute && t.hasAttribute('data-cov-in')) { covInput(t); return; }
                 if (t.hasAttribute && t.hasAttribute('data-fd-pick')) { const v = String(t.value || ''); const i = v.indexOf(':'); if (i > 0) fdApplyPick(v.slice(0, i), Number(v.slice(i + 1))); return; }
-                if (t.hasAttribute && t.hasAttribute('data-fd-site')) { const id = t.getAttribute('data-fd-site'); if (t.checked) fdSelected.add(id); else fdSelected.delete(id); fdRenderKeepScroll(); return; }
+                if (t.hasAttribute && t.hasAttribute('data-fd-site')) { const id = t.getAttribute('data-fd-site'); if (t.checked) fdSelected.add(id); else fdSelected.delete(id); onPickChanged(); fdRenderKeepScroll(); return; }
                 // 6. client select-all acts on the SHOWN rows of that client (what the header count shows)
-                if (t.hasAttribute && t.hasAttribute('data-fd-clientsel')) { const cl = t.getAttribute('data-fd-clientsel'); const ids = fdVisibleSiteIds().filter(id => fdClientOfId(id) === cl); ids.forEach(id => { if (t.checked) fdSelected.add(id); else fdSelected.delete(id); }); fdRenderKeepScroll(); return; }
+                if (t.hasAttribute && t.hasAttribute('data-fd-clientsel')) { const cl = t.getAttribute('data-fd-clientsel'); const ids = fdVisibleSiteIds().filter(id => fdClientOfId(id) === cl); ids.forEach(id => { if (t.checked) fdSelected.add(id); else fdSelected.delete(id); }); onPickChanged(); fdRenderKeepScroll(); return; }
                 if (t.hasAttribute && t.hasAttribute('data-pu-opt')) { const k = t.getAttribute('data-pu-opt'); const v = Number(t.value); if (t.value.trim() === '' || !isFinite(v) || v < 0) return; if (k === 'days' && v < 1) return; if (k === 'shiftHrs' && !(v > 0)) return; if (k in puOpts) { puOpts[k] = v; puSave(); if (k === 'twilightMin' || k === 'shiftHrs') { if (puResults && k === 'shiftHrs') puResults.shiftHrs = v; puReaggregate(); renderPanel(); } } return; }
                 if (t.hasAttribute && t.hasAttribute('data-pu-chk')) { const k = t.getAttribute('data-pu-chk'); if (k === 'hideEmpty') { puOpts.hideEmpty = !!t.checked; puSave(); renderPanel(); } return; }
                 if (t.hasAttribute && t.hasAttribute('data-pu-bulk')) { puBulkW = t.value in PU_WINDOWS ? t.value : '247'; return; }
@@ -8184,6 +8249,18 @@
                     }
                     return;
                 }
+                const scopeSel = ev.target.closest('select[data-ft-setup-scope]');
+                if (scopeSel) {   // v0.77
+                    const v = String(scopeSel.value) === 'filter' ? 'filter' : 'all';
+                    if (v !== ftCfg.setupScope) {
+                        ftCfg.setupScope = v;
+                        saveCfg();
+                        setStatus(`site setups → ${setupScopeLabel()}`);
+                        renderPanel();
+                        refreshSetupLayers();   // drops out-of-scope geometry now, fetches the newly allowed
+                    }
+                    return;
+                }
                 const cellSel = ev.target.closest('select[data-ft-cell]');
                 if (cellSel) {
                     const prop = cellSel.getAttribute('data-ft-cell');
@@ -8250,6 +8327,10 @@
                         setStatus(flag.checked ? (fdSelected.size ? `site labels: only the ${fdSelected.size} picked site(s)` : 'site labels "picked only" ON — nothing picked in 📦 Fleet Data, the names box applies') : 'site labels: the names box applies');
                         applySiteLabels();
                         renderPanel();
+                    } else if (prop === 'setupPicked') {
+                        setStatus(`site setups → ${setupScopeLabel()}`);
+                        renderPanel();
+                        refreshSetupLayers();
                     } else if (prop === 'xrefLegend') {
                         setStatus(flag.checked ? '🗺 legend ON — bottom-left of the map' : '🗺 legend OFF');
                         renderLegend();
