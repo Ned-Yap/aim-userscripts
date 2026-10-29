@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.52
+// @version      3.53
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.52';
+    const SCRIPT_VERSION = '3.53';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -6102,6 +6102,7 @@
         composerBindMapEvents();
         caBindMap();          // (re)attach Click-to-Add handlers to the current map container
         try { sgTick(); sgUpdateBtn(); } catch (e) {}   // v3.52 — keep staged 🎯 ghosts drawn for the open mission
+        try { genUpdateBtn(); } catch (e) {}             // v3.53 — ▣ Generate All hides while editing
         updateCaBanner();     // keep the armed banner present if the container rebuilt
         caUpdateBoxZoom();    // keep Shift+drag box-zoom OFF while the editor is open
         installComposerMarkerEvents();
@@ -6381,7 +6382,7 @@
     let liveEditorTimer = null;
     function startLiveEditorSync() {
         if (liveEditorTimer || CONTEXT !== 'IFRAME') return;
-        liveEditorTimer = setInterval(() => { try { liveEditorTick(); } catch (e) {} }, 700);
+        liveEditorTimer = setInterval(() => { try { genUpdateBtn(); } catch (e) {} try { liveEditorTick(); } catch (e) {} }, 700);   // v3.53: button visibility tracks editor open/close
     }
     function liveEditorTick() {
         if (CONTEXT !== 'IFRAME' || !document.querySelector('.mission-edit__content')) return;
@@ -6937,9 +6938,11 @@
             b.style.background = genOverlayOn ? '#14d2dc' : '#0d1b24';
             b.style.color = genOverlayOn ? '#04222a' : '#3fe0ea';
         }
-        // v3.51: ▣ Generate All is always available — it has its own 👁 overlay and never needed the ⊕ asset layer.
+        // v3.53: the floating ▣ Generate All only rides along with the ⊕ asset layer again (it
+        // was always in the way, with no close), never while a mission is open in the editor.
+        // The bulk panel's permanent home is the ▣ Generate button in the Summary toolbar.
         const all = document.getElementById(GEN_ALL_BTN_ID);
-        if (all) all.style.display = 'block';
+        if (all) all.style.display = (genOverlayOn && !caEditing()) ? 'block' : 'none';
     }
     const GEN_ALL_BTN_ID = 'aim-mb-gen-all-btn';
 
@@ -7008,7 +7011,7 @@
         all.id = GEN_ALL_BTN_ID; all.type = 'button';
         all.textContent = '▣ Generate All';
         all.title = 'Generate a mission for every pad without one (skips P&A / AVOID / bad states) — review, then create. ⊕ Generate above is the single-asset right-click overlay.';
-        all.style.cssText = 'position:absolute;top:40px;left:8px;z-index:1100;padding:6px 11px;border-radius:6px;cursor:pointer;display:block;' +
+        all.style.cssText = 'position:absolute;top:40px;left:8px;z-index:1100;padding:6px 11px;border-radius:6px;cursor:pointer;display:none;' +
             'font:800 12px "Lato",sans-serif;border:1.5px solid #5fff5f;background:#0d2410;color:#7dff7d;box-shadow:0 2px 8px rgba(0,0,0,0.7);';
         all.onclick = e => { e.preventDefault(); e.stopPropagation(); genOpenBulkPanel(); };
         mapC.appendChild(all);
@@ -15749,6 +15752,7 @@
                 <button class="aim-mb-tbtn ${mcv.on ? 'active' : ''}" data-mcv-toggle title="Show which pads are already claimed by macro (merged) missions — each macro gets a color + name chip; white dashed pads have missions but no macro yet. Click-through.">🧩 Macros</button>
                 <button class="aim-mb-tbtn" data-srm-open title="Remove tab: find every step of a chosen type across ALL missions on this site (flag poles, 1s waits, …) and remove them after a per-row review; flag poles take their paired nav too. Update tab: set every wait of the ticked durations to a new value. Backup JSON downloads before anything saves.">🧹 Steps</button>
                 <button class="aim-mb-tbtn" data-msf-check title="Check every mission's navs + flag poles against the site's NFZs (Percepto refuses the save) and FFZs — fills the 🚩 column. Runs only when clicked; takes a while on big sites but the panel stays usable.">${msfRunning ? '🚩 …' : '🚩 Check'}</button>
+                <button class="aim-mb-tbtn" data-gen-open title="▣ Generate missions for every pad without one (tiers, template, 👁 map, skip states) — the bulk generator panel.">▣ Generate</button>
                 <button class="aim-mb-tbtn" data-sg-open title="🎯 Ghosts staged on this site's missions (shot templates placed in the editor but not committed yet) — review, drop, or ⚡ Commit all: one save per mission with the 🎞 wrap applied after every new snapshot.">🎯 Ghosts</button>
                 <button class="aim-mb-tbtn" data-mrs-open title="Restore a mission: re-create one Delete Guard banked in the last 72 h, or restore in place from a backup JSON this script downloaded before a bulk edit. Same write path as every in-place tool; verified by re-fetch.">↩ Restore</button>
                 <button class="aim-mb-tbtn ${panelState.distanceUnit === 'imperial' ? 'active' : ''}" data-unit="imperial">mi</button>
@@ -16444,6 +16448,9 @@
         // v3.07 — ↩ mission restore (Delete Guard ring / backup file)
         const mrsBtn = panelEl.querySelector('[data-mrs-open]');
         if (mrsBtn) mrsBtn.onclick = () => mrsOpen();
+        // v3.53 — ▣ bulk generator from the toolbar
+        const genOpenBtn = panelEl.querySelector('[data-gen-open]');
+        if (genOpenBtn) genOpenBtn.onclick = () => { if (!generatorUnlocked) { showToast('Generator is locked on this install.', '#ff9800', 3000); return; } genOpenBulkPanel(); };
         // v3.52 — 🎯 ghosts panel
         const sgOpenBtn = panelEl.querySelector('[data-sg-open]');
         if (sgOpenBtn) sgOpenBtn.onclick = () => sgOpenPanel();
