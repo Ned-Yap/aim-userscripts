@@ -1,16 +1,19 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.77
+// @version      0.78
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
-// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.77: Site setups scope — draw the FFZs / flight paths / assets of ONLY the sites matching a names box or the 📦 Fleet Data pick (independent of the label filter, "= labels" copies it) so another client's setup never shows on a shared map. v0.76: site labels "Only matching / picked" mode (names box or the 📦 Fleet Data pick keep their label, every other site name hidden), 🗺 on-map legend (cross-ref bands + numbers, shown KML layers, site-setup colours) and 📷 Client view (names hidden, legend on, panel + button tucked away for a screenshot; ↩ Exit restores). v0.75: 📊 Fleet Metrics follows the 📦 Fleet Data pick ("picked only" checkbox, on by default; nothing picked → every site) — table, totals, Sheets / CSV and 🛂 Approval FPs. v0.67 (#285): 📡 Coverage — radius circles on the landing map (any Ø, drag centre / edge, live count of sites inside under a fully-inside / centre-inside rule, KML export), footprint of the picked sites (span, convex hull, smallest enclosing circle, site extents + FFZ acreage), 🧠 Best spot (centre covering the MOST sites at a Ø — exact candidate search) + 🗂 Plan all (greedy: how many circles cover every site), 📏 two-click ruler. v0.57 (#274): data check shows whether the skipped no-duration rows carry images / videos (+ first video object), and 🔎 probes one /missions/ page without the field filter to list every server field (hunting an abort / end-reason field). v0.56 (#274): 📋 Copy check button on the data check. v0.55 (#276): Utilization lenses — 🧑‍✈️ Pilots / 🛸 Drones / 📍 Sites / 🏢 Clients (sites + clients: flights, drone-hrs, air, flyable drone-hrs, util %, coverage, sites never flown, incomplete, capture %, gaps); Drones gain flyable hrs + util %. v0.54 (#274): Incomplete flights + Capture % from planned-vs-actual image counts (Pilots / Pilot-days / Flights), raw state codes + mission_data_reports sample in the data check. v0.53 (#274): ⚙ Site rules is a real button. v0.52 (#274): Pilot Utilization hides all-zero / blank columns (panel + Sheets + CSV) with a 'hidden:' note and a checkbox to show them. v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
+// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.78 (#318): 🖼 Map Export — renders what the landing map shows (KML layers, cross-ref bands, site setups, site names) on its own canvas at print size with basemap tiles, legend, scale bar, north arrow, title and a dead-space trim (transparent outside the content); preview modal with toggles; ⬇ PNG poster or 🌐 self-contained interactive HTML (small, zooms forever). v0.77: Site setups scope — draw the FFZs / flight paths / assets of ONLY the sites matching a names box or the 📦 Fleet Data pick (independent of the label filter, "= labels" copies it) so another client's setup never shows on a shared map. v0.76: site labels "Only matching / picked" mode (names box or the 📦 Fleet Data pick keep their label, every other site name hidden), 🗺 on-map legend (cross-ref bands + numbers, shown KML layers, site-setup colours) and 📷 Client view (names hidden, legend on, panel + button tucked away for a screenshot; ↩ Exit restores). v0.75: 📊 Fleet Metrics follows the 📦 Fleet Data pick ("picked only" checkbox, on by default; nothing picked → every site) — table, totals, Sheets / CSV and 🛂 Approval FPs. v0.67 (#285): 📡 Coverage — radius circles on the landing map (any Ø, drag centre / edge, live count of sites inside under a fully-inside / centre-inside rule, KML export), footprint of the picked sites (span, convex hull, smallest enclosing circle, site extents + FFZ acreage), 🧠 Best spot (centre covering the MOST sites at a Ø — exact candidate search) + 🗂 Plan all (greedy: how many circles cover every site), 📏 two-click ruler. v0.57 (#274): data check shows whether the skipped no-duration rows carry images / videos (+ first video object), and 🔎 probes one /missions/ page without the field filter to list every server field (hunting an abort / end-reason field). v0.56 (#274): 📋 Copy check button on the data check. v0.55 (#276): Utilization lenses — 🧑‍✈️ Pilots / 🛸 Drones / 📍 Sites / 🏢 Clients (sites + clients: flights, drone-hrs, air, flyable drone-hrs, util %, coverage, sites never flown, incomplete, capture %, gaps); Drones gain flyable hrs + util %. v0.54 (#274): Incomplete flights + Capture % from planned-vs-actual image counts (Pilots / Pilot-days / Flights), raw state codes + mission_data_reports sample in the data check. v0.53 (#274): ⚙ Site rules is a real button. v0.52 (#274): Pilot Utilization hides all-zero / blank columns (panel + Sheets + CSV) with a 'hidden:' note and a checkbox to show them. v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        *://qa.percepto.app/*
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        unsafeWindow
+// @grant        GM_xmlhttpRequest
+// @connect      server.arcgisonline.com
+// @connect      basemap.nationalmap.gov
 // @run-at       document-end
 // ==/UserScript==
 
@@ -40,7 +43,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.77';
+    const SCRIPT_VERSION = '0.78';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -4408,7 +4411,7 @@
     let buttonEl = null;
     let panelEl = null;
     // v0.31: every section starts COLLAPSED (user request) — open what you need.
-    let openSections = { issues: false, data: false, fc: false, pilots: false, sweep: false, map: false, cov: false, kml: false, xref: false, metrics: false, surveys: false };
+    let openSections = { issues: false, data: false, fc: false, pilots: false, sweep: false, map: false, cov: false, kml: false, xref: false, mx: false, metrics: false, surveys: false };
     // v0.25 (#257): 🚩 Fleet Issues front door. AIM Issues owns the engine +
     // panel (one copy of the merge/Slack/role rules); we ask it for a summary
     // and open it over tab-local DOM events on `document` (NOT the
@@ -7848,6 +7851,8 @@
             + renderKmlSection()
             + sectionHeader('xref', '📐', 'Cross-reference', 'KML vs sites / KML vs KML')
             + renderXrefSection()
+            + sectionHeader('mx', '🖼', 'Map Export', 'PNG poster / interactive HTML of what the map shows')
+            + renderMxSection()
             + sectionHeader('metrics', '📊', 'Fleet Metrics', Object.keys(mtIndex.sites).length ? `${Object.keys(mtIndex.sites).length} sites · setups + missions${mtPickedActive() ? ` · showing ${fdSelected.size} picked` : ''}` : 'setups + missions from Site Watch snapshots')
             + renderMetricsSection()
             + sectionHeader('surveys', '📄', 'Airspace Surveys', svIndex ? `${svRows().length} surveyed site(s) · ${svRows().filter(r => r.dueDays != null && r.dueDays < 0).length} due` : 'per-site survey reports from the Airspace Validator')
@@ -7935,6 +7940,7 @@
                     else if (cmd === 'xr-card') openXrefCard();
                     else if (cmd === 'xr-clear') { xrefSeq++; xrefState = null; closeXrefCard(); renderPanel(); renderOverlay(); renderLegend(); }
                     else if (cmd === 'client-view') enterClientView();
+                    else if (cmd === 'mx-open') mxOpen();
                     else if (cmd === 'setup-copy-labels') {   // v0.77
                         ftCfg.setupTerms = ftCfg.labelTerms || '';
                         ftCfg.setupPicked = !!ftCfg.labelPicked;
@@ -8400,6 +8406,698 @@
         setStatus(lastSweep && lastSweep.at
             ? `showing last sweep from ${new Date(lastSweep.at).toLocaleString()}`
             : 'ready — ▶ Run overlap sweep to check the whole fleet');
+    }
+
+    // ==================================================================
+    // 🖼 Map Export (v0.78, #318) — renders the landing-map content we own
+    // (KML layers, cross-ref bands + point marks, site setups, site names)
+    // onto OUR OWN canvas at any size: basemap tiles come in through
+    // GM_xmlhttpRequest (no canvas taint), then legend / scale bar / north
+    // arrow / title, with an optional rectilinear "dead-space trim" (grid
+    // cells without content go transparent). Outputs: PNG poster, and a
+    // self-contained interactive HTML map (Leaflet from cdnjs, vectors
+    // embedded, basemap streamed when opened — small file, infinite zoom).
+    // The preview in the modal is the same renderer at a small size.
+    // ==================================================================
+    const MX_TILE = 256;
+    const MX_SITE_CAP = 200;            // setups fetched for an export at most
+    const MX_FETCH_CONCURRENCY = 4;
+    const MX_TILE_CONCURRENCY = 8;
+    const MX_MAX_SIDE = 16000;          // Chrome canvas limits (per side / area)
+    const MX_MAX_AREA = 240e6;
+    const MX_SIZES = [3000, 4500, 6000, 9000];
+    let mxEl = null;
+    let mxOpts = null;
+    let mxSeq = 0;
+    let mxBusy = false;
+    let mxPreviewTimer = null;
+    let mxLast = null;                  // {W, H, tiles, sites, skipped, zi}
+    const mxTileCache = new Map();      // "bm/z/x/y" → ImageBitmap | null (failed)
+
+    function mxBasemapOk(key) { const bm = BASEMAPS[key]; return !!(bm && bm.url && key !== 'osm'); }   // OSM tile policy forbids bulk pulls
+    function mxDefaultOpts() {
+        const lm = labelMode();
+        const layers = {};
+        kmlLayers.forEach(ly => { if (ly.features) layers[ly.id] = !!kmlStyleFor(ly.id).show; });
+        return {
+            basemap: mxBasemapOk(ftCfg.basemap) ? ftCfg.basemap : 'dark',
+            labels: lm === 'hidden' ? 'none' : lm === 'filter' ? 'filter' : 'all',
+            setups: !!ftCfg.drawSetups,
+            xref: !!(xrefState && xrefState.result),
+            layers,
+            legend: true, legendCorner: 'bl',
+            scaleBar: true, north: true, date: true, title: '',
+            trim: true, trimCell: 5,
+            longSide: 6000,
+        };
+    }
+
+    // --- Web Mercator world pixels at zoom z ---
+    function mxProj(lat, lng, z) {
+        const n = MX_TILE * Math.pow(2, z);
+        const la = Math.max(-85.05, Math.min(85.05, lat)) * Math.PI / 180;
+        return { x: (lng + 180) / 360 * n, y: (1 - Math.log(Math.tan(la) + 1 / Math.cos(la)) / Math.PI) / 2 * n };
+    }
+    function mxBboxAdd(bb, lat, lng) {
+        if (!(typeof lat === 'number' && typeof lng === 'number') || !isFinite(lat) || !isFinite(lng)) return;
+        if (lat < bb.minLat) bb.minLat = lat; if (lat > bb.maxLat) bb.maxLat = lat;
+        if (lng < bb.minLng) bb.minLng = lng; if (lng > bb.maxLng) bb.maxLng = lng;
+    }
+    function mxBboxNew() { return { minLat: 90, maxLat: -90, minLng: 180, maxLng: -180 }; }
+    function mxBboxEmpty(bb) { return bb.minLat > bb.maxLat; }
+    function mxBboxPad(bb, f) {
+        const dLat = Math.max(0.002, (bb.maxLat - bb.minLat) * f), dLng = Math.max(0.002, (bb.maxLng - bb.minLng) * f);
+        return { minLat: bb.minLat - dLat, maxLat: bb.maxLat + dLat, minLng: bb.minLng - dLng, maxLng: bb.maxLng + dLng };
+    }
+    function mxInBbox(bb, lat, lng) { return lat >= bb.minLat && lat <= bb.maxLat && lng >= bb.minLng && lng <= bb.maxLng; }
+
+    // --- content collection (what the current toggles put on the map) ---
+    async function mxCollect(opts, progress, seq) {
+        const C = { layers: [], xref: null, setups: {}, labels: [], bbox: mxBboxNew(), skipped: 0, sitesFetched: 0, srcName: null };
+        const r = (opts.xref && xrefState && xrefState.result) ? xrefState.result : null;
+        if (r) { C.xref = r; C.srcName = r.srcName; }
+        kmlLayers.forEach(ly => {
+            if (!ly.features || !opts.layers[ly.id]) return;
+            const st = kmlStyleFor(ly.id);
+            C.layers.push({ ly, st, isSrc: !!(r && ly.name === r.srcName) });
+            ly.features.forEach(f => f.pts.forEach(pt => mxBboxAdd(C.bbox, pt[0], pt[1])));
+        });
+        if (r) {
+            r.runs.forEach(run => run.pts.forEach(pt => mxBboxAdd(C.bbox, pt[0], pt[1])));
+            r.pointMarks.forEach(pm => mxBboxAdd(C.bbox, pm.lat, pm.lng));
+        }
+        // anchor = what the user explicitly put on the map; setups in
+        // "every site" scope + "all" labels stay INSIDE it (never stretch the
+        // export to the whole fleet). Scoped setups are explicit → included whole.
+        const scoped = ftCfg.setupScope === 'filter';
+        let anchor = mxBboxEmpty(C.bbox) ? null : mxBboxPad(C.bbox, 0.02);
+        const setupIds = [];
+        if (opts.setups) {
+            if (!rawSites) { try { await fetchRawSites(false); } catch (e) { console.warn(`${TAG} map export: /sites/ failed — setups skipped:`, e); } }
+            if (rawSites) {
+                Object.keys(nbIndex.bboxes).forEach(id => {
+                    if (!rawSites[id]) return;
+                    const box = nbIndex.bboxes[id];
+                    if (!box || box.empty) return;
+                    if (ftIgnore[id]) return;
+                    if (ftCfg.clientsOff[clientOf(siteName(id))]) return;
+                    if (!setupSiteAllowed(id)) return;
+                    if (!scoped && anchor && !bboxIntersects(box, anchor.minLng, anchor.minLat, anchor.maxLng, anchor.maxLat)) return;
+                    if (!scoped && !anchor) return;   // "every site" + nothing else on the map = no anchor → nothing (fail closed)
+                    setupIds.push(id);
+                });
+                if (setupIds.length > MX_SITE_CAP) {
+                    console.warn(`${TAG} map export: ${setupIds.length} scoped sites — capped at ${MX_SITE_CAP}`);
+                    C.skipped = setupIds.length - MX_SITE_CAP;
+                    setupIds.length = MX_SITE_CAP;
+                }
+                const queue = setupIds.slice();
+                let done = 0;
+                const worker = async () => {
+                    while (queue.length) {
+                        if (seq !== mxSeq) return;
+                        const id = queue.shift();
+                        try {
+                            const ents = await fetchSiteEntities(id, false);
+                            const geoms = [];
+                            ents.forEach(e => { try { const g = nbEntityToGeom(e); if (g) geoms.push(g); } catch (e2) { console.warn(`${TAG} map export geometry failed for entity ${e && e.id}:`, e2); } });
+                            C.setups[id] = geoms;
+                            geoms.forEach(g => g.parts.forEach(part => part.forEach(pt => mxBboxAdd(C.bbox, pt[0], pt[1]))));
+                        } catch (e) { console.warn(`${TAG} map export: setup fetch failed for site ${id} — not drawn:`, e); }
+                        done++;
+                        if (progress) progress(`fetching site setups ${done}/${setupIds.length}…`);
+                    }
+                };
+                await Promise.all(Array.from({ length: Math.min(MX_FETCH_CONCURRENCY, queue.length) }, worker));
+                C.sitesFetched = Object.keys(C.setups).length;
+            }
+        }
+        if (seq !== mxSeq) return C;
+        if (mxBboxEmpty(C.bbox)) return C;
+        // labels: filter mode = every matching site INSIDE the final bbox; all = every site inside
+        if (opts.labels !== 'none' && rawSites) {
+            const match = opts.labels === 'filter' ? labelMatcher() : (() => true);
+            const bb = mxBboxPad(C.bbox, 0.03);
+            Object.keys(rawSites).forEach(id => {
+                if (ftIgnore[id]) return;
+                const c = siteEntryCenter(rawSites[id].raw);
+                if (!c) return;
+                if (!mxInBbox(bb, c.lat, c.lng)) return;
+                const nm = siteName(id);
+                if (!match(nm.trim().toLowerCase())) return;
+                C.labels.push({ lat: c.lat, lng: c.lng, name: nm });
+            });
+        }
+        return C;
+    }
+
+    // --- tiles through GM_xmlhttpRequest (any origin, no taint) ---
+    function mxFetchTile(bmKey, z, x, y) {
+        const n = Math.pow(2, z);
+        x = ((x % n) + n) % n;
+        if (y < 0 || y >= n) return Promise.resolve(null);
+        const key = `${bmKey}/${z}/${x}/${y}`;
+        if (mxTileCache.has(key)) return Promise.resolve(mxTileCache.get(key));
+        const url = BASEMAPS[bmKey].url.replace('{z}', z).replace('{x}', x).replace('{y}', y);
+        const p = new Promise(resolve => {
+            try {
+                GM_xmlhttpRequest({
+                    method: 'GET', url, responseType: 'blob', timeout: 20000,
+                    onload: (res) => {
+                        if (res.status < 200 || res.status >= 300 || !res.response) { resolve(null); return; }
+                        const blob = res.response;
+                        const viaImg = () => { try { const u = URL.createObjectURL(blob); const im = new Image(); im.onload = () => { URL.revokeObjectURL(u); resolve(im); }; im.onerror = () => { URL.revokeObjectURL(u); resolve(null); }; im.src = u; } catch (e) { resolve(null); } };
+                        if (typeof createImageBitmap === 'function') createImageBitmap(blob).then(bmp => resolve(bmp)).catch(viaImg); else viaImg();
+                    },
+                    onerror: () => resolve(null), ontimeout: () => resolve(null),
+                });
+            } catch (e) { console.warn(`${TAG} map export tile request failed:`, e); resolve(null); }
+        }).then(bmp => { mxTileCache.set(key, bmp); return bmp; });
+        mxTileCache.set(key, p);   // de-dupe in-flight
+        return p;
+    }
+
+    // --- scale bar: nice round length in ft / mi ---
+    function mxScaleChoice(mPerPx, targetPx) {
+        const ftPerPx = mPerPx * FT_PER_M;
+        const targetFt = targetPx * ftPerPx;
+        const nice = targetFt >= 2640
+            ? [0.5, 1, 2, 5, 10, 20, 50, 100].map(mi => ({ ft: mi * 5280, label: `${mi} mi` }))
+            : [100, 200, 500, 1000, 2000].map(ft => ({ ft, label: `${ft.toLocaleString()} ft` }));
+        let best = nice[0];
+        nice.forEach(c => { if (Math.abs(c.ft - targetFt) < Math.abs(best.ft - targetFt)) best = c; });
+        return { px: best.ft / ftPerPx, label: best.label };
+    }
+
+    function mxWrap(ctx, text, maxW) {
+        const words = String(text).split(/\s+/);
+        const lines = []; let cur = '';
+        words.forEach(w => {
+            const t = cur ? `${cur} ${w}` : w;
+            if (ctx.measureText(t).width > maxW && cur) { lines.push(cur); cur = w; } else cur = t;
+        });
+        if (cur) lines.push(cur);
+        return lines;
+    }
+
+    // --- legend content (shared by canvas + HTML export) ---
+    function mxLegendModel(C, opts) {
+        const r = C.xref;
+        const m = { title: null, sub: null, bands: [], summary: null, layers: [], setups: [], date: opts.date ? new Date(r && r.at ? r.at : Date.now()).toLocaleDateString() : null };
+        if (r) {
+            const bases = r.mode === 'bases';
+            const P = r.pointHits || { 0: 0, 1: 0, 2: 0 };
+            const pointsOnly = !!r.pointsTotal && !(r.totalM > 0);
+            const total = pointsOnly ? r.pointsTotal : r.totalM;
+            const v = (k) => pointsOnly ? P[k] : r.bandLenM[k];
+            const f = (x) => pointsOnly ? `${x} pts` : fmtMi(x);
+            m.title = 'Cross-reference';
+            m.sub = `"${r.srcName}" vs ${r.tgtLabel}`;
+            m.bands = [
+                { color: XREF_COLORS[1], label: bases ? `Tattu range (≤${r.b1.toLocaleString()} ft)` : `≤ ${r.b1} ft from site airspace`, val: `${f(v(1))} · ${pct(v(1), total)}` },
+                { color: XREF_COLORS[2], label: bases ? `Tulip only (≤${r.b2.toLocaleString()} ft)` : `${r.b1}–${r.b2} ft`, val: `${f(v(2))} · ${pct(v(2), total)}` },
+                { color: XREF_COLORS[0], label: bases ? 'Beyond battery range' : 'Beyond — no coverage', val: `${f(v(0))} · ${pct(v(0), total)}` },
+            ];
+            m.pointsOnly = pointsOnly;
+            m.summary = `${bases ? 'reachable without shielding' : 'inspectable from existing coverage'}: ${f(v(1) + v(2))} (${pct(v(1) + v(2), total)}) of ${f(total)}`;
+        }
+        C.layers.forEach(L => m.layers.push({ color: L.st.color, label: L.ly.name + (L.isSrc ? ' (source — coloured by band)' : ''), line: L.ly.features.some(ft => ft.type !== 'point') }));
+        if (Object.keys(C.setups).length) NB_CLASSES.forEach(c => { if (ftCfg.view[c.key]) m.setups.push({ color: SETUP_STYLE[c.key].color, label: c.label, line: c.key === 'fp' }); });
+        return m;
+    }
+
+    // --- the renderer: returns {canvas, W, H, ...}; progress(msg) for the modal ---
+    async function mxRender(opts, longSide, progress, seq) {
+        const C = await mxCollect(opts, progress, seq);
+        if (seq !== mxSeq) return null;
+        if (mxBboxEmpty(C.bbox)) throw new Error('nothing to draw — turn on a KML layer, a cross-reference or site setups');
+        const bb = mxBboxPad(C.bbox, 0.03);
+        // zoom: integer zi with a [1,2) scale so the long side lands on longSide
+        const a0 = mxProj(bb.maxLat, bb.minLng, 0), b0 = mxProj(bb.minLat, bb.maxLng, 0);
+        const longest0 = Math.max(b0.x - a0.x, b0.y - a0.y);
+        let zi = Math.max(3, Math.min(22, Math.floor(Math.log2(longSide / longest0))));
+        let scale = longSide / (longest0 * Math.pow(2, zi));
+        let W = Math.round((b0.x - a0.x) * Math.pow(2, zi) * scale), H = Math.round((b0.y - a0.y) * Math.pow(2, zi) * scale);
+        if (W > MX_MAX_SIDE || H > MX_MAX_SIDE || W * H > MX_MAX_AREA) {
+            const k = Math.min(MX_MAX_SIDE / W, MX_MAX_SIDE / H, Math.sqrt(MX_MAX_AREA / (W * H)));
+            scale *= k; W = Math.round(W * k); H = Math.round(H * k);
+            console.warn(`${TAG} map export: size capped by canvas limits → ${W}×${H}`);
+        }
+        const o = mxProj(bb.maxLat, bb.minLng, zi);
+        const XY = (lat, lng) => { const p = mxProj(lat, lng, zi); return [(p.x - o.x) * scale, (p.y - o.y) * scale]; };
+        const s = Math.max(0.6, longSide / 1800);   // stroke/font scale — matches the on-screen look at ~1800 px
+        const bm = mxBasemapOk(opts.basemap) ? BASEMAPS[opts.basemap] : null;
+        const bg = bm ? bm.bg : '#2b2f36';
+        const canvas = document.createElement('canvas');
+        canvas.width = W; canvas.height = H;
+        const ctx = canvas.getContext('2d');
+        // ---- furniture rectangles (reserved in the trim mask, drawn last) ----
+        const fx = {};
+        const font = (px, bold) => `${bold ? '700 ' : ''}${Math.round(px)}px ui-monospace, Menlo, Consolas, monospace`;
+        const legend = opts.legend ? mxLegendModel(C, opts) : null;
+        let legendBox = null;
+        if (legend) {
+            // measure
+            const padL = 14 * s, lh = 18 * s, maxW = Math.min(W * 0.45, 420 * s);
+            const lines = [];
+            ctx.font = font(12 * s);
+            if (legend.title) lines.push({ t: legend.title, color: '#7adfe6', bold: true, size: 13 });
+            if (legend.sub) mxWrap(ctx, legend.sub, maxW - 2 * padL).forEach(t => lines.push({ t, color: '#aaa' }));
+            legend.bands.forEach(b => lines.push({ sw: b.color, t: b.label, val: b.val, line: !legend.pointsOnly }));
+            if (legend.summary) mxWrap(ctx, legend.summary, maxW - 2 * padL).forEach(t => lines.push({ t, color: '#aaa' }));
+            if (legend.layers.length) { lines.push({ t: 'Layers', color: '#7adfe6', bold: true, gap: true }); legend.layers.forEach(l => lines.push({ sw: l.color, t: l.label, line: l.line })); }
+            if (legend.setups.length) { lines.push({ t: 'Site setups', color: '#7adfe6', bold: true, gap: true }); legend.setups.forEach(l => lines.push({ sw: l.color, t: l.label, line: l.line })); }
+            if (legend.date) lines.push({ t: legend.date, color: '#666', gap: true });
+            let w = 0;
+            lines.forEach(l => { ctx.font = font((l.size || 12) * s, l.bold); const tw = ctx.measureText(l.t).width + (l.sw ? 24 * s : 0) + (l.val ? ctx.measureText(l.val).width + 30 * s : 0); if (tw > w) w = tw; });
+            w = Math.min(maxW, w + 2 * padL);
+            const h = lines.reduce((n, l) => n + lh + (l.gap ? 6 * s : 0), 0) + 2 * padL - 4 * s;
+            const m = 18 * s;
+            const x = opts.legendCorner.endsWith('r') ? W - w - m : m, y = opts.legendCorner.startsWith('t') ? m : H - h - m;
+            legendBox = { x, y, w, h, lines, padL, lh };
+            fx.legend = legendBox;
+        }
+        if (opts.title) { ctx.font = font(22 * s, true); const tw = ctx.measureText(opts.title).width; const x = opts.legendCorner === 'tl' ? W - tw - 44 * s : 18 * s; fx.title = { x, y: 18 * s, w: tw + 26 * s, h: 44 * s }; }
+        if (opts.north) { const sz = 56 * s; fx.north = { x: W - sz - 18 * s, y: (opts.legendCorner === 'tr' ? (legendBox ? legendBox.h + 36 * s : 18 * s) : 18 * s), w: sz, h: sz + 16 * s }; }
+        let scaleBox = null;
+        if (opts.scaleBar) {
+            const mPerPx = 156543.03392 * Math.cos((bb.minLat + bb.maxLat) / 2 * Math.PI / 180) / Math.pow(2, zi) / scale;
+            const ch = mxScaleChoice(mPerPx, W * 0.14);
+            const w = ch.px + 28 * s, h = 40 * s;
+            const x = opts.legendCorner === 'br' ? 18 * s : W - w - 18 * s, y = H - h - 18 * s;
+            scaleBox = { x, y, w, h, px: ch.px, label: ch.label };
+            fx.scale = scaleBox;
+        }
+        // ---- trim mask: grid cells with content (+1 ring) keep the basemap ----
+        const cell = opts.trim ? Math.max(24, Math.round(W * (Math.max(2, Math.min(15, opts.trimCell)) / 100))) : 0;
+        const cols = cell ? Math.ceil(W / cell) : 1, rows = cell ? Math.ceil(H / cell) : 1;
+        const keep = new Uint8Array(cols * rows);
+        const mark = (x, y) => { if (!cell) return; const cx = Math.floor(x / cell), cy = Math.floor(y / cell); if (cx >= 0 && cy >= 0 && cx < cols && cy < rows) keep[cy * cols + cx] = 1; };
+        const markSeg = (a, b) => { if (!cell) return; const d = Math.hypot(b[0] - a[0], b[1] - a[1]); const n = Math.max(1, Math.ceil(d / (cell / 2))); for (let i = 0; i <= n; i++) mark(a[0] + (b[0] - a[0]) * i / n, a[1] + (b[1] - a[1]) * i / n); };
+        const markRect = (r) => { if (!cell || !r) return; for (let y = r.y; y <= r.y + r.h; y += cell / 2) for (let x = r.x; x <= r.x + r.w; x += cell / 2) mark(x, y); mark(r.x + r.w, r.y + r.h); };
+        // project everything once
+        const P = { setups: [], kml: [], runs: { 0: [], 1: [], 2: [] }, marks: [], labels: [] };
+        Object.keys(C.setups).forEach(id => C.setups[id].forEach(g => { if (!ftCfg.view[g.cls]) return; const parts = g.parts.map(part => part.map(pt => XY(pt[0], pt[1]))); parts.forEach(part => { for (let i = 1; i < part.length; i++) markSeg(part[i - 1], part[i]); if (g.closed && part.length) markSeg(part[part.length - 1], part[0]); }); P.setups.push({ cls: g.cls, closed: g.closed, parts }); }));
+        C.layers.forEach(L => {
+            const feats = [];
+            L.ly.features.forEach(f => {
+                if (L.isSrc && C.xref) { if (f.type === 'point' && C.xref.pointMarks.length) return; if (f.type === 'line' && C.xref.runs.length) return; }
+                const pts = f.pts.map(pt => XY(pt[0], pt[1]));
+                if (f.type === 'point') mark(pts[0][0], pts[0][1]); else { for (let i = 1; i < pts.length; i++) markSeg(pts[i - 1], pts[i]); if (f.type === 'poly' && pts.length) markSeg(pts[pts.length - 1], pts[0]); }
+                feats.push({ type: f.type, pts });
+            });
+            P.kml.push({ st: L.st, feats });
+        });
+        if (C.xref) {
+            C.xref.runs.forEach(run => { const pts = run.pts.map(pt => XY(pt[0], pt[1])); for (let i = 1; i < pts.length; i++) markSeg(pts[i - 1], pts[i]); P.runs[run.band].push(pts); });
+            C.xref.pointMarks.forEach(pm => { const p = XY(pm.lat, pm.lng); mark(p[0], p[1]); P.marks.push({ p, band: pm.band }); });
+        }
+        ctx.font = font(11 * s, true);
+        C.labels.forEach(l => { const p = XY(l.lat, l.lng); const tw = Math.min(ctx.measureText(l.name).width, 230 * s); const r = { x: p[0] - tw / 2 - 8 * s, y: p[1] - 24 * s, w: tw + 16 * s, h: 18 * s }; markRect(r); P.labels.push({ p, r, name: l.name, tw }); });
+        Object.keys(fx).forEach(k => markRect(fx[k]));
+        if (cell) {   // dilate one ring (8-neighbour)
+            const src = keep.slice();
+            for (let y = 0; y < rows; y++) for (let x = 0; x < cols; x++) {
+                if (src[y * cols + x]) continue;
+                let on = false;
+                for (let dy = -1; dy <= 1 && !on; dy++) for (let dx = -1; dx <= 1 && !on; dx++) { const xx = x + dx, yy = y + dy; if (xx >= 0 && yy >= 0 && xx < cols && yy < rows && src[yy * cols + xx]) on = true; }
+                if (on) keep[y * cols + x] = 1;
+            }
+        }
+        const cellOn = (px, py) => !cell || keep[Math.floor(py / cell) * cols + Math.floor(px / cell)] === 1;
+        // ---- basemap (clipped to the kept cells) ----
+        ctx.save();
+        if (cell) { ctx.beginPath(); for (let y = 0; y < rows; y++) for (let x = 0; x < cols; x++) if (keep[y * cols + x]) ctx.rect(x * cell, y * cell, cell, cell); ctx.clip(); }
+        ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+        let tilesDrawn = 0, tilesWanted = 0;
+        if (bm) {
+            const zt = Math.min(zi, bm.maxNative);
+            const f = Math.pow(2, zi - zt);                  // one tile covers f×f zi-tiles
+            const tilePx = MX_TILE * f * scale;              // drawn size
+            const ox = o.x / f, oy = o.y / f;                // origin in zt world px
+            const tx0 = Math.floor(ox / MX_TILE), ty0 = Math.floor(oy / MX_TILE);
+            const tx1 = Math.floor((ox + W / scale / f) / MX_TILE), ty1 = Math.floor((oy + H / scale / f) / MX_TILE);
+            const jobs = [];
+            for (let ty = ty0; ty <= ty1; ty++) for (let tx = tx0; tx <= tx1; tx++) {
+                const dx = (tx * MX_TILE - ox) * f * scale, dy = (ty * MX_TILE - oy) * f * scale;
+                // skip tiles that touch no kept cell
+                let any = !cell;
+                if (cell) for (let yy = dy; yy < dy + tilePx && !any; yy += cell / 2) for (let xx = dx; xx < dx + tilePx && !any; xx += cell / 2) if (xx >= 0 && yy >= 0 && xx < W && yy < H && cellOn(xx, yy)) any = true;
+                if (any) jobs.push({ tx, ty, dx, dy });
+            }
+            tilesWanted = jobs.length;
+            let done = 0;
+            const worker = async () => {
+                while (jobs.length) {
+                    if (seq !== mxSeq) return;
+                    const j = jobs.shift();
+                    const bmp = await mxFetchTile(opts.basemap, zt, j.tx, j.ty);
+                    if (seq !== mxSeq) return;
+                    if (bmp) { try { ctx.drawImage(bmp, j.dx, j.dy, tilePx + 0.5, tilePx + 0.5); tilesDrawn++; } catch (e) { console.warn(`${TAG} map export tile draw failed:`, e); } }
+                    done++;
+                    if (progress && (done % 20 === 0 || done === tilesWanted)) progress(`basemap tiles ${done}/${tilesWanted}…`);
+                }
+            };
+            await Promise.all(Array.from({ length: Math.min(MX_TILE_CONCURRENCY, jobs.length) }, worker));
+            if (seq !== mxSeq) return null;
+        }
+        // ---- vectors ----
+        const path = (pts, close) => { ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); if (close) ctx.closePath(); };
+        ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+        NB_CLASSES.forEach(c => {
+            const st = SETUP_STYLE[c.key];
+            P.setups.filter(g => g.cls === c.key).forEach(g => g.parts.forEach(part => {
+                path(part, g.closed);
+                if (g.closed) { ctx.globalAlpha = st.fill; ctx.fillStyle = st.color; ctx.fill(); }
+                ctx.globalAlpha = 0.9; ctx.strokeStyle = st.color; ctx.lineWidth = st.weight * s; ctx.stroke();
+            }));
+        });
+        ctx.globalAlpha = 1;
+        P.kml.forEach(L => {
+            const st = L.st;
+            L.feats.forEach(f => {
+                if (f.type === 'point') { ctx.globalAlpha = st.opacity; ctx.fillStyle = st.color; ctx.beginPath(); ctx.arc(f.pts[0][0], f.pts[0][1], Math.max(2.5, st.width + 1.5) * s, 0, Math.PI * 2); ctx.fill(); ctx.globalAlpha = 1; ctx.strokeStyle = '#10141c'; ctx.lineWidth = 1 * s; ctx.stroke(); return; }
+                path(f.pts, f.type === 'poly');
+                if (f.type === 'poly' && st.fill) { ctx.globalAlpha = 0.12; ctx.fillStyle = st.color; ctx.fill(); }
+                ctx.globalAlpha = st.opacity; ctx.strokeStyle = st.color; ctx.lineWidth = st.width * s; ctx.stroke();
+            });
+        });
+        ctx.globalAlpha = 0.95;
+        [0, 2, 1].forEach(b => { ctx.strokeStyle = XREF_COLORS[b]; ctx.lineWidth = 4 * s; P.runs[b].forEach(pts => { path(pts, false); ctx.stroke(); }); });
+        ctx.globalAlpha = 1;
+        P.marks.forEach(m => { ctx.fillStyle = XREF_COLORS[m.band]; ctx.beginPath(); ctx.arc(m.p[0], m.p[1], 5 * s, 0, Math.PI * 2); ctx.fill(); ctx.strokeStyle = '#10141c'; ctx.lineWidth = 1 * s; ctx.stroke(); });
+        // ---- site-name chips ----
+        ctx.font = font(11 * s, true); ctx.textBaseline = 'middle';
+        P.labels.forEach(l => {
+            ctx.fillStyle = 'rgba(14,18,26,0.7)'; ctx.fillRect(l.r.x, l.r.y, l.r.w, l.r.h);
+            ctx.strokeStyle = 'rgba(110,231,255,0.35)'; ctx.lineWidth = 1 * s; ctx.strokeRect(l.r.x, l.r.y, l.r.w, l.r.h);
+            ctx.fillStyle = '#6ee7ff';
+            let t = l.name; while (t.length > 3 && ctx.measureText(t).width > l.tw) t = t.slice(0, -2) + '…';
+            ctx.fillText(t, l.r.x + 8 * s, l.r.y + l.r.h / 2);
+        });
+        ctx.restore();
+        // ---- furniture ----
+        const chip = (r) => { ctx.fillStyle = 'rgba(14,18,26,0.9)'; ctx.fillRect(r.x, r.y, r.w, r.h); ctx.strokeStyle = '#2a3140'; ctx.lineWidth = 1 * s; ctx.strokeRect(r.x, r.y, r.w, r.h); };
+        ctx.textBaseline = 'middle';
+        if (legendBox) {
+            chip(legendBox);
+            let y = legendBox.y + legendBox.padL + legendBox.lh / 2 - 4 * s;
+            legendBox.lines.forEach(l => {
+                if (l.gap) y += 6 * s;
+                let x = legendBox.x + legendBox.padL;
+                if (l.sw) {
+                    ctx.fillStyle = l.sw;
+                    if (l.line) { ctx.fillRect(x, y - 2 * s, 18 * s, 4 * s); } else { ctx.beginPath(); ctx.arc(x + 7 * s, y, 6 * s, 0, Math.PI * 2); ctx.fill(); }
+                    x += 24 * s;
+                }
+                ctx.font = font((l.size || 12) * s, l.bold); ctx.fillStyle = l.color || '#ddd'; ctx.textAlign = 'left';
+                let t = l.t; const maxTw = legendBox.w - (x - legendBox.x) - legendBox.padL - (l.val ? ctx.measureText(l.val).width + 14 * s : 0);
+                while (t.length > 3 && ctx.measureText(t).width > maxTw) t = t.slice(0, -2) + '…';
+                ctx.fillText(t, x, y);
+                if (l.val) { ctx.textAlign = 'right'; ctx.fillStyle = '#ddd'; ctx.font = font(12 * s, true); ctx.fillText(l.val, legendBox.x + legendBox.w - legendBox.padL, y); }
+                y += legendBox.lh;
+            });
+        }
+        if (fx.title) { chip(fx.title); ctx.font = font(22 * s, true); ctx.fillStyle = '#e8f6ff'; ctx.textAlign = 'left'; ctx.fillText(opts.title, fx.title.x + 13 * s, fx.title.y + fx.title.h / 2); }
+        if (fx.north) {
+            const r = fx.north; chip(r); const cx = r.x + r.w / 2, cy = r.y + r.w / 2 + 4 * s, h = r.w * 0.34;
+            ctx.beginPath(); ctx.moveTo(cx, cy - h); ctx.lineTo(cx + h * 0.42, cy + h * 0.6); ctx.lineTo(cx, cy + h * 0.25); ctx.closePath(); ctx.fillStyle = '#e8f6ff'; ctx.fill();
+            ctx.beginPath(); ctx.moveTo(cx, cy - h); ctx.lineTo(cx - h * 0.42, cy + h * 0.6); ctx.lineTo(cx, cy + h * 0.25); ctx.closePath(); ctx.fillStyle = '#7adfe6'; ctx.fill();
+            ctx.font = font(12 * s, true); ctx.fillStyle = '#e8f6ff'; ctx.textAlign = 'center'; ctx.fillText('N', cx, r.y + r.h - 9 * s);
+        }
+        if (scaleBox) {
+            const r = scaleBox; chip(r); const x0 = r.x + 14 * s, y0 = r.y + r.h - 12 * s;
+            ctx.fillStyle = '#e8f6ff'; ctx.fillRect(x0, y0 - 3 * s, r.px, 3 * s); ctx.fillRect(x0, y0 - 9 * s, 2 * s, 9 * s); ctx.fillRect(x0 + r.px - 2 * s, y0 - 9 * s, 2 * s, 9 * s);
+            ctx.font = font(11 * s, true); ctx.textAlign = 'center'; ctx.fillText(r.label, x0 + r.px / 2, r.y + 12 * s);
+        }
+        ctx.textAlign = 'left';
+        return { canvas, W, H, zi, tilesDrawn, tilesWanted, sites: C.sitesFetched, skipped: C.skipped, labels: C.labels.length, C };
+    }
+
+    // --- interactive HTML export: Leaflet from cdnjs, vectors embedded ---
+    function mxHtmlExport(C, opts) {
+        const bm = mxBasemapOk(opts.basemap) ? BASEMAPS[opts.basemap] : BASEMAPS.dark;
+        const legend = mxLegendModel(C, opts);
+        const data = {
+            title: opts.title || '', bg: bm.bg, tiles: bm.url, maxNative: bm.maxNative,
+            bbox: C.bbox,
+            layers: C.layers.map(L => ({
+                name: L.ly.name, color: L.st.color, width: L.st.width, opacity: L.st.opacity, fill: !!L.st.fill,
+                feats: L.ly.features.filter(f => !(L.isSrc && C.xref && ((f.type === 'point' && C.xref.pointMarks.length) || (f.type === 'line' && C.xref.runs.length)))).map(f => ({ t: f.type[0], n: f.name || '', p: f.pts.map(pt => [+pt[0].toFixed(6), +pt[1].toFixed(6)]) })),
+            })),
+            xref: C.xref ? { colors: XREF_COLORS, runs: C.xref.runs.map(run => ({ b: run.band, p: run.pts.map(pt => [+pt[0].toFixed(6), +pt[1].toFixed(6)]) })), marks: C.xref.pointMarks.map(pm => [+pm.lat.toFixed(6), +pm.lng.toFixed(6), pm.band]) } : null,
+            setups: NB_CLASSES.map(c => ({ key: c.key, label: c.label, color: SETUP_STYLE[c.key].color, weight: SETUP_STYLE[c.key].weight, fill: SETUP_STYLE[c.key].fill, geoms: [].concat(...Object.keys(C.setups).map(id => C.setups[id].filter(g => g.cls === c.key && ftCfg.view[c.key]).map(g => ({ c: g.closed, p: g.parts.map(part => part.map(pt => [+pt[0].toFixed(6), +pt[1].toFixed(6)])) })))) })).filter(c => c.geoms.length),
+            labels: C.labels.map(l => [+l.lat.toFixed(6), +l.lng.toFixed(6), l.name]),
+            legend,
+        };
+        const json = JSON.stringify(data).replace(/<\//g, '<\\/');
+        return `<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${escapeHtml(opts.title || 'AIM map')}</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<style>
+html,body,#map{margin:0;height:100%;background:${bm.bg};font:12px/1.4 ui-monospace,Menlo,Consolas,monospace;color:#ddd}
+.aim-legend{background:rgba(14,18,26,.92);color:#ddd;border:1px solid #2a3140;border-radius:6px;padding:8px 12px;max-width:380px;box-shadow:0 4px 14px rgba(0,0,0,.5)}
+.aim-legend .h{color:#7adfe6;font-weight:700;margin-top:4px}.aim-legend .row{display:flex;align-items:center;gap:8px;line-height:1.5}
+.aim-legend .sw{display:inline-block;width:12px;height:12px;border-radius:6px;flex:none}.aim-legend .sw.l{width:22px;height:4px;border-radius:2px}
+.aim-legend .v{color:#ccc;font-weight:700;margin-left:auto;white-space:nowrap;padding-left:10px}.aim-legend .d{color:#666;margin-top:4px}.aim-legend .s{color:#aaa}
+.aim-title{background:rgba(14,18,26,.9);color:#e8f6ff;border:1px solid #2a3140;border-radius:6px;padding:6px 12px;font-size:16px;font-weight:700}
+.lbl{background:rgba(14,18,26,.7)!important;color:#6ee7ff!important;border:1px solid rgba(110,231,255,.35)!important;border-radius:4px!important;padding:1px 7px!important;font-size:11px!important;font-weight:600!important;white-space:nowrap!important;box-shadow:none!important}
+.lbl::before{display:none!important}
+.leaflet-control-layers{background:rgba(14,18,26,.92);color:#ddd;border:1px solid #2a3140}
+.leaflet-control-scale-line{background:rgba(14,18,26,.8);color:#ddd;border-color:#ddd}
+.leaflet-bar a{background:#14181f;color:#ddd;border-bottom-color:#2a3140}
+</style></head><body><div id="map"></div>
+<script>
+(function(){
+var D = ${json};
+var map = L.map('map', { preferCanvas: true, zoomSnap: 0.25 });
+var canvas = L.canvas({ padding: 0.5 });
+L.tileLayer(D.tiles, { maxNativeZoom: D.maxNative, maxZoom: 22, attribution: 'Basemap © Esri / USGS' }).addTo(map);
+var overlays = {};
+function poly(pts, closed, st){ return closed ? L.polygon(pts, st) : L.polyline(pts, st); }
+D.setups.forEach(function(c){
+  var g = L.layerGroup();
+  c.geoms.forEach(function(x){ x.p.forEach(function(part){ poly(part, x.c, { renderer: canvas, color: c.color, weight: c.weight, opacity: 0.9, fill: x.c, fillColor: c.color, fillOpacity: c.fill, interactive: false }).addTo(g); }); });
+  overlays['Site setups — ' + c.label] = g; g.addTo(map);
+});
+D.layers.forEach(function(ly){
+  var g = L.layerGroup();
+  ly.feats.forEach(function(f){
+    var o;
+    if (f.t === 'p') o = L.circleMarker(f.p[0], { renderer: canvas, radius: Math.max(2.5, ly.width + 1.5), color: '#10141c', weight: 1, fillColor: ly.color, fillOpacity: ly.opacity });
+    else o = poly(f.p, f.t === 'y', { renderer: canvas, color: ly.color, weight: ly.width, opacity: ly.opacity, fill: f.t === 'y' && ly.fill, fillColor: ly.color, fillOpacity: 0.12 });
+    if (f.n) o.bindTooltip(f.n, { sticky: true });
+    o.addTo(g);
+  });
+  overlays[ly.name] = g; g.addTo(map);
+});
+if (D.xref) {
+  var xg = L.layerGroup();
+  [0, 2, 1].forEach(function(b){ D.xref.runs.filter(function(r){ return r.b === b; }).forEach(function(r){ L.polyline(r.p, { renderer: canvas, color: D.xref.colors[b], weight: 4, opacity: 0.95, interactive: false }).addTo(xg); }); });
+  D.xref.marks.forEach(function(m){ L.circleMarker([m[0], m[1]], { renderer: canvas, radius: 5, color: '#10141c', weight: 1, fillColor: D.xref.colors[m[2]], fillOpacity: 0.9 }).addTo(xg); });
+  overlays['Cross-reference'] = xg; xg.addTo(map);
+}
+if (D.labels.length) {
+  var lg = L.layerGroup();
+  D.labels.forEach(function(l){ L.tooltip({ permanent: true, direction: 'top', className: 'lbl', offset: [0, -4] }).setLatLng([l[0], l[1]]).setContent(l[2]).addTo(lg); });
+  overlays['Site names'] = lg; lg.addTo(map);
+}
+L.control.layers(null, overlays, { collapsed: true }).addTo(map);
+L.control.scale({ imperial: true, metric: false }).addTo(map);
+var LG = D.legend;
+if (LG.title || LG.layers.length || LG.setups.length) {
+  var c = L.control({ position: 'bottomleft' });
+  c.onAdd = function(){
+    var el = L.DomUtil.create('div', 'aim-legend'), h = '';
+    function sw(x){ return '<div class="row"><span class="sw' + (x.line ? ' l' : '') + '" style="background:' + x.color + '"></span><span>' + x.label + '</span>' + (x.val ? '<span class="v">' + x.val + '</span>' : '') + '</div>'; }
+    if (LG.title) { h += '<div class="h" style="margin-top:0">' + LG.title + '</div><div class="s">' + LG.sub + '</div>'; LG.bands.forEach(function(b){ h += sw({ color: b.color, label: b.label, val: b.val, line: !LG.pointsOnly }); }); h += '<div class="s">' + LG.summary + '</div>'; }
+    if (LG.layers.length) { h += '<div class="h">Layers</div>'; LG.layers.forEach(function(x){ h += sw(x); }); }
+    if (LG.setups.length) { h += '<div class="h">Site setups</div>'; LG.setups.forEach(function(x){ h += sw(x); }); }
+    if (LG.date) h += '<div class="d">' + LG.date + '</div>';
+    el.innerHTML = h; L.DomEvent.disableClickPropagation(el); return el;
+  };
+  c.addTo(map);
+}
+if (D.title) { var t = L.control({ position: 'topleft' }); t.onAdd = function(){ var el = L.DomUtil.create('div', 'aim-title'); el.textContent = D.title; return el; }; t.addTo(map); }
+map.fitBounds([[D.bbox.minLat, D.bbox.minLng], [D.bbox.maxLat, D.bbox.maxLng]], { padding: [20, 20] });
+})();
+</script></body></html>`;
+    }
+
+    // --- modal ---
+    function mxFileStem() {
+        const parts = [];
+        if (mxOpts.title) parts.push(mxOpts.title);
+        else { const r = mxOpts.xref && xrefState && xrefState.result; if (r) parts.push(r.srcName); else if (ftCfg.setupScope === 'filter' && ftCfg.setupTerms.trim()) parts.push(ftCfg.setupTerms.trim()); }
+        parts.push(new Date().toISOString().slice(0, 10));
+        return ('AIM map ' + parts.join(' ')).replace(/[\\/:*?"<>|]+/g, '-').slice(0, 120);
+    }
+    function mxStatus(msg, color) {
+        const el = mxEl && mxEl.querySelector('[data-mx-status]');
+        if (el) { el.textContent = msg; el.style.color = color || '#8899bb'; }
+    }
+    function mxRenderControls() {
+        const o = mxOpts;
+        const sel = 'background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;padding:2px 4px;font:inherit;';
+        const inp = 'background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;font:inherit;padding:2px 4px;';
+        const lab = 'display:flex;align-items:center;gap:6px;cursor:pointer;padding:2px 0;';
+        const h = (t) => `<div style="color:#7adfe6;font-weight:700;margin:10px 0 4px;border-bottom:1px solid #222834">${t}</div>`;
+        const r = xrefState && xrefState.result;
+        const bmOpts = Object.keys(BASEMAPS).filter(mxBasemapOk).map(k => `<option value="${k}" ${o.basemap === k ? 'selected' : ''}>${BASEMAPS[k].label}</option>`).join('') + `<option value="none" ${o.basemap === 'none' ? 'selected' : ''}>None (solid dark)</option>`;
+        const layerRows = kmlLayers.filter(ly => ly.features).map(ly => { const st = kmlStyleFor(ly.id); return `<label style="${lab}"><input type="checkbox" data-mx-layer="${ly.id}" ${o.layers[ly.id] ? 'checked' : ''}><span style="display:inline-block;width:12px;height:12px;border-radius:6px;background:${st.color};flex:none"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(ly.name)}</span></label>`; }).join('') || '<div style="color:#666">no KML layers loaded</div>';
+        return h('Content')
+            + `<label style="${lab}" title="Percepto default basemap can't be fetched for export — Esri Dark Gray is the closest">Basemap <select data-mx="basemap" style="${sel};flex:1">${bmOpts}</select></label>`
+            + `<label style="${lab}">Site names <select data-mx="labels" style="${sel};flex:1"><option value="none" ${o.labels === 'none' ? 'selected' : ''}>Hidden</option><option value="filter" ${o.labels === 'filter' ? 'selected' : ''}>Only matching / picked</option><option value="all" ${o.labels === 'all' ? 'selected' : ''}>All in frame</option></select></label>`
+            + (o.labels === 'filter' ? `<div style="color:#888;padding-left:4px">= ${escapeHtml(ftCfg.labelPicked && fdSelected.size ? `the ${fdSelected.size} picked site(s)` : (ftCfg.labelTerms.trim() ? `names matching "${ftCfg.labelTerms.trim()}"` : 'nothing (set the names box in 🗺 Map)'))}</div>` : '')
+            + `<label style="${lab}"><input type="checkbox" data-mx="setups" ${o.setups ? 'checked' : ''}> Site setups <span style="color:#888">— ${escapeHtml(setupScopeLabel())}</span></label>`
+            + `<label style="${lab}" ${r ? '' : 'title="run a cross-reference first"'}><input type="checkbox" data-mx="xref" ${o.xref ? 'checked' : ''} ${r ? '' : 'disabled'}> Cross-reference ${r ? `<span style="color:#888">"${escapeHtml(r.srcName)}"</span>` : '<span style="color:#666">(none run)</span>'}</label>`
+            + h('KML layers') + layerRows
+            + h('Furniture')
+            + `<label style="${lab}"><input type="checkbox" data-mx="legend" ${o.legend ? 'checked' : ''}> Legend <select data-mx="legendCorner" style="${sel}"><option value="bl" ${o.legendCorner === 'bl' ? 'selected' : ''}>bottom-left</option><option value="br" ${o.legendCorner === 'br' ? 'selected' : ''}>bottom-right</option><option value="tl" ${o.legendCorner === 'tl' ? 'selected' : ''}>top-left</option><option value="tr" ${o.legendCorner === 'tr' ? 'selected' : ''}>top-right</option></select></label>`
+            + `<label style="${lab}"><input type="checkbox" data-mx="scaleBar" ${o.scaleBar ? 'checked' : ''}> Scale bar</label>`
+            + `<label style="${lab}"><input type="checkbox" data-mx="north" ${o.north ? 'checked' : ''}> North arrow</label>`
+            + `<label style="${lab}"><input type="checkbox" data-mx="date" ${o.date ? 'checked' : ''}> Date in legend</label>`
+            + `<label style="${lab}">Title <input type="text" data-mx-title value="${escapeHtml(o.title)}" placeholder="optional" style="${inp};flex:1"></label>`
+            + h('Shape & size')
+            + `<label style="${lab}" title="Grid cells with no content go transparent (PNG) — the map keeps a mostly right-angled outline around what matters"><input type="checkbox" data-mx="trim" ${o.trim ? 'checked' : ''}> Trim dead space</label>`
+            + `<label style="${lab}">cell <input type="number" data-mx-num="trimCell" value="${o.trimCell}" min="2" max="15" step="1" style="${inp};width:52px"> % of width <span style="color:#888">(+1 ring margin)</span></label>`
+            + `<label style="${lab}">PNG long side <select data-mx="longSide" style="${sel}">${MX_SIZES.map(n => `<option value="${n}" ${o.longSide === n ? 'selected' : ''}>${n.toLocaleString()} px</option>`).join('')}</select></label>`
+            + '<div style="color:#666;margin-top:4px">The interactive HTML is vector-only (small file) and zooms without limit — needs internet for the basemap when opened.</div>';
+    }
+    function mxOpen() {
+        if (mxEl) { mxClose(); }
+        mxOpts = mxDefaultOpts();
+        mxEl = document.createElement('div');
+        mxEl.id = 'aim-ft-mx';
+        mxEl.style.cssText = 'position:fixed;inset:0;z-index:2147480500;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;font:12px/1.4 monospace;color:#ddd;';
+        mxEl.innerHTML = '<div data-mx-card style="width:94vw;height:92vh;background:#1f2228;border:1px solid rgba(122,223,230,0.55);border-radius:10px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 10px 40px rgba(0,0,0,0.6)">'
+            + '<div style="display:flex;align-items:center;gap:12px;padding:8px 14px;background:#1a2029;border-bottom:1px solid #2a3140">'
+            + '<b style="color:#7adfe6">🖼 Map Export</b><span style="color:#888">what the landing map shows, rendered at print size — PNG poster or interactive HTML</span>'
+            + '<span data-mx-status style="margin-left:auto;color:#8899bb"></span>'
+            + '<span data-mx-act="preview" style="cursor:pointer;color:#5fff5f;font-weight:bold;border:1px solid #2a3140;padding:2px 8px;border-radius:3px">⟳ Preview</span>'
+            + '<span data-mx-act="png" style="cursor:pointer;color:#ffd54f;font-weight:bold;border:1px solid #2a3140;padding:2px 8px;border-radius:3px" title="Full-size PNG (transparent outside the trim)">⬇ PNG</span>'
+            + '<span data-mx-act="html" style="cursor:pointer;color:#7adfe6;font-weight:bold;border:1px solid #2a3140;padding:2px 8px;border-radius:3px" title="Self-contained interactive map (Leaflet) — small file, zoom without limit">🌐 HTML</span>'
+            + '<span data-mx-act="close" style="cursor:pointer;color:#888;font-size:16px;padding:0 4px">✕</span></div>'
+            + '<div style="display:flex;flex:1;min-height:0">'
+            + '<div data-mx-controls style="width:300px;flex:none;overflow:auto;padding:6px 12px 12px;border-right:1px solid #2a3140"></div>'
+            + '<div data-mx-stage style="flex:1;min-width:0;overflow:auto;background:#3a3f48 repeating-conic-gradient(#363b43 0 25%,#3a3f48 0 50%) 0 0/24px 24px;display:flex;align-items:center;justify-content:center;padding:14px">'
+            + '<canvas data-mx-canvas style="max-width:100%;max-height:100%;box-shadow:0 6px 24px rgba(0,0,0,0.5)"></canvas></div></div></div>';
+        document.body.appendChild(mxEl);
+        mxEl.querySelector('[data-mx-controls]').innerHTML = mxRenderControls();
+        mxEl.addEventListener('click', (ev) => {
+            const act = ev.target.closest('[data-mx-act]');
+            if (!act) { if (ev.target === mxEl) mxClose(); return; }
+            const a = act.getAttribute('data-mx-act');
+            if (a === 'close') mxClose();
+            else if (a === 'preview') mxPreview(0);
+            else if (a === 'png') mxExportPng();
+            else if (a === 'html') mxExportHtml();
+        });
+        mxEl.addEventListener('change', (ev) => {
+            const t = ev.target;
+            if (!t || !t.getAttribute) return;
+            const k = t.getAttribute('data-mx');
+            const ly = t.getAttribute('data-mx-layer');
+            const num = t.getAttribute('data-mx-num');
+            if (ly) mxOpts.layers[ly] = !!t.checked;
+            else if (num) mxOpts[num] = Number(t.value) || mxOpts[num];
+            else if (k === 'longSide') mxOpts.longSide = Number(t.value) || 6000;
+            else if (k === 'basemap' || k === 'labels' || k === 'legendCorner') mxOpts[k] = String(t.value);
+            else if (k) mxOpts[k] = !!t.checked;
+            else return;
+            if (k === 'labels') mxEl.querySelector('[data-mx-controls]').innerHTML = mxRenderControls();
+            if (k !== 'longSide') mxPreview(250);
+        });
+        mxEl.addEventListener('input', (ev) => {
+            const t = ev.target;
+            if (t && t.hasAttribute && t.hasAttribute('data-mx-title')) { mxOpts.title = t.value; mxPreview(600); }
+        });
+        mxPreview(0);
+    }
+    function mxClose() {
+        mxSeq++;
+        if (mxPreviewTimer) { clearTimeout(mxPreviewTimer); mxPreviewTimer = null; }
+        if (mxEl) { mxEl.remove(); mxEl = null; }
+        mxBusy = false;
+    }
+    function mxPreview(delay) {
+        if (mxPreviewTimer) clearTimeout(mxPreviewTimer);
+        mxPreviewTimer = setTimeout(async () => {
+            mxPreviewTimer = null;
+            if (!mxEl) return;
+            const seq = ++mxSeq;
+            const cv = mxEl.querySelector('[data-mx-canvas]');
+            mxStatus('rendering preview…');
+            try {
+                const stage = mxEl.querySelector('[data-mx-stage]');
+                const target = Math.max(600, Math.min(1400, Math.round(Math.max(stage.clientWidth, stage.clientHeight) * 1.0)));
+                const out = await mxRender(mxOpts, target, (m) => { if (seq === mxSeq) mxStatus(m); }, seq);
+                if (!out || seq !== mxSeq || !mxEl) return;
+                cv.width = out.W; cv.height = out.H;
+                cv.getContext('2d').drawImage(out.canvas, 0, 0);
+                mxLast = out;
+                const est = mxEstimate(out);
+                mxStatus(`preview ${out.W}×${out.H} · export ≈ ${est.W.toLocaleString()}×${est.H.toLocaleString()} px · ${out.tilesDrawn}/${out.tilesWanted} tiles · ${out.sites} site setup(s)${out.skipped ? ` (+${out.skipped} over cap)` : ''} · ${out.labels} name(s)`, '#5fff5f');
+            } catch (e) {
+                console.warn(`${TAG} map export preview failed:`, e);
+                if (seq === mxSeq) mxStatus(`preview failed — ${e.message || e}`, '#ff5252');
+            }
+        }, delay || 0);
+    }
+    function mxEstimate(out) { const k = mxOpts.longSide / Math.max(out.W, out.H); return { W: Math.round(out.W * k), H: Math.round(out.H * k) }; }
+    async function mxExportPng() {
+        if (mxBusy) { mxStatus('already exporting…', '#ffa030'); return; }
+        mxBusy = true;
+        const seq = ++mxSeq;
+        const t0 = performance.now();
+        try {
+            mxStatus(`rendering ${mxOpts.longSide.toLocaleString()} px PNG…`, '#ffd54f');
+            const out = await mxRender(mxOpts, mxOpts.longSide, (m) => { if (seq === mxSeq) mxStatus(`PNG · ${m}`, '#ffd54f'); }, seq);
+            if (!out || seq !== mxSeq) return;
+            mxStatus('encoding PNG…', '#ffd54f');
+            const blob = await new Promise((resolve, reject) => { try { out.canvas.toBlob(b => b ? resolve(b) : reject(new Error('toBlob returned null (canvas too large?)')), 'image/png'); } catch (e) { reject(e); } });
+            fdDownload(blob, `${mxFileStem()}.png`);
+            const mb = (blob.size / 1048576).toFixed(1);
+            mxStatus(`PNG saved — ${out.W.toLocaleString()}×${out.H.toLocaleString()} px · ${mb} MB · ${out.tilesDrawn}/${out.tilesWanted} tiles · ${Math.round((performance.now() - t0) / 1000)} s`, '#5fff5f');
+            setStatus(`🖼 map PNG exported (${out.W}×${out.H}, ${mb} MB)`);
+            console.log(`${TAG} map export PNG: ${out.W}×${out.H} · z${out.zi} · ${out.tilesDrawn}/${out.tilesWanted} tiles · ${mb} MB · ${Math.round(performance.now() - t0)} ms`);
+        } catch (e) {
+            console.warn(`${TAG} map export PNG failed:`, e);
+            mxStatus(`PNG failed — ${e.message || e}`, '#ff5252');
+        } finally { mxBusy = false; }
+    }
+    async function mxExportHtml() {
+        if (mxBusy) { mxStatus('already exporting…', '#ffa030'); return; }
+        mxBusy = true;
+        const seq = ++mxSeq;
+        try {
+            mxStatus('collecting vectors…', '#7adfe6');
+            const C = await mxCollect(mxOpts, (m) => { if (seq === mxSeq) mxStatus(`HTML · ${m}`, '#7adfe6'); }, seq);
+            if (seq !== mxSeq) return;
+            if (mxBboxEmpty(C.bbox)) throw new Error('nothing to draw — turn on a KML layer, a cross-reference or site setups');
+            const html = mxHtmlExport(C, mxOpts);
+            const blob = new Blob([html], { type: 'text/html' });
+            fdDownload(blob, `${mxFileStem()}.html`);
+            const mb = (blob.size / 1048576).toFixed(2);
+            mxStatus(`HTML saved — ${mb} MB · ${C.layers.length} layer(s) · ${C.sitesFetched} site setup(s) · ${C.labels.length} name(s) — open it in any browser`, '#5fff5f');
+            setStatus(`🌐 interactive map exported (${mb} MB)`);
+            console.log(`${TAG} map export HTML: ${mb} MB`);
+        } catch (e) {
+            console.warn(`${TAG} map export HTML failed:`, e);
+            mxStatus(`HTML failed — ${e.message || e}`, '#ff5252');
+        } finally { mxBusy = false; }
+    }
+    function renderMxSection() {
+        if (!openSections.mx) return '';
+        const r = xrefState && xrefState.result;
+        const shown = kmlLayers.filter(ly => ly.features && kmlStyleFor(ly.id).show).length;
+        return '<div style="padding:6px 10px;display:flex;gap:12px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;">'
+            + '<span data-ft="mx-open" style="cursor:pointer;color:#5fff5f;font-weight:bold;border:1px solid #2a3140;padding:2px 8px;border-radius:3px">🖼 Open Map Export</span>'
+            + `<span style="color:#888">starts from what the map shows now: ${shown} KML layer(s)${r ? ` · cross-ref "${escapeHtml(r.srcName)}"` : ''} · setups ${ftCfg.drawSetups ? setupScopeLabel() : 'off'} · names ${labelMode()}</span>`
+            + '</div>'
+            + '<div style="padding:4px 10px;color:#666;border-bottom:1px solid #222834;">Preview with toggles → ⬇ PNG poster (trimmed to the content, transparent outside) or 🌐 interactive HTML (small, zooms forever). Basemap = Esri / USGS tiles; the Percepto default and OpenStreetMap can\'t be exported.</div>';
     }
 
     // ------------------------------------------------------------------
