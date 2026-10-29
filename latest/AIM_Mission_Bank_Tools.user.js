@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.46
+// @version      3.47
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.46';
+    const SCRIPT_VERSION = '3.47';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -6915,10 +6915,10 @@
     // pads are solid, unticked ones hollow, so the selection reads on the map live.
     const GEN_EYE_KEY = 'aim-mb-gen-eye';
     const GEN_EYE_CLASSES = [
-        { id: 'create', label: 'to create', color: '#5fff5f' },
-        { id: 'have', label: 'have a micro', color: '#7adfe6' },
-        { id: 'macro', label: 'macro-only', color: '#ffd54f' },
-        { id: 'skip', label: 'skip-state', color: '#ff5252' },
+        { id: 'create', label: 'to create', color: '#00ff3c' },
+        { id: 'have', label: 'have a micro', color: '#00b7ff' },
+        { id: 'macro', label: 'macro-only', color: '#ffb300' },
+        { id: 'skip', label: 'skip-state', color: '#ff1744' },
     ];
     const genEye = { on: false, cls: { create: true, have: true, macro: true, skip: false }, layers: [], byPad: new Map(), canvas: null };
     try { const sv = gmGet(GEN_EYE_KEY, null); if (sv && typeof sv === 'object') { genEye.on = !!sv.on; Object.assign(genEye.cls, sv.cls || {}); } } catch (e) { console.warn(`${TAG} [gen-eye] prefs read failed`, e); }
@@ -6943,8 +6943,8 @@
                     const ticked = c.id !== 'create' || (checkedIds && checkedIds.has(a.id));
                     const ly = L.polygon(a.ring.map(p => [p.lat, p.lng]), {
                         renderer: genEye.canvas || undefined, interactive: false,
-                        color: c.color, weight: ticked ? 3 : 2, opacity: 0.95, dashArray: ticked ? null : '6 6',
-                        fill: true, fillColor: c.color, fillOpacity: ticked ? 0.45 : 0.08,
+                        color: c.color, weight: ticked ? 4 : 3, opacity: 1, dashArray: ticked ? null : '8 6',
+                        fill: true, fillColor: c.color, fillOpacity: ticked ? 0.75 : 0.3,
                     }).addTo(map);
                     genEye.layers.push(ly);
                     if (c.id === 'create') genEye.byPad.set(a.id, { ly, color: c.color });
@@ -6958,7 +6958,7 @@
     function genEyeSync(checkedIds) {
         genEye.byPad.forEach((rec, id) => {
             const t = checkedIds.has(id);
-            try { rec.ly.setStyle({ weight: t ? 3 : 2, dashArray: t ? null : '6 6', fillOpacity: t ? 0.45 : 0.08 }); } catch (e) {}
+            try { rec.ly.setStyle({ weight: t ? 4 : 3, dashArray: t ? null : '8 6', fillOpacity: t ? 0.75 : 0.3 }); } catch (e) {}
         });
     }
     function genRenderBulkPanel(valid, stateSkip, haveMission, ffzs, extra) {

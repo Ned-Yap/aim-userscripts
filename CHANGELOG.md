@@ -1,4 +1,6 @@
-## 2026-10-28 — 👁 Generate map overlay — Mission Bank Tools latest v3.46 (latest only)
+## 2026-10-28 — 👁 Generate map overlay — Mission Bank Tools latest v3.46 → v3.47 (latest only)
+
+- **v3.47** — **👁 Map pops.** Fills went from 45 % to 75 % (hollow pads 8 % → 30 %), strokes thicker, and the palette moved to saturated green / blue / amber / red so the status reads at a glance on sand and dark ortho alike.
 
 - **v3.46** — **▣ Generate: 👁 Map.** A new row under the tier chips paints every pad on the map by status, click-through and on the canvas renderer: green = to create, cyan = already has a micro, yellow = macro-only, red = skip-state (each class has its own tick; skip-state off by default). Ticked "to create" pads are solid, unticked ones hollow and dashed, and they restyle live as you tick rows, so the selection reads on the map before you press Create. The eye state and class ticks are remembered; the overlay clears when the panel closes.
 
