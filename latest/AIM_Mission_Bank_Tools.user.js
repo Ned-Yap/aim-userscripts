@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.60
+// @version      3.61
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.60';
+    const SCRIPT_VERSION = '3.61';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -4651,7 +4651,9 @@
         const nfzs = (ent && ent.nfzs) || [], assets = ((ent && ent.assets) || []).filter(sgTargetable);
         const out = rows.map(r => {
             const bearing = ((rot + r.angle) % 360 + 360) % 360;
-            const c = sgClampRay(focus, bearing, r.distFt / 3.28084, ffzs);
+            // v3.61: standoff is from the target's EDGE when there is one (the 80 ft rule is edge-based too)
+            const distM = targetRing ? sgEdgeRayM(focus, bearing, r.distFt, [targetRing]) : r.distFt / 3.28084;
+            const c = sgClampRay(focus, bearing, distM, ffzs);
             const inFfz = c.ok && sgInAnyFfz(c.pt, ffzs);
             const overNfz = nfzs.some(z => z.ring && z.ring.length >= 3 && genPointInPoly(c.pt, z.ring));      // Percepto refuses the save
             const overAsset = !overNfz && assets.some(a => genPointInPoly(c.pt, a.ring));                     // never fly over an asset
@@ -4890,6 +4892,7 @@
         if (sg.mode === 'dots') { sgUpdateHudDots(h); return; }
         const all = sgTplAll();
         const worst = sg.live.reduce((w, p) => (p.status === 'red' ? 'red' : (p.status === 'amber' && w !== 'red' ? 'amber' : w)), 'green');
+        const hardRed = sg.live.some(p => !p.inFfz || p.overNfz);
         const inp = (attr, v, w, extra) => `<input type="number" ${attr} value="${v}" ${extra || ''} style="width:${w}px;background:#0f1216;border:1px solid #456;color:#fff;border-radius:3px;font:inherit;font-size:11px;padding:1px 3px;text-align:right;">`;
         const table = `<table style="width:100%;border-collapse:collapse;margin-top:4px;font-size:11px;"><thead><tr style="color:#789;"><th style="text-align:left;font-weight:600;">set</th><th style="font-weight:600;">angle°</th><th style="font-weight:600;">ft</th><th style="font-weight:600;">snaps</th><th style="text-align:left;font-weight:600;">focus · asset</th></tr></thead><tbody>${sg.rows.map((r, i) => { const p = sg.live[sg.flip ? sg.rows.length - 1 - i : i]; return `<tr><td style="color:#cfe;">N${i + 1}</td><td>${inp(`data-sg-row="${i}" data-sg-f="angle"`, r.angle, 44, 'step="5"')}</td><td>${inp(`data-sg-row="${i}" data-sg-f="distFt"`, r.distFt, 46, 'min="20" max="600" step="5"')}</td><td>${inp(`data-sg-row="${i}" data-sg-f="snaps"`, r.snaps, 34, 'min="1" max="6"')}</td><td style="white-space:nowrap;">${p ? `<span style="color:${SG_COL[p.focusStatus]};">${Math.round(p.focusFt)}</span>${p.edgeFt != null ? ` · <span style="color:${SG_COL[p.edgeStatus]};">${Math.round(p.edgeFt)}</span>` : ''}${p.clamped ? ' <span style="color:#ffb74d;">⤵</span>' : ''}${!p.inFfz ? ' <span style="color:#ff5252;">✕</span>' : ''}` : '—'}</td></tr>`; }).join('')}</tbody></table>`;
         const sel = `<select data-sg-tpl style="flex:1;min-width:0;background:#0f1216;border:1px solid #ff8ad2;color:#fff;border-radius:3px;font:inherit;font-size:11px;padding:1px 3px;">${Object.keys(all).map(n => `<option value="${escapeHtml(n)}" ${n === sg.tplName ? 'selected' : ''}>${escapeHtml(n)}${all[n].builtin ? '' : ' ·'}</option>`).join('')}</select>`;
@@ -4907,10 +4910,10 @@
             <div style="margin-top:3px;display:flex;align-items:center;gap:5px;color:#ffd54f;">↔ gap ruler ≤ ${inp('data-sg-gapft', sg.gapFt, 44, 'min="5" max="500" step="5"')} ft${sg.gap.length ? ` <span style="color:#cfe;">· ${sg.gap.map(g => `${Math.round(g.ft)} ft`).join(' · ')}${sg.gap.length === 2 ? ` <span style="color:#789;">(${Math.round(sg.gap[0].ft + sg.gap[1].ft)} ft apart)</span>` : ''}</span>` : ' <span style="color:#789;">· no neighbour that close</span>'}</div>
             ${sgStagedListHtml()}
             <div style="margin-top:6px;display:flex;gap:5px;">
-                <button data-sg-stage ${(!sg.pinned || worst === 'red') ? 'disabled' : ''} title="Enter" style="flex:1;background:${worst === 'red' ? '#3a2020' : '#2a3a2a'};border:1px solid ${worst === 'red' ? '#ff5252' : '#5fff5f'};color:${worst === 'red' ? '#ff8a8a' : '#7dff7d'};border-radius:4px;cursor:pointer;font-weight:800;padding:3px 6px;">➕ Stage ghost</button>
+                <button data-sg-stage ${(!sg.pinned || hardRed) ? 'disabled' : ''} title="Enter" style="flex:1;background:${worst === 'red' ? '#3a2020' : '#2a3a2a'};border:1px solid ${worst === 'red' ? '#ff5252' : '#5fff5f'};color:${worst === 'red' ? '#ff8a8a' : '#7dff7d'};border-radius:4px;cursor:pointer;font-weight:800;padding:3px 6px;">${worst === 'red' && !hardRed ? '➕ Stage anyway' : '➕ Stage ghost'}</button>
                 <button data-sg-cancel title="Esc" style="background:none;border:1px solid #456;color:#cfe;border-radius:4px;cursor:pointer;padding:3px 6px;">Esc</button>
             </div>
-            ${worst === 'red' ? `<div style="margin-top:4px;color:#ff8a8a;">red = outside the FFZ or under ${SG_MIN_FT} ft from the asset — spin / push out first</div>` : ''}`;
+            ${worst === 'red' ? `<div style="margin-top:4px;color:#ff8a8a;">${hardRed ? 'red = outside the FFZ / over an NFZ — Percepto refuses these; spin or pull in' : `red = under ${SG_MIN_FT} ft from the asset edge or over an asset — push out, or Stage anyway (confirm)`}</div>` : ''}`;
         sgWireModeBtns(h);
         h.querySelector('[data-sg-tpl]').onchange = (ev) => { sgApplyTpl(ev.target.value); sgDrawLive(); };
         h.querySelector('[data-sg-save]').onclick = () => {
@@ -5205,7 +5208,7 @@
             if (sg.active) sgDrawLive();
             return;
         }
-        if (k === 'Escape') sgStop();
+        if (k === 'Escape') { if (sg.pinned) { sg.pinned = false; sg.targetRing = null; sg.targetName = ''; showToast('🎯 Unpinned — Esc again to exit.', '#888', 1500); } else sgStop(); }
         else if (k === 'Enter') sgStage();
         else if (/^[1-6]$/.test(k)) { sg.navs = Number(k); sgRegenRows(); }
         else if (k === '-' || k === '_') { sg.rows.forEach(r => { r.snaps = Math.max(1, r.snaps - 1); }); sgSyncSummary(); }   // Q/E belong to Map Nav zoom
@@ -5230,7 +5233,10 @@
     }
     function sgStage() {
         if (!sg.active || !sg.pinned || !sg.focus) return;
-        if (sg.live.some(p => p.status === 'red')) { showToast('🎯 A nav is red (outside the FFZ or under 80 ft) — spin or push out first.', '#ff5252', 4000); return; }
+        const hard = sg.live.filter(p => !p.inFfz || p.overNfz);
+        if (hard.length) { showToast(`🎯 ${hard.length} nav(s) outside the FFZ / over an NFZ — Percepto would refuse the save. Spin or pull in first.`, '#ff5252', 4000); return; }
+        const soft = sg.live.filter(p => p.status === 'red');
+        if (soft.length && !confirm(`${soft.length} nav(s) break the ${SG_MIN_FT} ft-from-asset / never-over-an-asset rule (thermal crop risk). Stage anyway?`)) return;
         const sid = sg.sid, mid = composerMission && composerMission.id;
         if (!sid || !mid) { showToast('No open mission to stage into.', '#ff9800', 3000); return; }
         const groups = sgGhostsFor(sid, mid);
