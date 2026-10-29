@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.68
+// @version      3.69
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.68';
+    const SCRIPT_VERSION = '3.69';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -4708,6 +4708,11 @@
     // and only when every one of them stays in the band. A dot may carry several rings (a
     // PAIR of assets shot from between them) — its edge is the nearest of them.
     function sgDotRingsOf(d) { return Array.isArray(d.rings) ? d.rings : (d.ring ? [d.ring] : []); }
+    // A nav spot is legal when it is inside an FFZ and over no NFZ / targetable asset.
+    function sgNavLegal(p, ent) {
+        const ffzs = (ent && ent.ffzs) || [], nfzs = (ent && ent.nfzs) || [], assets = ((ent && ent.assets) || []).filter(sgTargetable);
+        return sgInAnyFfz(p, ffzs) && !nfzs.some(z => z.ring && z.ring.length >= 3 && genPointInPoly(p, z.ring)) && !assets.some(a => genPointInPoly(p, a.ring));
+    }
     function sgSolveDots(dots, K, distFt, band, entOv, opts) {
         const ent = entOv || sg.ent || { assets: [], ffzs: [], nfzs: [] };
         const lo = Math.max(SG_MIN_FT, Number(band && band.lo) || 95), hi = Math.max(lo + 1, Number(band && band.hi) || 110);
@@ -4717,7 +4722,7 @@
         const aimFt = (p, d) => mbApproxMeters(p.lat, p.lng, d.lat, d.lng) * 3.28084;
         const edgeFt = (p, d) => { const rs = sgDotRingsOf(d); if (!rs.length) return Infinity; return Math.min.apply(null, rs.map(r => mbPointToPolygonMeters(p.lat, p.lng, r))) * 3.28084; };
         const bearingFrom = (d, p) => { const b = Math.atan2((p.lng - d.lng) * Math.cos(d.lat * Math.PI / 180), p.lat - d.lat) * 180 / Math.PI; return (b + 360) % 360; };
-        const legal = p => sgInAnyFfz(p, ffzs) && !nfzs.some(z => z.ring && z.ring.length >= 3 && genPointInPoly(p, z.ring)) && !assets.some(a => genPointInPoly(p, a.ring));
+        const legal = p => sgNavLegal(p, ent);
         const angDiff = (a, b) => { let da = Math.abs(a - b); if (da > 180) da = 360 - da; return da; };
         // candidates: 24 bearings × 4 standoffs around every dot, slid into the FFZ, never over an asset / NFZ
         const cands = [];
@@ -8274,14 +8279,14 @@
                         <span title="Angles per asset + standoff come from this 🎯 template">Template</span><select data-gen-auto-tpl style="flex:1;min-width:90px;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:2px 6px;border-radius:3px;font:inherit;font-size:11px;"></select>
                     </div>
                     <div style="display:flex;align-items:center;gap:6px;margin-top:4px;flex-wrap:wrap;color:#cfe;font-size:11px;">
-                        <span title="Two assets whose edges sit this close become ONE aim between them — one snapshot catches both (pairs only, never three)">pair ≤</span><input data-gen-auto-pair type="number" min="0" step="5" style="width:46px;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px;"><span>ft</span>
+                        <span title="Wells chained this close (edge to edge) form a ROW: trios shot from both broadsides at the gaps (two wells per image) plus one end-on shot of the whole group">row ≤</span><input data-gen-auto-pair type="number" min="0" step="5" style="width:46px;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px;"><span>ft</span>
                         <span title="Every shot's nav→snapshot distance must be inside this band; a nav is shared only when every aim it covers stays in the band">· band</span><input data-gen-auto-lo type="number" min="${SG_MIN_FT}" step="5" style="width:46px;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px;"><span>–</span><input data-gen-auto-hi type="number" min="85" step="5" style="width:46px;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px;"><span>ft</span>
                     </div>
                     <div style="display:flex;align-items:center;gap:6px;margin-top:4px;flex-wrap:wrap;color:#cfe;font-size:11px;">
                         <span title="Shots on one aim must be at least this far apart in bearing (90° is tried first)">min angle</span><input data-gen-auto-sep type="number" min="5" max="180" step="5" style="width:46px;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px;"><span>°</span>
                         <span title="A nav may shoot at most this many aims">· max aims/nav</span><input data-gen-auto-maxnav type="number" min="1" max="6" style="width:40px;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px;">
                     </div>
-                    <div style="color:#9a8bb8;font-size:10px;margin-top:3px;">Priority: distance (band, edge ≥ ${SG_MIN_FT} ft) → angle (≥ min, 90° first) → number of angles → sharing (≤ max/nav, band kept). Close pairs share one aim between them · never outside the FFZ / over an asset or NFZ · ordered from base · 🎞 wrap at Create · review list after.</div>
+                    <div style="color:#9a8bb8;font-size:10px;margin-top:3px;">Rows (wells within row ≤): trios → broadside navs on both sides with one shot per gap (two wells per image) + one end-on shot of the group. Lone assets: distance (band) → angle (≥ min, 90° first) → count → sharing (≤ max/nav). Never outside the FFZ / over an asset or NFZ · ordered from base · 🎞 wrap at Create · review list after.</div>
                 </div>
                 <div style="display:flex;align-items:center;gap:6px;margin-top:7px;"><label style="color:#cfe;white-space:nowrap;">Name</label><input data-gen-bulk-name value="{section} - {asset}" title="Tokens: {section} = N/E/S/W · {asset} = asset name" style="flex:1;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:2px 6px;border-radius:3px;font:inherit;font-size:11px;"></div>
                 <div style="color:#789;font-size:10px;margin-top:2px;">Tokens: <b>{section}</b> = N/E/S/W · <b>{asset}</b> = asset name (e.g. <b>NNE - {asset}</b>)</div>
@@ -8482,15 +8487,18 @@
         const leaves = (pad.descendants || []).map(id => byId.get(id)).filter(a => a && sgTargetable(a));
         const skippedKids = [];
         const kids = leaves.filter(a => { const r = genSkipReason(a); if (r) { skippedKids.push(`${a.name || a.id} (${r})`); return false; } return true; });
-        // pair neighbours whose edges sit ≤ pairFt apart (closest pairs first, each asset in ONE pair, pairs only — never three)
+        // v3.69 ROWS: wells chained within the pair distance (edge to edge, single linkage) form a
+        // row and get the row template (broadside gap shots + end-on shot); everything else is a dot
+        // for the generic solver.
         const pairFt = Math.max(0, Number(opts && opts.pairFt) || 0);
         const edgeGap = (r1, r2) => { let best = Infinity; for (const p of r1) { const d = mbPointToPolygonMeters(p.lat, p.lng, r2) * 3.28084; if (d < best) best = d; } for (const p of r2) { const d = mbPointToPolygonMeters(p.lat, p.lng, r1) * 3.28084; if (d < best) best = d; } return best; };
-        const cand = [];
-        if (pairFt > 0) for (let i = 0; i < kids.length; i++) for (let j = i + 1; j < kids.length; j++) { const g = edgeGap(kids[i].ring, kids[j].ring); if (g <= pairFt) cand.push({ i, j, g }); }
-        cand.sort((x, y) => x.g - y.g);
-        const used = new Set(), dots = [];
-        cand.forEach(c => { if (used.has(c.i) || used.has(c.j)) return; used.add(c.i); used.add(c.j); const a = kids[c.i], b = kids[c.j]; const ca = genCentroid(a.ring), cb = genCentroid(b.ring); dots.push({ lat: (ca.lat + cb.lat) / 2, lng: (ca.lng + cb.lng) / 2, rings: [a.ring, b.ring], name: `${a.name || a.id} + ${b.name || b.id}`, kind: 'asset', pair: true }); });
-        kids.forEach((a, i) => { if (used.has(i)) return; const c = genCentroid(a.ring); dots.push({ lat: c.lat, lng: c.lng, rings: [a.ring], name: a.name || String(a.id), kind: 'asset' }); });
+        const comp = kids.map((_, i) => i);
+        const find = i => { while (comp[i] !== i) { comp[i] = comp[comp[i]]; i = comp[i]; } return i; };
+        if (pairFt > 0) for (let i = 0; i < kids.length; i++) for (let j = i + 1; j < kids.length; j++) { if (edgeGap(kids[i].ring, kids[j].ring) <= pairFt) comp[find(i)] = find(j); }
+        const byRoot = new Map();
+        kids.forEach((a, i) => { const r = find(i); if (!byRoot.has(r)) byRoot.set(r, []); byRoot.get(r).push(a); });
+        const rows = [], dots = [];
+        byRoot.forEach(list => { if (list.length >= 2) rows.push(list); else { const a = list[0]; const c = genCentroid(a.ring); dots.push({ lat: c.lat, lng: c.lng, rings: [a.ring], name: a.name || String(a.id), kind: 'asset' }); } });
         (ent.nfzs || []).forEach(z => {
             if (!z.ring || z.ring.length < 3) return;
             const c = genCentroid(z.ring);
@@ -8498,8 +8506,75 @@
             if (leaves.some(a => genPointInPoly(genCentroid(a.ring), z.ring) || genPointInPoly(c, a.ring))) return;
             dots.push({ lat: c.lat, lng: c.lng, rings: [z.ring], name: z.name || `NFZ ${z.id}`, kind: 'nfz' });
         });
-        if (!dots.length) { const c = genCentroid(pad.ring); dots.push({ lat: c.lat, lng: c.lng, rings: [pad.ring], name: pad.name || String(pad.id), kind: 'pad' }); }
-        return { dots, skippedKids };
+        if (!dots.length && !rows.length) { const c = genCentroid(pad.ring); dots.push({ lat: c.lat, lng: c.lng, rings: [pad.ring], name: pad.name || String(pad.id), kind: 'pad' }); }
+        return { dots, rows, skippedKids };
+    }
+    // ── ROW TEMPLATE (v3.69, from the user's hand-built reference on GRANTHAM WEST) ──
+    // Order the wells along the row, chunk into trios (5 → 3+2, 4 → 2+2, never a lone 1).
+    // Per group: a nav on EACH broadside, perpendicular to the row at the standoff, taking
+    // one snapshot per GAP between adjacent wells (two wells per image, the middle well in
+    // both); plus ONE end-on nav on the row axis taking a single snapshot at the group's
+    // centre (the whole group in one frame). End chosen = legal at the shortest distance.
+    // Every nav slides into the FFZ; a side / end with no legal spot is skipped and flagged.
+    function genRowNavs(wells, ent, distFt, band, flags, rowName) {
+        const cs = wells.map(a => genCentroid(a.ring));
+        const lat0 = cs[0].lat, mLat = 110540, mLng = 111320 * Math.cos(lat0 * Math.PI / 180);
+        const xy = c => ({ x: (c.lng - cs[0].lng) * mLng, y: (c.lat - cs[0].lat) * mLat });
+        const ll = p => ({ lat: cs[0].lat + p.y / mLat, lng: cs[0].lng + p.x / mLng });
+        const P = cs.map(xy);
+        // row axis = the farthest pair of centroids
+        let u = { x: 1, y: 0 }, far = -1;
+        for (let i = 0; i < P.length; i++) for (let j = i + 1; j < P.length; j++) { const dx = P[j].x - P[i].x, dy = P[j].y - P[i].y, d = Math.hypot(dx, dy); if (d > far) { far = d; u = { x: dx / d, y: dy / d }; } }
+        const n = { x: -u.y, y: u.x };
+        const order = wells.map((a, i) => ({ a, p: P[i], t: P[i].x * u.x + P[i].y * u.y })).sort((x, y) => x.t - y.t);
+        // chunk: 3s, with 4 → 2+2 and 5 → 3+2 (never a lone 1)
+        const groups = []; let rest = order.slice();
+        while (rest.length) { const k = rest.length === 4 ? 2 : (rest.length >= 3 ? 3 : rest.length); groups.push(rest.slice(0, k)); rest = rest.slice(k); }
+        const bearing = v => ((Math.atan2(v.x, v.y) * 180 / Math.PI) + 360) % 360;   // x east, y north
+        const aimFt = (a, b) => mbApproxMeters(a.lat, a.lng, b.lat, b.lng) * 3.28084;
+        const navs = []; let snaps = 0;
+        groups.forEach((g, gi) => {
+            const gc = { x: g.reduce((s, w) => s + w.p.x, 0) / g.length, y: g.reduce((s, w) => s + w.p.y, 0) / g.length };
+            const C = ll(gc);
+            const label = `${rowName} group ${gi + 1} (${g.map(w => w.a.name || w.a.id).join(' / ')})`;
+            // gap aims between consecutive wells (a lone-well group would have none → aim the well itself)
+            const gaps = [];
+            for (let i = 0; i + 1 < g.length; i++) gaps.push(ll({ x: (g[i].p.x + g[i + 1].p.x) / 2, y: (g[i].p.y + g[i + 1].p.y) / 2 }));
+            if (!gaps.length) gaps.push(ll(g[0].p));
+            const halfGap = gaps.length > 1 ? Math.abs((g[0].t + g[1].t) / 2 - gc.x * u.x - gc.y * u.y) : 0;   // gap offset along the row (m)
+            const dSide = Math.sqrt(Math.max(1, (distFt / 3.28084) ** 2 - halfGap ** 2));
+            // broadsides
+            [1, -1].forEach(s => {
+                const dir = { x: n.x * s, y: n.y * s };
+                const c = sgClampRay(C, bearing(dir), dSide, ent.ffzs || []);
+                if (!c.ok || !sgNavLegal(c.pt, ent)) { flags.push(`${label}: no legal broadside on one side (FFZ / asset / NFZ) — skipped`); return; }
+                const fts = gaps.map(a => Math.round(aimFt(c.pt, a)));
+                if (c.clamped) flags.push(`${label}: broadside pulled in to the FFZ edge (${Math.min.apply(null, fts)}–${Math.max.apply(null, fts)} ft)`);
+                navs.push({ lat: c.pt.lat, lng: c.pt.lng, clamped: c.clamped, aims: gaps.map(a => ({ lat: a.lat, lng: a.lng, ft: aimFt(c.pt, a) })) });
+                snaps += gaps.length;
+            });
+            // end-on: try both ends, step out past anything in the way, keep the shorter legal one
+            let bestEnd = null;
+            [1, -1].forEach(s => {
+                const dir = { x: u.x * s, y: u.y * s };
+                for (let extra = 0; extra <= 40; extra += 5) {
+                    const want = (distFt + extra) / 3.28084;
+                    const c = sgClampRay(C, bearing(dir), want, ent.ffzs || []);
+                    if (!c.ok) break;                                   // ray leaves the FFZ before the standoff → this end is out
+                    if (Math.abs(mbApproxMeters(c.pt.lat, c.pt.lng, C.lat, C.lng) - want) > 1) break;   // clamped short → would be too close to the group
+                    if (!sgNavLegal(c.pt, ent)) continue;              // over a well / NFZ → push further out
+                    const ft = aimFt(c.pt, C);
+                    if (!bestEnd || ft < bestEnd.ft) bestEnd = { pt: c.pt, ft };
+                    break;
+                }
+            });
+            if (bestEnd) {
+                if (Math.round(bestEnd.ft) > band.hi) flags.push(`${label}: end-on shot at ${Math.round(bestEnd.ft)} ft (pushed past the neighbours)`);
+                navs.push({ lat: bestEnd.pt.lat, lng: bestEnd.pt.lng, clamped: false, aims: [{ lat: C.lat, lng: C.lng, ft: bestEnd.ft }], endOn: true });
+                snaps += 1;
+            } else flags.push(`${label}: no legal end-on spot — only broadsides`);
+        });
+        return { navs, snaps, groups: groups.length };
     }
     // One pad → { instructions, name, report } or null (no FFZ / no elevation yet).
     function genAutoBuild(pad, ent, opts) {
@@ -8508,28 +8583,39 @@
         const all = sgTplAll(); const t = all[opts.tpl] || all['3-shot 90°'];
         const K = Math.max(1, Math.min(6, Number(t.navs) || 3)), distFt = Math.max(SG_MIN_FT, Number(t.distFt) || 100);
         const band = { lo: Number(opts.shareLo) || 95, hi: Number(opts.shareHi) || 110 };
-        const { dots, skippedKids } = genAutoDots(pad, ent, opts);
-        const report = { pad: pad.name || String(pad.id), name: stock.name, aims: dots.length, navs: 0, snaps: 0, flags: [], fallback: 0, ring: pad.ring, mid: null };
+        const { dots, rows, skippedKids } = genAutoDots(pad, ent, opts);
+        const report = { pad: pad.name || String(pad.id), name: stock.name, aims: dots.length + rows.reduce((a, r) => a + r.length, 0), navs: 0, snaps: 0, flags: [], fallback: 0, ring: pad.ring, mid: null };
         if (skippedKids.length) report.flags.push(`skipped child: ${skippedKids.join(', ')}`);
-        dots.forEach(d => { if (d.pair) report.flags.push(`paired: ${d.name} (one aim between them)`); if (d.kind === 'asset') d.rings.forEach(r => { const sp = genRingSpanFt(r); if (sp > GEN_AUTO_BIG_FT) report.flags.push(`big asset in ${d.name} (${Math.round(sp)} ft) — check the aim`); }); if (d.kind === 'pad') report.flags.push('no child assets — pad centroid aimed'); if (d.kind === 'nfz') report.flags.push(`NFZ ${d.name} aimed as an obstacle`); });
-        let plan = null;
-        try { plan = sgSolveDots(dots, K, distFt, band, ent, { minSep: opts.minSep, maxPerNav: opts.maxPerNav }); } catch (e) { console.warn(`${TAG} [gen-auto] solve failed for "${pad.name}"`, e); report.flags.push(`solver error: ${(e && e.message) || e}`); }
+        dots.forEach(d => { if (d.kind === 'asset') d.rings.forEach(r => { const sp = genRingSpanFt(r); if (sp > GEN_AUTO_BIG_FT) report.flags.push(`big asset ${d.name} (${Math.round(sp)} ft) — check the aim`); }); if (d.kind === 'pad') report.flags.push('no child assets — pad centroid aimed'); if (d.kind === 'nfz') report.flags.push(`NFZ ${d.name} aimed as an obstacle`); });
+        let navs = [];
+        const allDots = dots.slice();
+        rows.forEach((wells, ri) => {
+            const rowName = `row ${ri + 1} (${wells.length} wells)`;
+            try {
+                const r = genRowNavs(wells, ent, distFt, band, report.flags, rowName);
+                navs = navs.concat(r.navs);
+                report.flags.push(`${rowName}: ${r.groups} group(s) → ${r.navs.length} nav / ${r.snaps} snap (broadside gap shots + end-on)`);
+                wells.forEach(a => { const c = genCentroid(a.ring); allDots.push({ lat: c.lat, lng: c.lng, name: a.name || String(a.id) }); });
+            } catch (e) { console.warn(`${TAG} [gen-auto] row template failed for "${pad.name}"`, e); report.flags.push(`${rowName}: template error — ${(e && e.message) || e}`); }
+        });
+        if (dots.length) {
+            let plan = null;
+            try { plan = sgSolveDots(dots, K, distFt, band, ent, { minSep: opts.minSep, maxPerNav: opts.maxPerNav }); } catch (e) { console.warn(`${TAG} [gen-auto] solve failed for "${pad.name}"`, e); report.flags.push(`solver error: ${(e && e.message) || e}`); }
+            if (plan) { plan.unmet.forEach(u => report.flags.push(`${dots[u.j].name}: ${u.missing} angle(s) short (no legal spot in the ${band.lo}–${band.hi} ft band — FFZ / asset / NFZ)`)); navs = navs.concat(plan.navs); }
+        }
         const groups = [];
-        if (plan && plan.navs.length) {
-            plan.unmet.forEach(u => report.flags.push(`${dots[u.j].name}: ${u.missing} angle(s) short (no legal spot in the ${band.lo}–${band.hi} ft band — FFZ / asset / NFZ)`));
-            const navs = sgOrderNavs(plan.navs, ent.base || null);
-            let lat = 0, lng = 0; dots.forEach(d => { lat += d.lat; lng += d.lng; });
-            groups.push({ gid: 'auto', focus: { lat: lat / dots.length, lng: lng / dots.length }, navs: navs.map(n => ({ lat: n.lat, lng: n.lng, snaps: n.aims.length, aims: n.aims.map(a => ({ lat: a.lat, lng: a.lng })) })), snapsPerNav: 1, target: `${dots.length} aim(s)`, tpl: 'points', dots: dots.map(d => ({ lat: d.lat, lng: d.lng, name: d.name })) });
-            const shared = navs.filter(n => n.aims.length > 1).length;
-            if (shared) report.flags.push(`${shared} nav(s) shoot more than one asset (shared)`);
+        if (navs.length) {
+            const ordered = sgOrderNavs(navs, ent.base || null);
+            let lat = 0, lng = 0; allDots.forEach(d => { lat += d.lat; lng += d.lng; });
+            groups.push({ gid: 'auto', focus: { lat: lat / allDots.length, lng: lng / allDots.length }, navs: ordered.map(n => ({ lat: n.lat, lng: n.lng, snaps: n.aims.length, aims: n.aims.map(a => ({ lat: a.lat, lng: a.lng })) })), snapsPerNav: 1, target: `${allDots.length} aim(s)`, tpl: 'points', dots: allDots.map(d => ({ lat: d.lat, lng: d.lng, name: d.name })) });
         } else {
-            // nothing legal anywhere → plain nearest-FFZ nav at the first dot (stock behaviour), flagged
-            const d0 = dots[0];
+            // nothing legal anywhere → plain nearest-FFZ nav at the first aim (stock behaviour), flagged
+            const d0 = allDots[0] || genCentroid(pad.ring);
             const ffz = genAssetFFZ(d0, ent.ffzs || []);
             const nav = ffz ? genNavPoint(d0, ffz) : null;
             if (!nav) { report.flags.push('NO nav possible (no FFZ) — stock centroid mission'); return { instructions: stock.instructions, name: stock.name, report: Object.assign(report, { navs: 1, snaps: 1 }) }; }
             report.fallback++; report.flags.push(`no legal spot for any aim — single stock nav at ${Math.round(nav.standoffFt)} ft`);
-            groups.push({ gid: 'auto', focus: { lat: d0.lat, lng: d0.lng }, navs: [{ lat: nav.point.lat, lng: nav.point.lng, snaps: 1 }], snapsPerNav: 1, target: d0.name, tpl: 'fallback' });
+            groups.push({ gid: 'auto', focus: { lat: d0.lat, lng: d0.lng }, navs: [{ lat: nav.point.lat, lng: nav.point.lng, snaps: 1 }], snapsPerNav: 1, target: d0.name || 'pad', tpl: 'fallback' });
         }
         const built = sgBuildWireSteps(groups, stock.instructions, opts.wrapSteps || [], f => getElevationFromCache(f.lat, f.lng));
         if (built.error) { report.flags.push(`build error: ${built.error}`); return { instructions: stock.instructions, name: stock.name, report }; }
@@ -8580,7 +8666,7 @@
         if (auto && ent) {
             // ground under every child centroid (snapshot altitude = ground + default AGL)
             const pts = [];
-            assets.forEach(pad => { try { genAutoDots(pad, ent, auto).dots.forEach(d => { if (getElevationFromCache(d.lat, d.lng) == null) pts.push({ lat: d.lat, lng: d.lng }); }); } catch (e) { console.warn(`${TAG} [gen-auto] dot scan failed for ${pad.name}`, e); } });
+            assets.forEach(pad => { try { const dd = genAutoDots(pad, ent, auto); dd.dots.forEach(d => { if (getElevationFromCache(d.lat, d.lng) == null) pts.push({ lat: d.lat, lng: d.lng }); }); dd.rows.forEach(r => r.forEach(a => { const c = genCentroid(a.ring); if (getElevationFromCache(c.lat, c.lng) == null) pts.push(c); })); } catch (e) { console.warn(`${TAG} [gen-auto] dot scan failed for ${pad.name}`, e); } });
             if (pts.length) { setStatus(`Fetching ${pts.length} elevation(s)…`); try { await bulkFetchElevations(pts); } catch (e) { console.warn(`${TAG} [gen-auto] elevation fetch failed`, e); } }
         }
         for (let i = 0; i < assets.length; i++) {
