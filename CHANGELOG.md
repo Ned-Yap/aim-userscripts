@@ -2,7 +2,9 @@
 
 - **v0.78** — **The client map, straight from AIM.** New **🖼 Map Export** section → a preview modal that renders what the landing map shows on its own canvas at print size: KML layers (per-layer toggles), cross-reference bands + point marks, site setups (same scope as the map), site names (hidden / matching / all), basemap tiles (Esri dark / light / imagery / USGS — fetched through Tampermonkey, so no screenshot), legend (corner picker), scale bar, north arrow, optional title, date. **Trim dead space** keeps only the grid cells with content plus a one-cell margin and makes the rest transparent — a mostly right-angled cut-out around what matters, so the PNG stays small. **⬇ PNG** at 3,000 / 4,500 / 6,000 / 9,000 px long side; **🌐 HTML** writes a self-contained interactive map (Leaflet, vectors embedded, basemap streamed when opened) that is a few MB and zooms without limit — the one to send when the client wants detail. Preview = the same renderer at screen size, re-rendered on every toggle.
 
-## 2026-10-29 — 🎯 Shot templates + ghost placement — Mission Bank Tools latest v3.52 → v3.65 (latest only)
+## 2026-10-29 — 🎯 Shot templates + ghost placement — Mission Bank Tools latest v3.52 → v3.66 (latest only)
+
+- **v3.66** — **Auto-shots runs on the Points solver.** Each child's centroid is an aim; the solver places the fewest navs that give every aim its angles (count + standoff from the chosen 🎯 template), neighbours share a nav when both are within the new **share ≤** distance (200 ft), each nav takes one snapshot per asset it covers aimed at that asset (no more midpoint snapshots), standoff is measured from each asset's own edge, and angles land wherever is most efficient rather than on a 90° fan. An NFZ is only an aim when no child sits inside it, so a wellhead-row NFZ no longer pushes navs out. The merge distance is gone.
 
 - **v3.65** — ▣ Generate list: the checkbox sits beside the pad name again. The tier filter (which runs on open) was clearing each row's inline layout, so Percepto's label styling stacked the checkbox on its own line.
 

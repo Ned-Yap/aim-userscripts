@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.65
+// @version      3.66
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.65';
+    const SCRIPT_VERSION = '3.66';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -4698,8 +4698,8 @@
     // can shoot every dot whose edge is within [80 ft, maxFt] of it, so neighbouring dots share
     // navs. Greedy set cover: the candidate that satisfies the most outstanding (dot, angle)
     // needs wins, ties → nearest the standoff; repeat until nothing helps.
-    function sgSolveDots(dots, K, distFt, maxFt) {
-        const ent = sg.ent || { assets: [], ffzs: [], nfzs: [] };
+    function sgSolveDots(dots, K, distFt, maxFt, entOv) {
+        const ent = entOv || sg.ent || { assets: [], ffzs: [], nfzs: [] };
         const ffzs = ent.ffzs || [], nfzs = ent.nfzs || [], assets = (ent.assets || []).filter(sgTargetable);
         const edgeFt = (p, d) => (d.ring ? mbPointToPolygonMeters(p.lat, p.lng, d.ring) : mbApproxMeters(p.lat, p.lng, d.lat, d.lng)) * 3.28084;
         const bearingFrom = (d, p) => { const b = Math.atan2((p.lng - d.lng) * Math.cos(d.lat * Math.PI / 180), p.lat - d.lat) * 180 / Math.PI; return (b + 360) % 360; };
@@ -8230,12 +8230,12 @@
                 </div>
                 <label style="display:flex;align-items:center;gap:6px;margin-top:7px;cursor:pointer;color:#cfe;"><input type="checkbox" data-gen-bulk-scan checked> Inspection scan (Thermal/GEM/Wait wrap) on every mission</label>
                 <div data-gen-auto-row style="margin-top:7px;padding:6px 8px;border:1px solid rgba(195,157,255,0.35);border-radius:5px;background:rgba(195,157,255,0.06);">
-                    <label style="display:flex;align-items:center;gap:6px;cursor:pointer;color:#e2d4ff;font-weight:700;"><input type="checkbox" data-gen-auto> 🎯 Auto-shots — ring every child asset</label>
+                    <label style="display:flex;align-items:center;gap:6px;cursor:pointer;color:#e2d4ff;font-weight:700;"><input type="checkbox" data-gen-auto> 🎯 Auto-shots — 📍 solver on every child asset</label>
                     <div style="display:flex;align-items:center;gap:6px;margin-top:5px;flex-wrap:wrap;color:#cfe;font-size:11px;">
-                        <span>Template</span><select data-gen-auto-tpl style="flex:1;min-width:90px;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:2px 6px;border-radius:3px;font:inherit;font-size:11px;"></select>
-                        <span title="Children whose edges sit this close fold into ONE aim (span capped at 2×)">merge ≤</span><input data-gen-auto-merge type="number" min="0" step="5" style="width:48px;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px;"><span>ft</span>
+                        <span title="Angles per asset + standoff come from this 🎯 template">Template</span><select data-gen-auto-tpl style="flex:1;min-width:90px;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:2px 6px;border-radius:3px;font:inherit;font-size:11px;"></select>
+                        <span title="A nav shoots every asset within this distance of it — neighbours share navs">share ≤</span><input data-gen-auto-max type="number" min="${SG_MIN_FT}" step="10" style="width:52px;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px;"><span>ft</span>
                     </div>
-                    <div style="color:#9a8bb8;font-size:10px;margin-top:3px;">Centroid aim per child (standalone NFZs too) · best spin auto-picked · red angles dropped · ordered from base · 🎞 wrap chosen at Create (replaces the scan box) · review list after.</div>
+                    <div style="color:#9a8bb8;font-size:10px;margin-top:3px;">Each child's centroid is an aim · fewest navs that give every aim its angles, neighbours share · standoff from the asset edge · never outside the FFZ / over an asset or NFZ · one snapshot per asset per nav · ordered from base · 🎞 wrap chosen at Create · review list after.</div>
                 </div>
                 <div style="display:flex;align-items:center;gap:6px;margin-top:7px;"><label style="color:#cfe;white-space:nowrap;">Name</label><input data-gen-bulk-name value="{section} - {asset}" title="Tokens: {section} = N/E/S/W · {asset} = asset name" style="flex:1;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:2px 6px;border-radius:3px;font:inherit;font-size:11px;"></div>
                 <div style="color:#789;font-size:10px;margin-top:2px;">Tokens: <b>{section}</b> = N/E/S/W · <b>{asset}</b> = asset name (e.g. <b>NNE - {asset}</b>)</div>
@@ -8370,15 +8370,15 @@
         };
         refreshTpls('');
         // v3.59 — 🎯 Auto-shots controls (GM-persisted)
-        const autoCb = p.querySelector('[data-gen-auto]'), autoTpl = p.querySelector('[data-gen-auto-tpl]'), autoMerge = p.querySelector('[data-gen-auto-merge]');
+        const autoCb = p.querySelector('[data-gen-auto]'), autoTpl = p.querySelector('[data-gen-auto-tpl]'), autoMerge = p.querySelector('[data-gen-auto-max]');
         const ap = genAutoPrefs();
-        autoCb.checked = !!ap.on; autoMerge.value = String(ap.mergeFt);
+        autoCb.checked = !!ap.on; autoMerge.value = String(ap.maxFt);
         autoTpl.innerHTML = Object.keys(sgTplAll()).map(k => `<option value="${escapeHtml(k)}" ${k === ap.tpl ? 'selected' : ''}>${escapeHtml(k)}</option>`).join('');
         const autoSync = () => {
             const on = autoCb.checked;
             scanCb.disabled = on; tplSel.disabled = on;
             goBtn.textContent = on ? '🎯 Create' : '⊕ Create';
-            genAutoSavePrefs({ on, mergeFt: Number(autoMerge.value) || 0, tpl: autoTpl.value });
+            genAutoSavePrefs({ on, maxFt: Number(autoMerge.value) || SG_IDEAL_HI, tpl: autoTpl.value });
         };
         autoCb.onchange = autoSync; autoTpl.onchange = autoSync; autoMerge.onchange = autoSync;
         autoSync();
@@ -8392,30 +8392,28 @@
             if (autoCb.checked) {
                 const wrap = await sgPickWrap(`🎯 Auto-shots on ${picked.length} pad(s) · template "${autoTpl.value}" · wrap after every snapshot`);
                 if (!wrap) return;
-                auto = { tpl: autoTpl.value, mergeFt: Math.max(0, Number(autoMerge.value) || 0), wrapSteps: wrap.steps || [] };
+                auto = { tpl: autoTpl.value, maxFt: Math.max(SG_MIN_FT, Number(autoMerge.value) || SG_IDEAL_HI), wrapSteps: wrap.steps || [] };
             }
             genBulkCommit(picked, ffzs, { inspectionScan: scan, nameTemplate, template, auto }, p.querySelector('[data-gen-bulk-status]'), goBtn);
         };
     }
     // ════════════════════════════════════════════════════════════════════════
-    // v3.59 — ▣ AUTO-SHOTS (#320): the generator rings every CHILD asset of a pad
-    // with the 🎯 shot template instead of one centroid snapshot. Per pad: leaf
-    // assets (+ standalone NFZs under no asset) → aim points at their centroids;
-    // neighbours whose edges sit ≤ mergeFt apart fold into one aim (span-capped at
-    // 2× mergeFt so a tank row never becomes one 150 ft "aim"); every aim tries
-    // 36 spins and keeps the one with the most legal navs (then greens, then edge
-    // clearance); red navs (outside the FFZ, over an asset/NFZ, < 80 ft) are DROPPED,
-    // and an aim with no legal nav at all falls back to the plain nearest-FFZ nav.
-    // Groups are ordered nearest-next from the base, the chosen 🎞 wrap follows each
-    // snapshot, ONE save per pad. The review list flags what deserves a human look:
-    // big children (centroid may not be the part you care about), clamped rings,
-    // dropped angles, merges, fallbacks.
+    // v3.59/v3.66 — ▣ AUTO-SHOTS (#320): the generator builds each pad's mission with the
+    // 📍 Points solver instead of one centroid snapshot. Every leaf child's centroid is an
+    // aim (an NFZ only when no child sits in it; the pad itself when it has no children);
+    // sgSolveDots places the fewest navs that give every aim K angles (K + standoff from
+    // the chosen 🎯 template), neighbours share a nav when both are within `share ≤` ft,
+    // standoff is measured from each asset's own edge, navs never leave the FFZ or sit
+    // over an asset / NFZ, one snapshot per asset per nav, nearest-next + 2-opt from the
+    // base, the chosen 🎞 wrap after every snapshot, ONE save per pad. The review list
+    // flags what deserves a human look: big children (centroid may not be the part you
+    // care about), angles short, shared navs, fallbacks.
     const GEN_AUTO_KEY = 'aim-mb-gen-auto';
     const GEN_AUTO_BIG_FT = 60;      // a child longer than this → "centroid may be wrong" flag
     function genAutoPrefs() {
-        const d = { on: false, mergeFt: 30, tpl: '3-shot 90°' };
+        const d = { on: false, maxFt: SG_IDEAL_HI, tpl: '3-shot 90°' };
         try { const sv = gmGet(GEN_AUTO_KEY, null); if (sv && typeof sv === 'object') Object.assign(d, sv); } catch (e) { console.warn(`${TAG} [gen-auto] prefs read failed`, e); }
-        d.mergeFt = Number(d.mergeFt); if (!Number.isFinite(d.mergeFt) || d.mergeFt < 0) d.mergeFt = 30;
+        d.maxFt = Number(d.maxFt); if (!Number.isFinite(d.maxFt) || d.maxFt < SG_MIN_FT) d.maxFt = SG_IDEAL_HI;
         return d;
     }
     function genAutoSavePrefs(p) { try { gmSet(GEN_AUTO_KEY, p); } catch (e) { console.warn(`${TAG} [gen-auto] prefs save failed`, e); } }
@@ -8424,109 +8422,56 @@
         for (let i = 0; i < ring.length; i++) for (let j = i + 1; j < ring.length; j++) { const d = mbApproxMeters(ring[i].lat, ring[i].lng, ring[j].lat, ring[j].lng); if (d > best) best = d; }
         return best * 3.28084;
     }
-    function genRingEdgeFt(r1, r2) {
-        let best = Infinity;
-        for (const p of r1) { const d = mbPointToPolygonMeters(p.lat, p.lng, r2) * 3.28084; if (d < best) best = d; if (!best) return 0; }
-        for (const p of r2) { const d = mbPointToPolygonMeters(p.lat, p.lng, r1) * 3.28084; if (d < best) best = d; if (!best) return 0; }
-        return best;
-    }
-    // Aim points for one pad: [{ focus, rings:[ring…], names:[…], kinds:[…], flags:[…] }]
-    function genAutoAims(pad, ent, mergeFt) {
+    // v3.66: Auto-shots = the 📍 Points solver fed with child centroids. Dots for one pad:
+    // every leaf child (skip-state children out), plus an NFZ only when NO child sits in it
+    // (a wellhead-row NFZ is not a target — its wells are), plus the pad itself when it
+    // has no children. Returns { dots:[{lat,lng,ring,name,kind}], skippedKids:[…] }.
+    function genAutoDots(pad, ent) {
         const byId = new Map((ent.assets || []).map(a => [a.id, a]));
         const leaves = (pad.descendants || []).map(id => byId.get(id)).filter(a => a && sgTargetable(a));
         const skippedKids = [];
         const kids = leaves.filter(a => { const r = genSkipReason(a); if (r) { skippedKids.push(`${a.name || a.id} (${r})`); return false; } return true; });
-        const items = kids.map(a => ({ ring: a.ring, name: a.name || String(a.id), kind: 'asset', c: genCentroid(a.ring) }));
-        // standalone NFZs on the pad: centroid inside the pad, inside no targetable asset
+        const dots = kids.map(a => { const c = genCentroid(a.ring); return { lat: c.lat, lng: c.lng, ring: a.ring, name: a.name || String(a.id), kind: 'asset' }; });
         (ent.nfzs || []).forEach(z => {
             if (!z.ring || z.ring.length < 3) return;
             const c = genCentroid(z.ring);
             if (!genPointInPoly(c, pad.ring)) return;
-            if (leaves.some(a => genPointInPoly(c, a.ring))) return;
-            items.push({ ring: z.ring, name: z.name || `NFZ ${z.id}`, kind: 'nfz', c });
+            if (leaves.some(a => genPointInPoly(genCentroid(a.ring), z.ring) || genPointInPoly(c, a.ring))) return;
+            dots.push({ lat: c.lat, lng: c.lng, ring: z.ring, name: z.name || `NFZ ${z.id}`, kind: 'nfz' });
         });
-        if (!items.length) items.push({ ring: pad.ring, name: pad.name || String(pad.id), kind: 'pad', c: genCentroid(pad.ring) });
-        // greedy merge: edges ≤ mergeFt AND merged span ≤ 2 × mergeFt
-        const spanCap = Math.max(mergeFt * 2, 1);
-        const clusters = items.map(it => ({ items: [it] }));
-        let merged = true;
-        while (merged && mergeFt > 0) {
-            merged = false;
-            outer: for (let i = 0; i < clusters.length; i++) for (let j = i + 1; j < clusters.length; j++) {
-                const A = clusters[i], B = clusters[j];
-                const close = A.items.some(x => B.items.some(y => genRingEdgeFt(x.ring, y.ring) <= mergeFt));
-                if (!close) continue;
-                const all = A.items.concat(B.items);
-                let span = 0; all.forEach(x => all.forEach(y => { const d = mbApproxMeters(x.c.lat, x.c.lng, y.c.lat, y.c.lng) * 3.28084; if (d > span) span = d; }));
-                if (span > spanCap) continue;
-                A.items = all; clusters.splice(j, 1); merged = true; break outer;
-            }
-        }
-        const aims = clusters.map(cl => {
-            let lat = 0, lng = 0; cl.items.forEach(it => { lat += it.c.lat; lng += it.c.lng; });
-            const flags = [];
-            if (cl.items.length > 1) flags.push(`merged ${cl.items.length}: ${cl.items.map(it => it.name).join(' + ')}`);
-            cl.items.forEach(it => { if (it.kind === 'asset' && genRingSpanFt(it.ring) > GEN_AUTO_BIG_FT) flags.push(`big asset ${it.name} (${Math.round(genRingSpanFt(it.ring))} ft) — check the aim`); });
-            if (cl.items.some(it => it.kind === 'pad')) flags.push('no child assets — pad centroid aimed');
-            return { focus: { lat: lat / cl.items.length, lng: lng / cl.items.length }, rings: cl.items.map(it => it.ring), names: cl.items.map(it => it.name), kinds: cl.items.map(it => it.kind), flags };
-        });
-        return { aims, skippedKids };
-    }
-    // Best spin for one aim: most legal navs, then most greens, then the largest minimum edge clearance.
-    function genAutoRing(aim, shape, ent) {
-        const single = aim.rings.length === 1 ? aim.rings[0] : null;
-        let best = null;
-        for (let rot = 0; rot < 360; rot += 10) {
-            // v3.60: standoff measured from the asset EDGE along each ray (a 70 ft tank gets 100 ft from its end, not its centre)
-            const rows2 = shape.rows.map(r => Object.assign({}, r, { distFt: sgEdgeRayM(aim.focus, ((rot + r.angle) % 360 + 360) % 360, r.distFt, aim.rings) * 3.28084 }));
-            const ring = sgComputeRing(aim.focus, Object.assign({}, shape, { rows: rows2 }), rot, false, single, ent).map(p => {
-                let edgeFt = Infinity; aim.rings.forEach(r => { const d = mbPointToPolygonMeters(p.lat, p.lng, r) * 3.28084; if (d < edgeFt) edgeFt = d; });
-                const st = (p.overNfz || p.overAsset) ? 'red' : sgFtStatus(edgeFt, p.inFfz);
-                return Object.assign({}, p, { edgeFt, status: st });
-            });
-            const kept = ring.filter(p => p.status !== 'red');
-            if (!kept.length) continue;
-            const greens = kept.filter(p => p.status === 'green').length;
-            const minEdge = Math.min.apply(null, kept.map(p => p.edgeFt));
-            const clamped = kept.filter(p => p.clamped).length;
-            const score = kept.length * 1e6 + greens * 1e4 + Math.min(minEdge, 400) * 10 - clamped;
-            if (!best || score > best.score) best = { score, rot, kept, dropped: ring.length - kept.length, clamped };
-        }
-        return best;
+        if (!dots.length) { const c = genCentroid(pad.ring); dots.push({ lat: c.lat, lng: c.lng, ring: pad.ring, name: pad.name || String(pad.id), kind: 'pad' }); }
+        return { dots, skippedKids };
     }
     // One pad → { instructions, name, report } or null (no FFZ / no elevation yet).
     function genAutoBuild(pad, ent, opts) {
         const stock = buildMissionForAsset(pad, ent.ffzs || [], { inspectionScan: false, nameTemplate: opts.nameTemplate });
         if (!stock) return null;
         const all = sgTplAll(); const t = all[opts.tpl] || all['3-shot 90°'];
-        const shape = { navs: t.navs, spreadDeg: t.spreadDeg, distFt: t.distFt, snapsPerNav: t.snapsPerNav || 1, rows: [] };
-        if (Array.isArray(t.rows) && t.rows.length) shape.rows = t.rows.map(r => ({ angle: Number(r.angle) || 0, distFt: Number(r.distFt) || shape.distFt, snaps: Math.max(1, Number(r.snaps) || 1) }));
-        else { const n = Math.max(1, Math.min(6, shape.navs | 0)); for (let i = 0; i < n; i++) shape.rows.push({ angle: Math.round((i - (n - 1) / 2) * shape.spreadDeg), distFt: shape.distFt, snaps: shape.snapsPerNav }); }
-        const { aims, skippedKids } = genAutoAims(pad, ent, opts.mergeFt);
-        const report = { pad: pad.name || String(pad.id), name: stock.name, aims: aims.length, navs: 0, snaps: 0, flags: [], fallback: 0, ring: pad.ring, mid: null };
+        const K = Math.max(1, Math.min(6, Number(t.navs) || 3)), distFt = Math.max(SG_MIN_FT, Number(t.distFt) || 100), maxFt = Math.max(distFt, Number(opts.maxFt) || SG_IDEAL_HI);
+        const { dots, skippedKids } = genAutoDots(pad, ent);
+        const report = { pad: pad.name || String(pad.id), name: stock.name, aims: dots.length, navs: 0, snaps: 0, flags: [], fallback: 0, ring: pad.ring, mid: null };
         if (skippedKids.length) report.flags.push(`skipped child: ${skippedKids.join(', ')}`);
+        dots.forEach(d => { if (d.kind === 'asset' && genRingSpanFt(d.ring) > GEN_AUTO_BIG_FT) report.flags.push(`big asset ${d.name} (${Math.round(genRingSpanFt(d.ring))} ft) — check the aim`); if (d.kind === 'pad') report.flags.push('no child assets — pad centroid aimed'); if (d.kind === 'nfz') report.flags.push(`NFZ ${d.name} aimed as an obstacle`); });
+        let plan = null;
+        try { plan = sgSolveDots(dots, K, distFt, maxFt, ent); } catch (e) { console.warn(`${TAG} [gen-auto] solve failed for "${pad.name}"`, e); report.flags.push(`solver error: ${(e && e.message) || e}`); }
         const groups = [];
-        const stockNav = stock.instructions.find(s => s.type === 1);
-        aims.forEach(aim => {
-            const label = aim.names.join(' + ');
-            aim.flags.forEach(f => report.flags.push(f));
-            const best = genAutoRing(aim, shape, ent);
-            if (!best) {
-                // no legal ring at all → plain nearest-FFZ nav aimed at this focus (stock behaviour), flagged
-                const ffz = genAssetFFZ(aim.focus, ent.ffzs || []);
-                const nav = ffz ? genNavPoint(aim.focus, ffz) : null;
-                if (!nav) { report.flags.push(`${label}: NO nav possible (no FFZ) — skipped`); return; }
-                report.fallback++; report.flags.push(`${label}: no ring fits — single stock nav at ${Math.round(nav.standoffFt)} ft`);
-                groups.push({ gid: 'auto', focus: aim.focus, navs: [{ lat: nav.point.lat, lng: nav.point.lng, snaps: shape.snapsPerNav }], snapsPerNav: shape.snapsPerNav, target: label, tpl: 'fallback' });
-                return;
-            }
-            if (best.dropped) report.flags.push(`${label}: ${best.dropped} angle(s) dropped (FFZ / asset / 80 ft)`);
-            if (best.clamped) report.flags.push(`${label}: ${best.clamped} nav(s) pulled in to the FFZ edge`);
-            groups.push({ gid: 'auto', focus: aim.focus, navs: best.kept.map(p => ({ lat: p.lat, lng: p.lng, snaps: p.snaps || 1 })), snapsPerNav: shape.snapsPerNav, target: label, tpl: opts.tpl });
-        });
-        if (!groups.length) return { instructions: stock.instructions, name: stock.name, report: Object.assign(report, { navs: 1, snaps: 1, flags: report.flags.concat(['nothing buildable — stock centroid mission']) }) };
-        const ordered = sgOrderGroups(groups, ent.base || (stockNav && stockNav.location) || groups[0].focus);
-        const built = sgBuildWireSteps(ordered, stock.instructions, opts.wrapSteps || [], f => getElevationFromCache(f.lat, f.lng));
+        if (plan && plan.navs.length) {
+            plan.unmet.forEach(u => report.flags.push(`${dots[u.j].name}: ${u.missing} angle(s) short (no legal spot — FFZ / asset / NFZ / ${SG_MIN_FT} ft)`));
+            const navs = sgOrderNavs(plan.navs, ent.base || null);
+            let lat = 0, lng = 0; dots.forEach(d => { lat += d.lat; lng += d.lng; });
+            groups.push({ gid: 'auto', focus: { lat: lat / dots.length, lng: lng / dots.length }, navs: navs.map(n => ({ lat: n.lat, lng: n.lng, snaps: n.aims.length, aims: n.aims.map(a => ({ lat: a.lat, lng: a.lng })) })), snapsPerNav: 1, target: `${dots.length} aim(s)`, tpl: 'points', dots: dots.map(d => ({ lat: d.lat, lng: d.lng, name: d.name })) });
+            const shared = navs.filter(n => n.aims.length > 1).length;
+            if (shared) report.flags.push(`${shared} nav(s) shoot more than one asset (shared)`);
+        } else {
+            // nothing legal anywhere → plain nearest-FFZ nav at the first dot (stock behaviour), flagged
+            const d0 = dots[0];
+            const ffz = genAssetFFZ(d0, ent.ffzs || []);
+            const nav = ffz ? genNavPoint(d0, ffz) : null;
+            if (!nav) { report.flags.push('NO nav possible (no FFZ) — stock centroid mission'); return { instructions: stock.instructions, name: stock.name, report: Object.assign(report, { navs: 1, snaps: 1 }) }; }
+            report.fallback++; report.flags.push(`no legal spot for any aim — single stock nav at ${Math.round(nav.standoffFt)} ft`);
+            groups.push({ gid: 'auto', focus: { lat: d0.lat, lng: d0.lng }, navs: [{ lat: nav.point.lat, lng: nav.point.lng, snaps: 1 }], snapsPerNav: 1, target: d0.name, tpl: 'fallback' });
+        }
+        const built = sgBuildWireSteps(groups, stock.instructions, opts.wrapSteps || [], f => getElevationFromCache(f.lat, f.lng));
         if (built.error) { report.flags.push(`build error: ${built.error}`); return { instructions: stock.instructions, name: stock.name, report }; }
         const shell = stock.instructions.filter(s => s.type === 0 || s.type === 99);   // takeoff + returnHome
         const next = sgSplice(shell, built.perGroup, s => s && s.type === 1, s => s && s.type === 99);
@@ -8575,7 +8520,7 @@
         if (auto && ent) {
             // ground under every child centroid (snapshot altitude = ground + default AGL)
             const pts = [];
-            assets.forEach(pad => { try { genAutoAims(pad, ent, auto.mergeFt).aims.forEach(a => { if (getElevationFromCache(a.focus.lat, a.focus.lng) == null) pts.push(a.focus); }); } catch (e) { console.warn(`${TAG} [gen-auto] aim scan failed for ${pad.name}`, e); } });
+            assets.forEach(pad => { try { genAutoDots(pad, ent).dots.forEach(d => { if (getElevationFromCache(d.lat, d.lng) == null) pts.push({ lat: d.lat, lng: d.lng }); }); } catch (e) { console.warn(`${TAG} [gen-auto] dot scan failed for ${pad.name}`, e); } });
             if (pts.length) { setStatus(`Fetching ${pts.length} elevation(s)…`); try { await bulkFetchElevations(pts); } catch (e) { console.warn(`${TAG} [gen-auto] elevation fetch failed`, e); } }
         }
         for (let i = 0; i < assets.length; i++) {
