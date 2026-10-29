@@ -1,4 +1,6 @@
-## 2026-10-28 — 👁 Generate map overlay — Mission Bank Tools latest v3.46 → v3.48 (latest only)
+## 2026-10-28 — 👁 Generate map overlay — Mission Bank Tools latest v3.46 → v3.49 (latest only)
+
+- **v3.49** — **Skip states are a list you can edit.** Inactive, abandoned, plugged, retired, sold, removed, decommissioned, shut-in and TA join unreachable / unshielded / empty, and the match now looks at every ` - ` segment of the asset type instead of only the last one (so `Empty - Battery` skips too). A **Skip states** box in the panel holds the list (Enter re-runs the classification, ↺ restores the default), and the skipped section shows a per-reason count plus each pad's raw type so a miss is easy to spot.
 
 - **v3.48** — **P&A and AVOID pads are never generation candidates.** The skip rule only knew the state suffixes (unreachable / unshielded / empty), so the importer's `PA Asset - …` / `PA 3rd Party - …` / `AVOID - 3rd Party Pad` types landed in the untiered bucket as flyable pads. They now skip with their own reason and paint red under 👁 skip-state. The overlay also stops painting rows the tier chips or built-only filter have hidden — only rows you can see in the list are candidates on the map.
 

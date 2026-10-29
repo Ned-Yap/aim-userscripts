@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.48
+// @version      3.49
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.48';
+    const SCRIPT_VERSION = '3.49';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -5896,7 +5896,16 @@
     const GEN_BTN_ID = 'aim-mb-gen-btn';
     const GEN_TARGET_STANDOFF_FT = 100; // ideal nav↔asset distance
     const GEN_FFZ_INSET_M = 1;          // push the nav this far inside the FFZ edge
-    const GEN_SKIP_STATES = ['unreachable', 'unshielded', 'empty'];
+    // v3.49: default skip words — matched against EVERY " - " segment of the asset type
+    // (case-insensitive), not just the last; editable in the ▣ Generate panel (GM
+    // `aim-mb-gen-skip`, comma list). Type PREFIXES (PA / AVOID) are handled by genSkipType.
+    const GEN_SKIP_STATES_DEFAULT = ['unreachable', 'unshielded', 'empty', 'inactive', 'abandoned', 'plugged', 'retired', 'sold', 'removed', 'decommissioned', 'shut in', 'shut-in', 'ta', 'avoid'];
+    const GEN_SKIP_KEY = 'aim-mb-gen-skip';
+    function genSkipStates() {
+        try { const sv = gmGet(GEN_SKIP_KEY, null); if (typeof sv === 'string') return sv.split(',').map(x => x.trim().toLowerCase()).filter(Boolean); } catch (e) { console.warn(`${TAG} [gen-bulk] skip list read failed`, e); }
+        return GEN_SKIP_STATES_DEFAULT.slice();
+    }
+    const GEN_SKIP_STATES = GEN_SKIP_STATES_DEFAULT;   // legacy alias
     // Skip-state reason for an asset (unreachable/unshielded/empty) or null if
     // it's valid to generate. Ported from the Asset Inspector's assetSkipReason:
     // is_unshielded flag, else the state suffix after " - " in poi_type_str.
@@ -5912,12 +5921,13 @@
         if (asset.unshielded) return 'unshielded';
         const t = genSkipType(asset);
         if (t) return t;
-        const p = asset.poi || '';
-        // v3.36: the state is the LAST " - " segment ("P1 - v - pumping rod - unreachable");
-        // the first-segment read never matched once types carried a tier prefix.
-        const i = p.lastIndexOf(' - ');
-        const suffix = i >= 0 ? p.slice(i + 3).trim().toLowerCase() : '';
-        return GEN_SKIP_STATES.indexOf(suffix) >= 0 ? suffix : null;
+        // v3.49: any " - " segment of the type that equals a skip word ("P1 - v - pumping
+        // rod - inactive", "Empty - Battery", …). Whole-segment match so "inactive" never
+        // hits "pumping rod". The tier prefix segment ("P1") is just another segment.
+        const words = genSkipStates();
+        const segs = String(asset.poi || '').split(/\s+[-–—]\s+/).map(x => x.trim().toLowerCase()).filter(Boolean);
+        const hit = segs.find(x => words.indexOf(x) >= 0);
+        return hit || null;
     }
     // v3.36: pad tier for the generator = best rank among the pad's own assets
     // (root + descendants). P0 only when every tiered asset is P0; '' = no
@@ -7002,7 +7012,9 @@
         const nm = a => escapeHtml(`${genSection(genCentroid(a.ring))} - ${a.name || a.id}`);
         const existRows = haveMission.map(a => `<div style="padding:3px 4px;color:#9ad;font-size:11px;border-bottom:1px solid #1b2430;">${genTierBadge(a.genTier)}${nm(a)} <span style="color:#678;">· ${a.genMicros && a.genMicros.length ? 'micro: ' + escapeHtml(a.genMicros.join(', ')) : 'name match only — no mission step touches this pad'}</span></div>`).join('');
         const macroRows = macroOnly.map(a => `<div style="padding:3px 4px;color:#ffd54f;font-size:11px;border-bottom:1px solid #2a2410;">${genTierBadge(a.genTier)}${nm(a)} <span style="color:#a98;">· only in macro: ${escapeHtml(a.genMacros.join(', '))}</span></div>`).join('');
-        const skipRows = stateSkip.map(a => `<div style="padding:3px 4px;color:#ff8a8a;font-size:11px;border-bottom:1px solid #241b1b;">${nm(a)} <span style="color:#a66;">· ${escapeHtml(genSkipReason(a))}</span></div>`).join('');
+        const skipRows = stateSkip.map(a => `<div style="padding:3px 4px;color:#ff8a8a;font-size:11px;border-bottom:1px solid #241b1b;">${nm(a)} <span style="color:#a66;">· ${escapeHtml(genSkipReason(a))}</span> <span style="color:#654;">· ${escapeHtml(String(a.poi || ''))}</span></div>`).join('');
+        const skipBy = {}; stateSkip.forEach(a => { const r = genSkipReason(a) || '?'; skipBy[r] = (skipBy[r] || 0) + 1; });
+        const skipSummary = Object.keys(skipBy).sort((x, y) => skipBy[y] - skipBy[x]).map(k => `${escapeHtml(k)} ${skipBy[k]}`).join(' · ');
         const p = document.createElement('div');
         p.id = GEN_BULK_PANEL_ID;
         p.style.cssText = 'position:fixed;top:60px;right:24px;width:380px;max-height:80vh;display:flex;flex-direction:column;z-index:2147483600;' +
@@ -7031,6 +7043,7 @@
                 </div>
                 <div data-gen-tpl-sum style="color:#789;font-size:10px;margin-top:2px;"></div>
                 <label style="display:flex;align-items:center;gap:6px;margin-top:5px;cursor:pointer;color:#cfe;"><input type="checkbox" data-gen-bulk-builtonly> Built areas only — assets with an FFZ inside or ≤${GEN_BUILT_FT} ft</label>
+                <div style="display:flex;align-items:center;gap:6px;margin-top:6px;"><label style="color:#cfe;white-space:nowrap;" title="Comma list. A pad is skipped when any ' - ' segment of its asset type equals one of these words (case-insensitive). PA / AVOID type prefixes always skip. Enter = re-run.">Skip states</label><input data-gen-skip value="${escapeHtml(genSkipStates().join(', '))}" style="flex:1;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:2px 6px;border-radius:3px;font:inherit;font-size:11px;"><button data-gen-skip-reset class="aim-mb-tbtn" title="Back to the default list" style="padding:2px 7px;font-size:11px;">↺</button></div>
                 <div style="display:flex;align-items:center;gap:6px;margin-top:7px;">
                     <button data-gen-selall class="aim-mb-tbtn" style="padding:3px 9px;font-size:11px;">Select all</button>
                     <button data-gen-deselall class="aim-mb-tbtn" style="padding:3px 9px;font-size:11px;">Deselect all</button>
@@ -7040,7 +7053,7 @@
             <div style="overflow:auto;flex:1;padding:2px 10px;">${rows || '<div style="padding:12px;color:#888;">No assets to create.</div>'}
                 ${macroRows ? `<div style="margin-top:8px;color:#ffd54f;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;">In a macro only — no micro (🧩 → ✂ Split mints one from the macro's steps)</div>${macroRows}` : ''}
                 ${existRows ? `<div style="margin-top:8px;color:#9ad;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;">Already have a micro</div>${existRows}` : ''}
-                ${skipRows ? `<div style="margin-top:8px;color:#ff8a8a;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;">Skipped (state)</div>${skipRows}` : ''}
+                ${skipRows ? `<div style="margin-top:8px;color:#ff8a8a;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;">Skipped (state) <span style="text-transform:none;letter-spacing:0;color:#a66;">· ${skipSummary}</span></div>${skipRows}` : ''}
             </div>
             <div style="padding:9px 12px;border-top:1px solid #2a2f38;display:flex;align-items:center;gap:8px;">
                 <span data-gen-bulk-status style="flex:1;font-size:11px;color:#9ad;"></span>
@@ -7091,6 +7104,18 @@
             updateGo();
         };
         builtOnly.onchange = applyBuiltFilter;
+        // v3.49 — editable skip list: Enter (or blur with a change) saves + re-runs the classification.
+        const skipIn = p.querySelector('[data-gen-skip]');
+        const skipApply = () => {
+            const v = (skipIn.value || '').split(',').map(x => x.trim().toLowerCase()).filter(Boolean).join(', ');
+            if (v === genSkipStates().join(', ')) return;
+            try { gmSet(GEN_SKIP_KEY, v); } catch (e) { console.warn(`${TAG} [gen-bulk] skip list save failed`, e); }
+            showToast('Skip list saved — re-classifying…', '#9ad', 2500);
+            genOpenBulkPanel();
+        };
+        skipIn.onkeydown = (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); skipApply(); } };
+        skipIn.onblur = skipApply;
+        p.querySelector('[data-gen-skip-reset]').onclick = () => { try { gmSet(GEN_SKIP_KEY, null); } catch (e) {} skipIn.value = GEN_SKIP_STATES_DEFAULT.join(', '); showToast('Skip list reset — re-classifying…', '#9ad', 2500); genOpenBulkPanel(); };
         // v3.36 tier chips — unticking hides + unchecks that tier's pads; ticking
         // shows them (checked only via Select all, so a re-tick never silently
         // re-arms rows). Choice persists per install.
