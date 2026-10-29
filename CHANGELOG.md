@@ -1,4 +1,6 @@
-## 2026-10-28 — 👁 Generate map overlay — Mission Bank Tools latest v3.46 → v3.50 (latest only)
+## 2026-10-28 — 👁 Generate map overlay — Mission Bank Tools latest v3.46 → v3.51 (latest only)
+
+- **v3.51** — **The red P&A triangles were the ⊕ Generate asset layer, not the 👁 overlay.** ⊕ Generate (single-asset right-click) draws every asset, red for skip-state, and ignored Map Styler's hides — and ▣ Generate All was only reachable while that layer was on, so opening the bulk panel looked like it un-hid them. Now: the ⊕ layer leaves Map Styler-hidden pads undrawn (toast + console say how many), and ▣ Generate All is always on the map, no ⊕ layer needed.
 
 - **v3.50** — **👁 Map respects Map Styler hides.** A pad whose asset is hidden by a style rule (rule 👁 off, e.g. AVOID / P&A) is no longer painted by the generator overlay in any class. Map Styler's hide is a display:none on Percepto's own path, and the overlay is a separate canvas, so it needed to look: hidden paths are matched to pads by bbox-contains-centroid, and the console line says how many were left unpainted.
 

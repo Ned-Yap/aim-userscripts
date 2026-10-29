@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.50
+// @version      3.51
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.50';
+    const SCRIPT_VERSION = '3.51';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -6334,9 +6334,12 @@
             genClearOverlay();
             const group = L.layerGroup();
             ffzs.forEach(f => { try { L.polygon(f.ring.map(p => [p.lat, p.lng]), { color: '#39ff14', weight: 1, fill: false, interactive: false }).addTo(group); } catch (e) {} });
-            let valid = 0, skipped = 0;
+            let valid = 0, skipped = 0, hidden = 0;
+            // v3.51: a pad hidden by a Map Styler style rule stays hidden here too (the user hid it on purpose).
+            const hiddenBoxes = genEyeHiddenBoxes(map);
             assets.forEach(a => {
                 try {
+                    if (genEyeIsHidden(a, map, hiddenBoxes)) { hidden++; return; }
                     const skip = genSkipReason(a);             // red = would be skipped (bad state)
                     if (skip) skipped++; else valid++;
                     const col = skip ? '#ff6b6b' : '#fff';
@@ -6347,7 +6350,8 @@
             });
             group.addTo(map);
             genLayer = group; genOverlayOn = true; genUpdateBtn();
-            showToast(`Generator: ${valid} valid · ${skipped} skip-state (red) · ${ffzs.length} FFZs. Right-click an asset to generate.`, '#5fff5f', 5500);
+            showToast(`Generator: ${valid} valid · ${skipped} skip-state (red)${hidden ? ` · ${hidden} hidden by Map Styler (not drawn)` : ''} · ${ffzs.length} FFZs. Right-click an asset to generate.`, '#5fff5f', 5500);
+            console.log(`${TAG} [gen] overlay: ${valid} valid · ${skipped} skip-state · ${hidden} hidden by a Map Styler rule · ${ffzs.length} FFZs`);
         }).catch(e => { console.warn(`${TAG} [gen] fetch/draw failed`, e); showToast('Generator: failed to load assets (see console).', '#ff5252', 4000); });
     }
     function genToggleOverlay() {
@@ -6372,8 +6376,9 @@
             b.style.background = genOverlayOn ? '#14d2dc' : '#0d1b24';
             b.style.color = genOverlayOn ? '#04222a' : '#3fe0ea';
         }
+        // v3.51: ▣ Generate All is always available — it has its own 👁 overlay and never needed the ⊕ asset layer.
         const all = document.getElementById(GEN_ALL_BTN_ID);
-        if (all) all.style.display = genOverlayOn ? 'block' : 'none';
+        if (all) all.style.display = 'block';
     }
     const GEN_ALL_BTN_ID = 'aim-mb-gen-all-btn';
 
@@ -6437,13 +6442,12 @@
             'font:800 12px "Lato",sans-serif;border:1.5px solid #14d2dc;box-shadow:0 2px 8px rgba(0,0,0,0.7);';
         btn.onclick = e => { e.preventDefault(); e.stopPropagation(); genToggleOverlay(); };
         mapC.appendChild(btn);
-        // "Generate All" — bulk-generate every valid (white) asset. Shown only
-        // while the overlay is on.
+        // "Generate All" — bulk-generate every valid pad. v3.51: always shown (own 👁 overlay).
         const all = document.createElement('button');
         all.id = GEN_ALL_BTN_ID; all.type = 'button';
         all.textContent = '▣ Generate All';
-        all.title = 'Generate a mission for every VALID asset (skips Empty / Unreachable / Unshielded) — preview, then commit.';
-        all.style.cssText = 'position:absolute;top:40px;left:8px;z-index:1100;padding:6px 11px;border-radius:6px;cursor:pointer;display:none;' +
+        all.title = 'Generate a mission for every pad without one (skips P&A / AVOID / bad states) — review, then create. ⊕ Generate above is the single-asset right-click overlay.';
+        all.style.cssText = 'position:absolute;top:40px;left:8px;z-index:1100;padding:6px 11px;border-radius:6px;cursor:pointer;display:block;' +
             'font:800 12px "Lato",sans-serif;border:1.5px solid #5fff5f;background:#0d2410;color:#7dff7d;box-shadow:0 2px 8px rgba(0,0,0,0.7);';
         all.onclick = e => { e.preventDefault(); e.stopPropagation(); genOpenBulkPanel(); };
         mapC.appendChild(all);
