@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.75
+// @version      0.76
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
-// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.75: 📊 Fleet Metrics follows the 📦 Fleet Data pick ("picked only" checkbox, on by default; nothing picked → every site) — table, totals, Sheets / CSV and 🛂 Approval FPs. v0.67 (#285): 📡 Coverage — radius circles on the landing map (any Ø, drag centre / edge, live count of sites inside under a fully-inside / centre-inside rule, KML export), footprint of the picked sites (span, convex hull, smallest enclosing circle, site extents + FFZ acreage), 🧠 Best spot (centre covering the MOST sites at a Ø — exact candidate search) + 🗂 Plan all (greedy: how many circles cover every site), 📏 two-click ruler. v0.57 (#274): data check shows whether the skipped no-duration rows carry images / videos (+ first video object), and 🔎 probes one /missions/ page without the field filter to list every server field (hunting an abort / end-reason field). v0.56 (#274): 📋 Copy check button on the data check. v0.55 (#276): Utilization lenses — 🧑‍✈️ Pilots / 🛸 Drones / 📍 Sites / 🏢 Clients (sites + clients: flights, drone-hrs, air, flyable drone-hrs, util %, coverage, sites never flown, incomplete, capture %, gaps); Drones gain flyable hrs + util %. v0.54 (#274): Incomplete flights + Capture % from planned-vs-actual image counts (Pilots / Pilot-days / Flights), raw state codes + mission_data_reports sample in the data check. v0.53 (#274): ⚙ Site rules is a real button. v0.52 (#274): Pilot Utilization hides all-zero / blank columns (panel + Sheets + CSV) with a 'hidden:' note and a checkbox to show them. v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
+// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.76: site labels "Only matching / picked" mode (names box or the 📦 Fleet Data pick keep their label, every other site name hidden), 🗺 on-map legend (cross-ref bands + numbers, shown KML layers, site-setup colours) and 📷 Client view (names hidden, legend on, panel + button tucked away for a screenshot; ↩ Exit restores). v0.75: 📊 Fleet Metrics follows the 📦 Fleet Data pick ("picked only" checkbox, on by default; nothing picked → every site) — table, totals, Sheets / CSV and 🛂 Approval FPs. v0.67 (#285): 📡 Coverage — radius circles on the landing map (any Ø, drag centre / edge, live count of sites inside under a fully-inside / centre-inside rule, KML export), footprint of the picked sites (span, convex hull, smallest enclosing circle, site extents + FFZ acreage), 🧠 Best spot (centre covering the MOST sites at a Ø — exact candidate search) + 🗂 Plan all (greedy: how many circles cover every site), 📏 two-click ruler. v0.57 (#274): data check shows whether the skipped no-duration rows carry images / videos (+ first video object), and 🔎 probes one /missions/ page without the field filter to list every server field (hunting an abort / end-reason field). v0.56 (#274): 📋 Copy check button on the data check. v0.55 (#276): Utilization lenses — 🧑‍✈️ Pilots / 🛸 Drones / 📍 Sites / 🏢 Clients (sites + clients: flights, drone-hrs, air, flyable drone-hrs, util %, coverage, sites never flown, incomplete, capture %, gaps); Drones gain flyable hrs + util %. v0.54 (#274): Incomplete flights + Capture % from planned-vs-actual image counts (Pilots / Pilot-days / Flights), raw state codes + mission_data_reports sample in the data check. v0.53 (#274): ⚙ Site rules is a real button. v0.52 (#274): Pilot Utilization hides all-zero / blank columns (panel + Sheets + CSV) with a 'hidden:' note and a checkbox to show them. v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        *://qa.percepto.app/*
@@ -40,7 +40,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.75';
+    const SCRIPT_VERSION = '0.76';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -111,6 +111,9 @@
             // (one-way distance from a site's base): Tattu / Tulip batteries.
             xrefBaseB1: 14000, xrefBaseB2: 18000,
             siteLabels: 'dark',
+            // v0.76: 'filter' label mode — comma-separated name terms, or the 📦 Fleet Data pick
+            labelTerms: '', labelPicked: false,
+            xrefLegend: false,       // v0.76: 🗺 legend bottom-left of the landing map
             // v0.68 (#287): 📶 FCC cell coverage dots on the landing map
             cellDots: false, cellCarrier: 'best', cellTech: 'lte',
             cellHeat: false, cellHeatOpacity: 0.45,   // v0.69: fleet-wide hex heat map
@@ -140,6 +143,9 @@
             if (typeof s.xrefBaseB1 === 'number') d.xrefBaseB1 = s.xrefBaseB1;
             if (typeof s.xrefBaseB2 === 'number') d.xrefBaseB2 = s.xrefBaseB2;
             if (typeof s.siteLabels === 'string') d.siteLabels = s.siteLabels;
+            if (typeof s.labelTerms === 'string') d.labelTerms = s.labelTerms;
+            if (typeof s.labelPicked === 'boolean') d.labelPicked = s.labelPicked;
+            if (typeof s.xrefLegend === 'boolean') d.xrefLegend = s.xrefLegend;
             if (typeof s.cellDots === 'boolean') d.cellDots = s.cellDots;
             if (typeof s.cellHeat === 'boolean') d.cellHeat = s.cellHeat;
             if (typeof s.cellHeatOpacity === 'number') d.cellHeatOpacity = s.cellHeatOpacity;
@@ -1650,7 +1656,14 @@
         hidden: '.pr-site-marker{display:none!important;}',
         default: '',
     };
+    // v0.76: 'filter' = dark chips, but only markers the scanner stamped
+    // data-aim-ft-lbl="on" stay visible (everything else, incl. cluster
+    // bubbles, is hidden)
+    LABEL_CSS.filter = LABEL_CSS.dark + '.pr-site-marker:not([data-aim-ft-lbl="on"]){display:none!important;}';
     let labelStyleEl = null;
+    let labelOverride = null;      // 📷 Client view: session-only forced mode (never persisted)
+    let labelScanTimer = null;
+    function labelMode() { return labelOverride || ftCfg.siteLabels; }
     function applySiteLabels() {
         try {
             if (!labelStyleEl || !labelStyleEl.parentElement) {
@@ -1658,8 +1671,164 @@
                 labelStyleEl.id = 'aim-ft-label-css';
                 (document.head || document.documentElement).appendChild(labelStyleEl);
             }
-            labelStyleEl.textContent = LABEL_CSS[ftCfg.siteLabels] || '';
+            const mode = labelMode();
+            labelStyleEl.textContent = LABEL_CSS[mode] || '';
+            if (mode === 'filter') {
+                if (!labelScanTimer) labelScanTimer = setInterval(applyLabelFilter, 600);
+                applyLabelFilter();
+            } else if (labelScanTimer) { clearInterval(labelScanTimer); labelScanTimer = null; }
         } catch (e) { console.warn(`${TAG} site-label CSS failed:`, e); }
+    }
+    // v0.76: filter mode — a marker keeps its label when its text matches the
+    // names box (comma-separated terms, same rule as the cross-ref "sites:"
+    // box) or, with "picked only" on, equals a site ticked in 📦 Fleet Data.
+    // Percepto (Angular) rebuilds .pr-site-marker on every zoom, so a 600 ms
+    // stamp pass re-classifies; write-free when nothing changed. Cluster
+    // bubbles ("Multiple sites") carry no name → hidden.
+    function labelMatcher() {
+        if (ftCfg.labelPicked && fdSelected.size) {
+            const names = new Set();
+            fdSelected.forEach(id => names.add(siteName(id).trim().toLowerCase()));
+            return (t) => names.has(t);
+        }
+        const terms = String(ftCfg.labelTerms || '').split(',').map(x => x.trim().toLowerCase()).filter(Boolean);
+        if (!terms.length) return () => true;
+        return (t) => terms.some(term => t.includes(term));
+    }
+    function applyLabelFilter() {
+        try {
+            if (labelMode() !== 'filter' || !onLandingPage()) return;
+            const els = document.querySelectorAll('.pr-site-marker');
+            if (!els.length) return;
+            const match = labelMatcher();
+            let shown = 0, changed = 0;
+            els.forEach(el => {
+                const t = (el.textContent || '').trim().toLowerCase();
+                const want = (t && match(t)) ? 'on' : 'off';
+                if (want === 'on') shown++;
+                if (el.getAttribute('data-aim-ft-lbl') !== want) { el.setAttribute('data-aim-ft-lbl', want); changed++; }
+            });
+            if (changed) console.log(`${TAG} site labels filtered: ${shown}/${els.length} shown`);
+        } catch (e) { console.warn(`${TAG} label filter failed:`, e); }
+    }
+    let labelTermsSaveTimer = null;
+    function labelTermsSave() {   // debounced — GM_setValue rewrites the whole blob
+        clearTimeout(labelTermsSaveTimer);
+        labelTermsSaveTimer = setTimeout(saveCfg, 500);
+    }
+
+    // ---- v0.76: on-map legend (bottom-left of the landing map) — what the
+    // colours mean on a client-facing screenshot: cross-ref bands with their
+    // numbers, the shown KML layers, the site-setup classes when drawn ----
+    let legendOverride = false;   // 📷 Client view forces it on (session only)
+    let legendEl = null;
+    let legendHtml = '';
+    function legendRows() {
+        const rows = [];
+        const sw = (color, label, val, line) => `<div style="display:flex;align-items:center;gap:8px;line-height:1.5">`
+            + `<span style="display:inline-block;width:${line ? 22 : 12}px;height:${line ? 4 : 12}px;border-radius:${line ? 2 : 6}px;background:${color};flex:none"></span>`
+            + `<span style="flex:1">${label}</span>${val !== undefined ? `<span style="color:#ccc;font-weight:700;white-space:nowrap">${val}</span>` : ''}</div>`;
+        const r = xrefState && xrefState.result;
+        if (r) {
+            const bases = r.mode === 'bases';
+            const P = r.pointHits || { 0: 0, 1: 0, 2: 0 };
+            const pointsOnly = !!r.pointsTotal && !(r.totalM > 0);
+            const total = pointsOnly ? r.pointsTotal : r.totalM;
+            const v = (k) => pointsOnly ? P[k] : r.bandLenM[k];
+            const f = (x) => pointsOnly ? `${x} pts` : fmtMi(x);
+            const l1 = bases ? `Tattu range (≤${r.b1.toLocaleString()} ft)` : `≤ ${r.b1} ft from site airspace`;
+            const l2 = bases ? `Tulip only (≤${r.b2.toLocaleString()} ft)` : `${r.b1}–${r.b2} ft`;
+            rows.push('<div style="color:#7adfe6;font-weight:700;margin-bottom:2px">Cross-reference</div>');
+            rows.push(`<div style="color:#aaa;margin-bottom:4px">"${escapeHtml(r.srcName)}" vs ${escapeHtml(r.tgtLabel)}</div>`);
+            rows.push(sw(XREF_COLORS[1], l1, `${f(v(1))} · ${pct(v(1), total)}`, !pointsOnly));
+            rows.push(sw(XREF_COLORS[2], l2, `${f(v(2))} · ${pct(v(2), total)}`, !pointsOnly));
+            rows.push(sw(XREF_COLORS[0], bases ? 'Beyond battery range' : 'Beyond — no coverage', `${f(v(0))} · ${pct(v(0), total)}`, !pointsOnly));
+            rows.push(`<div style="color:#aaa;margin:2px 0 4px">${bases ? 'reachable without shielding' : 'inspectable from existing coverage'}: <b style="color:#5fff5f">${f(v(1) + v(2))} (${pct(v(1) + v(2), total)})</b> of ${f(total)}</div>`);
+        }
+        const kmlRows = [];
+        kmlLayers.forEach(ly => {
+            if (!ly.features) return;
+            const st = kmlStyleFor(ly.id);
+            if (!st.show) return;
+            const isSrc = !!(r && ly.name === r.srcName);
+            kmlRows.push(sw(st.color, escapeHtml(ly.name) + (isSrc ? ' <span style="color:#888">(source — recoloured by band)</span>' : ''), undefined, ly.features.some(ft => ft.type !== 'point')));
+        });
+        if (kmlRows.length) { rows.push('<div style="color:#7adfe6;font-weight:700;margin-top:4px">Layers</div>'); rows.push(...kmlRows); }
+        if (ftCfg.drawSetups) {
+            let zoom = 0;
+            try { zoom = ovMap && ovMap.getZoom ? ovMap.getZoom() : 0; } catch (e) {}
+            if (zoom >= SETUP_MIN_ZOOM) {
+                rows.push('<div style="color:#7adfe6;font-weight:700;margin-top:4px">Site setups</div>');
+                NB_CLASSES.forEach(c => { if (ftCfg.view[c.key]) rows.push(sw(SETUP_STYLE[c.key].color, c.label, undefined, c.key === 'fp')); });
+            }
+        }
+        rows.push(`<div style="color:#666;margin-top:4px">${new Date(r && r.at ? r.at : Date.now()).toLocaleDateString()}</div>`);
+        return rows;
+    }
+    function renderLegend() {
+        try {
+            const map = onLandingPage() ? getLandingMap() : null;
+            const want = !!(legendOverride || ftCfg.xrefLegend) && !!map;
+            if (!want) {
+                if (legendEl) { legendEl.remove(); legendEl = null; legendHtml = ''; }
+                return;
+            }
+            const container = (map.getContainer && map.getContainer()) || document.getElementById('pr-sites-select-map');
+            if (!container) return;
+            if (!legendEl || legendEl.parentElement !== container) {
+                if (legendEl) legendEl.remove();
+                legendEl = document.createElement('div');
+                legendEl.id = 'aim-ft-legend';
+                legendEl.style.cssText = 'position:absolute;left:14px;bottom:28px;z-index:900;pointer-events:none;'
+                    + 'background:rgba(14,18,26,0.9);color:#ddd;border:1px solid #2a3140;border-radius:6px;'
+                    + 'padding:8px 12px;font:12px/1.4 monospace;max-width:380px;box-shadow:0 4px 14px rgba(0,0,0,0.5);';
+                container.appendChild(legendEl);
+                legendHtml = '';
+            }
+            const html = legendRows().join('');
+            if (html !== legendHtml) { legendEl.innerHTML = html; legendHtml = html; }
+        } catch (e) { console.warn(`${TAG} legend render failed:`, e); }
+    }
+
+    // ---- v0.76: 📷 Client view — a screenshot-ready map: every site name
+    // hidden, legend on, panel + launcher button out of the way. Session-only
+    // overrides; ↩ Exit (bottom-right, where the button was) restores whatever
+    // the 🗺 Map section is set to ----
+    let cvExitEl = null;
+    function enterClientView() {
+        try {
+            labelOverride = 'hidden';
+            legendOverride = true;
+            applySiteLabels();
+            renderLegend();
+            if (panelEl) panelEl.style.display = 'none';
+            if (buttonEl) buttonEl.style.display = 'none';
+            if (!cvExitEl || !cvExitEl.isConnected) {
+                cvExitEl = document.createElement('div');
+                cvExitEl.id = 'aim-ft-cv-exit';
+                cvExitEl.textContent = '↩ Exit client view';
+                cvExitEl.title = 'Restore the site labels, the Fleet Tools panel and its button';
+                cvExitEl.style.cssText = 'position:fixed;right:18px;bottom:18px;z-index:2147480000;'
+                    + 'background:#14181f;color:#7adfe6;border:1px solid #2a3140;border-radius:6px;'
+                    + 'padding:6px 12px;font:12px/1.4 monospace;cursor:pointer;user-select:none;opacity:0.85;'
+                    + 'box-shadow:0 4px 14px rgba(0,0,0,0.5);';
+                cvExitEl.addEventListener('click', exitClientView);
+                document.body.appendChild(cvExitEl);
+            }
+            setStatus('📷 client view — names hidden, legend on');
+            console.log(`${TAG} 📷 client view ON`);
+        } catch (e) { console.warn(`${TAG} client view failed:`, e); exitClientView(); }
+    }
+    function exitClientView() {
+        labelOverride = null;
+        legendOverride = false;
+        try { applySiteLabels(); renderLegend(); } catch (e) { console.warn(`${TAG} client view exit:`, e); }
+        if (cvExitEl) { cvExitEl.remove(); cvExitEl = null; }
+        if (onLandingPage()) {
+            if (buttonEl) buttonEl.style.display = 'block';
+            if (panelEl) { panelEl.style.display = 'flex'; renderPanel(); }
+        }
+        console.log(`${TAG} 📷 client view OFF`);
     }
 
     function applyBasemap() {
@@ -2543,6 +2712,7 @@
                 notes,
             };
             xrefState = { running: false, result };
+            renderLegend();
             console.log(`${TAG} cross-ref done:`, buildXrefReport().split('\n').slice(0, 8).join(' | '));
             setStatus(totalLenM > 0
                 ? `cross-ref done — ≤${result.b1} ft: ${fmtMi(bandLenM[1])} · ≤${result.b2} ft: ${fmtMi(bandLenM[1] + bandLenM[2])} of ${fmtMi(totalLenM)}`
@@ -4414,6 +4584,8 @@
             + (xrefState && xrefState.result ? '<span data-ft="xr-card" style="cursor:pointer;color:#ffd54f;font-weight:bold">📊 Report</span>' : '')
             + '<span data-ft="xr-copy" style="cursor:pointer;color:#7adfe6">📋 Copy text</span>'
             + '<span data-ft="xr-clear" style="cursor:pointer;color:#888">Clear</span>'
+            + `<label title="Legend bottom-left of the map: cross-ref bands + numbers, the shown KML layers, site-setup colours (when drawn)" style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;"><input type="checkbox" data-ft-flag="xrefLegend" ${ftCfg.xrefLegend ? 'checked' : ''}> 🗺 Legend</label>`
+            + '<span data-ft="client-view" title="Screenshot-ready map: hides every site name, shows the legend, tucks this panel + the Fleet Tools button away. ↩ Exit (bottom-right) restores." style="cursor:pointer;color:#7adfe6;font-weight:bold">📷 Client view</span>'
             + '</div>');
         if (xrefState && xrefState.error) rows.push(`<div style="padding:4px 10px;color:#ff5252">${escapeHtml(xrefState.error)}</div>`);
         if (running) rows.push('<div style="padding:6px 10px;color:#8899bb">Running… (progress in the status line up top)</div>');
@@ -4446,6 +4618,7 @@
     function syncButton() {
         const want = onLandingPage();
         if (!want) {
+            if (labelOverride) exitClientView();   // v0.76: never leave the ↩ pill on a site page
             if (buttonEl) buttonEl.style.display = 'none';
             if (panelEl && !sweepRunning) panelEl.style.display = 'none';
             // SPA nav destroyed the landing map (and our overlay with it) —
@@ -4474,7 +4647,8 @@
             requestIssuesSummary();   // v0.25: badge on the button
         }
         syncButtonBadge();
-        buttonEl.style.display = 'block';
+        buttonEl.style.display = labelOverride ? 'none' : 'block';   // v0.76: hidden during 📷 client view
+        renderLegend();   // v0.76: cheap no-op unless the legend is on; re-attaches after an SPA map rebuild
         // Keep the map pins current: covers the first draw of a GM-cached
         // sweep on page load AND the redraw after returning from a site
         if (pinsKey !== sweepPinsKey()) drawSweepPins();
@@ -4620,7 +4794,13 @@
             + `<option value="dark" ${ftCfg.siteLabels === 'dark' ? 'selected' : ''}>Dark &amp; slim</option>`
             + `<option value="default" ${ftCfg.siteLabels === 'default' ? 'selected' : ''}>Percepto default</option>`
             + `<option value="hidden" ${ftCfg.siteLabels === 'hidden' ? 'selected' : ''}>Hidden</option>`
+            + `<option value="filter" ${ftCfg.siteLabels === 'filter' ? 'selected' : ''}>Only matching / picked</option>`
             + '</select></label>'
+            + (ftCfg.siteLabels === 'filter'
+                ? `<label title="Only sites whose NAME contains one of these comma-separated words keep their label (e.g. Exxon, Diamondback). Empty = every site.">names: <input type="text" data-ft-lbl-terms value="${escapeHtml(ftCfg.labelTerms || '')}" placeholder="e.g. Exxon" ${ftCfg.labelPicked && fdSelected.size ? 'disabled' : ''} style="width:110px;background:#0e1218;color:${ftCfg.labelPicked && fdSelected.size ? '#666' : '#ddd'};border:1px solid #2a3140;border-radius:3px;font:inherit;padding:1px 4px;"></label>`
+                  + `<label title="Only the sites ticked in 📦 Fleet Data keep their label (nothing picked → the names box applies)" style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;"><input type="checkbox" data-ft-flag="labelPicked" ${ftCfg.labelPicked ? 'checked' : ''}> picked only <span style="color:${fdSelected.size ? '#5fff5f' : '#888'}">(${fdSelected.size})</span></label>`
+                : '')
+            + (labelOverride ? '<span style="color:#ffa030">📷 client view active — labels forced hidden until ↩ Exit</span>' : '')
             + '</div>'
             + '<div style="padding:6px 10px;display:flex;gap:14px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;">'
             + `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;" title="One dot per site colored by the FCC-modeled minimum signal (−60 strong … −110 edge, grey = no modeled coverage). Build the stats under 📊 Fleet Metrics → 📶 first.">`
@@ -7703,7 +7883,8 @@
                     else if (cmd === 'xr-abort') { xrefSeq++; if (xrefState) xrefState.running = false; setStatus('cross-ref aborted'); renderPanel(); }
                     else if (cmd === 'xr-copy') copyText(buildXrefReport(), 'cross-ref report copied');
                     else if (cmd === 'xr-card') openXrefCard();
-                    else if (cmd === 'xr-clear') { xrefSeq++; xrefState = null; closeXrefCard(); renderPanel(); renderOverlay(); }
+                    else if (cmd === 'xr-clear') { xrefSeq++; xrefState = null; closeXrefCard(); renderPanel(); renderOverlay(); renderLegend(); }
+                    else if (cmd === 'client-view') enterClientView();
                     else if (cmd === 'run') runSweep();
                     else if (cmd === 'abort') abortSweep();
                     else if (cmd === 'copy') copyText(buildSweepReport(), 'report copied to clipboard');
@@ -7880,6 +8061,12 @@
             // Live search — re-render but keep the search box focused
             panelEl.addEventListener('input', (ev) => {
                 if (ev.target.id === 'aim-ft-xr-sites') { xrefSiteFilter = ev.target.value; return; }   // read at run time; no re-render needed
+                if (ev.target.hasAttribute && ev.target.hasAttribute('data-ft-lbl-terms')) {   // v0.76: live label filter, debounced save
+                    ftCfg.labelTerms = ev.target.value;
+                    labelTermsSave();
+                    applyLabelFilter();
+                    return;
+                }
                 const fdIn = ev.target.hasAttribute && (ev.target.hasAttribute('data-fd-filter') ? 'data-fd-filter' : ev.target.hasAttribute('data-fd-search') ? 'data-fd-search' : null);
                 if (fdIn) {
                     if (fdIn === 'data-fd-filter') fdFilter = ev.target.value; else if (fdBrowse) fdBrowse.search = ev.target.value;
@@ -7990,7 +8177,10 @@
                         ftCfg.siteLabels = v;
                         saveCfg();
                         applySiteLabels();
-                        setStatus(`site labels → ${v === 'dark' ? 'dark & slim' : v}`);
+                        setStatus(v === 'filter'
+                            ? (ftCfg.labelPicked && fdSelected.size ? `site labels → only the ${fdSelected.size} picked site(s)` : (ftCfg.labelTerms.trim() ? `site labels → only names matching "${ftCfg.labelTerms.trim()}"` : 'site labels → filter mode — type a name term (e.g. Exxon) or tick "picked only"'))
+                            : `site labels → ${v === 'dark' ? 'dark & slim' : v}`);
+                        renderPanel();
                     }
                     return;
                 }
@@ -8056,6 +8246,13 @@
                         const n = Object.keys(cellIdx.sites).length;
                         setStatus(flag.checked ? (n ? `📶 cell coverage dots ON — ${n} site(s)` : '📶 cell dots ON — no FCC stats yet: 📊 Fleet Metrics → 📶 Build cell coverage') : '📶 cell coverage dots OFF');
                         requestRender();
+                    } else if (prop === 'labelPicked') {
+                        setStatus(flag.checked ? (fdSelected.size ? `site labels: only the ${fdSelected.size} picked site(s)` : 'site labels "picked only" ON — nothing picked in 📦 Fleet Data, the names box applies') : 'site labels: the names box applies');
+                        applySiteLabels();
+                        renderPanel();
+                    } else if (prop === 'xrefLegend') {
+                        setStatus(flag.checked ? '🗺 legend ON — bottom-left of the map' : '🗺 legend OFF');
+                        renderLegend();
                     } else {
                         if (prop === 'mtPicked') {
                             setStatus(flag.checked ? (fdSelected.size ? `📊 metrics scoped to the ${fdSelected.size} site(s) picked in 📦 Fleet Data` : '📊 "picked only" ON — nothing picked in 📦 Fleet Data yet, showing every site') : '📊 metrics show every indexed site');
