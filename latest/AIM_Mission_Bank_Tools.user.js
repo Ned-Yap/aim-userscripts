@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.49
+// @version      3.50
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.49';
+    const SCRIPT_VERSION = '3.50';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -6948,17 +6948,44 @@
         genEye.layers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
         genEye.layers = []; genEye.byPad = new Map();
     }
+    // v3.50 — honour Map Styler's per-rule hides (👁 off on a style rule = display:none on
+    // Percepto's asset path). Those paths carry no asset id, so match geometrically: the
+    // hidden path's bbox in layer pixels (parsed from its `d`) must contain the pad centroid.
+    function genEyeHiddenBoxes(map) {
+        const boxes = [];
+        try {
+            document.querySelectorAll('path.leaflet-interactive[data-aim-asset-rule]').forEach(p => {
+                if (p.style.display !== 'none') return;
+                const nums = (p.getAttribute('d') || '').match(/-?\d+(?:\.\d+)?/g);
+                if (!nums || nums.length < 6) return;
+                let w = Infinity, e = -Infinity, n = Infinity, s2 = -Infinity;
+                for (let i = 0; i + 1 < nums.length; i += 2) { const x = Number(nums[i]), y = Number(nums[i + 1]); if (x < w) w = x; if (x > e) e = x; if (y < n) n = y; if (y > s2) s2 = y; }
+                boxes.push({ w, e, n, s: s2 });
+            });
+        } catch (e) { console.warn(`${TAG} [gen-eye] hidden-path scan failed`, e); }
+        return boxes;
+    }
+    function genEyeIsHidden(a, map, boxes) {
+        if (!boxes.length) return false;
+        try {
+            const c = genCentroid(a.ring), pt = map.latLngToLayerPoint([c.lat, c.lng]);
+            return boxes.some(b => pt.x >= b.w - 1 && pt.x <= b.e + 1 && pt.y >= b.n - 1 && pt.y <= b.s + 1);
+        } catch (e) { return false; }
+    }
     function genEyeDraw(groups, checkedIds) {
         genEyeClear();
         if (!genEye.on) return;
         const L = composerGetL(), map = getLeafletMap();
         if (!L || !map) { showToast('👁 Map not found — open the generator from the Mission Bank map page.', '#ff9800', 3500); return; }
+        const hiddenBoxes = genEyeHiddenBoxes(map);
+        let skippedHidden = 0;
         if (!genEye.canvas) { try { genEye.canvas = L.canvas({ padding: 0.5 }); } catch (e) { console.warn(`${TAG} [gen-eye] canvas renderer failed`, e); genEye.canvas = null; } }
         let drawn = 0;
         GEN_EYE_CLASSES.forEach(c => {
             if (!genEye.cls[c.id]) return;
             (groups[c.id] || []).forEach(a => {
                 if (!a || !Array.isArray(a.ring) || a.ring.length < 3) return;
+                if (genEyeIsHidden(a, map, hiddenBoxes)) { skippedHidden++; return; }   // hidden by a Map Styler rule → stays hidden here
                 try {
                     const ticked = c.id !== 'create' || (checkedIds && checkedIds.has(a.id));
                     const ly = L.polygon(a.ring.map(p => [p.lat, p.lng]), {
@@ -6972,7 +6999,7 @@
                 } catch (e) { console.warn(`${TAG} [gen-eye] pad ${a.id} failed`, e); }
             });
         });
-        console.log(`${TAG} [gen-eye] drew ${drawn} pad(s)`);
+        console.log(`${TAG} [gen-eye] drew ${drawn} pad(s)${skippedHidden ? ` · ${skippedHidden} left unpainted (hidden by a Map Styler rule)` : ''}`);
     }
     // Live: ticking / unticking a "to create" row restyles its pad without a redraw.
     function genEyeSync(checkedIds) {
