@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.99
+// @version      3.100
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.99';
+    const SCRIPT_VERSION = '3.100';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -4084,6 +4084,12 @@
         sgBtn.style.cssText = 'flex:0 0 auto;margin-left:5px;padding:5px 9px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;';
         sgBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); if (e.shiftKey) { if (!sgUndoLastGhost()) showToast('No ghost to undo.', '#888', 1500); return; } if (sg.active) sgStop(); else sgStart(); };
         sgBtn.oncontextmenu = (e) => { e.preventDefault(); e.stopPropagation(); sgCommitOpen(); };
+        // v3.100 — 📏 standoff rings: the hand-placement distance guide
+        const stdBtn = document.createElement('button');
+        stdBtn.id = STD_BTN_ID;
+        stdBtn.type = 'button';
+        stdBtn.style.cssText = 'flex:0 0 auto;margin-left:5px;padding:5px 9px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;';
+        stdBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); stdSetRings(!stdRingsOn); };
         const wrapBtn = document.createElement('button');
         wrapBtn.id = WRAP_BTN_ID;
         wrapBtn.type = 'button';
@@ -4092,8 +4098,8 @@
         // Right-click (M2) = toggle AUTO-WRAP for this session (applies the last-used
         // template on every mission SAVE — see applyWrapToBodyStr).
         wrapBtn.oncontextmenu = (e) => { e.preventDefault(); e.stopPropagation(); toggleAutoWrap(); };
-        row2.appendChild(autoBtn); row2.appendChild(stageBtn); row2.appendChild(caBtn); row2.appendChild(sgBtn); row2.appendChild(wrapBtn);
-        sgUpdateBtn();
+        row2.appendChild(autoBtn); row2.appendChild(stageBtn); row2.appendChild(caBtn); row2.appendChild(sgBtn); row2.appendChild(stdBtn); row2.appendChild(wrapBtn);
+        sgUpdateBtn(); updateStdBtn();
         // Row 3: the Click-to-Add "Insert at" bar (shown only while the mode is ON).
         const row3 = document.createElement('div');
         row3.id = CA_BAR_ID;
@@ -6184,6 +6190,60 @@
         try { if (genOverlayOn && caEditing()) { genClearOverlay(); genOverlayOn = false; genUpdateBtn(); } } catch (e) {}   // v3.79: ⊕ asset overlay is a list-view tool
         try { if (caEditing()) sgDrawStaged(false); else if (sg.stagedLayers.length || sg.active) { sgStop(true); sgClearLayers(sg.stagedLayers); sg.stagedKey = ''; sg.stagedGroups = []; sgPassiveRemove(); } } catch (e) {}
     }
+    // ── 📏 Standoff rings (v3.100) — the hand-placement guide ────────────────
+    // While placing steps by hand (Ctrl+M1 = snapshot, M2 = nav) draw around EVERY snapshot of the
+    // open mission: a dashed purple ring at exactly 100 ft and a translucent green band for the
+    // 95–110 ft OK zone, so the nav can be dropped on sight. Independent of the 🎯 ghosts (those
+    // carry their own distances). Redrawn on every marker pass; cheap when nothing moved (key).
+    const STD_RINGS_KEY = 'aim-mb-std-rings';
+    const STD_RING_FT = 100, STD_BAND_MIN_FT = 95, STD_BAND_MAX_FT = 110;
+    const STD_BTN_ID = 'aim-mb-std-btn';
+    let stdRingsOn = gmGet(STD_RINGS_KEY, false);
+    const stdRings = { layers: [], key: '', map: null };
+    function stdRingPts(c, m, n) { const out = []; for (let i = 0; i < n; i++) { const q = sgOffset(c, i * 360 / n, m); out.push([q.lat, q.lng]); } return out; }
+    // Distinct snapshot spots of the open mission — the live editor list first (it has the
+    // un-saved ones), the tagged DOM markers as the fallback.
+    function stdSnapPoints() {
+        const pts = [];
+        const add = (lat, lng) => { if (lat == null || lng == null) return; if (!pts.some(q => mbApproxMeters(q.lat, q.lng, lat, lng) < 0.3)) pts.push({ lat, lng }); };
+        try { composerEditorInstrs(null).forEach(st => { if (st && (st.type_name === 'snapshot' || st.type === 6) && st.location) add(st.location.lat, st.location.lng); }); } catch (e) { console.warn(`${TAG} [📏] editor read failed`, e); }
+        if (!pts.length) document.querySelectorAll('.instruction-marker[data-aim-kind="snap"]').forEach(el => { if (el.__aimLL) add(el.__aimLL[0], el.__aimLL[1]); });
+        return pts;
+    }
+    function stdRingsClear() { if (stdRings.layers.length) sgClearLayers(stdRings.layers); stdRings.key = ''; }
+    function stdRingsDraw() {
+        if (CONTEXT !== 'IFRAME') return;
+        if (!stdRingsOn || !caEditing()) { stdRingsClear(); return; }
+        const L = composerGetL(), map = getLeafletMap(); if (!L || !map) { stdRingsClear(); return; }
+        const pts = stdSnapPoints();
+        const key = pts.map(q => `${q.lat.toFixed(7)},${q.lng.toFixed(7)}`).join('|');
+        if (key === stdRings.key && stdRings.map === map) return;
+        stdRingsClear(); stdRings.key = key; stdRings.map = map;
+        if (!pts.length) return;
+        const cv = sgCanvas(L);
+        const keep = l => { stdRings.layers.push(l); l.addTo(map); return l; };
+        const FT = 0.3048;
+        pts.forEach(q => {
+            try {
+                // 95–110 ft band = one polygon with a hole (canvas fills even-odd → a true donut)
+                keep(L.polygon([stdRingPts(q, STD_BAND_MAX_FT * FT, 72), stdRingPts(q, STD_BAND_MIN_FT * FT, 72)], { renderer: cv || undefined, interactive: false, stroke: false, fillColor: '#5fff5f', fillOpacity: 0.22, fillRule: 'evenodd' }));
+                keep(L.circle([q.lat, q.lng], { radius: STD_RING_FT * FT, renderer: cv || undefined, interactive: false, fill: false, color: '#c39dff', weight: 2, dashArray: '8 6', opacity: 0.95 }));
+            } catch (e) { console.warn(`${TAG} [📏] ring draw failed`, e); }
+        });
+    }
+    function stdSetRings(on) {
+        stdRingsOn = !!on; gmSet(STD_RINGS_KEY, stdRingsOn);
+        updateStdBtn(); stdRingsDraw();
+        showToast(stdRingsOn ? `📏 Standoff rings ON — dashed purple = ${STD_RING_FT} ft from each snapshot, green band = ${STD_BAND_MIN_FT}–${STD_BAND_MAX_FT} ft: drop the nav inside the band.` : '📏 Standoff rings OFF.', stdRingsOn ? '#c39dff' : '#888', stdRingsOn ? 4500 : 1500);
+    }
+    function updateStdBtn() {
+        const btn = document.getElementById(STD_BTN_ID); if (!btn) return;
+        btn.textContent = stdRingsOn ? '📏 Rings: ON' : '📏 Rings';
+        btn.title = `Standoff rings around every snapshot of the open mission: dashed purple = ${STD_RING_FT} ft, green band = ${STD_BAND_MIN_FT}–${STD_BAND_MAX_FT} ft (drop the nav inside the band). For hand placement — 🎯 ghosts carry their own distances.`;
+        btn.style.background = stdRingsOn ? 'rgba(195,157,255,0.25)' : 'transparent';
+        btn.style.border = stdRingsOn ? '1px solid #c39dff' : '1px solid rgba(195,157,255,0.45)';
+        btn.style.color = stdRingsOn ? '#d9c4ff' : '#a98fd6';
+    }
     // Nav group (1-based) of the step currently open in the editor — Click-to-Add + 🎯 insert after it.
     function caOpenStepNavGroup() {
         const id = getOpenStepId(); if (id == null) return null;
@@ -7258,6 +7318,7 @@
         composerBindMapEvents();
         caBindMap();          // (re)attach Click-to-Add handlers to the current map container
         try { sgTick(); sgUpdateBtn(); } catch (e) {}   // v3.52 — keep staged 🎯 ghosts drawn for the open mission
+        try { stdRingsDraw(); } catch (e) { console.warn(`${TAG} [📏] draw failed`, e); }   // v3.100 — standoff rings follow the snapshots
         try { genUpdateBtn(); } catch (e) {}             // v3.53 — ▣ Generate All hides while editing
         updateCaBanner();     // keep the armed banner present if the container rebuilt
         caUpdateBoxZoom();    // keep Shift+drag box-zoom OFF while the editor is open
@@ -7770,7 +7831,7 @@
     let liveEditorTimer = null;
     function startLiveEditorSync() {
         if (liveEditorTimer || CONTEXT !== 'IFRAME') return;
-        liveEditorTimer = setInterval(() => { try { genUpdateBtn(); } catch (e) {} try { liveEditorTick(); } catch (e) {} }, 700);   // v3.53: button visibility tracks editor open/close
+        liveEditorTimer = setInterval(() => { try { genUpdateBtn(); } catch (e) {} try { liveEditorTick(); } catch (e) {} try { if (stdRings.layers.length && !caEditing()) stdRingsClear(); } catch (e) {} }, 700);   // v3.53: button visibility tracks editor open/close
     }
     function liveEditorTick() {
         if (CONTEXT !== 'IFRAME' || !document.querySelector('.mission-edit__content')) return;
