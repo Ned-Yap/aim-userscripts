@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.91
+// @version      3.92
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.91';
+    const SCRIPT_VERSION = '3.92';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -4864,7 +4864,9 @@
     // Straight-line ordering sent the drone "across" a tank-battery NFZ and it had to double back.
     function sgLegalMetric(pts, ent, bboxFrom) {
         const ffzs = ((ent && ent.ffzs) || []).filter(f => f.ring && f.ring.length >= 3);
-        const nfzs = ((ent && ent.nfzs) || []).filter(z => z.ring && z.ring.length >= 3);
+        // v3.92: obstacles = NFZs AND the shot assets themselves — a route straight over the pumpjack
+        // (south end → north end) is never what a pilot wants; go around = the half circle.
+        const nfzs = ((ent && ent.nfzs) || []).filter(z => z.ring && z.ring.length >= 3).concat(((ent && ent.assets) || []).filter(a => sgTargetable(a)));
         if (!ffzs.length || pts.length < 2) return null;
         const src = (bboxFrom && bboxFrom.length) ? bboxFrom : pts;
         let la0 = Infinity, la1 = -Infinity, ln0 = Infinity, ln1 = -Infinity;
@@ -4894,8 +4896,10 @@
             }
             for (let t = 0; t < Pn; t++) M[s0][t] = D[t];
         }
-        // no legal route (other lobe / start outside the FFZ) → straight × 3 keeps the order sane
-        for (let i = 0; i < Pn; i++) for (let j = 0; j < Pn; j++) if (!Number.isFinite(M[i][j])) M[i][j] = (i === j) ? 0 : mbApproxMeters(pts[i].lat, pts[i].lng, pts[j].lat, pts[j].lng) * 3;
+        // no legal route: a point OUTSIDE the FFZ (the base / arrival) → plain straight distance; two points
+        // inside with no path between them (other lobe) → straight × 3 so the order still degrades sanely
+        const inF = pts.map(p => F.some(f => genPointInPoly(p, f.ring)));
+        for (let i = 0; i < Pn; i++) for (let j = 0; j < Pn; j++) if (!Number.isFinite(M[i][j])) M[i][j] = (i === j) ? 0 : mbApproxMeters(pts[i].lat, pts[i].lng, pts[j].lat, pts[j].lng) * ((inF[i] && inF[j]) ? 3 : 1);
         return M;
     }
     function sgOrderNavs(navs, start, ent) {
