@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.95
+// @version      3.96
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.95';
+    const SCRIPT_VERSION = '3.96';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -4617,9 +4617,12 @@
         // v3.60 📍 Points mode: the user drops the aim points, the solver places the fewest navs
         mode: 'ring', dots: [], plan: null, dotK: 3, shareLo: 95, shareHi: 110, pairFt: 30, minSep: 45, maxPerNav: 2, hover: null, hoverName: '', replace: false,
         // v3.74: drag-to-move / R-click-remove on STAGED ghosts (navs + aims)
-        drag: null, suppressClick: false, hitCursor: false, stagedGroups: [], passiveEl: null, idle: false };
+        drag: null, suppressClick: false, hitCursor: false, stagedGroups: [], passiveEl: null, idle: false,
+        // v3.96 🧭 Nav-first mode: pin ONE nav, click up to SG_NAV_MAX aim points it shoots
+        navPt: null, navAims: [] };
+    const SG_NAV_MAX = 10;
     const SG_GAP_KEY = 'aim-mb-sg-gap', SG_MODE_KEY = 'aim-mb-sg-mode', SG_DOTK_KEY = 'aim-mb-sg-dotk', SG_BAND_KEY = 'aim-mb-sg-band';
-    try { const m = String(gmGet(SG_MODE_KEY, 'ring') || 'ring'); if (m === 'dots') sg.mode = 'dots'; const k = Number(gmGet(SG_DOTK_KEY, 3)); if (Number.isFinite(k) && k >= 1 && k <= 6) sg.dotK = k; } catch (e) {}
+    try { const m = String(gmGet(SG_MODE_KEY, 'ring') || 'ring'); if (m === 'dots' || m === 'nav') sg.mode = m; const k = Number(gmGet(SG_DOTK_KEY, 3)); if (Number.isFinite(k) && k >= 1 && k <= 6) sg.dotK = k; } catch (e) {}
     try { const b = gmGet(SG_BAND_KEY, null); if (b && typeof b === 'object') { if (Number(b.lo) >= SG_MIN_FT) sg.shareLo = Number(b.lo); if (Number(b.hi) > sg.shareLo) sg.shareHi = Number(b.hi); if (Number(b.pair) >= 0) sg.pairFt = Number(b.pair); if (Number(b.sep) >= 5) sg.minSep = Number(b.sep); if (Number(b.max) >= 1) sg.maxPerNav = Number(b.max); } } catch (e) {}
     function sgBandSave() { try { gmSet(SG_BAND_KEY, { lo: sg.shareLo, hi: sg.shareHi, pair: sg.pairFt, sep: sg.minSep, max: sg.maxPerNav }); } catch (e) {} }
     try { const g = Number(gmGet(SG_GAP_KEY, 50)); if (Number.isFinite(g) && g > 0) sg.gapFt = g; } catch (e) {}
@@ -5019,6 +5022,7 @@
     }
     function sgDrawLive() {
         if (sg.idle) { sgClearLayers(sg.liveLayers); return; }
+        if (sg.mode === 'nav') { sgDrawNav(); return; }
         if (sg.mode === 'dots') { sgDrawDots(); return; }
         sgClearLayers(sg.liveLayers);
         if (!sg.active || !sg.focus) return;
@@ -5154,6 +5158,7 @@
         if (!sg.active) { h.remove(); return; }
         if (h.contains(document.activeElement) && document.activeElement.tagName === 'INPUT') return;   // typing in the table — don't rebuild under the cursor
         if (sg.idle) { sgUpdateHudIdle(h); return; }
+        if (sg.mode === 'nav') { sgUpdateHudNav(h); return; }
         if (sg.mode === 'dots') { sgUpdateHudDots(h); return; }
         const all = sgTplAll();
         const worst = sg.live.reduce((w, p) => (p.status === 'red' ? 'red' : (p.status === 'amber' && w !== 'red' ? 'amber' : w)), 'green');
@@ -5231,17 +5236,17 @@
     }
     function sgModeBtns() {
         const b = (m, txt, title) => `<button data-sg-mode="${m}" title="${title}" style="background:${sg.mode === m ? 'rgba(255,138,210,0.25)' : 'none'};border:1px solid ${sg.mode === m ? '#ff8ad2' : '#456'};color:${sg.mode === m ? '#ffb3e0' : '#9ad'};border-radius:3px;cursor:pointer;font-size:11px;font-weight:800;padding:1px 6px;">${txt}</button>`;
-        return b('ring', '🎯', 'Ring: a template of navs around one focus (P switches)') + b('dots', '📍', 'Points: drop the aim points, the solver places the fewest navs (P switches)');
+        return b('ring', '🎯', 'Ring: a template of navs around one focus (P cycles)') + b('dots', '📍', 'Points: drop the aim points, the solver places the fewest navs (P cycles)') + b('nav', '🧭', 'Nav first: pin ONE nav, then click up to 10 points it shoots (P cycles)');
     }
     function sgWireModeBtns(h) {
         h.querySelectorAll('[data-sg-mode]').forEach(b => b.onclick = () => sgSetMode(b.getAttribute('data-sg-mode')));
     }
     function sgSetMode(m) {
-        if (m !== 'ring' && m !== 'dots') return; if (sg.mode === m) return;
+        if (m !== 'ring' && m !== 'dots' && m !== 'nav') return; if (sg.mode === m) return;
         sg.mode = m; try { gmSet(SG_MODE_KEY, m); } catch (e) {}
-        sg.pinned = false; sg.targetRing = null; sg.targetName = ''; sg.hover = null;
+        sg.pinned = false; sg.targetRing = null; sg.targetName = ''; sg.hover = null; sg.navPt = null; sg.navAims = [];
         sgClearLayers(sg.liveLayers); sgDrawLive(); sgUpdateHud();
-        showToast(m === 'dots' ? '📍 Points — click every spot you want a snapshot of, Enter = stage the plan.' : '🎯 Ring — move to the asset, click to pin.', '#ff8ad2', 3000);
+        showToast(m === 'dots' ? '📍 Points — click every spot you want a snapshot of, Enter = stage the plan.' : (m === 'nav' ? '🧭 Nav first — click where the drone should stand, then click every point it shoots (up to 10). Enter = stage.' : '🎯 Ring — move to the asset, click to pin.'), '#ff8ad2', 3500);
     }
     function sgUpdateHudDots(h) {
         const inp = (attr, v, w, extra) => `<input type="number" ${attr} value="${v}" ${extra || ''} style="width:${w}px;background:#0f1216;border:1px solid #456;color:#fff;border-radius:3px;font:inherit;font-size:11px;padding:1px 3px;text-align:right;">`;
@@ -5401,7 +5406,7 @@
         let last = ''; try { last = String(gmGet(SG_LAST_KEY, '') || ''); } catch (e) {}
         sgApplyTpl(last || '3-shot 90°');
         sg.active = true; sg.pinned = false; sg.focus = null; sg.targetRing = null; sg.targetName = ''; sg.rot = 0; sg.flip = false;
-        sg.dots = []; sg.plan = null; sg.hover = null; sg.hoverName = ''; sg.replace = false;
+        sg.dots = []; sg.plan = null; sg.hover = null; sg.hoverName = ''; sg.replace = false; sg.navPt = null; sg.navAims = [];
         sg.sid = sid; sg.mid = sgMid();
         sg.idle = sgGhostsFor(sid, sg.mid).length > 0;   // v3.85: ghosts already here → edit them, no follow ring until ➕
         sg.container = caMapContainer();
@@ -5419,12 +5424,13 @@
         genFetchEntities(sid).then(ent => { sg.ent = ent; sgDrawLive(); }).catch(e => { console.warn(`${TAG} [🎯] entity load failed`, e); showToast('🎯 Could not load FFZs/assets — rails are off.', '#ff9800', 4000); sg.ent = { assets: [], ffzs: [], nfzs: [] }; });
         sgUpdateHud(); sgUpdateBtn();
         if (sg.idle) showToast('🎯 Ghosts on this mission — drag a nav · drag a pink aim (its navs follow) · R-click drops one. ➕ in the panel places a NEW shot · M2 the 🎯 button = ⚡ commit · Esc closes.', '#c39dff', 6000);
+        else if (sg.mode === 'nav') showToast('🧭 Nav first — click where the drone should stand, then click every point it shoots (up to 10) · M2 a point removes it · Enter = stage · P = next mode · Esc.', '#ff8ad2', 6000);
         else if (sg.mode === 'dots') showToast('📍 Points — click every spot you want a snapshot of; the plan redraws after each click. R-click a point removes it · 1–6 angles per point · Ctrl+wheel standoff · Enter = stage · P = ring mode · Esc.', '#ff8ad2', 7000);
         else showToast('🎯 Ghost live — move to the asset, click to pin, Shift+wheel = spin (X = 1° steps) · Ctrl+wheel = standoff · Alt+wheel = fan · 1–6 sets · −/+ snaps · F flip · Enter = stage · P = points mode · Esc = drop.', '#ff8ad2', 7000);
     }
     function sgStop(silent) {
         if (!sg.active) return;
-        sg.active = false; sg.idle = false; sg.pinned = false; sg.focus = null; sg.targetRing = null; sg.dots = []; sg.plan = null; sg.hover = null;
+        sg.active = false; sg.idle = false; sg.pinned = false; sg.focus = null; sg.targetRing = null; sg.dots = []; sg.plan = null; sg.hover = null; sg.navPt = null; sg.navAims = [];
         if (sg.container) {
             try { sg.container.removeEventListener('mousedown', sgOnDown, true); sg.container.removeEventListener('mousemove', sgOnMove, true); sg.container.removeEventListener('click', sgOnClick, true); sg.container.removeEventListener('contextmenu', sgOnContext, true); sg.container.removeEventListener('wheel', sgOnWheel, { capture: true }); } catch (e) {}
         }
@@ -5569,6 +5575,7 @@
         // cursor hint over a staged nav / aim
         try { const on = !!sgHitStaged(e); if (on !== sg.hitCursor) { sg.hitCursor = on; if (sg.container) sg.container.style.cursor = on ? 'grab' : ''; } } catch (err) {}
         if (sg.idle) return;
+        if (sg.mode === 'nav') { const ll = caClickToLatLng(e); if (!ll) return; sg.hover = { lat: ll.lat, lng: ll.lng }; sgDrawNav(); return; }
         if (sg.mode === 'dots') {
             const ll = caClickToLatLng(e); if (!ll) return;
             sg.hover = { lat: ll.lat, lng: ll.lng };
@@ -5600,6 +5607,7 @@
         sg.downAt = null;
         e.preventDefault(); e.stopPropagation();
         const ll = caClickToLatLng(e); if (!ll) return;
+        if (sg.mode === 'nav') { sgNavClick(ll); return; }
         if (sg.mode === 'dots') { sgAddDot(ll); return; }
         if (!sg.pinned) { sgPin(ll); return; }
         sgStage();
@@ -5621,7 +5629,7 @@
             sg.dots.splice(bi, 1); sgResolveDots(); sgDrawLive(); return true;
         } catch (err) { console.warn(`${TAG} [📍] remove failed`, err); return false; }
     }
-    function sgOnContext(e) { if (!sg.active) return; e.preventDefault(); e.stopPropagation(); if (sgContextStaged(e)) return; if (sg.idle) return; if (sg.mode === 'dots') { sgRemoveDotAt(e); return; } if (sg.pinned) { sg.pinned = false; sg.targetRing = null; sg.targetName = ''; const ll = caClickToLatLng(e); if (ll) sg.focus = { lat: ll.lat, lng: ll.lng }; sgDrawLive(); } }
+    function sgOnContext(e) { if (!sg.active) return; e.preventDefault(); e.stopPropagation(); if (sgContextStaged(e)) return; if (sg.idle) return; if (sg.mode === 'nav') { sgNavContext(e); return; } if (sg.mode === 'dots') { sgRemoveDotAt(e); return; } if (sg.pinned) { sg.pinned = false; sg.targetRing = null; sg.targetName = ''; const ll = caClickToLatLng(e); if (ll) sg.focus = { lat: ll.lat, lng: ll.lng }; sgDrawLive(); } }
     function sgPin(ll) {
         sg.focus = { lat: ll.lat, lng: ll.lng }; sg.pinned = true;
         const t = sgFindTarget(sg.focus); sg.targetRing = t ? t.ring : null; sg.targetName = t ? `${t.kind === 'nfz' ? 'NFZ ' : ''}${t.name}` : '';
@@ -5636,6 +5644,7 @@
         e.preventDefault(); e.stopPropagation();
         // Shift+wheel arrives as deltaX on Windows — read whichever axis moved
         const d = e.deltaY || e.deltaX; const dir = d > 0 ? 1 : -1;
+        if (sg.mode === 'nav') return;
         if (sg.mode === 'dots') { if (e.ctrlKey) { sg.distFt = Math.max(80, Math.min(600, sg.distFt + dir * 5)); sg.rows.forEach(r => { r.distFt = sg.distFt; }); sgResolveDots(); sgDrawLive(); } return; }
         if (e.ctrlKey) { sg.rows.forEach(r => { r.distFt = Math.max(20, Math.min(600, r.distFt + dir * 5)); }); sgSyncSummary(); }
         else if (e.altKey) { sg.spreadDeg = Math.max(0, Math.min(180, sg.spreadDeg + dir * 5)); sgRegenRows(); }
@@ -5647,7 +5656,17 @@
         const k = e.key;
         let used = true;
         if (sg.idle) { if (k === 'Escape') { sgStop(); e.preventDefault(); e.stopPropagation(); } return; }
-        if (k === 'p' || k === 'P') { sgSetMode(sg.mode === 'dots' ? 'ring' : 'dots'); e.preventDefault(); e.stopPropagation(); return; }
+        if (k === 'p' || k === 'P') { sgSetMode(sg.mode === 'ring' ? 'dots' : (sg.mode === 'dots' ? 'nav' : 'ring')); e.preventDefault(); e.stopPropagation(); return; }
+        if (sg.mode === 'nav') {
+            if (k === 'Escape') { if (sg.navAims.length) { sg.navAims = []; showToast('🧭 Aims cleared — Esc again unpins the nav.', '#888', 1500); } else if (sg.navPt) { sg.navPt = null; showToast('🧭 Nav unpinned — Esc again to exit.', '#888', 1500); } else sgStop(); }
+            else if (k === 'Enter') sgStageNav();
+            else if (k === 'Backspace') { if (sg.navAims.length) sg.navAims.pop(); }
+            else used = false;
+            if (!used) return;
+            e.preventDefault(); e.stopPropagation();
+            if (sg.active) { sgDrawLive(); sgUpdateHud(); }
+            return;
+        }
         if (sg.mode === 'dots') {
             if (k === 'Escape') sgStop();
             else if (k === 'Enter') sgStageDots();
@@ -5705,6 +5724,87 @@
     }
     // Stage the solved plan as ONE ghost group: each nav carries its own aim list (one
     // snapshot per aim, at that aim). `replace` = strip the mission's existing shots on commit.
+    // ── 🧭 NAV-FIRST (v3.96): the opposite of the ring — ONE nav where you click, then every point
+    // you click is a snapshot it takes (≤ SG_NAV_MAX). Distances show per aim in band colours; the nav
+    // must be legal (inside the FFZ, off NFZ / asset) — soft gate at stage time.
+    function sgNavClick(ll) {
+        if (!sg.navPt) { sg.navPt = { lat: ll.lat, lng: ll.lng }; try { fetchElevation(ll.lat, ll.lng); } catch (e) {} sgDrawLive(); sgUpdateHud(); return; }
+        if (sg.navAims.length >= SG_NAV_MAX) { showToast(`🧭 ${SG_NAV_MAX} snapshots is the cap for one nav — stage it and pin another.`, '#ff9800', 3000); return; }
+        sg.navAims.push({ lat: ll.lat, lng: ll.lng }); try { fetchElevation(ll.lat, ll.lng); } catch (e) {}
+        sgDrawLive(); sgUpdateHud();
+    }
+    function sgNavContext(e) {
+        const map = getLeafletMap(); if (!map) return;
+        try {
+            const r = map.getContainer().getBoundingClientRect(); const px = { x: e.clientX - r.left, y: e.clientY - r.top };
+            let bi = -1, bd = 14;
+            sg.navAims.forEach((a, i) => { const q = map.latLngToContainerPoint([a.lat, a.lng]); const dd = Math.hypot(q.x - px.x, q.y - px.y); if (dd < bd) { bd = dd; bi = i; } });
+            if (bi >= 0) { sg.navAims.splice(bi, 1); sgDrawLive(); sgUpdateHud(); return; }
+            if (sg.navPt) { const q = map.latLngToContainerPoint([sg.navPt.lat, sg.navPt.lng]); if (Math.hypot(q.x - px.x, q.y - px.y) < 16) { const ll = caClickToLatLng(e); if (ll) { sg.navPt = { lat: ll.lat, lng: ll.lng }; } } }
+        } catch (err) { console.warn(`${TAG} [🧭] context failed`, err); }
+        sgDrawLive(); sgUpdateHud();
+    }
+    function sgNavLegalNow() { return sg.navPt ? sgNavLegal(sg.navPt, sg.ent || { ffzs: [], nfzs: [], assets: [] }) : false; }
+    function sgDrawNav() {
+        sgClearLayers(sg.liveLayers);
+        if (!sg.active) return;
+        const L = composerGetL(), map = getLeafletMap(); if (!L || !map) return;
+        sgEnsureStyle();
+        const cv = sgCanvas(L);
+        const keep = l => { sg.liveLayers.push(l); l.addTo(map); return l; };
+        try {
+            const nav = sg.navPt || sg.hover; if (!nav) return;
+            const legal = sg.navPt ? sgNavLegalNow() : (sg.hover ? sgNavLegal(sg.hover, sg.ent || { ffzs: [], nfzs: [], assets: [] }) : true);
+            const col = legal ? '#c39dff' : '#ff5252';
+            sg.navAims.forEach((a, i) => {
+                const ft = Math.round(sgLLFt(nav, a)); const st = sgFtStatus(ft, legal);
+                keep(L.polyline([[nav.lat, nav.lng], [a.lat, a.lng]], { renderer: cv || undefined, interactive: false, color: SG_COL[st], weight: 2.5, dashArray: '6 5', opacity: 0.95 }));
+                keep(L.circleMarker([a.lat, a.lng], { renderer: cv || undefined, interactive: false, radius: 7, color: '#fff', weight: 2, fillColor: '#ff8ad2', fillOpacity: 1 }));
+                keep(sgChip(L, a.lat, a.lng, `S${i + 1} · <span style="color:${SG_COL[st]}">${ft}</span> ft`, '#ff8ad2', 915, 'dl'));
+            });
+            if (sg.navPt && sg.hover && sg.navAims.length < SG_NAV_MAX) {
+                const ft = Math.round(sgLLFt(nav, sg.hover)); const st = sgFtStatus(ft, legal);
+                keep(L.polyline([[nav.lat, nav.lng], [sg.hover.lat, sg.hover.lng]], { renderer: cv || undefined, interactive: false, color: SG_COL[st], weight: 2, dashArray: '2 6', opacity: 0.7 }));
+                keep(sgChip(L, sg.hover.lat, sg.hover.lng, `<span style="color:${SG_COL[st]}">${ft}</span> ft`, '#789', 910, 'dr'));
+            }
+            keep(L.circleMarker([nav.lat, nav.lng], { renderer: cv || undefined, interactive: false, radius: sg.navPt ? 10 : 8, color: '#fff', weight: 2, fillColor: col, fillOpacity: sg.navPt ? 0.95 : 0.4 }));
+            keep(sgChip(L, nav.lat, nav.lng, sg.navPt ? `NAV · ${sg.navAims.length}/${SG_NAV_MAX} snaps${legal ? '' : ' · ⚠ not legal'}` : 'click to pin the nav', col, 920));
+        } catch (e) { console.warn(`${TAG} [🧭] draw failed`, e); }
+    }
+    function sgUpdateHudNav(h) {
+        const legal = sgNavLegalNow();
+        const rows = sg.navAims.map((a, i) => { const ft = sg.navPt ? Math.round(sgLLFt(sg.navPt, a)) : 0; const st = sgFtStatus(ft, legal); return `<div style="display:flex;gap:6px;align-items:center;padding:1px 0;color:#cfe;"><span style="min-width:24px;color:#ff8ad2;font-weight:700;">S${i + 1}</span><span style="flex:1;color:${SG_COL[st]};">${ft} ft</span><button data-sg-nav-rm="${i}" title="Remove this snapshot" style="background:none;border:1px solid #456;color:#cfe;border-radius:3px;cursor:pointer;font-size:10px;padding:0 4px;line-height:1.4;">✕</button></div>`; }).join('');
+        h.innerHTML = `<div style="display:flex;align-items:center;gap:5px;margin-bottom:5px;">${sgModeBtns()}<b style="color:#ff8ad2;flex:1;">Nav first</b><span style="color:#789;font-size:10px;">P = next</span></div>
+            <div style="color:#9ad;line-height:1.4;">${sg.navPt ? `nav pinned${legal ? '' : ' <b style="color:#ff5252;">· ⚠ outside the FFZ / over an NFZ</b>'} · click every point it shoots (${sg.navAims.length}/${SG_NAV_MAX}) · M2 a point removes it · M2 the nav re-pins it under the cursor` : 'click where the drone should <b>stand</b>'}</div>
+            ${rows ? `<div style="margin-top:5px;border-top:1px solid #2a2f38;padding-top:4px;">${rows}</div>` : ''}
+            <div style="display:flex;gap:5px;margin-top:6px;">
+                <button data-sg-nav-stage ${(!sg.navPt || !sg.navAims.length) ? 'disabled' : ''} title="Enter" style="flex:1;background:${legal ? '#2a3a2a' : '#3a2020'};border:1px solid ${legal ? '#5fff5f' : '#ff5252'};color:${legal ? '#7dff7d' : '#ff8a8a'};border-radius:4px;cursor:pointer;font-weight:800;padding:3px 6px;">${legal ? '➕ Stage nav + snaps' : '➕ Stage anyway'}</button>
+                <button data-sg-nav-clear title="Clear the aims (Esc)" style="background:none;border:1px solid #456;color:#cfe;border-radius:4px;cursor:pointer;padding:3px 7px;">clear</button>
+            </div>
+            ${sgStagedListHtml()}`;
+        sgWireModeBtns(h);
+        h.querySelectorAll('[data-sg-nav-rm]').forEach(b => b.onclick = () => { sg.navAims.splice(Number(b.getAttribute('data-sg-nav-rm')), 1); sgDrawLive(); sgUpdateHud(); });
+        const st = h.querySelector('[data-sg-nav-stage]'); if (st) st.onclick = () => sgStageNav();
+        const cl = h.querySelector('[data-sg-nav-clear]'); if (cl) cl.onclick = () => { sg.navAims = []; sgDrawLive(); sgUpdateHud(); };
+        sgWireStagedList(h);
+    }
+    function sgStageNav() {
+        if (!sg.active || sg.mode !== 'nav') return;
+        if (!sg.navPt || !sg.navAims.length) { showToast('🧭 Pin the nav and click at least one point it shoots.', '#ff9800', 3000); return; }
+        const sid = sg.sid, mid = sgMid();
+        if (!sid || !mid) { showToast('No open mission to stage into.', '#ff9800', 3000); return; }
+        if (!sgNavLegalNow() && !confirm('This nav is outside the FFZ or over an NFZ / asset — Percepto may refuse the save. Stage anyway?')) return;
+        const groups = sgGhostsFor(sid, mid);
+        const gid = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+        const n = sg.navAims.length; let lat = 0, lng = 0; sg.navAims.forEach(a => { lat += a.lat; lng += a.lng; });
+        groups.push({ gid, focus: { lat: lat / n, lng: lng / n }, navs: [{ lat: sg.navPt.lat, lng: sg.navPt.lng, snaps: n, aims: sg.navAims.map(a => ({ lat: a.lat, lng: a.lng })) }],
+            snapsPerNav: n, afterNav: sgInsertAfterNav(), target: `nav + ${n} shot${n === 1 ? '' : 's'}`, tpl: 'nav', dots: [], replace: false, createdAt: Date.now() });
+        sgGhostsSet(sid, mid, (composerMission && composerMission.name) || '', groups);
+        sgDrawStaged(true);
+        sg.navPt = null; sg.navAims = [];
+        sgDrawLive(); sgUpdateBtn(); sgUpdateHud();
+        showToast(`🧭 Staged 1 nav with ${n} snapshot${n === 1 ? '' : 's'} — pin the next nav, or Esc.`, '#c39dff', 3000);
+    }
     function sgStageDots() {
         if (!sg.active || sg.mode !== 'dots') return;
         if (!sg.plan || !sg.plan.navs.length) { showToast('📍 Nothing to stage — drop at least one point with a legal nav spot.', '#ff9800', 3500); return; }
