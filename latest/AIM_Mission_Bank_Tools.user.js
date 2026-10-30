@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.87
+// @version      3.88
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.87';
+    const SCRIPT_VERSION = '3.88';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -5399,11 +5399,13 @@
         // hover uses the rendered list (no GM read per mousemove); a press/R-click re-reads storage
         const groups = fresh ? sgGhostsFor(sid, mid) : (sg.stagedGroups || []); if (!groups.length) return null;
         let px; try { const r = map.getContainer().getBoundingClientRect(); px = { x: e.clientX - r.left, y: e.clientY - r.top }; } catch (err) { return null; }
+        // v3.88: grabbing a CHIP ("G1 · S2") counts as grabbing the point it labels
+        try { const t = e.target; if (t && t.closest) { const ic = t.closest('.leaflet-marker-icon'); if (ic) { const lyr = sg.stagedLayers.find(l => l && l._icon === ic); if (lyr && typeof lyr.getLatLng === 'function') { const q = map.latLngToContainerPoint(lyr.getLatLng()); px = { x: q.x, y: q.y }; } } } } catch (err) {}
         const pxOf = (p) => { try { const q = map.latLngToContainerPoint([p.lat, p.lng]); return Math.hypot(q.x - px.x, q.y - px.y); } catch (err) { return Infinity; } };
-        let best = null, bd = 13;
+        let best = null, bd = 14;
         groups.forEach((g, gi) => (g.navs || []).forEach((p, ni) => { const d = pxOf(p); if (d < bd) { bd = d; best = { gi, ni, kind: 'nav', ai: -1, groups }; } }));
         if (best) return best;
-        bd = 10;
+        bd = 14;
         groups.forEach((g, gi) => (g.navs || []).forEach((p, ni) => (p.aims || []).forEach((a, ai) => { const d = pxOf(a); if (d < bd) { bd = d; best = { gi, ni, kind: 'aim', ai, groups }; } })));
         return best;
     }
