@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.93
+// @version      3.94
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.93';
+    const SCRIPT_VERSION = '3.94';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -8880,10 +8880,10 @@
                     </div>
                     <div style="display:flex;align-items:center;gap:6px;margin-top:4px;flex-wrap:wrap;color:#cfe;font-size:11px;">
                         <span title="Shots on one aim must be at least this far apart in bearing (90° is tried first)">min angle</span><input data-gen-auto-sep type="number" min="5" max="180" step="5" style="width:46px;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px;"><span>°</span>
-                        <span title="A nav may shoot at most this many aims">· max aims/nav</span><input data-gen-auto-maxnav type="number" min="1" max="6" style="width:40px;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px;">
+                        <span title="A nav may shoot at most this many aims">· max aims/nav</span><input data-gen-auto-maxnav type="number" min="1" max="6" style="width:40px;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px;"><span title="FACILITIES (an NFZ / asset outline with 6+ corners, or ≥ 250 ft across) are walked edge by edge: one nav every this many feet along each edge, 100 ft out, shooting straight at the edge (2 snaps per nav when the stretch is long enough)">· facility every</span><input data-gen-auto-fac type="number" min="20" step="10" style="width:44px;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px;"><span>ft</span>
                     </div>
                     <label style="display:flex;align-items:center;gap:6px;margin-top:5px;cursor:pointer;color:#d8c3ff;" title="Create the mission with only the stock centroid shot and stage the plan as ghosts on it: open the mission, reorder ↑↓ / drop ✕ / ⟲ auto-order in the 🎯 HUD, then ⚡ commit (the stock shot is replaced, wrap chosen at commit)"><input type="checkbox" data-gen-auto-ghost> 👻 Stage as ghosts — review / reorder in the editor, ⚡ commit when ready</label>
-                    <div style="color:#9a8bb8;font-size:10px;margin-top:3px;">Rows (wells within row ≤): trios → broadside navs on both sides with one shot per gap (two wells per image) + one end-on shot of the group. Pumping units (type says “pumping”): both ends + the long side away from the FFZ edge, square to the box at the standoff — only a blocked shot swings. Other lone assets: distance (band) → angle (≥ min, 90° first) → count → sharing (≤ max/nav). Never outside the FFZ / over an asset or NFZ · ordered from base · 🎞 wrap at Create (or at commit for ghosts) · review list after.</div>
+                    <div style="color:#9a8bb8;font-size:10px;margin-top:3px;">Rows (wells within row ≤): trios → broadside navs on both sides with one shot per gap (two wells per image) + one end-on shot of the group. Pumping units (type says “pumping”): both ends + the long side away from the FFZ edge, square to the box at the standoff — only a blocked shot swings. Facilities (6+ corners or ≥ 250 ft): walked edge by edge, a nav every “facility every” ft standing 100 ft out, straight-on snaps. Other lone assets: distance (band) → angle (≥ min, 90° first) → count → sharing (≤ max/nav). Never outside the FFZ / over an asset or NFZ · ordered from base · 🎞 wrap at Create (or at commit for ghosts) · review list after.</div>
                 </div>
                 <div style="display:flex;align-items:center;gap:6px;margin-top:7px;"><label style="color:#cfe;white-space:nowrap;">Name</label><input data-gen-bulk-name value="{section} - {asset}" title="Tokens: {section} = N/E/S/W · {asset} = asset name" style="flex:1;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:2px 6px;border-radius:3px;font:inherit;font-size:11px;"></div>
                 <div style="color:#789;font-size:10px;margin-top:2px;">Tokens: <b>{section}</b> = N/E/S/W · <b>{asset}</b> = asset name (e.g. <b>NNE - {asset}</b>)</div>
@@ -9020,18 +9020,18 @@
         };
         refreshTpls('');
         // v3.59 — 🎯 Auto-shots controls (GM-persisted)
-        const autoCb = p.querySelector('[data-gen-auto]'), autoTpl = p.querySelector('[data-gen-auto-tpl]'), autoPair = p.querySelector('[data-gen-auto-pair]'), autoLo = p.querySelector('[data-gen-auto-lo]'), autoHi = p.querySelector('[data-gen-auto-hi]'), autoSep = p.querySelector('[data-gen-auto-sep]'), autoMaxNav = p.querySelector('[data-gen-auto-maxnav]'), autoGhost = p.querySelector('[data-gen-auto-ghost]');
+        const autoCb = p.querySelector('[data-gen-auto]'), autoTpl = p.querySelector('[data-gen-auto-tpl]'), autoPair = p.querySelector('[data-gen-auto-pair]'), autoLo = p.querySelector('[data-gen-auto-lo]'), autoHi = p.querySelector('[data-gen-auto-hi]'), autoSep = p.querySelector('[data-gen-auto-sep]'), autoMaxNav = p.querySelector('[data-gen-auto-maxnav]'), autoFac = p.querySelector('[data-gen-auto-fac]'), autoGhost = p.querySelector('[data-gen-auto-ghost]');
         const ap = genAutoPrefs();
-        autoCb.checked = !!ap.on; autoPair.value = String(ap.pairFt); autoLo.value = String(ap.shareLo); autoHi.value = String(ap.shareHi); autoSep.value = String(ap.minSep); autoMaxNav.value = String(ap.maxPerNav); autoGhost.checked = !!ap.ghost;
+        autoCb.checked = !!ap.on; autoPair.value = String(ap.pairFt); autoLo.value = String(ap.shareLo); autoHi.value = String(ap.shareHi); autoSep.value = String(ap.minSep); autoMaxNav.value = String(ap.maxPerNav); autoFac.value = String(ap.facFt); autoGhost.checked = !!ap.ghost;
         autoTpl.innerHTML = Object.keys(sgTplAll()).map(k => `<option value="${escapeHtml(k)}" ${k === ap.tpl ? 'selected' : ''}>${escapeHtml(k)}</option>`).join('');
         const autoSync = () => {
             const on = autoCb.checked;
             scanCb.disabled = on; tplSel.disabled = on;
             goBtn.textContent = on ? '🎯 Create' : '⊕ Create';
-            genAutoSavePrefs({ on, tpl: autoTpl.value, pairFt: Number(autoPair.value), shareLo: Number(autoLo.value), shareHi: Number(autoHi.value), minSep: Number(autoSep.value), maxPerNav: Number(autoMaxNav.value), ghost: !!autoGhost.checked });
+            genAutoSavePrefs({ on, tpl: autoTpl.value, pairFt: Number(autoPair.value), shareLo: Number(autoLo.value), shareHi: Number(autoHi.value), minSep: Number(autoSep.value), maxPerNav: Number(autoMaxNav.value), facFt: Number(autoFac.value), ghost: !!autoGhost.checked });
             goBtn.textContent = on ? (autoGhost.checked ? '👻 Create + stage' : '🎯 Create') : '⊕ Create';
         };
-        autoCb.onchange = autoSync; autoTpl.onchange = autoSync; autoPair.onchange = autoSync; autoLo.onchange = autoSync; autoHi.onchange = autoSync; autoSep.onchange = autoSync; autoMaxNav.onchange = autoSync; autoGhost.onchange = autoSync;
+        autoCb.onchange = autoSync; autoTpl.onchange = autoSync; autoPair.onchange = autoSync; autoLo.onchange = autoSync; autoHi.onchange = autoSync; autoSep.onchange = autoSync; autoMaxNav.onchange = autoSync; autoFac.onchange = autoSync; autoGhost.onchange = autoSync;
         autoSync();
         goBtn.onclick = async () => {
             if (genBulkBusy) return;
@@ -9048,7 +9048,7 @@
                     if (!wrap) return;
                     wrapSteps = wrap.steps || [];
                 }
-                auto = { tpl: autoTpl.value, pairFt: ap2.pairFt, shareLo: ap2.shareLo, shareHi: ap2.shareHi, minSep: ap2.minSep, maxPerNav: ap2.maxPerNav, ghost: !!ap2.ghost, wrapSteps };
+                auto = { tpl: autoTpl.value, pairFt: ap2.pairFt, shareLo: ap2.shareLo, shareHi: ap2.shareHi, minSep: ap2.minSep, maxPerNav: ap2.maxPerNav, facFt: ap2.facFt, ghost: !!ap2.ghost, wrapSteps };
             }
             genBulkCommit(picked, ffzs, { inspectionScan: scan, nameTemplate, template, auto }, p.querySelector('[data-gen-bulk-status]'), goBtn);
         };
@@ -9067,13 +9067,14 @@
     const GEN_AUTO_KEY = 'aim-mb-gen-auto';
     const GEN_AUTO_BIG_FT = 60;      // a child longer than this → "centroid may be wrong" flag
     function genAutoPrefs() {
-        const d = { on: false, tpl: '3-shot 90°', pairFt: 30, shareLo: 95, shareHi: 110, minSep: 45, maxPerNav: 2, ghost: false };
+        const d = { on: false, tpl: '3-shot 90°', pairFt: 30, shareLo: 95, shareHi: 110, minSep: 45, maxPerNav: 2, ghost: false, facFt: 80 };
         try { const sv = gmGet(GEN_AUTO_KEY, null); if (sv && typeof sv === 'object') Object.assign(d, sv); } catch (e) { console.warn(`${TAG} [gen-auto] prefs read failed`, e); }
         d.pairFt = Number(d.pairFt); if (!Number.isFinite(d.pairFt) || d.pairFt < 0) d.pairFt = 30;
         d.shareLo = Number(d.shareLo); if (!Number.isFinite(d.shareLo) || d.shareLo < SG_MIN_FT) d.shareLo = 95;
         d.shareHi = Number(d.shareHi); if (!Number.isFinite(d.shareHi) || d.shareHi <= d.shareLo) d.shareHi = Math.max(110, d.shareLo + 5);
         d.minSep = Number(d.minSep); if (!Number.isFinite(d.minSep) || d.minSep < 5) d.minSep = 45;
         d.maxPerNav = Number(d.maxPerNav); if (!Number.isFinite(d.maxPerNav) || d.maxPerNav < 1) d.maxPerNav = 2;
+        d.facFt = Number(d.facFt); if (!Number.isFinite(d.facFt) || d.facFt < 20) d.facFt = 80;
         return d;
     }
     function genAutoSavePrefs(p) { try { gmSet(GEN_AUTO_KEY, p); } catch (e) { console.warn(`${TAG} [gen-auto] prefs save failed`, e); } }
@@ -9115,11 +9116,11 @@
         // v3.70: a LONG lone polygon (tank-battery NFZ, long asset) can't be shot from a 100 ft ring
         // around its centroid (the ring is inside it) — treat it as a row of virtual units along
         // its long axis (one unit per ~30 ft) so it gets broadside gap shots + an end-on shot.
-        const longOnes = [];
-        const keep = dots.filter(d => { if (d.kind === 'pad') return true; const sp = genRingSpanFt(d.rings[0]); if (sp >= GEN_AUTO_BIG_FT) { longOnes.push({ d, sp }); return false; } return true; });
+        const longOnes = [], facilities = [];
+        const keep = dots.filter(d => { if (d.kind === 'pad') return true; const sp = genRingSpanFt(d.rings[0]); if (genIsFacility(d.rings[0], sp)) { facilities.push({ ring: d.rings[0], name: `${d.kind === 'nfz' ? 'NFZ ' : ''}${d.name}`, spanFt: sp }); return false; } if (sp >= GEN_AUTO_BIG_FT) { if (genIsBox(d.rings[0])) { pumps.push({ ring: d.rings[0], name: `${d.kind === 'nfz' ? 'NFZ ' : ''}${d.name}`, id: d.name, box: true }); return false; } longOnes.push({ d, sp }); return false; } return true; });
         longOnes.forEach(({ d, sp }) => { const row = genVirtualRow(d.rings[0], d.name, sp); row.rowLabel = `${d.kind === 'nfz' ? 'NFZ ' : ''}${d.name} (${Math.round(sp)} ft, as ${row.length} units)`; rows.push(row); });
-        if (!keep.length && !rows.length && !pumps.length) { const c = genCentroid(pad.ring); keep.push({ lat: c.lat, lng: c.lng, rings: [pad.ring], name: pad.name || String(pad.id), kind: 'pad' }); }
-        return { dots: keep, rows, pumps, skippedKids };
+        if (!keep.length && !rows.length && !pumps.length && !facilities.length) { const c = genCentroid(pad.ring); keep.push({ lat: c.lat, lng: c.lng, rings: [pad.ring], name: pad.name || String(pad.id), kind: 'pad' }); }
+        return { dots: keep, rows, pumps, facilities, skippedKids };
     }
     // ── PUMPING-UNIT TEMPLATE (v3.75, from the user's reference) ──
     // A pumping unit is always the same long box. Three shots at the standoff, square to
@@ -9151,7 +9152,7 @@
         // skip the long side whose shot sits closest to (or beyond) the FFZ border
         const skip = eA <= eB ? sideA : sideB, keepSide = skip === sideA ? sideB : sideA;
         const faces = [{ k: 'end A', b: brg(u) }, keepSide, { k: 'end B', b: brg({ x: -u.x, y: -u.y }) }];
-        const swings = [0]; for (let d = 5; d <= 60; d += 5) swings.push(d, -d);
+        const swings = [0]; for (let d = 5; d <= 90; d += 5) swings.push(d, -d);
         const dists = [distFt]; for (let d = band.lo; d <= band.hi; d += 5) if (d !== distFt) dists.push(d);
         dists.sort((a, b) => Math.abs(a - distFt) - Math.abs(b - distFt));
         const place = f => {
@@ -9165,8 +9166,65 @@
             if (r.sw || r.ft !== distFt) notes.push(`${f.k} ${r.sw ? `swung ${r.sw > 0 ? '+' : ''}${r.sw}°` : ''}${r.sw && r.ft !== distFt ? ', ' : ''}${r.ft !== distFt ? `at ${r.ft} ft` : ''}`);
             navs.push({ lat: r.p.lat, lng: r.p.lng, snaps: 1, aims: [{ lat: c.lat, lng: c.lng }] });
         });
+        if (navs.length < 2) {   // last resort: the wall side rather than a one-shot mission
+            const r = place(skip);
+            if (r) { notes.push(`${skip.k} used after all (wall side) — nothing else was legal`); navs.push({ lat: r.p.lat, lng: r.p.lng, snaps: 1, aims: [{ lat: c.lat, lng: c.lng }] }); }
+        }
         const skipFt = skip === sideA ? eA : eB;
-        flags.push(`pump ${name}: ${navs.length} face shot(s) — skipped ${skip.k} (${skipFt >= 0 ? `${Math.round(skipFt)} ft from the FFZ edge` : `${Math.round(-skipFt)} ft OUTSIDE the FFZ`})${notes.length ? ' · ' + notes.join(' · ') : ''}`);
+        flags.push(`${asset.box ? 'box' : 'pump'} ${name}: ${navs.length} face shot(s) — skipped ${skip.k} (${skipFt >= 0 ? `${Math.round(skipFt)} ft from the FFZ edge` : `${Math.round(-skipFt)} ft OUTSIDE the FFZ`})${notes.length ? ' · ' + notes.join(' · ') : ''}`);
+        return navs;
+    }
+    // ── FACILITY WALK (v3.94) ── a complex outline (6+ corners) or anything ≥ 250 ft across is a
+    // facility, not a row of wells. Walk it edge by edge: one nav every `spacingFt` along each edge,
+    // standing `distFt` OUT from the edge, shooting straight at it (two straight-ish snaps when the
+    // stretch it covers is long enough, else one). A spot with no legal place slides in within the
+    // band, then along its edge; if still nothing it is skipped and flagged. Edges < 25 ft are
+    // jogs / corners — their coverage comes from the neighbours. No merging: every outline walked.
+    const GEN_FAC_MIN_VERTS = 6, GEN_FAC_SPAN_FT = 250, GEN_FAC_MIN_EDGE_FT = 25;
+    function genRingUnique(ring) {
+        const out = [];
+        (ring || []).forEach(p => { const l = out[out.length - 1]; if (!l || mbApproxMeters(l.lat, l.lng, p.lat, p.lng) > 0.5) out.push(p); });
+        if (out.length > 1 && mbApproxMeters(out[0].lat, out[0].lng, out[out.length - 1].lat, out[out.length - 1].lng) < 0.5) out.pop();
+        return out;
+    }
+    function genIsFacility(ring, spanFt) { return genRingUnique(ring).length >= GEN_FAC_MIN_VERTS || spanFt >= GEN_FAC_SPAN_FT; }
+    // A compact BOX (≤ 5 corners, clearly longer than wide) = a pumpjack-shaped thing whatever it is
+    // called → the 3-face template (ends + the long side away from the FFZ wall), never "as 2 units".
+    function genRingDims(ring) {
+        const { c, u, n } = genRingAxis(ring); const mLat = 110540, mLng = 111320 * Math.cos(c.lat * Math.PI / 180);
+        let l0 = Infinity, l1 = -Infinity, w0 = Infinity, w1 = -Infinity;
+        ring.forEach(p => { const x = (p.lng - c.lng) * mLng, y = (p.lat - c.lat) * mLat; const t = x * u.x + y * u.y, w = x * n.x + y * n.y; if (t < l0) l0 = t; if (t > l1) l1 = t; if (w < w0) w0 = w; if (w > w1) w1 = w; });
+        return { lenFt: (l1 - l0) * 3.28084, widFt: (w1 - w0) * 3.28084 };
+    }
+    function genIsBox(ring) { const u = genRingUnique(ring); if (u.length > 5) return false; const d = genRingDims(u); return d.widFt > 0 && d.lenFt / d.widFt >= 1.6; }
+    function genFacilityNavs(ring0, name, ent, distFt, band, flags, spacingFt) {
+        const ring = genRingUnique(ring0); if (ring.length < 3) return [];
+        const c = genCentroid(ring), mLat = 110540, mLng = 111320 * Math.cos(c.lat * Math.PI / 180);
+        const toM = p => ({ x: (p.lng - c.lng) * mLng, y: (p.lat - c.lat) * mLat }), toLL = q => ({ lat: c.lat + q.y / mLat, lng: c.lng + q.x / mLng });
+        const Pm = ring.map(toM);
+        const distM = distFt / 3.28084, spM = Math.max(20, spacingFt || 80) / 3.28084;
+        const dists = [distM]; for (let f = band.lo; f <= band.hi; f += 5) if (f !== distFt) dists.push(f / 3.28084); dists.sort((p, q) => Math.abs(p - distM) - Math.abs(q - distM));
+        const navs = []; let skipped = 0, edgesUsed = 0, shortEdges = 0;
+        for (let i = 0; i < Pm.length; i++) {
+            const a = Pm[i], b = Pm[(i + 1) % Pm.length]; const dx = b.x - a.x, dy = b.y - a.y, len = Math.hypot(dx, dy);
+            if (len < GEN_FAC_MIN_EDGE_FT / 3.28084) { shortEdges++; continue; }
+            const ux = dx / len, uy = dy / len; let nx = -uy, ny = ux;
+            const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+            if (genPointInPoly(toLL({ x: mid.x + nx * 2, y: mid.y + ny * 2 }), ring)) { nx = -nx; ny = -ny; }   // normal must point OUT
+            const n = Math.max(1, Math.round(len / spM)), sub = len / n; edgesUsed++;
+            for (let k = 0; k < n; k++) {
+                const tc = sub * k + sub / 2; const foot = { x: a.x + ux * tc, y: a.y + uy * tc };
+                const slides = [0]; for (let sl = sub / 4; sl <= sub / 2 + 0.01; sl += sub / 4) slides.push(sl, -sl);
+                let nav = null;
+                outer: for (const dm of dists) for (const sl of slides) { const q = toLL({ x: foot.x + ux * sl + nx * dm, y: foot.y + uy * sl + ny * dm }); if (sgNavLegal(q, ent)) { nav = { q, dm, sl }; break outer; } }
+                if (!nav) { skipped++; continue; }
+                const aims = [];
+                if (sub >= 60 / 3.28084) { const off = Math.min(sub / 4, distM * 0.35); aims.push(toLL({ x: foot.x + ux * (nav.sl - off), y: foot.y + uy * (nav.sl - off) }), toLL({ x: foot.x + ux * (nav.sl + off), y: foot.y + uy * (nav.sl + off) })); }
+                else aims.push(toLL({ x: foot.x + ux * nav.sl, y: foot.y + uy * nav.sl }));
+                navs.push({ lat: nav.q.lat, lng: nav.q.lng, snaps: aims.length, aims });
+            }
+        }
+        flags.push(`facility ${name}: ${edgesUsed} edge(s) walked every ${spacingFt || 80} ft → ${navs.length} nav / ${navs.reduce((t, p) => t + p.aims.length, 0)} snap (straight-on at ${distFt} ft)${skipped ? ` · ${skipped} spot(s) had no legal place (FFZ / NFZ) — skipped` : ''}${shortEdges ? ` · ${shortEdges} edge(s) < ${GEN_FAC_MIN_EDGE_FT} ft folded into neighbours` : ''}`);
         return navs;
     }
     // Virtual units along a long polygon's axis (farthest vertex pair), ~30 ft apart, inset half a step.
@@ -9289,7 +9347,7 @@
         const all = sgTplAll(); const t = all[opts.tpl] || all['3-shot 90°'];
         const K = Math.max(1, Math.min(6, Number(t.navs) || 3)), distFt = Math.max(SG_MIN_FT, Number(t.distFt) || 100);
         const band = { lo: Number(opts.shareLo) || 95, hi: Number(opts.shareHi) || 110 };
-        const { dots, rows, pumps, skippedKids } = genAutoDots(pad, ent, opts);
+        const { dots, rows, pumps, facilities, skippedKids } = genAutoDots(pad, ent, opts);
         const report = { pad: pad.name || String(pad.id), name: stock.name, aims: dots.length + rows.reduce((a, r) => a + r.length, 0) + (pumps || []).length, navs: 0, snaps: 0, flags: [], fallback: 0, ring: pad.ring, mid: null };
         if (skippedKids.length) report.flags.push(`skipped child: ${skippedKids.join(', ')}`);
         dots.forEach(d => { if (d.kind === 'asset') d.rings.forEach(r => { const sp = genRingSpanFt(r); if (sp > GEN_AUTO_BIG_FT) report.flags.push(`big asset ${d.name} (${Math.round(sp)} ft) — check the aim`); }); if (d.kind === 'pad') report.flags.push('no child assets — pad centroid aimed'); if (d.kind === 'nfz') report.flags.push(`NFZ ${d.name} aimed as an obstacle`); });
@@ -9303,6 +9361,10 @@
                 report.flags.push(`${rowName}: ${r.groups} group(s) → ${r.navs.length} nav / ${r.snaps} snap (broadside gap shots + end-on)`);
                 wells.forEach(a => { const c = a.c || genCentroid(a.ring); allDots.push({ lat: c.lat, lng: c.lng, name: a.name || String(a.id) }); });
             } catch (e) { console.warn(`${TAG} [gen-auto] row template failed for "${pad.name}"`, e); report.flags.push(`${rowName}: template error — ${(e && e.message) || e}`); }
+        });
+        (facilities || []).forEach(f => {
+            try { const fn = genFacilityNavs(f.ring, f.name, ent, distFt, band, report.flags, opts.facFt); navs = navs.concat(fn); report.aims += fn.reduce((t, p) => t + p.aims.length, 0); fn.forEach(p => p.aims.forEach(a => allDots.push({ lat: a.lat, lng: a.lng, name: f.name }))); }
+            catch (e) { console.warn(`${TAG} [gen-auto] facility walk failed for "${f.name}"`, e); report.flags.push(`facility ${f.name}: walk error — ${(e && e.message) || e}`); }
         });
         (pumps || []).forEach(a => {
             try { navs = navs.concat(genPumpNavs(a, ent, distFt, band, report.flags)); const c = genCentroid(a.ring); allDots.push({ lat: c.lat, lng: c.lng, name: a.name || String(a.id) }); }
@@ -9369,7 +9431,8 @@
     // (after a template fix) — the mission stays, its ghosts are replaced, and the commit's
     // `replace` strips whatever navs it already has. No delete, no recreate.
     let genRestageBusy = false;
-    async function genRestageItems(sid, items, pumpsOnly) {
+    async function genRestageItems(sid, items, filter) {
+        const pumpsOnly = filter === 'pumps' || filter === true, facOnly = filter === 'facilities';
         if (genRestageBusy) { showToast('Re-stage already running.', '#ff9800', 2500); return; }
         genRestageBusy = true;
         try {
@@ -9380,12 +9443,12 @@
             const jobs = [];
             items.forEach(it => {
                 const pad = findPad(it); if (!pad) { jobs.push({ it, skip: 'pad not found' }); return; }
-                if (pumpsOnly) { let dd = null; try { dd = genAutoDots(pad, ent, prefs); } catch (e) { jobs.push({ it, skip: `scan failed: ${(e && e.message) || e}` }); return; } if (!(dd.pumps && dd.pumps.length)) return; }
+                if (pumpsOnly || facOnly) { let dd = null; try { dd = genAutoDots(pad, ent, prefs); } catch (e) { jobs.push({ it, skip: `scan failed: ${(e && e.message) || e}` }); return; } if (pumpsOnly && !(dd.pumps && dd.pumps.length)) return; if (facOnly && !(dd.facilities && dd.facilities.length)) return; }
                 jobs.push({ it, pad });
             });
             const todo = jobs.filter(j => j.pad);
-            if (!todo.length) { showToast(pumpsOnly ? 'No unreviewed pad has a lone pumping unit.' : 'Nothing to re-stage.', '#ff9800', 3500); return; }
-            if (!confirm(`Re-stage ${todo.length} mission(s)${pumpsOnly ? ' (pumping-unit pads)' : ''}?\n\nTheir current ghosts are replaced with the fixed template. Missions are NOT deleted; committing replaces their navs.`)) return;
+            if (!todo.length) { showToast(pumpsOnly ? 'No unreviewed pad has a lone pumping unit.' : (facOnly ? 'No unreviewed pad has a facility outline.' : 'Nothing to re-stage.'), '#ff9800', 3500); return; }
+            if (!confirm(`Re-stage ${todo.length} mission(s)${pumpsOnly ? ' (pumping-unit pads)' : (facOnly ? ' (facility pads)' : '')}?\n\nTheir current ghosts are replaced with the fixed template. Missions are NOT deleted; committing replaces their navs.`)) return;
             const pts = [];
             todo.forEach(({ pad }) => { try { const dd = genAutoDots(pad, ent, prefs); dd.dots.forEach(d => { if (getElevationFromCache(d.lat, d.lng) == null) pts.push({ lat: d.lat, lng: d.lng }); }); dd.rows.forEach(r => r.forEach(a => { const c = a.c || genCentroid(a.ring); if (getElevationFromCache(c.lat, c.lng) == null) pts.push(c); })); (dd.pumps || []).forEach(a => { const c = genCentroid(a.ring); if (getElevationFromCache(c.lat, c.lng) == null) pts.push(c); }); const pc = genCentroid(pad.ring); if (getElevationFromCache(pc.lat, pc.lng) == null) pts.push(pc); } catch (e) { console.warn(`${TAG} [restage] dot scan failed for ${pad.name}`, e); } });
             if (pts.length) { showToast(`Fetching ${pts.length} elevation(s)…`, '#9ad', 2500); try { await bulkFetchElevations(pts); } catch (e) { console.warn(`${TAG} [restage] elevation fetch failed`, e); } }
@@ -9425,7 +9488,7 @@
             let wrapSteps = [];
             if (!ap.ghost) { const wrap = await sgPickWrap(`↻ Recreate ${pads.length} pad(s) · template "${ap.tpl}" · wrap after every snapshot`); if (!wrap) return; wrapSteps = wrap.steps || []; }
             items.forEach(it => { try { if (it.mid != null) { genReviewForget(sid, it.mid); sgGhostsSet(sid, it.mid, '', []); } } catch (e) {} });
-            const auto = { tpl: ap.tpl, pairFt: ap.pairFt, shareLo: ap.shareLo, shareHi: ap.shareHi, minSep: ap.minSep, maxPerNav: ap.maxPerNav, ghost: !!ap.ghost, wrapSteps };
+            const auto = { tpl: ap.tpl, pairFt: ap.pairFt, shareLo: ap.shareLo, shareHi: ap.shareHi, minSep: ap.minSep, maxPerNav: ap.maxPerNav, facFt: ap.facFt, ghost: !!ap.ghost, wrapSteps };
             await genBulkCommit(pads, ent.ffzs || [], { inspectionScan: false, nameTemplate: '{section} - {asset}', template: null, auto }, null, null);
         } catch (e) { console.warn(`${TAG} [recreate] failed`, e); showToast(`Recreate failed: ${(e && e.message) || e}`, '#ff5252', 5000); }
     }
@@ -9476,13 +9539,13 @@
         const text = () => items.map(r => `${r.done ? '[x]' : '[ ]'}\t${r.name}\t${r.aims} aims\t${r.navs} navs\t${r.snaps} snaps${r.created === false ? '\tNOT CREATED' : ''}${r.flags.length ? '\t' + r.flags.join(' | ') : ''}`).join('\n');
         p.innerHTML = `<div style="display:flex;align-items:center;justify-content:space-between;gap:14px;padding:9px 12px;background:rgba(125,255,125,0.08);border-bottom:1px solid rgba(125,255,125,0.3);">
                 <span style="font-weight:800;color:#7dff7d;font-size:13px;">📋 Review — ${done.length} / ${items.length} done · ${left.length} left</span>
-                <span style="display:flex;gap:6px;"><button data-ar-copy style="background:rgba(255,255,255,0.12);border:none;color:#fff;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;">Copy</button>${gone.length ? `<button data-ar-recreate-all title="Rebuild every DELETED mission in this list with the current template" style="background:rgba(255,138,138,0.15);border:1px solid #ff8a8a;color:#ffb3b3;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;">↻ Recreate deleted (${gone.length})</button>` : ''}<button data-ar-restage="pumps" title="Rebuild the ghosts of every UNREVIEWED pad that has a lone pumping unit with the current template — missions stay, nothing is deleted" style="background:rgba(195,157,255,0.18);border:1px solid #c39dff;color:#d8c3ff;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;">🔁 Re-stage pumps</button><button data-ar-restage="all" title="Rebuild the ghosts of EVERY unreviewed mission with the current template — missions stay, nothing is deleted" style="background:rgba(195,157,255,0.18);border:1px solid #c39dff;color:#d8c3ff;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;">🔁 Re-stage all</button><button data-ar-delete title="Select every UNREVIEWED mission in the list and open 🗑 Delete (backup file + Delete Guard + slider) — start the run over" style="background:rgba(255,82,82,0.18);border:1px solid #ff5252;color:#ff8a8a;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;" ${left.filter(x => x.mid != null && x.created !== false).length ? '' : 'disabled'}>🗑 Delete unreviewed (${left.filter(x => x.mid != null && x.created !== false).length})</button><button data-ar-clear title="Forget this site's review list (missions stay)" style="background:rgba(255,255,255,0.12);border:none;color:#ff8a8a;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;">Forget list</button><button data-ar-close style="background:rgba(255,255,255,0.12);border:none;color:#fff;width:22px;height:22px;border-radius:4px;cursor:pointer;">✕</button></span>
+                <span style="display:flex;gap:6px;"><button data-ar-copy style="background:rgba(255,255,255,0.12);border:none;color:#fff;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;">Copy</button>${gone.length ? `<button data-ar-recreate-all title="Rebuild every DELETED mission in this list with the current template" style="background:rgba(255,138,138,0.15);border:1px solid #ff8a8a;color:#ffb3b3;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;">↻ Recreate deleted (${gone.length})</button>` : ''}<button data-ar-restage="pumps" title="Rebuild the ghosts of every UNREVIEWED pad that has a lone pumping unit with the current template — missions stay, nothing is deleted" style="background:rgba(195,157,255,0.18);border:1px solid #c39dff;color:#d8c3ff;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;">🔁 Re-stage pumps</button><button data-ar-restage="facilities" title="Rebuild the ghosts of every UNREVIEWED pad that has a facility outline (6+ corners or ≥ 250 ft) with the edge walk — missions stay" style="background:rgba(195,157,255,0.18);border:1px solid #c39dff;color:#d8c3ff;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;">🔁 Re-stage facilities</button><button data-ar-restage="all" title="Rebuild the ghosts of EVERY unreviewed mission with the current template — missions stay, nothing is deleted" style="background:rgba(195,157,255,0.18);border:1px solid #c39dff;color:#d8c3ff;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;">🔁 Re-stage all</button><button data-ar-delete title="Select every UNREVIEWED mission in the list and open 🗑 Delete (backup file + Delete Guard + slider) — start the run over" style="background:rgba(255,82,82,0.18);border:1px solid #ff5252;color:#ff8a8a;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;" ${left.filter(x => x.mid != null && x.created !== false).length ? '' : 'disabled'}>🗑 Delete unreviewed (${left.filter(x => x.mid != null && x.created !== false).length})</button><button data-ar-clear title="Forget this site's review list (missions stay)" style="background:rgba(255,255,255,0.12);border:none;color:#ff8a8a;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;">Forget list</button><button data-ar-close style="background:rgba(255,255,255,0.12);border:none;color:#fff;width:22px;height:22px;border-radius:4px;cursor:pointer;">✕</button></span>
             </div>
             <div style="padding:5px 12px;font-size:10px;color:#9ad;border-bottom:1px solid #2a2f38;">${headline ? escapeHtml(headline) + ' · ' : ''}click a row to open the mission · tick ☐ when it is reviewed / fixed · yellow = flagged (big asset, pulled-in or swung angles, splits), green = built clean</div>
             <div style="overflow:auto;flex:1;padding:4px 10px;font-size:11px;">${items.length ? flagged.map(row).join('') + clean.map(row).join('') + (done.length ? `<div style="padding:6px 4px 2px;color:#789;font-size:10px;">done (${done.length})</div>` + done.map(row).join('') : '') : '<div style="padding:10px;color:#888;">No Auto-shots runs recorded for this site yet.</div>'}</div>`;
         p.querySelector('[data-ar-close]').onclick = () => p.remove();
         p.querySelector('[data-ar-copy]').onclick = () => { try { navigator.clipboard.writeText(text()); showToast('Review list copied.', '#5fff5f', 2000); } catch (e) { console.warn(`${TAG} [review] copy failed`, e); } };
-        p.querySelectorAll('[data-ar-restage]').forEach(b => b.onclick = () => { const pumpsOnly = b.getAttribute('data-ar-restage') === 'pumps'; const todo = left.filter(x => x.mid != null && x.created !== false); if (!todo.length) { showToast('Nothing unreviewed.', '#ff9800', 2500); return; } genRestageItems(sid, todo, pumpsOnly); });
+        p.querySelectorAll('[data-ar-restage]').forEach(b => b.onclick = () => { const filter = b.getAttribute('data-ar-restage'); const todo = left.filter(x => x.mid != null && x.created !== false); if (!todo.length) { showToast('Nothing unreviewed.', '#ff9800', 2500); return; } genRestageItems(sid, todo, filter); });
         p.querySelector('[data-ar-delete]').onclick = (ev) => {
             const ids = left.filter(x => x.mid != null && x.created !== false).map(x => x.mid);
             if (!ids.length) return;
