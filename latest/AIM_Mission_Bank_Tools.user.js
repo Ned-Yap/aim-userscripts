@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.83
+// @version      3.84
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.83';
+    const SCRIPT_VERSION = '3.84';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -4533,7 +4533,7 @@
         // v3.60 📍 Points mode: the user drops the aim points, the solver places the fewest navs
         mode: 'ring', dots: [], plan: null, dotK: 3, shareLo: 95, shareHi: 110, pairFt: 30, minSep: 45, maxPerNav: 2, hover: null, hoverName: '', replace: false,
         // v3.74: drag-to-move / R-click-remove on STAGED ghosts (navs + aims)
-        drag: null, suppressClick: false, hitCursor: false, stagedGroups: [] };
+        drag: null, suppressClick: false, hitCursor: false, stagedGroups: [], passiveEl: null };
     const SG_GAP_KEY = 'aim-mb-sg-gap', SG_MODE_KEY = 'aim-mb-sg-mode', SG_DOTK_KEY = 'aim-mb-sg-dotk', SG_BAND_KEY = 'aim-mb-sg-band';
     try { const m = String(gmGet(SG_MODE_KEY, 'ring') || 'ring'); if (m === 'dots') sg.mode = 'dots'; const k = Number(gmGet(SG_DOTK_KEY, 3)); if (Number.isFinite(k) && k >= 1 && k <= 6) sg.dotK = k; } catch (e) {}
     try { const b = gmGet(SG_BAND_KEY, null); if (b && typeof b === 'object') { if (Number(b.lo) >= SG_MIN_FT) sg.shareLo = Number(b.lo); if (Number(b.hi) > sg.shareLo) sg.shareHi = Number(b.hi); if (Number(b.pair) >= 0) sg.pairFt = Number(b.pair); if (Number(b.sep) >= 5) sg.minSep = Number(b.sep); if (Number(b.max) >= 1) sg.maxPerNav = Number(b.max); } } catch (e) {}
@@ -4948,8 +4948,46 @@
     }
     // v3.74: render a given group list (sgDrawStaged reads storage; a live drag passes its
     // working copy so GM storage isn't re-read on every mousemove).
+    // v3.84: staged ghosts are editable the moment they're drawn — no 🎯 arming. Passive
+    // listeners on the map container: press-drag a nav / aim (aim carries its navs), R-click
+    // drops one. They stand down while the 🎯 tool is live (sgOnDown / sgOnContext own it then).
+    function sgPassiveInstall() {
+        const c = caMapContainer(); if (!c) return;
+        if (sg.passiveEl === c) return;
+        sgPassiveRemove();
+        sg.passiveEl = c;
+        c.addEventListener('mousedown', sgPassiveDown, true);
+        c.addEventListener('mousemove', sgPassiveMove, true);
+        c.addEventListener('contextmenu', sgPassiveContext, true);
+        c.addEventListener('click', sgPassiveClick, true);
+    }
+    function sgPassiveRemove() {
+        const c = sg.passiveEl; if (!c) return;
+        try { c.removeEventListener('mousedown', sgPassiveDown, true); c.removeEventListener('mousemove', sgPassiveMove, true); c.removeEventListener('contextmenu', sgPassiveContext, true); c.removeEventListener('click', sgPassiveClick, true); } catch (e) {}
+        sg.passiveEl = null;
+    }
+    function sgPassiveDown(e) {
+        if (sg.active || sg.drag || e.button !== 0 || e.shiftKey || e.ctrlKey || e.altKey) return;
+        if (!(sg.stagedGroups && sg.stagedGroups.length) || !caEditing()) return;
+        if (e.target && e.target.closest && e.target.closest('#' + SG_HUD_ID + ', [id^="aim-"], button, input, select')) return;
+        const hit = sgHitStaged(e, true); if (!hit) return;
+        e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+        if (!sg.container) sg.container = caMapContainer();
+        sgDragStart(e, hit);
+    }
+    function sgPassiveMove(e) {
+        if (sg.active || sg.drag) return;
+        if (!(sg.stagedGroups && sg.stagedGroups.length)) { if (sg.hitCursor) { sg.hitCursor = false; sg.passiveEl.style.cursor = ''; } return; }
+        try { const on = !!sgHitStaged(e); if (on !== sg.hitCursor) { sg.hitCursor = on; sg.passiveEl.style.cursor = on ? 'grab' : ''; } } catch (err) {}
+    }
+    function sgPassiveContext(e) {
+        if (sg.active || !(sg.stagedGroups && sg.stagedGroups.length) || !caEditing()) return;
+        if (sgContextStaged(e)) { e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); }
+    }
+    function sgPassiveClick(e) { if (!sg.active && sg.suppressClick) { e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); } }
     function sgRenderStaged(groups) {
         sgClearLayers(sg.stagedLayers);
+        if (groups.length) { try { sgPassiveInstall(); } catch (e) { console.warn(`${TAG} [🎯] passive install failed`, e); } }
         if (!groups.length) return;
         const L = composerGetL(), map = getLeafletMap(); if (!L || !map) return;
         sgEnsureStyle();
@@ -5217,6 +5255,7 @@
         sg.dots = []; sg.plan = null; sg.hover = null; sg.hoverName = ''; sg.replace = false;
         sg.sid = sid; sg.mid = sgMid();
         sg.container = caMapContainer();
+        if (sg.passiveEl) { sg.passiveEl.style.cursor = ''; sg.hitCursor = false; }
         sg.wheelOn = false;   // v3.56: plain wheel keeps zooming the map; Shift+wheel spins
         if (sg.container) {
             sg.container.addEventListener('mousedown', sgOnDown, true);
@@ -5806,7 +5845,7 @@
     function sgTick() {
         if (CONTEXT !== 'IFRAME') return;
         try { if (genOverlayOn && caEditing()) { genClearOverlay(); genOverlayOn = false; genUpdateBtn(); } } catch (e) {}   // v3.79: ⊕ asset overlay is a list-view tool
-        try { if (caEditing()) sgDrawStaged(false); else if (sg.stagedLayers.length || sg.active) { sgStop(true); sgClearLayers(sg.stagedLayers); sg.stagedKey = ''; sg.stagedGroups = []; } } catch (e) {}
+        try { if (caEditing()) sgDrawStaged(false); else if (sg.stagedLayers.length || sg.active) { sgStop(true); sgClearLayers(sg.stagedLayers); sg.stagedKey = ''; sg.stagedGroups = []; sgPassiveRemove(); } } catch (e) {}
     }
     // Nav group (1-based) of the step currently open in the editor — Click-to-Add + 🎯 insert after it.
     function caOpenStepNavGroup() {
