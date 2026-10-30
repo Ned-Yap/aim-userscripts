@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.89
+// @version      3.90
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.89';
+    const SCRIPT_VERSION = '3.90';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -4636,9 +4636,17 @@
         try { gmSet(SG_TPL_KEY, user); } catch (e) { console.warn(`${TAG} [🎯] template delete failed`, e); }
     }
     // Ghost store: { siteKey: { missionId: { name, groups: [...] } } }
-    function sgGhostsAll() { try { const o = gmGet(SG_GHOST_KEY, {}); return (o && typeof o === 'object') ? o : {}; } catch (e) { console.warn(`${TAG} [🎯] ghost read failed`, e); return {}; } }
+    // v3.90: memory copy of the store. Every redraw / hit-test used to re-read GM while the write was
+    // still debounced → a moved ghost snapped back for a moment and the next press missed it.
+    let sgGhostMem = null;
+    function sgGhostsAll() {
+        if (sgGhostMem) return sgGhostMem;
+        try { const o = gmGet(SG_GHOST_KEY, {}); sgGhostMem = (o && typeof o === 'object') ? o : {}; } catch (e) { console.warn(`${TAG} [🎯] ghost read failed`, e); sgGhostMem = {}; }
+        return sgGhostMem;
+    }
     let sgSaveT = null;
-    function sgGhostsWrite(all) { clearTimeout(sgSaveT); sgSaveT = setTimeout(() => { try { gmSet(SG_GHOST_KEY, all); } catch (e) { console.warn(`${TAG} [🎯] ghost save failed`, e); } }, 300); }
+    function sgGhostsWrite(all) { sgGhostMem = all; clearTimeout(sgSaveT); sgSaveT = setTimeout(() => { try { gmSet(SG_GHOST_KEY, all); } catch (e) { console.warn(`${TAG} [🎯] ghost save failed`, e); } }, 300); }
+    try { document.addEventListener('visibilitychange', () => { if (!document.hidden && !sgSaveT) sgGhostMem = null; }); } catch (e) {}   // another tab may have written
     function sgGhostsFor(sid, mid) { const all = sgGhostsAll(); const s = all[envSiteKey(sid)] || {}; const m = s[String(mid)]; return m && Array.isArray(m.groups) ? m.groups : []; }
     function sgGhostsSet(sid, mid, name, groups) {
         const all = sgGhostsAll(); const sk = envSiteKey(sid);
@@ -4653,7 +4661,7 @@
         try {
             const all = sgGhostsAll(); let hit = false;
             Object.keys(all).forEach(sk => { if (all[sk] && all[sk].new) { delete all[sk].new; hit = true; if (!Object.keys(all[sk]).length) delete all[sk]; } });
-            if (hit) { try { gmSet(SG_GHOST_KEY, all); } catch (e) { console.warn(`${TAG} [🎯] ghost purge save failed`, e); } sg.stagedKey = ''; }
+            if (hit) { sgGhostMem = all; try { gmSet(SG_GHOST_KEY, all); } catch (e) { console.warn(`${TAG} [🎯] ghost purge save failed`, e); } sg.stagedKey = ''; }
         } catch (e) { console.warn(`${TAG} [🎯] ghost purge failed`, e); }
     }
     try { sgDropNewGhosts(); } catch (e) {}
@@ -5040,6 +5048,7 @@
     // drops one. They stand down while the 🎯 tool is live (sgOnDown / sgOnContext own it then).
     function sgPassiveInstall() {
         const c = caMapContainer(); if (!c) return;
+        if (!sg.ent && !sg.entLoading) { const sid = getCurrentSiteID(); if (sid) { sg.entLoading = true; genFetchEntities(sid).then(ent => { sg.ent = ent; genEntCache[sid] = ent; sg.entLoading = false; sg.stagedKey = ''; }).catch(err => { sg.entLoading = false; console.warn(`${TAG} [🎯] entity load failed`, err); }); } }
         if (sg.passiveEl === c) return;
         sgPassiveRemove();
         sg.passiveEl = c;
@@ -5081,11 +5090,11 @@
         const cv = sgCanvas(L);
         const keep = l => { sg.stagedLayers.push(l); l.addTo(map); return l; };
         const dragging = sg.drag ? sg.drag : null;
+        const entChk = sg.ent || genEntCache[getCurrentSiteID()] || null;
         // v3.89: the pink dots are the AIMS — where the snapshots look (one dot per distinct point, "×3" =
         // three navs shoot it). Those are what you drag. Unit centroids (g.dots) are grey reference rings.
         const aimsAll = [];
         groups.forEach(g => (g.navs || []).forEach(p => { const as = (p.aims && p.aims.length) ? p.aims : [g.focus]; as.forEach(a => { const hit = aimsAll.find(x => mbApproxMeters(x.lat, x.lng, a.lat, a.lng) < 0.3); if (hit) hit.n++; else aimsAll.push({ lat: a.lat, lng: a.lng, n: 1 }); }); }));
-        groups.forEach(g => { (g.dots || []).forEach(d => { if (!aimsAll.some(x => mbApproxMeters(x.lat, x.lng, d.lat, d.lng) < 0.3)) keep(L.circleMarker([d.lat, d.lng], { renderer: cv || undefined, interactive: false, radius: 4, color: '#cfd8dc', weight: 1.5, fill: false, opacity: 0.9 })); }); });
         aimsAll.forEach((a, k) => { keep(L.circleMarker([a.lat, a.lng], { renderer: cv || undefined, interactive: false, radius: 8, color: '#ffffff', weight: 2, fillColor: '#ff8ad2', fillOpacity: 1 })); keep(sgChip(L, a.lat, a.lng, `A${k + 1}${a.n > 1 ? ` ×${a.n}` : ''}`, '#ff8ad2', 915, 'dl')); });
         groups.forEach((g, gi) => {
             try {
@@ -5093,7 +5102,8 @@
                     const aims = (p.aims && p.aims.length) ? p.aims : [g.focus];
                     aims.forEach(a => keep(L.polyline([[a.lat, a.lng], [p.lat, p.lng]], { renderer: cv || undefined, interactive: false, color: '#c39dff', weight: 3, dashArray: '7 4', opacity: 1 })));
                     const hot = dragging && dragging.gi === gi && dragging.ni === i;
-                    keep(L.circleMarker([p.lat, p.lng], { renderer: cv || undefined, interactive: false, radius: hot ? 11 : 9, color: hot ? '#ffd54f' : '#ffffff', weight: hot ? 3 : 2, fillColor: '#c39dff', fillOpacity: 0.95 }));
+                    const bad = entChk && !sgNavLegal(p, entChk);
+                    keep(L.circleMarker([p.lat, p.lng], { renderer: cv || undefined, interactive: false, radius: hot ? 11 : 9, color: hot ? '#ffd54f' : (bad ? '#ff5252' : '#ffffff'), weight: hot || bad ? 3 : 2, fillColor: bad ? '#ff5252' : '#c39dff', fillOpacity: 0.95 }));
                     const ns = (p.aims && p.aims.length) ? p.aims.length : (p.snaps || g.snapsPerNav || 1);
                     // chip carries nav→aim ft so a dragged nav can be kept inside the band
                     const fts = (p.aims && p.aims.length) ? p.aims.map(a => { const ft = Math.round(sgLLFt(p, a)); const st = sgFtStatus(ft, true); return `<span style="color:${SG_COL[st]}">${ft}</span>`; }) : [];
@@ -5464,6 +5474,18 @@
         } else { const p = sgDragPoint(d); p.lat = ll.lat; p.lng = ll.lng; }
         if (!d.raf) d.raf = requestAnimationFrame(() => { d.raf = 0; try { sgRenderStaged(d.groups); } catch (err) { console.warn(`${TAG} [🎯] drag draw failed`, err); } });
     }
+    // Re-place one nav around its aim: same bearing + distance first, then swings of 5°, then the band.
+    function sgRelegalNav(p, aim, p0, aim0, ent) {
+        if (sgNavLegal(p, ent)) return 'ok';
+        const mLat = 110540, mLng = 111320 * Math.cos(aim0.lat * Math.PI / 180);
+        const dx = (p0.lng - aim0.lng) * mLng, dy = (p0.lat - aim0.lat) * mLat;
+        const distM = Math.hypot(dx, dy) || (100 / 3.28084), brg = (Math.atan2(dx, dy) * 180 / Math.PI + 360) % 360;
+        const ap = genAutoPrefs(); const lo = Number(ap.shareLo) || 95, hi = Number(ap.shareHi) || 110, distFt = Math.round(distM * 3.28084);
+        const dists = [distFt]; for (let f = lo; f <= hi; f += 5) if (f !== distFt) dists.push(f); dists.sort((a, b) => Math.abs(a - distFt) - Math.abs(b - distFt));
+        const swings = [0]; for (let sw = 5; sw <= 90; sw += 5) swings.push(sw, -sw);
+        for (const ft of dists) for (const sw of swings) { const q = sgOffset(aim, brg + sw, ft / 3.28084); if (sgNavLegal(q, ent)) { p.lat = q.lat; p.lng = q.lng; return sw || ft !== distFt ? 'moved' : 'ok'; } }
+        return 'stuck';
+    }
     function sgDragEnd(e) {
         const d = sg.drag; if (!d) return;
         window.removeEventListener('mousemove', sgDragMove, true);
@@ -5476,8 +5498,22 @@
         sg.suppressClick = true; setTimeout(() => { sg.suppressClick = false; }, 300);
         if (d.moved) {
             try { const p = sgDragPoint(d); fetchElevation(p.lat, p.lng); } catch (err) {}
+            let note = '';
+            if ((d.kind === 'aim' || d.kind === 'focus') && d.cluster && d.cluster.length) {
+                const ent = sg.ent || genEntCache[getCurrentSiteID()] || null;
+                if (!ent) note = ' · FFZ check skipped (entities not loaded yet)';
+                else {
+                    const aim = sgDragPoint(d); let swung = 0, stuck = 0;
+                    d.cluster.forEach(c => { const r = sgRelegalNav(c.p, aim, c.p0, d.orig, ent); if (r === 'moved') swung++; else if (r === 'stuck') stuck++; });
+                    if (swung) note += ` · ${swung} nav(s) swung to stay in the FFZ`;
+                    if (stuck) note += ` · ⚠ ${stuck} nav(s) have NO legal spot — move the shot again`;
+                }
+            } else if (d.kind === 'nav') {
+                const ent = sg.ent || genEntCache[getCurrentSiteID()] || null;
+                if (ent && !sgNavLegal(sgDragPoint(d), ent)) note = ' · ⚠ outside the FFZ / over an NFZ';
+            }
             sgGroupsMutate(() => d.groups);
-            showToast(`🎯 ${d.kind === 'aim' || d.kind === 'focus' ? `shot moved with ${(d.cluster || []).length} nav(s)` : `G${d.gi + 1} · N${d.ni + 1} moved (nav only)`}.`, '#c39dff', 1500);
+            showToast(`🎯 ${d.kind === 'aim' || d.kind === 'focus' ? `shot moved with ${(d.cluster || []).length} nav(s)` : `G${d.gi + 1} · N${d.ni + 1} moved (nav only)`}${note}.`, note.includes('⚠') ? '#ff9800' : '#c39dff', note ? 4000 : 1500);
         } else sgDrawStaged(true);
     }
     // R-click on a staged nav drops that nav (the group when it was the last one); on an
