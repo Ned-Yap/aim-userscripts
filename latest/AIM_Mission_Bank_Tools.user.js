@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.77
+// @version      3.78
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.77';
+    const SCRIPT_VERSION = '3.78';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -8925,7 +8925,7 @@
         reports.forEach(r => {
             let center = null;
             if (r.ring && r.ring.length) { let la = 0, ln = 0; r.ring.forEach(p => { la += p.lat; ln += p.lng; }); center = { lat: la / r.ring.length, lng: ln / r.ring.length }; }
-            const it = { mid: r.mid != null ? r.mid : null, name: r.name, aims: r.aims, navs: r.navs, snaps: r.snaps, flags: (r.flags || []).slice(0, 40), created: r.created !== false, center, at: Date.now(), done: false };
+            const it = { pad: r.pad || null, mid: r.mid != null ? r.mid : null, name: r.name, aims: r.aims, navs: r.navs, snaps: r.snaps, flags: (r.flags || []).slice(0, 40), created: r.created !== false, center, at: Date.now(), done: false };
             const i = it.mid != null ? items.findIndex(x => x.mid === it.mid) : -1;
             if (i >= 0) { it.done = !!items[i].done; items[i] = it; } else items.push(it);
         });
@@ -8939,6 +8939,48 @@
         if (!all[sk].items.length) delete all[sk];
         genReviewSave(all);
         const open = document.getElementById('aim-mb-gen-auto-report'); if (open) { try { genReviewOpen(sid, ''); } catch (e) {} }
+    }
+    // v3.78 🔁 Re-stage: rebuild the Auto-shots ghosts for EXISTING missions in the review list
+    // (after a template fix) — the mission stays, its ghosts are replaced, and the commit's
+    // `replace` strips whatever navs it already has. No delete, no recreate.
+    let genRestageBusy = false;
+    async function genRestageItems(sid, items, pumpsOnly) {
+        if (genRestageBusy) { showToast('Re-stage already running.', '#ff9800', 2500); return; }
+        genRestageBusy = true;
+        try {
+            let ent = genEntCache[sid]; if (!ent) { showToast('Loading site entities…', '#9ad', 2000); ent = await genFetchEntities(sid); genEntCache[sid] = ent; }
+            const prefs = genAutoPrefs();
+            const roots = (ent.assets || []).filter(a => a.parentId == null && a.ring && a.ring.length >= 3);
+            const findPad = it => (it.pad && roots.find(a => a.name === it.pad)) || (it.center ? roots.filter(a => genPointInPoly(it.center, a.ring)).sort((x, y) => mbRingArea(x.ring) - mbRingArea(y.ring))[0] : null) || null;
+            const jobs = [];
+            items.forEach(it => {
+                const pad = findPad(it); if (!pad) { jobs.push({ it, skip: 'pad not found' }); return; }
+                if (pumpsOnly) { let dd = null; try { dd = genAutoDots(pad, ent, prefs); } catch (e) { jobs.push({ it, skip: `scan failed: ${(e && e.message) || e}` }); return; } if (!(dd.pumps && dd.pumps.length)) return; }
+                jobs.push({ it, pad });
+            });
+            const todo = jobs.filter(j => j.pad);
+            if (!todo.length) { showToast(pumpsOnly ? 'No unreviewed pad has a lone pumping unit.' : 'Nothing to re-stage.', '#ff9800', 3500); return; }
+            if (!confirm(`Re-stage ${todo.length} mission(s)${pumpsOnly ? ' (pumping-unit pads)' : ''}?\n\nTheir current ghosts are replaced with the fixed template. Missions are NOT deleted; committing replaces their navs.`)) return;
+            const pts = [];
+            todo.forEach(({ pad }) => { try { const dd = genAutoDots(pad, ent, prefs); dd.dots.forEach(d => { if (getElevationFromCache(d.lat, d.lng) == null) pts.push({ lat: d.lat, lng: d.lng }); }); dd.rows.forEach(r => r.forEach(a => { const c = a.c || genCentroid(a.ring); if (getElevationFromCache(c.lat, c.lng) == null) pts.push(c); })); (dd.pumps || []).forEach(a => { const c = genCentroid(a.ring); if (getElevationFromCache(c.lat, c.lng) == null) pts.push(c); }); const pc = genCentroid(pad.ring); if (getElevationFromCache(pc.lat, pc.lng) == null) pts.push(pc); } catch (e) { console.warn(`${TAG} [restage] dot scan failed for ${pad.name}`, e); } });
+            if (pts.length) { showToast(`Fetching ${pts.length} elevation(s)…`, '#9ad', 2500); try { await bulkFetchElevations(pts); } catch (e) { console.warn(`${TAG} [restage] elevation fetch failed`, e); } }
+            const reports = []; let done = 0; const skipped = jobs.filter(j => j.skip).map(j => `${j.it.name}: ${j.skip}`);
+            todo.forEach(({ it, pad }) => {
+                let built = null;
+                try { built = genAutoBuild(pad, ent, Object.assign({ nameTemplate: '{section} - {asset}' }, prefs)); } catch (e) { console.warn(`${TAG} [restage] build failed for "${pad.name}"`, e); skipped.push(`${it.name}: build error — ${(e && e.message) || e}`); return; }
+                if (!built || !built.ghostGroups || !built.ghostGroups.length) { skipped.push(`${it.name}: nothing to stage (no FFZ / elevation / legal spot)`); return; }
+                sgGhostsSet(sid, it.mid, it.name, built.ghostGroups);
+                built.report.mid = it.mid; built.report.name = it.name; built.report.created = true;
+                built.report.flags.push(`re-staged as ${built.ghostGroups.length} ghost nav(s) — open it, ⚡ commit replaces its navs`);
+                reports.push(built.report); done++;
+            });
+            if (reports.length) genReviewMerge(sid, reports);
+            sg.stagedKey = ''; try { if (caEditing()) sgDrawStaged(true); sgUpdateBtn(); } catch (e) {}
+            if (skipped.length) console.warn(`${TAG} [restage] skipped:\n${skipped.join('\n')}`);
+            genReviewOpen(sid, `${done} re-staged${skipped.length ? ` · ${skipped.length} skipped (console)` : ''}`);
+            showToast(`🔁 ${done} mission(s) re-staged — review them, then commit each.`, '#5fff5f', 5000);
+        } catch (e) { console.warn(`${TAG} [restage] failed`, e); showToast(`Re-stage failed: ${(e && e.message) || e}`, '#ff5252', 5000); }
+        finally { genRestageBusy = false; }
     }
     function genReviewSetDone(sid, mid, done) {
         const all = genReviewAll(); const sk = envSiteKey(sid); if (!all[sk]) return;
@@ -8970,12 +9012,13 @@
         const text = () => items.map(r => `${r.done ? '[x]' : '[ ]'}\t${r.name}\t${r.aims} aims\t${r.navs} navs\t${r.snaps} snaps${r.created === false ? '\tNOT CREATED' : ''}${r.flags.length ? '\t' + r.flags.join(' | ') : ''}`).join('\n');
         p.innerHTML = `<div style="display:flex;align-items:center;justify-content:space-between;gap:14px;padding:9px 12px;background:rgba(125,255,125,0.08);border-bottom:1px solid rgba(125,255,125,0.3);">
                 <span style="font-weight:800;color:#7dff7d;font-size:13px;">📋 Review — ${done.length} / ${items.length} done · ${left.length} left</span>
-                <span style="display:flex;gap:6px;"><button data-ar-copy style="background:rgba(255,255,255,0.12);border:none;color:#fff;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;">Copy</button><button data-ar-delete title="Select every UNREVIEWED mission in the list and open 🗑 Delete (backup file + Delete Guard + slider) — start the run over" style="background:rgba(255,82,82,0.18);border:1px solid #ff5252;color:#ff8a8a;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;" ${left.filter(x => x.mid != null && x.created !== false).length ? '' : 'disabled'}>🗑 Delete unreviewed (${left.filter(x => x.mid != null && x.created !== false).length})</button><button data-ar-clear title="Forget this site's review list (missions stay)" style="background:rgba(255,255,255,0.12);border:none;color:#ff8a8a;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;">Forget list</button><button data-ar-close style="background:rgba(255,255,255,0.12);border:none;color:#fff;width:22px;height:22px;border-radius:4px;cursor:pointer;">✕</button></span>
+                <span style="display:flex;gap:6px;"><button data-ar-copy style="background:rgba(255,255,255,0.12);border:none;color:#fff;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;">Copy</button><button data-ar-restage="pumps" title="Rebuild the ghosts of every UNREVIEWED pad that has a lone pumping unit with the current template — missions stay, nothing is deleted" style="background:rgba(195,157,255,0.18);border:1px solid #c39dff;color:#d8c3ff;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;">🔁 Re-stage pumps</button><button data-ar-restage="all" title="Rebuild the ghosts of EVERY unreviewed mission with the current template — missions stay, nothing is deleted" style="background:rgba(195,157,255,0.18);border:1px solid #c39dff;color:#d8c3ff;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;">🔁 Re-stage all</button><button data-ar-delete title="Select every UNREVIEWED mission in the list and open 🗑 Delete (backup file + Delete Guard + slider) — start the run over" style="background:rgba(255,82,82,0.18);border:1px solid #ff5252;color:#ff8a8a;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;" ${left.filter(x => x.mid != null && x.created !== false).length ? '' : 'disabled'}>🗑 Delete unreviewed (${left.filter(x => x.mid != null && x.created !== false).length})</button><button data-ar-clear title="Forget this site's review list (missions stay)" style="background:rgba(255,255,255,0.12);border:none;color:#ff8a8a;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;">Forget list</button><button data-ar-close style="background:rgba(255,255,255,0.12);border:none;color:#fff;width:22px;height:22px;border-radius:4px;cursor:pointer;">✕</button></span>
             </div>
             <div style="padding:5px 12px;font-size:10px;color:#9ad;border-bottom:1px solid #2a2f38;">${headline ? escapeHtml(headline) + ' · ' : ''}click a row to open the mission · tick ☐ when it is reviewed / fixed · yellow = flagged (big asset, pulled-in or swung angles, splits), green = built clean</div>
             <div style="overflow:auto;flex:1;padding:4px 10px;font-size:11px;">${items.length ? flagged.map(row).join('') + clean.map(row).join('') + (done.length ? `<div style="padding:6px 4px 2px;color:#789;font-size:10px;">done (${done.length})</div>` + done.map(row).join('') : '') : '<div style="padding:10px;color:#888;">No Auto-shots runs recorded for this site yet.</div>'}</div>`;
         p.querySelector('[data-ar-close]').onclick = () => p.remove();
         p.querySelector('[data-ar-copy]').onclick = () => { try { navigator.clipboard.writeText(text()); showToast('Review list copied.', '#5fff5f', 2000); } catch (e) { console.warn(`${TAG} [review] copy failed`, e); } };
+        p.querySelectorAll('[data-ar-restage]').forEach(b => b.onclick = () => { const pumpsOnly = b.getAttribute('data-ar-restage') === 'pumps'; const todo = left.filter(x => x.mid != null && x.created !== false); if (!todo.length) { showToast('Nothing unreviewed.', '#ff9800', 2500); return; } genRestageItems(sid, todo, pumpsOnly); });
         p.querySelector('[data-ar-delete]').onclick = (ev) => {
             const ids = left.filter(x => x.mid != null && x.created !== false).map(x => x.mid);
             if (!ids.length) return;
@@ -9012,7 +9055,7 @@
         if (auto && ent) {
             // ground under every child centroid (snapshot altitude = ground + default AGL)
             const pts = [];
-            assets.forEach(pad => { try { const dd = genAutoDots(pad, ent, auto); dd.dots.forEach(d => { if (getElevationFromCache(d.lat, d.lng) == null) pts.push({ lat: d.lat, lng: d.lng }); }); dd.rows.forEach(r => r.forEach(a => { const c = a.c || genCentroid(a.ring); if (getElevationFromCache(c.lat, c.lng) == null) pts.push(c); })); } catch (e) { console.warn(`${TAG} [gen-auto] dot scan failed for ${pad.name}`, e); } });
+            assets.forEach(pad => { try { const dd = genAutoDots(pad, ent, auto); dd.dots.forEach(d => { if (getElevationFromCache(d.lat, d.lng) == null) pts.push({ lat: d.lat, lng: d.lng }); }); dd.rows.forEach(r => r.forEach(a => { const c = a.c || genCentroid(a.ring); if (getElevationFromCache(c.lat, c.lng) == null) pts.push(c); })); (dd.pumps || []).forEach(a => { const c = genCentroid(a.ring); if (getElevationFromCache(c.lat, c.lng) == null) pts.push(c); }); const pc = genCentroid(pad.ring); if (getElevationFromCache(pc.lat, pc.lng) == null) pts.push(pc); } catch (e) { console.warn(`${TAG} [gen-auto] dot scan failed for ${pad.name}`, e); } });
             if (pts.length) { setStatus(`Fetching ${pts.length} elevation(s)…`); try { await bulkFetchElevations(pts); } catch (e) { console.warn(`${TAG} [gen-auto] elevation fetch failed`, e); } }
         }
         for (let i = 0; i < assets.length; i++) {
