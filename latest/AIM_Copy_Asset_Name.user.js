@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.493
+// @version      4.494
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.493';
+    const SCRIPT_VERSION = '4.494';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -23045,7 +23045,7 @@
             missing: null, missingAt: null, missingOp: '', missingSel: new Set(), missStatus: { producing: true, drilled: true, inactive: true, plugged: true, facility: true }, finding: false, missingFac: true,
             paAssets: true, paSizeFt: 100, paMatchFt: 250, paReview: null, thirdType: 'AVOID - 3rd Party Pad', areaFt: 300, thirdSizeFt: 150 },   // v4.466: own size for other operators' pads   // v4.450: fill-in area = the site's flight envelope (FFZs) + areaFt when no importer boundary is drawn   // v4.444: one searchable type for every other operator's well / facility   // v4.413: 🩻 plugged / retired → P&A assets (own size), status review (API match, location tolerance)   // v4.366: fill-in · facilities too   // v4.356: Enverus cross-check · v4.358: client review report
         hv: { on: true, col: null, useEnv: true },     // v4.418: h - / v - / d - type prefix: file deviation column → Enverus trajectory → the asset's existing prefix
-        pri: { on: false, open: false, oilCol: null, waterCol: null, blpdCol: null, priCol: null, clusterFt: 100, padFt: 50, p1Min: 250, p1Max: 1500, summary: null, zeroUntier: true, envUntier: true },   // v4.347: priority tiers · v4.357: zero-production / Enverus-dead wells get no tier
+        pri: { on: false, open: false, oilCol: null, waterCol: null, blpdCol: null, gasCol: null, priCol: null, clusterFt: 100, padFt: 50, p1Min: 250, p1Max: 1500, summary: null, zeroUntier: true, envUntier: true },   // v4.347: priority tiers · v4.357: zero-production / Enverus-dead wells get no tier
         advOpen: false,                             // v4.331: ▸ Advanced (subset tools + delete mode) expanded — GM-remembered
         secOpen: { bounds: true, data: true, type: false, place: false, env: false, resp: false, create: true, adv: false },   // v4.352: collapsible sections — GM-remembered
         mapOpen: false,                             // v4.331: column-mapping row expanded (auto-collapses once applied)
@@ -23196,7 +23196,7 @@
     // Prioritized block in the notes. Pad = the nested parent/child tree +
     // anything within padFt of the pad polygon; brand-new points cluster by
     // clusterFt. A pad with no numbers gets NO prefix and is flagged.
-    const IMP_TIER_RE = /^P([0-3])\s*[-–—:]\s*/i;   // v4.477: P0 = tiered on purpose, no priority (zero production / dead / client inactive / no pad numbers); NO prefix = the tool never processed it
+    const IMP_TIER_RE = /^P([0-4])\s*[-–—:]\s*/i;   // v4.494: P4 = the client's own tier for NO production (shut in / TA / down → quarterly); replaces P0 (legacy, still read). NO prefix = the tool never processed it
     const IMP_TIER_COLORS = { P1: '#ff7b00', P2: '#ffe14d', P3: '#4fc3f7', none: '#ff5252' };   // v4.352: map fill per tier (P1 orange = top priority, P2 yellow, P3 blue, untiered red)
     function impTierStrip(sub) { return String(sub || '').replace(IMP_TIER_RE, '').trim(); }
     function impTierOf(sub) { const m = String(sub || '').match(IMP_TIER_RE); return m && m[1] !== '0' ? `P${m[1]}` : ''; }   // P0 reads as 'no tier' everywhere tiers are compared
@@ -23206,14 +23206,16 @@
         const pick = (rx, not) => { const i = lower.findIndex(h => rx.test(h) && !(not && not.test(h))); return i >= 0 ? headers[i] : null; };
         const oil = pick(/\boil\b|oil_/, /api|well_origin/), water = pick(/\bwater\b|water_|\bwtr\b/, null);
         const blpd = (oil && water) ? null : pick(/blpd|fluid|total.*prod|production.*(total|vol)|\bprod\b/, /method|name|type/);
+        const gas = pick(/\bgas\b|mcf/, /lift|method|name|type|api/);   // v4.494: gas-only wells are P3 (any production at all), not P4
         let pri = null;
         headers.forEach(h => {
             if (pri) return;
             const vals = imp.rows.map(r => String(r[h] == null ? '' : r[h]).trim()).filter(Boolean);
             if (vals.length >= 3 && vals.filter(v => /^P?[1-3]$/i.test(v)).length >= vals.length * 0.8 && /pri|tier|rank/i.test(h)) pri = h;
         });
-        return { oilCol: oil, waterCol: water, blpdCol: blpd, priCol: pri };
+        return { oilCol: oil, waterCol: water, blpdCol: blpd, gasCol: gas, priCol: pri };
     }
+    function impPriGas(p) { const c = imp.pri; if (!c.gasCol || c.priCol) return null; return impNum((imp.rows[p.i] || {})[c.gasCol]); }
     function impPriBlpd(p) {
         const r = imp.rows[p.i] || {}; const c = imp.pri;
         if (c.priCol) return null;
@@ -23248,7 +23250,7 @@
         live.forEach(p => {
             const r = imp.rows[p.i] || {};
             const d = direct ? String(r[c.priCol] == null ? '' : r[c.priCol]).trim().toUpperCase().replace(/^(\d)$/, 'P$1') : '';
-            p.pri = { blpd: direct ? null : impPriBlpd(p), direct: /^P[1-3]$/.test(d) ? d : '', tier: '', padKey: null, padName: '', padTotal: null, padN: 0, padWith: 0, flags: [], before: p.dup ? impTierOf(p.dupSubtype) : '', off: 0, offOf: '' };
+            p.pri = { blpd: direct ? null : impPriBlpd(p), gas: direct ? null : impPriGas(p), direct: /^P[1-3]$/.test(d) ? d : '', tier: '', padKey: null, padName: '', padTotal: null, padN: 0, padWith: 0, flags: [], before: p.dup ? impTierOf(p.dupSubtype) : '', off: 0, offOf: '' };
             // v4.351: PLACEMENT — a name match whose point is not inside its own
             // asset polygon, or a point near (not on) a pad polygon, needs a ↔ Move
             // before it is created/updated. Distance in ft to the polygon it belongs to.
@@ -23313,6 +23315,7 @@
             const padName = root ? (root.name || `asset ${root.id}`) : `new pad ${ci}`;
             const with_ = members.filter(p => direct ? p.pri.direct : p.pri.blpd != null);
             const total = direct ? null : with_.reduce((a, p) => a + p.pri.blpd, 0);
+            const gas = direct ? null : members.reduce((a, p) => a + (p.pri.gas || 0), 0);
             let tier = direct ? '' : (with_.length ? impTierFromTotal(total) : '');
             const flags = [];
             if (!with_.length) flags.push(direct ? 'no priority value for this pad' : 'no production numbers for this pad');
@@ -23325,7 +23328,7 @@
             const off = members.filter(p => p.pri.off > 0 && !p.dup);
             if (off.length) flags.push(`📍 ${off.length} new point${off.length === 1 ? ' sits' : 's sit'} OUTSIDE the pad polygon — ↔ Move onto it or confirm separate: ${off.slice(0, 3).map(p => `${p.name} (${p.pri.off} ft off ${p.pri.offOf})`).join(', ')}${off.length > 3 ? ` +${off.length - 3}` : ''}`);
             if (direct) { const set = new Set(with_.map(p => p.pri.direct)); if (set.size > 1) flags.push(`assets on one pad carry different priorities (${[...set].join(', ')})`); if (set.size === 1) tier = [...set][0]; }
-            members.forEach(p => { p.pri.padKey = key; p.pri.padName = padName; p.pri.padTotal = total; p.pri.padN = members.length; p.pri.padWith = with_.length; p.pri.tier = direct ? (p.pri.direct || tier) : tier; p.pri.flags = flags.slice(); impPriDemote(p); });
+            members.forEach(p => { p.pri.padKey = key; p.pri.padName = padName; p.pri.padTotal = total; p.pri.padGas = gas; p.pri.padN = members.length; p.pri.padWith = with_.length; p.pri.tier = direct ? (p.pri.direct || tier) : tier; p.pri.flags = flags.slice(); impPriDemote(p); });
             if (pads.has(key)) { const ex = pads.get(key); ex.members = ex.members.concat(members); ex.flags = [...new Set(ex.flags.concat(flags))]; }
             else pads.set(key, { key, name: padName, members, total, tier, flags });
         });
@@ -23334,9 +23337,10 @@
             if (!/^a:/.test(pad.key)) return;
             const with_ = pad.members.filter(p => direct ? p.pri.direct : p.pri.blpd != null);
             const total = direct ? null : with_.reduce((a, p) => a + p.pri.blpd, 0);
+            const gas = direct ? null : pad.members.reduce((a, p) => a + (p.pri.gas || 0), 0);
             const tier = direct ? pad.tier : (with_.length ? impTierFromTotal(total) : '');
             pad.total = total; pad.tier = tier;
-            pad.members.forEach(p => { p.pri.padTotal = total; p.pri.padN = pad.members.length; p.pri.padWith = with_.length; if (!direct) p.pri.tier = tier; p.pri.flags = pad.flags.slice(); impPriDemote(p); });
+            pad.members.forEach(p => { p.pri.padTotal = total; p.pri.padGas = gas; p.pri.padN = pad.members.length; p.pri.padWith = with_.length; if (!direct) p.pri.tier = tier; p.pri.flags = pad.flags.slice(); impPriDemote(p); });
         });
         c.pads = pads;
         impSummarizePriority();
@@ -23445,7 +23449,7 @@
         if (p.thirdParty) { p.pri.untier = 'third'; p.pri.tier = ''; return; }        // not ours — an obstacle, never an inspection target
         if (p.client && p.client.producing) return;                                   // the client confirmed it is producing — beats Enverus
         if (p.client && (p.client.inactive || p.client.planned && !p.client.producing)) { p.pri.untier = 'client'; p.pri.tier = ''; return; }   // client says inactive / not yet drilled
-        if (c.zeroUntier && !c.priCol && p.pri.blpd === 0) { p.pri.untier = 'zero'; p.pri.tier = ''; return; }
+        if (c.zeroUntier && !c.priCol && p.pri.blpd === 0) { if (p.pri.gas > 0) { p.pri.gasOnly = true; return; } p.pri.untier = 'zero'; p.pri.tier = ''; return; }   // v4.494: 0 BLPD but gas flowing = still producing → keeps the pad tier (P3 on a 0-BLPD pad)
         if (c.envUntier && p.env && p.env.found) { const b = impEnvBucket(p.env); if (b === 'inactive' || b === 'plugged') { p.pri.untier = 'env'; p.pri.tier = ''; } }
     }
     function impPriNotesBlocks(p, dateStr) {
@@ -23453,14 +23457,14 @@
         const fmt = (n) => n == null ? '—' : Math.round(n).toLocaleString();
         const q = p.pri;
         const line = q.tier
-            ? `${q.tier} · ${c.priCol ? 'from the client\'s priority column' : `pad total ${fmt(q.padTotal)} BLPD across ${q.padN} asset${q.padN === 1 ? '' : 's'}${q.padWith < q.padN ? ` (${q.padWith} with numbers)` : ''}`}${q.padName && !/^new pad/.test(q.padName) ? ` · pad ${q.padName}` : ''}`   // v4.470: pad-level only (account manager 2026-10-26) — same line on the pad and all its wells
-            : (q.untier === 'pa' ? `not tiered — ${p.pa && p.pa.label ? p.pa.label.toLowerCase() : 'plugged'} (flyable ground, not inspected)` : (q.untier === 'third' ? 'not tiered — third-party well (obstacle, not inspected)' : (q.untier === 'client' ? `not tiered — client confirmed ${p.client && p.client.status ? p.client.status.toLowerCase() : 'inactive'}` : (q.untier === 'zero' ? 'not tiered — zero production (0 BLPD in the client list)' : (q.untier === 'env' ? `not tiered — Enverus reports ${p.env && p.env.status ? p.env.status : 'inactive'}` : `not tiered — ${q.flags[0] || 'no numbers'}`)))));
+            ? `${q.tier} · ${c.priCol ? 'from the client\'s priority column' : `pad total ${fmt(q.padTotal)} BLPD across ${q.padN} asset${q.padN === 1 ? '' : 's'}${q.padWith < q.padN ? ` (${q.padWith} with numbers)` : ''}${(q.gasOnly || (q.padTotal === 0 && q.padGas > 0)) ? ` · gas only (${fmt(q.padGas)} MCF per day)` : ''}`}${q.padName && !/^new pad/.test(q.padName) ? ` · pad ${q.padName}` : ''}`   // v4.470: pad-level only (account manager 2026-10-26) — same line on the pad and all its wells
+            : (q.untier === 'pa' ? `not tiered — ${p.pa && p.pa.label ? p.pa.label.toLowerCase() : 'plugged'} (flyable ground, not inspected)` : (q.untier === 'third' ? 'not tiered — third-party well (obstacle, not inspected)' : (q.untier === 'client' ? `P4 · quarterly · client confirmed ${p.client && p.client.status ? p.client.status.toLowerCase() : 'inactive'}` : (q.untier === 'zero' ? 'P4 · quarterly · no production (0 BLPD, no gas in the client list)' : (q.untier === 'env' ? `not tiered — Enverus reports ${p.env && p.env.status ? p.env.status : 'inactive'}` : `not tiered — ${q.flags[0] || 'no numbers'}`)))));
         return [`Priority\n${line}`, `Prioritized\n${dateStr}`];
     }
     function impTierPrefix(p, subtype) {
         const base = impTierStrip(subtype);
         if (!imp.pri.on || !p.pri) return base;
-        if (!p.pri.tier) return impClientConfirmedNoPriority(p) ? `P0 - ${base}` : base;   // v4.477/v4.478: P0 ONLY when the client's own data says so; everything else stays unprefixed = look at it
+        if (!p.pri.tier) return impClientConfirmedNoPriority(p) ? `P4 - ${base}` : base;   // v4.494: P4 (was P0) ONLY when the client's own data says no production; everything else stays unprefixed = look at it
         return `${p.pri.tier} - ${base}`;
     }
     function impRenderPriUi() {
@@ -23484,7 +23488,7 @@
                 <div id="aim-imp-pri-summary" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">${summary}</div>
                 <div data-impri-settings style="display:${setOpen ? '' : 'none'};margin-top:6px;padding-top:6px;border-top:1px dashed rgba(255,179,71,0.3)">
                 <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:6px">
-                    ${sel('oilCol', 'Oil', 'oil production column (summed with Water)')} ${sel('waterCol', 'Water', 'water production column (summed with Oil)')} <span style="color:#888">or</span> ${sel('blpdCol', 'BLPD', 'a single total-fluid column (used instead of Oil + Water)')} <span style="color:#888">or</span> ${sel('priCol', 'Ready-made priority', 'a column that already holds P1 / P2 / P3 — wins outright, no math')}
+                    ${sel('oilCol', 'Oil', 'oil production column (summed with Water)')} ${sel('waterCol', 'Water', 'water production column (summed with Oil)')} ${sel('gasCol', 'Gas', 'optional gas column (MCF per day) — a well or pad with 0 BLPD but gas flowing is P3 (any production at all), not P4')} <span style="color:#888">or</span> ${sel('blpdCol', 'BLPD', 'a single total-fluid column (used instead of Oil + Water)')} <span style="color:#888">or</span> ${sel('priCol', 'Ready-made priority', 'a column that already holds P1 / P2 / P3 — wins outright, no math')}
                 </div>
                 <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:6px">
                     <span style="color:#888;font-size:10px">Tiers (BLPD = oil + water per pad):</span>
@@ -23497,7 +23501,7 @@
                 </div>
                 <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:4px;font-size:10px;color:#cfd6dc">
                     <span style="color:#888">No tier for:</span>
-                    <label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" data-impri-zero ${c.zeroUntier ? 'checked' : ''} style="accent-color:#ffb347"> wells with ZERO production (0 oil + 0 water)</label>
+                    <label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" data-impri-zero ${c.zeroUntier ? 'checked' : ''} style="accent-color:#ffb347"> wells with ZERO production (0 oil + 0 water, no gas) → <b>P4</b> (client tier: no production, quarterly)</label>
                     <label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" data-impri-envdead ${c.envUntier ? 'checked' : ''} style="accent-color:#ffb347"> wells Enverus reports inactive / TA / plugged (after a 🛢 cross-check)</label>
                     <span style="color:#888">— the pad keeps its total and tier for its live assets; on a re-run an earlier "P3 - " is removed from the type</span>
                 </div>
@@ -23511,7 +23515,7 @@
             if (pr) impZoomToPad(pr.getAttribute('data-impri-pad'));
         };
         if (c.on) impRenderPriSummary();
-        const rerun = () => { impComputePriority(); impRenderPriUi(); impRenderStaged(); impSyncUi(); impMarkDirty(); impStoreMapping(imp.headers, { name: imp.mapping.name, lat: imp.mapping.lat, lng: imp.mapping.lng, type: imp.mapping.type, extId: imp.mapping.extId || null, notesCols: impNotesCols(), pri: { on: c.on, oilCol: c.oilCol, waterCol: c.waterCol, blpdCol: c.blpdCol, priCol: c.priCol } }); };
+        const rerun = () => { impComputePriority(); impRenderPriUi(); impRenderStaged(); impSyncUi(); impMarkDirty(); impStoreMapping(imp.headers, { name: imp.mapping.name, lat: imp.mapping.lat, lng: imp.mapping.lng, type: imp.mapping.type, extId: imp.mapping.extId || null, notesCols: impNotesCols(), pri: { on: c.on, oilCol: c.oilCol, waterCol: c.waterCol, blpdCol: c.blpdCol, gasCol: c.gasCol, priCol: c.priCol } }); };
         el.querySelector('#aim-imp-pri-hdr').onclick = () => { c.open = !c.open; impSaveParams(); impRenderPriUi(); };
         const stg = el.querySelector('[data-impri-settings-toggle]'); if (stg) stg.onclick = () => { c.setOpen = !setOpen; impSaveParams(); impRenderPriUi(); };
         el.querySelector('input[data-impri-on]').onchange = function () { c.on = this.checked; rerun(); };
@@ -24546,7 +24550,7 @@
         // carry the rest of the state the file load reset
         if (S.resp) imp.resp = S.resp;
         if (S.envState) { Object.assign(imp.env, S.envState); imp.env._guessed = !!imp.env.apiCol; if (!imp.env.apiCol) imp.env._guessed = false; }
-        if (S.pri) { ['on', 'oilCol', 'waterCol', 'blpdCol', 'priCol'].forEach(k => { if (k === 'on' || !S.pri[k] || imp.headers.includes(S.pri[k])) imp.pri[k] = S.pri[k]; }); imp.pri._guessed = true; }
+        if (S.pri) { ['on', 'oilCol', 'waterCol', 'blpdCol', 'gasCol', 'priCol'].forEach(k => { if (k === 'on' || !S.pri[k] || imp.headers.includes(S.pri[k])) imp.pri[k] = S.pri[k]; }); imp.pri._guessed = true; }
         if (S.hv) { imp.hv.on = S.hv.on; imp.hv.useEnv = S.hv.useEnv; if (S.hv.col && imp.headers.includes(S.hv.col)) { imp.hv.col = S.hv.col; imp.hv._guessed = true; } }
         imp.lastCreated = S.lastCreated || imp.lastCreated; imp.lastUpdated = S.lastUpdated || imp.lastUpdated;
         if (S.mapping && Array.isArray(S.mapping.notesCols)) { const keep = S.mapping.notesCols.filter(c => imp.headers.includes(c.col)); if (keep.length) { m.notesCols = keep; m._notesSeeded = false; impNotesCols(); } }
@@ -24629,10 +24633,10 @@
             imp.points.push({ i, name: name || `Import ${i + 1}`, rawName: name, lat, lng, typeRaw: m.type ? (r[m.type] || '').trim() : '', notes: '', sel: false, dup: false, dupWhy: '', child: null, near: null, done: false });
         });
         impResolveFileDuplicates();   // v4.363: battery + well sharing a name → "<name> BATTERY"; other repeats → "-DUP"
-        if (m.pri && typeof m.pri === 'object' && !imp.pri._guessed) { ['oilCol', 'waterCol', 'blpdCol', 'priCol'].forEach(k => { imp.pri[k] = imp.headers.includes(m.pri[k]) ? m.pri[k] : null; }); if (typeof m.pri.on === 'boolean') imp.pri.on = m.pri.on; imp.pri._guessed = true; }
+        if (m.pri && typeof m.pri === 'object' && !imp.pri._guessed) { ['oilCol', 'waterCol', 'blpdCol', 'gasCol', 'priCol'].forEach(k => { imp.pri[k] = imp.headers.includes(m.pri[k]) ? m.pri[k] : null; }); if (typeof m.pri.on === 'boolean') imp.pri.on = m.pri.on; imp.pri._guessed = true; }
         imp._rootCache = null;
         if (imp.swapSnap && imp._swapFromApply) { imp._swapFromApply = false; try { impSwapApplySnapshot(); } catch (e) { console.warn(`${TAG} 🔁 swap failed:`, e); imp.swapSnap = null; } }
-        impStoreMapping(imp.headers, { name: m.name, lat: m.lat, lng: m.lng, type: m.type, extId: m.extId || null, notesCols: impNotesCols(), pri: { on: imp.pri.on, oilCol: imp.pri.oilCol, waterCol: imp.pri.waterCol, blpdCol: imp.pri.blpdCol, priCol: imp.pri.priCol } });
+        impStoreMapping(imp.headers, { name: m.name, lat: m.lat, lng: m.lng, type: m.type, extId: m.extId || null, notesCols: impNotesCols(), pri: { on: imp.pri.on, oilCol: imp.pri.oilCol, waterCol: imp.pri.waterCol, blpdCol: imp.pri.blpdCol, gasCol: imp.pri.gasCol, priCol: imp.pri.priCol } });
         impMarkDirty();
         imp.mapOpen = false;
         impRenderMappingUi();
@@ -26137,7 +26141,8 @@
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#ff8a80" title="Side of the TRIANGLE a 🩻 P&A asset becomes (plugged / expired / cancelled / retired wells and facilities from the fill-in) — three corners instead of four so it never passes for a normal asset. ↔ Move and ✏ Shape still apply.">P&A size <input type="number" id="aim-imp-pasize" min="5" max="2000" step="5" style="width:52px;background:#1a1d23;border:1px solid rgba(255,138,128,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px"> ft</label>
                 <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#ffd400" title="What happens to a staged point whose NAME matches an asset already on this site. Update = rewrite that asset's TYPE and NOTES from this file, never its shape or position (the quarterly re-run). Copy = create a second asset named …-2. Skip = leave it alone. Points merely inside / near an existing asset are only flagged and always created.">name matches <select id="aim-imp-dupmode" style="background:#1a1d23;border:1px solid rgba(255,212,0,0.45);color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px"><option value="update">update type + notes</option><option value="skip">skip</option><option value="copy">create a copy (-N)</option></select></label>
                 <button id="aim-imp-preflight" style="${btnCss('122,223,230')}" title="👁 Reads only: a plain-text report of everything the importer knows about the run — what Create would do, types, names, flags, Enverus, safety — downloaded and copied to the clipboard for review before writing.">👁 📋 Pre-import report</button>
-                <button id="aim-imp-askclient" style="${btnCss('122,223,230')}" title="👁 Reads only: builds the list to send the client — every asset on this site the import deliberately left without a priority (P0 = their sheet said zero production or they said inactive) plus pads their sheet had no numbers for, one row per pad with its wells, with a blank Capture? column for them. Copied for Sheets + CSV. A second CSV (for you, not them) lists assets the import never touched.">👁 📋 Ask-the-client list</button><span id="aim-imp-preflight-note" style="flex-basis:100%;font-size:10px;color:#9ad"></span><div id="aim-imp-commit-note" style="flex-basis:100%;font-size:11px;color:#9ad;line-height:1.5;min-height:14px;padding:4px 8px;background:rgba(255,255,255,0.03);border-radius:3px"></div>
+                <button id="aim-imp-askclient" style="${btnCss('122,223,230')}" title="👁 Reads only: builds the list to send the client — every asset on this site the import deliberately left without a priority (P0 = their sheet said zero production or they said inactive) plus pads their sheet had no numbers for, one row per pad with its wells, with a blank Capture? column for them. Copied for Sheets + CSV. A second CSV (for you, not them) lists assets the import never touched.">👁 📋 Ask-the-client list</button>
+                <button id="aim-imp-clienttiers" style="${btnCss('255,179,71')}" title="WRITES (honours Dry run): load the Ask-the-client workbook the client sent back — the row's Tier column (P1–P4, Remove / Sold, P&amp;A) is applied to the site. A whole-pad row retypes the pad AND every well nested under it (PA / AVOID children untouched), an only-these-wells row just those wells, a standalone row that asset (+ its children when it is a pad). Remove / Sold rows open Bulk → Delete afterwards; P&amp;A rows become PA Asset - Plugged. Notes keep everything except the Priority block, which becomes the client's reason. Backup downloads first; ↩ Undo last import reverts the retypes.">📬 Apply client tiers</button><span id="aim-imp-preflight-note" style="flex-basis:100%;font-size:10px;color:#9ad"></span><div id="aim-imp-commit-note" style="flex-basis:100%;font-size:11px;color:#9ad;line-height:1.5;min-height:14px;padding:4px 8px;background:rgba(255,255,255,0.03);border-radius:3px"></div>
                 <button id="aim-imp-commit" style="${btnCss('255,120,60')};font-weight:600" title="WRITES to AIM: creates the selected staged points as real assets (updates type + notes on name matches). Honours Dry run. A backup manifest downloads first; ↩ Undo reverts exactly this run.">⚡ Create selected</button>
                 <button id="aim-imp-audit" style="${btnCss('122,223,230')}" title="👁 Reads only: lists wells this session created more than 1,500 ft from their pad (a far-away row that name-matched a local pad), with a delete for exactly those.">👁 🔍 Audit placements</button>
                 <button id="aim-imp-wrapchild" style="${btnCss('255,120,60')}" title="WRITES to AIM: every row that matched a 'Pad - …' asset → the pad becomes a container (type = tier + Pad, pad-level priority note, External ID removed) and the well itself is created under it from your outline (or as a square) with the row's name, type, notes and External ID. Dry run lists the counts first.">⚡ 🧱 Apply pad model</button>
@@ -26307,6 +26312,7 @@
         q('aim-imp-commit').onclick = () => { impCommit(); };
         q('aim-imp-preflight').onclick = () => { impPreflight('download'); };
         q('aim-imp-askclient').onclick = () => { impClientAsk().catch(e => { console.warn(`${TAG} 📋 ask-client`, e); impCommitNote(`📋 ask-the-client list failed: ${impEsc(e && e.message || e)}`, '#ff6060'); }); };
+        q('aim-imp-clienttiers').onclick = () => { const inp = document.createElement('input'); inp.type = 'file'; inp.accept = '.xlsx,.csv'; inp.onchange = () => { const f = inp.files && inp.files[0]; if (f) impClientTiers(f).catch(e => { console.warn(`${TAG} 📬 client tiers`, e); impCommitNote(`📬 apply client tiers failed: ${impEsc(e && e.message || e)}`, '#ff6060'); }); }; inp.click(); };
         q('aim-imp-undocreate').onclick = () => { impUndoCreate(); };
         q('aim-imp-audit').onclick = () => { impAudit().catch(e => impCommitNote(`🔍 ${impEsc(e && e.message || e)}`, '#ff6060')); };
         q('aim-imp-wrapchild').onclick = () => { impApplyPadModel().catch(e => { console.warn(`${TAG} ↻ outlines`, e); impCommitNote(`↻ ${impEsc(e && e.message || e)}`, '#ff6060'); }); };
@@ -27962,7 +27968,7 @@
         const typeOf = (e) => String((e.custom && e.custom.poi_type_str) || '').trim();
         const tierOf = (t) => { const m = String(t || '').match(IMP_TIER_RE); return m ? `P${m[1]}` : ''; };          // P0..P3 or ''
         const isPa = (t) => /^pa\s*(asset|3rd party)\b/i.test(t) || /^p&a\b/i.test(t), isAvoid = (t) => /^avoid\b/i.test(t);
-        const isPadType = (t) => /^(P[0-3]\s*[-–—:]\s*)?pad$/i.test(t);
+        const isPadType = (t) => /^(P[0-4]\s*[-–—:]\s*)?pad$/i.test(t);
         const nk = (v) => String(v || '').trim().toLowerCase();
         const byName = new Map(); ents.forEach(e => { if (e.name) byName.set(nk(e.name), e); });
         const kidsOf = new Map(); ents.forEach(e => { const pk = nk(e.parent_asset_name); if (!pk) return; if (!kidsOf.has(pk)) kidsOf.set(pk, []); kidsOf.get(pk).push(e); });
@@ -28190,12 +28196,162 @@
     // its type ("P2 - Pad"), the same pad-level priority note as every well on it, and NO External ID (only wells carry one).
     // Every well — X included — is its own child asset with its outline (or a square). ----
     // v4.482: the PAD's tier comes from the pad total (client rule: P3 < p1Min · P1 p1Min..p1Max · P2 > p1Max), never from one well —
-    // a zero-production well on a producing pad is P0 itself but its pad is not
+    // ---- v4.494 (user 2026-10-30) 📬 APPLY CLIENT TIERS. The client returned the Ask-the-client workbook with a
+    // "Percepto Tier" column per row (P1–P4 · Remove / Sold · P&A) plus their reason / DCDW status. This reads it back
+    // and writes the answers to the site. Tier rows retype the pad AND every well nested under it (pad-level tiering;
+    // PA / AVOID children untouched), "only these wells" rows retype just the listed wells, standalone rows the asset
+    // itself (+ children when it is a pad). Remove / Sold rows are handed to Bulk → Delete (its own checks, slide and
+    // Delete Guard backup); P&A rows become PA Asset - Plugged. Notes: only the Priority / Prioritized blocks are
+    // replaced (with the client's reason); every other block stays. Dry run = the plan; the full plan is logged.
+    const IMP_CT_LABEL = { P1: 'twice weekly', P2: 'weekly', P3: 'monthly', P4: 'quarterly, no production' };
+    function impClientTiersClassify(v) {
+        const t = String(v || '').trim(); if (!t) return { kind: 'skip', why: 'no tier given' };
+        const m = t.match(/^P\s*([1-4])\b/i); if (m) return { kind: 'tier', tier: `P${m[1]}` };
+        if (/p\s*&\s*a|plug/i.test(t)) return { kind: 'pa' };
+        if (/remove|sold|delete|drop/i.test(t)) return { kind: 'remove' };
+        return { kind: 'skip', why: `"${t}" is not a tier (P1–P4, Remove, Sold, P&A)` };
+    }
+    async function impClientTiersRead(file) {
+        const name = file.name || 'answers';
+        const isHeader = (r) => r.some(c => /tier/i.test(String(c))) && r.some(c => /^(pad|asset|name|well names?)$/i.test(String(c).trim()));
+        let headers, rows;
+        if (/\.xlsx$/i.test(name)) {
+            const buf = await new Promise((res, rej) => { const rd = new FileReader(); rd.onload = () => res(rd.result); rd.onerror = () => rej(new Error('file read failed')); rd.readAsArrayBuffer(file); });
+            const wb = await impXlsxRead(buf);
+            const sh = wb.sheets.find(x => x.rows.some(isHeader)); if (!sh) throw new Error('no sheet with a "Tier" column next to Pad / Asset / Well names');
+            const hi = sh.rows.findIndex(isHeader); headers = sh.rows[hi].map(h => String(h || '').trim());
+            rows = sh.rows.slice(hi + 1).map(r => Object.fromEntries(headers.map((h, i) => [h, r[i] == null ? '' : String(r[i])])));
+        } else {
+            const txt = await new Promise((res, rej) => { const rd = new FileReader(); rd.onload = () => res(String(rd.result || '')); rd.onerror = () => rej(new Error('file read failed')); rd.readAsText(file); });
+            const p = impParseCsv(txt); headers = p.headers.map(h => String(h || '').trim()); rows = p.rows;
+            if (!isHeader(headers)) throw new Error('no "Tier" column next to Pad / Asset / Well names');
+        }
+        const col = (rx, not) => headers.find(h => h && rx.test(h) && !(not && not.test(h))) || null;
+        const filled = (h) => rows.filter(r => String(r[h] || '').trim()).length;
+        const tierCols = headers.filter(h => /tier/i.test(h)).sort((a, b) => filled(b) - filled(a));   // the legend's own "Tier" column has 4 cells; the answers column has them all
+        const H = {
+            tier: tierCols[0], pad: col(/^pad$/i) || col(/^(asset|name)$/i), covers: col(/covers/i), wells: col(/well names?/i) || col(/^wells?$/i),
+            reason: col(/^reason/i), status: col(/well status|^status/i), lastProd: col(/last prod/i), detail: col(/detail/i), blpd: col(/blpd/i, /^(min|max)\b/i), gas: col(/\bgas\b|mcf/i), notes: col(/your notes/i),
+        };
+        if (!H.pad && !H.wells) throw new Error('no "Pad" / "Asset" / "Well names" column');
+        const out = [];
+        rows.forEach((r, i) => {
+            const padName = String(H.pad ? r[H.pad] : '').trim(), wells = String(H.wells ? r[H.wells] : '').split(/\s*[,;\n]\s*/).map(x => x.trim()).filter(Boolean);
+            if (!padName && !wells.length) return;
+            const cv = String(H.covers ? r[H.covers] : '').trim().toLowerCase();
+            out.push({ i, padName, wells, covers: /only these/.test(cv) ? 'wells' : (/standalone/.test(cv) ? 'lone' : 'pad'), tierRaw: String(r[H.tier] || '').trim(), cls: impClientTiersClassify(r[H.tier]),
+                reason: String(H.reason ? r[H.reason] : '').trim(), status: String(H.status ? r[H.status] : '').trim(), lastProd: String(H.lastProd ? r[H.lastProd] : '').trim().slice(0, 10), detail: String(H.detail ? r[H.detail] : '').trim(),
+                blpd: H.blpd ? impNum(r[H.blpd]) : null, gas: H.gas ? impNum(r[H.gas]) : null, notes: String(H.notes ? r[H.notes] : '').trim() });
+        });
+        return { fileName: name, headers: H, rows: out };
+    }
+    function impClientTiersPlan(R) {
+        const sid = genState.siteID; const ents = (((mapObjectsBySite[sid] || {}).entities) || []).filter(e => e && e.type === 3);
+        const nk = (x) => String(x || '').trim().toLowerCase().replace(/\s+/g, ' ');
+        const byName = new Map(); ents.forEach(e => { const k = nk(e.name); if (k && !byName.has(k)) byName.set(k, e); });
+        const kids = new Map(); ents.forEach(e => { const pn = nk(e.parent_asset_name); if (pn) { if (!kids.has(pn)) kids.set(pn, []); kids.get(pn).push(e); } });
+        const typeOf = (e) => String((e.custom && e.custom.poi_type_str) || '').trim();
+        const isPa = (t) => /^pa\s*(asset|3rd party)\b/i.test(t) || /^p&a\b/i.test(t), isAvoid = (t) => /^avoid\b/i.test(t);
+        const plan = { retype: [], pa: [], remove: [], skip: [], missing: [], same: 0 };
+        const seen = new Map();   // entity id → row that claimed it (first row wins — a pad row never re-tiers a well another row answered)
+        R.rows.forEach(r => {
+            const c = r.cls;
+            if (c.kind === 'skip') { plan.skip.push({ r, why: `${r.padName || r.wells.join(', ')}: ${c.why}` }); return; }
+            const pad = r.padName ? byName.get(nk(r.padName)) : null;
+            const wellEnts = r.wells.map(w => ({ w, e: byName.get(nk(w)) || null }));
+            const lost = wellEnts.filter(x => !x.e).map(x => x.w); if (r.padName && !pad && !wellEnts.some(x => x.e)) lost.unshift(r.padName);
+            if (lost.length) plan.missing.push({ r, names: lost });
+            let targets = [];
+            if (r.covers === 'wells') targets = wellEnts.filter(x => x.e).map(x => x.e);
+            else {
+                const roots = []; if (pad) roots.push(pad); wellEnts.forEach(x => { if (x.e && !roots.includes(x.e)) roots.push(x.e); });
+                roots.forEach(e => { targets.push(e); (kids.get(nk(e.name)) || []).forEach(k => targets.push(k)); });
+            }
+            targets = [...new Set(targets)].filter(e => !seen.has(e.id) || seen.get(e.id) === r.i);
+            targets.forEach(e => seen.set(e.id, r.i));
+            targets.forEach(e => {
+                const t = typeOf(e); const base = impTierStrip(t);
+                if (c.kind === 'remove') { plan.remove.push({ r, e, type: t }); return; }
+                if (isPa(t) || isAvoid(t)) { if (c.kind !== 'pa') plan.skip.push({ r, why: `${e.name} is ${t} — left alone`, e }); return; }
+                if (c.kind === 'pa') { plan.pa.push({ r, e, from: t, to: impPaTypeFor(true, 'Plugged') }); return; }
+                if (!base) { plan.skip.push({ r, why: `${e.name} has no type to put a tier on — set its type first`, e }); return; }
+                const to = `${c.tier} - ${base}`;
+                if (to.toLowerCase() === t.toLowerCase() && /^Priority\n/m.test(String(e.description || ''))) { plan.same++; return; }
+                plan.retype.push({ r, e, from: t, to, tier: c.tier });
+            });
+        });
+        return plan;
+    }
+    function impClientTiersNotes(e, r, kind, when) {
+        const dateStr = String(when).slice(0, 10);
+        const drop = kind === 'pa' ? /^(Priority|Prioritized|Status recorded)\n/ : /^(Priority|Prioritized)\n/;
+        const blocks = String(e.description || '').split(/\n\s*\n/).map(b => b.trim()).filter(b => b && !drop.test(b));
+        const n1 = (v) => Math.round(v * 10) / 10;
+        const fact = [r.reason, r.status ? `DCDW ${r.status.toLowerCase()}` : '', r.lastProd ? `last production ${r.lastProd}` : '', r.blpd != null ? `${n1(r.blpd)} BLPD` : '', r.gas > 0 ? `${n1(r.gas)} MCF per day gas` : ''].filter(Boolean).join(' · ');
+        const add = kind === 'pa'
+            ? [`Status recorded\n${dateStr} · PLUGGED AND ABANDONED · per the client${fact ? ` · ${fact}` : ''}${r.detail ? `\n${r.detail}` : ''}`]
+            : [`Priority\n${r.cls.tier} · ${IMP_CT_LABEL[r.cls.tier]} · per the client ${dateStr}${fact ? ` · ${fact}` : ''}${r.detail ? `\n${r.detail}` : ''}${r.notes ? `\nClient note: ${r.notes}` : ''}`, `Prioritized\n${dateStr}`];
+        const head = blocks.length && /^(Original name|Pad)\n/.test(blocks[0]) ? [blocks.shift()] : [];   // name / Pad block stays first
+        return impSafeNotes(head.concat(add, blocks).join('\n\n')).slice(0, IMP_NOTES_MAX);
+    }
+    async function impClientTiers(file) {
+        if (liteBlockedWrite('apply client tiers')) return;
+        const sid = genState.siteID; if (!sid) { impCommitNote('📬 no site open', '#ff6060'); return; }
+        impCommitNote(`📬 reading ${impEsc(file.name || 'answers')}…`);
+        const R = await impClientTiersRead(file);
+        if (!R.rows.length) { impCommitNote('📬 no rows with a pad / asset name', '#ff6060'); return; }
+        try { await fetchMapObjects(sid, true); } catch (e) {}
+        const plan = impClientTiersPlan(R); const esc = impEsc;
+        const byTier = {}; plan.retype.forEach(x => { byTier[x.tier] = (byTier[x.tier] || 0) + 1; });
+        const tierTxt = Object.keys(byTier).sort().map(t => `${t} ${byTier[t]}`).join(' · ') || 'none';
+        console.log(`${TAG} 📬 client tiers — ${R.fileName}`, { columns: R.headers, rows: R.rows, plan });
+        const lines = [`<b>${plan.retype.length}</b> asset(s) retyped (${tierTxt})`, `<b>${plan.pa.length}</b> → PA Asset - Plugged`, `<b>${plan.remove.length}</b> to delete (Bulk → Delete opens after the writes)`, `${plan.same} already right`,
+            plan.skip.length ? `<span style="color:#ffb347">${plan.skip.length} skipped</span>` : '', plan.missing.length ? `<span style="color:#ff6060">${plan.missing.length} row(s) name nothing on this site: ${esc(plan.missing.slice(0, 6).map(m => m.names.join(', ')).join(' · '))}${plan.missing.length > 6 ? ' …' : ''}</span>` : ''].filter(Boolean).join(' · ');
+        if (!plan.retype.length && !plan.pa.length && !plan.remove.length) { impCommitNote(`📬 nothing to write — ${lines}`, '#5fff5f'); return; }
+        const sample = plan.retype.slice(0, 8).map(x => `${x.e.name}: ${x.from || '—'} → ${x.to}`).concat(plan.pa.map(x => `${x.e.name}: ${x.from || '—'} → ${x.to}`), plan.remove.map(x => `🗑 ${x.e.name}`)).join(' · ');
+        const dry = (() => { try { return !!document.getElementById('aim-gen-dryrun').checked; } catch (e) { return true; } })();
+        if (dry) { impCommitNote(`DRY RUN — 📬 ${esc(R.fileName)} (${R.rows.length} rows · tier column "${esc(R.headers.tier)}"): ${lines}. e.g. ${esc(sample)}${plan.skip.length ? ` · skipped: ${esc(plan.skip.slice(0, 5).map(s => s.why).join(' · '))}${plan.skip.length > 5 ? ' …' : ''}` : ''} — full plan in the console. Untick Dry run to write.`); return; }
+        const csrf = getCsrfToken(); if (!csrf) { impCommitNote('No CSRF token — make one native save anywhere in Percepto first, then retry', '#ff6060'); return; }
+        let siteCfg = null; try { siteCfg = await fetchSiteConfig(sid); } catch (e) {}
+        if (!siteCfg) { impCommitNote('Could not read the site config — nothing written', '#ff6060'); return; }
+        if (!confirm(`Apply the client's answers from ${R.fileName}?\n\n${plan.retype.length} retyped (${tierTxt})\n${plan.pa.length} → PA Asset - Plugged\n${plan.remove.length} handed to Bulk → Delete afterwards\n${plan.same} already right · ${plan.skip.length} skipped · ${plan.missing.length} not on this site\n\nNotes keep everything except the Priority block (becomes the client's reason). Backup downloads first; ↩ Undo last import reverts the retypes.`)) return;
+        const writes = plan.retype.map(x => Object.assign({ kind: 'tier' }, x)).concat(plan.pa.map(x => Object.assign({ kind: 'pa' }, x)));
+        try { downloadJSONFile(`client-tiers-${sid}-${Date.now()}.json`, JSON.stringify({ site: sid, at: new Date().toISOString(), file: R.fileName, before: writes.map(x => x.e), remove: plan.remove.map(x => x.e) }, null, 1)); } catch (e) {}
+        const known = impSiteTypeSet(); const stamp = impNowStamp(); let ok = 0, fail = 0, refused = 0; const updated = [];
+        const post = async (body) => fetch('/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) });
+        for (let i = 0; i < writes.length; i++) {
+            const x = writes[i]; impCommitNote(`📬 ${i + 1}/${writes.length} — "${esc(x.e.name)}" → ${esc(x.to)}…`);
+            try {
+                const body = buildWriteBody(x.e, siteCfg); if (!body.custom || typeof body.custom !== 'object') body.custom = {};
+                const ref = impTypeRef(x.to, known); body.custom.poi_type_str = x.to; body.custom.new_poi_type_str = x.to;
+                body.description = impClientTiersNotes(x.e, x.r, x.kind, stamp);
+                const rr = await post(body); const txt = await rr.text(); let js = null; try { js = JSON.parse(txt); } catch (e) {}
+                if (rr.status === 200) {
+                    ok++; updated.push({ id: x.e.id, name: x.e.name, before: JSON.parse(JSON.stringify(x.e)) });
+                    if (ref.isNew && await impConfirmType(sid, x.to)) known.add(x.to.toLowerCase());
+                    const mo = js && js.map_objects; const sType = mo && mo.custom ? String(mo.custom.poi_type_str || '') : '?';
+                    if (sType.toLowerCase() !== x.to.toLowerCase()) { refused++; console.warn(`${TAG} 📬 TYPE REFUSED "${x.e.name}": sent "${x.to}" → stored "${sType}" · warnings ${JSON.stringify(js && js.warnings)}`); }
+                } else { fail++; console.warn(`${TAG} 📬 "${x.e.name}" ${rr.status} ${txt.slice(0, 200)}`); if (rr.status === 403) { impCommitNote('ABORTED — server 403', '#ff6060'); break; } }
+            } catch (e) { fail++; console.warn(`${TAG} 📬 "${x.e.name}"`, e); }
+            await sleep(DELETE_GAP_MS);
+        }
+        imp.lastUpdated = imp.lastUpdated.concat(updated);
+        await sleep(3000); try { await fetchMapObjects(sid, true); } catch (e) {}
+        const after = new Map((((mapObjectsBySite[sid] || {}).entities) || []).map(e => [e.id, e]));
+        const verified = writes.filter(x => { const e = after.get(x.e.id); return e && String((e.custom && e.custom.poi_type_str) || '').toLowerCase() === x.to.toLowerCase(); }).length;
+        imp._rootCache = null; impBuildAssetIndex(); impComputeDups(); impRefreshAfterSelChange(); try { impSaveSession('client-tiers'); } catch (e) {}
+        impCommitNote(`📬 DONE: <b>${ok}</b> written, verified <b>${verified}/${writes.length}</b> (${tierTxt}${plan.pa.length ? ` · PA ${plan.pa.length}` : ''})${refused ? ` · <span style="color:#ff6060">${refused} type(s) refused by the server (console)</span>` : ''}${fail ? ` · <span style="color:#ff6060">${fail} failed</span>` : ''} · ${plan.same} already right${plan.skip.length ? ` · ${plan.skip.length} skipped` : ''}${plan.missing.length ? ` · <span style="color:#ff6060">${plan.missing.length} row(s) matched nothing (console)</span>` : ''}${plan.remove.length ? ` · 🗑 ${plan.remove.length} to delete — Bulk → Delete opening` : ''} · ↩ Undo last import reverts the retypes · reload to see them natively`, fail || refused || verified < writes.length ? '#ffb347' : '#5fff5f');
+        if (plan.remove.length) {
+            try { sumPanelState.selectedIds.clear(); plan.remove.forEach(x => sumPanelState.selectedIds.add(String(x.e.id))); openBulkDeleteModal(); }
+            catch (e) { console.warn(`${TAG} 📬 bulk delete open:`, e); impCommitNote(`🗑 could not open Bulk → Delete — select ${esc(plan.remove.map(x => x.e.name).join(', '))} in SUM and delete from there`, '#ffb347'); }
+        }
+    }
+    // a zero-production well on a producing pad is P4 itself but its pad is not
     function impPadTier(p) {
         const c = imp.pri; if (!c.on || !p || !p.pri) return '';
         const q = p.pri; if (q.direct && p.pri.tier) return p.pri.tier;
         if (q.padTotal == null || !(q.padWith > 0)) return '';                          // no numbers on the pad → unknown (plain Pad = look at it)
-        if (q.padTotal === 0) return 'P0';                                               // every number on the pad is zero → client-confirmed none
+        if (q.padTotal === 0) return q.padGas > 0 ? 'P3' : 'P4';                         // v4.494: every number on the pad is zero → P4 (client: no production, quarterly); gas flowing → P3
         return q.padTotal < c.p1Min ? 'P3' : (q.padTotal <= c.p1Max ? 'P1' : 'P2');
     }
     function impPadType(p) { const t = impPadTier(p); return t ? `${t} - Pad` : 'Pad'; }
@@ -28217,11 +28373,12 @@
         const with_ = members.filter(q => q.pri.blpd != null);
         if (!with_.length) return fb;
         const total = with_.reduce((a, q) => a + q.pri.blpd, 0);
-        const tier = total === 0 ? 'P0' : impTierFromTotal(total);
-        const pp = { pri: { tier: tier === 'P0' ? '' : tier, untier: tier === 'P0' ? 'zero' : '', padTotal: total, padN: members.length, padWith: with_.length, padName: pad.name, flags: [] }, client: p && p.client };
+        const gas = members.reduce((a, q) => a + (q.pri.gas || 0), 0);
+        const tier = total === 0 ? (gas > 0 ? 'P3' : 'P4') : impTierFromTotal(total);   // v4.494: P4 = no production, gas-only = P3
+        const pp = { pri: { tier: tier === 'P4' ? '' : tier, untier: tier === 'P4' ? 'zero' : '', padTotal: total, padGas: gas, gasOnly: total === 0 && gas > 0, padN: members.length, padWith: with_.length, padName: pad.name, flags: [] }, client: p && p.client };
         return { tier, type: `${tier} - Pad`, pp, total, n: members.length };
     }
-    // P0 = the CLIENT SHEET confirms no priority: numbers present and zero (oil + water = 0), or the client's response marked it inactive.
+    // P4 (was P0) = the CLIENT SHEET confirms no production: numbers present and zero (oil + water = 0), or the client's response marked it inactive.
     // Not Enverus' opinion, not missing numbers, not third-party / P&A (those keep their own types).
     function impClientConfirmedNoPriority(p) { if (!p || p.pa || p.thirdParty || !p.pri) return false; const u = p.pri.untier; return u === 'zero' || u === 'client'; }
     function impComposePadNotes(p, pad, when, nWells) {
@@ -28814,7 +28971,7 @@
             }).filter(Boolean),
             shapes: imp.shapes.map(sh => sh.kind === 'circle' ? { id: sh.id, kind: 'circle', center: sh.center, radiusM: sh.radiusM, name: sh.name || '' } : { id: sh.id, kind: sh.kind, ring: sh.ring, handle: sh.handle, name: sh.name || '' }),
             shapeSeq: imp.shapeSeq,
-            pri: { on: imp.pri.on, oilCol: imp.pri.oilCol, waterCol: imp.pri.waterCol, blpdCol: imp.pri.blpdCol, priCol: imp.pri.priCol },
+            pri: { on: imp.pri.on, oilCol: imp.pri.oilCol, waterCol: imp.pri.waterCol, blpdCol: imp.pri.blpdCol, gasCol: imp.pri.gasCol, priCol: imp.pri.priCol },
             hv: { on: imp.hv.on, col: imp.hv.col, useEnv: imp.hv.useEnv },
             env: { apiCol: imp.env.apiCol, notes: imp.env.notes, checkedAt: imp.env.checkedAt, mismatchFt: imp.env.mismatchFt, missing: imp.env.missing, missingAt: imp.env.missingAt, missingOp: imp.env.missingOp, missingTotal: imp.env.missingTotal, paReview: imp.env.paReview },
             undo: { created: imp.lastCreated.slice(), updated: imp.lastUpdated.map(u => ({ id: u.id, name: u.name, before: u.before })) },   // v4.364: undo survives a reload
@@ -28925,7 +29082,7 @@
         imp.shapeSeq = Math.max(d.shapeSeq || 1, ...imp.shapes.map(sh => sh.id + 1), 1);
         imp.mapOpen = false;
         if (d.hv) { imp.hv.on = d.hv.on !== false; imp.hv.col = d.hv.col || null; imp.hv.useEnv = d.hv.useEnv !== false; imp.hv._guessed = true; }
-        if (d.pri) { Object.assign(imp.pri, { on: !!d.pri.on, oilCol: d.pri.oilCol || null, waterCol: d.pri.waterCol || null, blpdCol: d.pri.blpdCol || null, priCol: d.pri.priCol || null }); imp.pri._guessed = true; }
+        if (d.pri) { Object.assign(imp.pri, { on: !!d.pri.on, oilCol: d.pri.oilCol || null, waterCol: d.pri.waterCol || null, blpdCol: d.pri.blpdCol || null, gasCol: d.pri.gasCol || null, priCol: d.pri.priCol || null }); imp.pri._guessed = true; }
         if (d.env) { imp.env.apiCol = d.env.apiCol || null; imp.env.notes = d.env.notes !== false; imp.env.checkedAt = d.env.checkedAt || null; if (typeof d.env.mismatchFt === 'number') imp.env.mismatchFt = d.env.mismatchFt; if (Array.isArray(d.env.missing)) { imp.env.missing = d.env.missing; imp.env.missingAt = d.env.missingAt || null; imp.env.missingOp = d.env.missingOp || ''; imp.env.missingTotal = d.env.missingTotal || 0; imp.env.missingSel = new Set(); } if (d.env.paReview && Array.isArray(d.env.paReview.rows)) imp.env.paReview = d.env.paReview; imp.env._guessed = true; }
         if (Array.isArray(d.lastReset)) imp.lastReset = d.lastReset;   // v4.437
         if (d.undo) { imp.lastCreated = Array.isArray(d.undo.created) ? d.undo.created.slice() : []; imp.lastUpdated = Array.isArray(d.undo.updated) ? d.undo.updated.filter(u => u && u.id != null && u.before) : []; console.log(`${TAG} 📥 resume: undo record ${imp.lastCreated.length} created / ${imp.lastUpdated.length} updated`); }
