@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.96
+// @version      3.97
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.96';
+    const SCRIPT_VERSION = '3.97';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -4768,7 +4768,10 @@
         // v3.95: the edge-based standoff is for SMALL targets (a 70 ft tank shot from its end). Pin the
         // focus inside a facility-sized outline and the nav must sit 100 ft from the POINT you chose —
         // edge-based put it 100 ft outside a 300 ft NFZ, i.e. 240 ft from the focus.
-        const edgeBased = !!(targetRing && genRingSpanFt(targetRing) < SG_EDGE_MAX_FT);
+        // v3.97: the standoff is ALWAYS nav→snapshot (the focus) — rule #1 is 100 ft to the shot. The
+        // asset edge is only the 80 ft safety check (v3.61's edge-based standoff made the staged chip
+        // read 126 ft when the live HUD said 100 ft to the asset).
+        const edgeBased = false;
         const out = rows.map(r => {
             const bearing = ((rot + r.angle) % 360 + 360) % 360;
             const distM = edgeBased ? sgEdgeRayM(focus, bearing, r.distFt, [targetRing]) : r.distFt / 3.28084;
@@ -4777,9 +4780,9 @@
             const overNfz = nfzs.some(z => z.ring && z.ring.length >= 3 && genPointInPoly(c.pt, z.ring));      // Percepto refuses the save
             const overAsset = !overNfz && assets.some(a => genPointInPoly(c.pt, a.ring));                     // never fly over an asset
             const focusFt = mbApproxMeters(c.pt.lat, c.pt.lng, focus.lat, focus.lng) * 3.28084;
-            const edgeFt = edgeBased ? mbPointToPolygonMeters(c.pt.lat, c.pt.lng, targetRing) * 3.28084 : null;
+            const edgeFt = targetRing ? mbPointToPolygonMeters(c.pt.lat, c.pt.lng, targetRing) * 3.28084 : null;
             const focusStatus = sgFtStatus(focusFt, inFfz);
-            const edgeStatus = edgeFt == null ? null : sgFtStatus(edgeFt, inFfz);
+            const edgeStatus = edgeFt == null ? null : (Math.round(edgeFt) < SG_MIN_FT ? 'red' : focusStatus);
             const status = (overNfz || overAsset) ? 'red' : (edgeStatus || focusStatus);
             return { lat: c.pt.lat, lng: c.pt.lng, bearing, focusFt, focusStatus, edgeFt, edgeStatus, status, inFfz, clamped: c.clamped, overNfz, overAsset, snaps: r.snaps || 1 };
         });
@@ -5209,6 +5212,7 @@
                 else if (act === 'down' && i < groups.length - 1) { const t = groups[i + 1]; groups[i + 1] = groups[i]; groups[i] = t; }
                 else if (act === 'del') groups.splice(i, 1);
                 else if (act === 'rev') groups[i].navs.reverse();
+                else if (act === 'edit') { setTimeout(() => sgPickUpNav(i, 0), 0); return groups; }
                 return groups;
             });
         });
@@ -5293,6 +5297,7 @@
                 else if (act === 'down' && i < groups.length - 1) { const t = groups[i + 1]; groups[i + 1] = groups[i]; groups[i] = t; }
                 else if (act === 'del') groups.splice(i, 1);
                 else if (act === 'rev') groups[i].navs.reverse();
+                else if (act === 'edit') { setTimeout(() => sgPickUpNav(i, 0), 0); return groups; }
                 return groups;
             });
         });
@@ -5319,6 +5324,7 @@
                 else if (act === 'down' && i < groups.length - 1) { const t = groups[i + 1]; groups[i + 1] = groups[i]; groups[i] = t; }
                 else if (act === 'del') groups.splice(i, 1);
                 else if (act === 'rev') groups[i].navs.reverse();
+                else if (act === 'edit') { setTimeout(() => sgPickUpNav(i, 0), 0); return groups; }
                 return groups;
             });
         });
@@ -5332,7 +5338,7 @@
         const btn = (i, act, txt, title) => `<button data-sg-g="${i}" data-sg-act="${act}" title="${title}" style="background:none;border:1px solid #456;color:#cfe;border-radius:3px;cursor:pointer;font-size:10px;padding:0 4px;line-height:1.4;">${txt}</button>`;
         return `<div style="margin-top:6px;border-top:1px solid #2a2f38;padding-top:4px;">
             <div style="display:flex;align-items:center;gap:6px;color:#c39dff;font-weight:700;">Staged (${groups.length})<span style="flex:1;"></span><button data-sg-auto title="Re-order the staged groups + each ring's direction by nearest-next from where the drone arrives (the step before the insert point)" style="background:rgba(195,157,255,0.15);border:1px solid #c39dff;color:#d8c3ff;border-radius:3px;cursor:pointer;font-size:10px;padding:0 6px;">⟲ Auto-order</button><button data-sg-g-clear title="Drop every staged ghost on this mission" style="background:none;border:1px solid #456;color:#ff8a8a;border-radius:3px;cursor:pointer;font-size:10px;padding:0 5px;">✕ all</button></div>
-            ${groups.map((g, i) => `<div style="display:flex;align-items:center;gap:4px;padding:1px 0;color:#cfe;"><span style="min-width:24px;color:#c39dff;font-weight:700;">G${i + 1}</span><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${g.navs.length} nav${g.navs.length > 1 ? 's' : ''} · ${g.navs.reduce((a, p) => a + (p.snaps || g.snapsPerNav || 1), 0)} snap${g.target ? ` · <span style="color:#9ad;">${escapeHtml(g.target.slice(0, 20))}</span>` : ''}</span>${btn(i, 'up', '↑', 'Earlier')}${btn(i, 'down', '↓', 'Later')}${btn(i, 'rev', '⇄', 'Reverse this ring\'s nav order')}${btn(i, 'del', '✕', 'Drop this ghost')}</div>`).join('')}
+            ${groups.map((g, i) => `<div style="display:flex;align-items:center;gap:4px;padding:1px 0;color:#cfe;"><span style="min-width:24px;color:#c39dff;font-weight:700;">G${i + 1}</span><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${g.navs.length} nav${g.navs.length > 1 ? 's' : ''} · ${g.navs.reduce((a, p) => a + (p.snaps || g.snapsPerNav || 1), 0)} snap${g.target ? ` · <span style="color:#9ad;">${escapeHtml(g.target.slice(0, 20))}</span>` : ''}</span>${btn(i, 'edit', '✎', 'Pick this ghost up into the Nav-first tool (its first nav + snapshots) to re-place it — Alt+M2 on any staged nav does the same')}${btn(i, 'up', '↑', 'Earlier')}${btn(i, 'down', '↓', 'Later')}${btn(i, 'rev', '⇄', 'Reverse this ring\'s nav order')}${btn(i, 'del', '✕', 'Drop this ghost')}</div>`).join('')}
         </div>`;
     }
     function sgGroupsMutate(fn) {
@@ -5553,8 +5559,24 @@
     }
     // R-click on a staged nav drops that nav (the group when it was the last one); on an
     // aim drops that snapshot (a nav keeps at least one). Returns true when it ate the click.
+    function sgPickUpNav(gi, ni) {
+        const sid = getCurrentSiteID(), mid = sgMid(); if (!sid || !mid) return;
+        const groups = sgGhostsFor(sid, mid); const g = groups[gi]; if (!g || !g.navs || !g.navs[ni]) return;
+        const p = g.navs[ni];
+        const aims = (p.aims && p.aims.length) ? p.aims.map(a => ({ lat: a.lat, lng: a.lng })) : [{ lat: g.focus.lat, lng: g.focus.lng }];
+        g.navs.splice(ni, 1); if (!g.navs.length) groups.splice(gi, 1);
+        sgGhostsSet(sid, mid, (composerMission && composerMission.name) || '', groups); sgDrawStaged(true); sgUpdateBtn();
+        if (!sg.active) sgStart();
+        if (!sg.active) return;
+        sg.idle = false; sg.mode = 'nav'; try { gmSet(SG_MODE_KEY, 'nav'); } catch (e) {}
+        sg.pinned = false; sg.dots = []; sg.plan = null;
+        sg.navPt = { lat: p.lat, lng: p.lng }; sg.navAims = aims.slice(0, SG_NAV_MAX);
+        sgDrawLive(); sgUpdateHud();
+        showToast(`✎ Picked the nav up with ${aims.length} snapshot(s) — move it, add / remove points, Enter re-stages it.`, '#c39dff', 4000);
+    }
     function sgContextStaged(e) {
         const hit = sgHitStaged(e, true); if (!hit) return false;
+        if (e.altKey && hit.kind === 'nav') { sgPickUpNav(hit.gi, hit.ni); return true; }   // v3.97: Alt+M2 = pick it up
         const g = hit.groups[hit.gi], p = hit.ni >= 0 ? g.navs[hit.ni] : null;
         let msg;
         if (hit.kind === 'focus') { hit.groups.splice(hit.gi, 1); msg = `G${hit.gi + 1} dropped`; }
@@ -9615,6 +9637,21 @@
         try { genReviewMerge(sid, reports); } catch (e) { console.warn(`${TAG} [review] merge failed`, e); }
         genReviewOpen(sid, `${created} created this run`);
     }
+    const GEN_REVIEW_SORT_KEY = 'aim-mb-gen-review-sort';
+    const genReviewNotesOpen = new Set();   // mids whose notes are expanded (session only)
+    const GEN_REVIEW_SORTS = { flag: 'flagged first', az: 'name A → Z', za: 'name Z → A', aims: 'most aims', navs: 'most navs', snaps: 'most snaps', few: 'fewest navs' };
+    function genReviewSorted(left, mode) {
+        const byName = (a, b) => String(a.name || '').localeCompare(String(b.name || ''), undefined, { numeric: true, sensitivity: 'base' });
+        const out = left.slice();
+        if (mode === 'az') out.sort(byName);
+        else if (mode === 'za') out.sort((a, b) => byName(b, a));
+        else if (mode === 'aims') out.sort((a, b) => (b.aims || 0) - (a.aims || 0) || byName(a, b));
+        else if (mode === 'navs') out.sort((a, b) => (b.navs || 0) - (a.navs || 0) || byName(a, b));
+        else if (mode === 'snaps') out.sort((a, b) => (b.snaps || 0) - (a.snaps || 0) || byName(a, b));
+        else if (mode === 'few') out.sort((a, b) => (a.navs || 0) - (b.navs || 0) || byName(a, b));
+        else out.sort((a, b) => ((b.flags || []).length ? 1 : 0) - ((a.flags || []).length ? 1 : 0));
+        return out;
+    }
     function genReviewOpen(sid, headline) {
         const ID = 'aim-mb-gen-auto-report';
         const old = document.getElementById(ID); if (old) old.remove();
@@ -9638,24 +9675,30 @@
         items.forEach(x => { x.gone = !!(have && x.mid != null && x.created !== false && fetchedAt > (x.at || 0) + 1500 && !have.has(x.mid)); });
         const gone = items.filter(x => x.gone);
         const left = items.filter(x => !x.done), done = items.filter(x => x.done);
-        const flagged = left.filter(x => x.flags.length), clean = left.filter(x => !x.flags.length);
+        let sortMode = 'flag'; try { sortMode = String(gmGet(GEN_REVIEW_SORT_KEY, 'flag') || 'flag'); } catch (e) {}
+        if (!GEN_REVIEW_SORTS[sortMode]) sortMode = 'flag';
+        const ordered = genReviewSorted(left, sortMode);
         const p = document.createElement('div'); p.id = ID;
         p.style.cssText = 'position:fixed;top:60px;right:24px;width:470px;max-height:82vh;display:flex;flex-direction:column;z-index:2147483603;background:#161a20;border:1px solid #7dff7d;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;';
         const row = r => `<div style="display:flex;gap:6px;align-items:flex-start;padding:5px 4px;border-bottom:1px solid #20262e;${r.done ? 'opacity:0.45;' : ''}">
                 <input type="checkbox" data-ar-done="${r.mid != null ? r.mid : ''}" ${r.done ? 'checked' : ''} ${r.mid == null ? 'disabled' : ''} title="Done — reviewed / fixed" style="margin-top:2px;flex:0 0 auto;">
                 <div data-ar-open="${r.mid != null && !r.gone ? r.mid : ''}" title="${r.gone ? 'This mission was deleted — ↻ Recreate rebuilds it' : (r.mid != null ? 'Open this mission in the editor and zoom to the pad' : '')}" style="flex:1;min-width:0;${r.mid != null && !r.gone ? 'cursor:pointer;' : ''}">
-                    <div style="display:flex;gap:8px;align-items:baseline;"><span style="flex:1;font-weight:700;color:${r.gone ? '#ff8a8a' : (r.done ? '#9ad' : (r.flags.length ? '#ffd54f' : '#7dff7d'))};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(r.name)}</span>${r.gone || r.created === false ? `<button data-ar-recreate="${r.mid != null ? r.mid : ''}" data-ar-recreate-name="${escapeHtml(r.name)}" title="Rebuild this pad with the current Auto-shots template and create the mission again" style="background:rgba(255,138,138,0.15);border:1px solid #ff8a8a;color:#ffb3b3;border-radius:3px;cursor:pointer;font-size:10px;padding:0 6px;">↻ Recreate</button>` : ''}<span style="color:#9ad;white-space:nowrap;font-size:10px;">${r.aims} aim${r.aims === 1 ? '' : 's'} · ${r.navs} nav · ${r.snaps} snap${r.gone ? ' · <b style="color:#ff5252;">DELETED</b>' : (r.created === false ? ' · <b style="color:#ff5252;">NOT CREATED</b>' : '')}</span></div>
-                    ${r.done ? '' : r.flags.map(f => `<div style="color:#cfb;font-size:10px;padding-left:10px;">⚠ ${escapeHtml(f)}</div>`).join('')}
+                    <div style="display:flex;gap:8px;align-items:baseline;"><span style="flex:1;font-weight:700;color:${r.gone ? '#ff8a8a' : (r.done ? '#9ad' : (r.flags.length ? '#ffd54f' : '#7dff7d'))};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(r.name)}</span>${(!r.done && r.flags.length) ? `<button data-ar-notes-t="${r.mid != null ? r.mid : r.name}" title="Show / hide the build notes" style="background:none;border:1px solid #2a3340;color:#9ad;border-radius:3px;cursor:pointer;font-size:10px;padding:0 5px;line-height:1.4;">${genReviewNotesOpen.has(String(r.mid != null ? r.mid : r.name)) ? '▾' : '▸'} ${r.flags.length}</button>` : ''}${r.gone || r.created === false ? `<button data-ar-recreate="${r.mid != null ? r.mid : ''}" data-ar-recreate-name="${escapeHtml(r.name)}" title="Rebuild this pad with the current Auto-shots template and create the mission again" style="background:rgba(255,138,138,0.15);border:1px solid #ff8a8a;color:#ffb3b3;border-radius:3px;cursor:pointer;font-size:10px;padding:0 6px;">↻ Recreate</button>` : ''}<span style="color:#9ad;white-space:nowrap;font-size:10px;">${r.aims} aim${r.aims === 1 ? '' : 's'} · ${r.navs} nav · ${r.snaps} snap${r.gone ? ' · <b style="color:#ff5252;">DELETED</b>' : (r.created === false ? ' · <b style="color:#ff5252;">NOT CREATED</b>' : '')}</span></div>
+                    ${r.done ? '' : `<div data-ar-notes="${r.mid != null ? r.mid : r.name}" style="display:${genReviewNotesOpen.has(String(r.mid != null ? r.mid : r.name)) ? 'block' : 'none'};">${r.flags.map(f => `<div style="color:#cfb;font-size:10px;padding-left:10px;">⚠ ${escapeHtml(f)}</div>`).join('')}</div>`}
                 </div>
             </div>`;
         const text = () => items.map(r => `${r.done ? '[x]' : '[ ]'}\t${r.name}\t${r.aims} aims\t${r.navs} navs\t${r.snaps} snaps${r.created === false ? '\tNOT CREATED' : ''}${r.flags.length ? '\t' + r.flags.join(' | ') : ''}`).join('\n');
         p.innerHTML = `<div style="display:flex;align-items:center;justify-content:space-between;gap:14px;padding:9px 12px;background:rgba(125,255,125,0.08);border-bottom:1px solid rgba(125,255,125,0.3);">
                 <span style="font-weight:800;color:#7dff7d;font-size:13px;">📋 Review — ${done.length} / ${items.length} done · ${left.length} left</span>
-                <span style="display:flex;gap:6px;"><button data-ar-copy style="background:rgba(255,255,255,0.12);border:none;color:#fff;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;">Copy</button>${gone.length ? `<button data-ar-recreate-all title="Rebuild every DELETED mission in this list with the current template" style="background:rgba(255,138,138,0.15);border:1px solid #ff8a8a;color:#ffb3b3;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;">↻ Recreate deleted (${gone.length})</button>` : ''}<button data-ar-restage="pumps" title="Rebuild the ghosts of every UNREVIEWED pad that has a lone pumping unit with the current template — missions stay, nothing is deleted" style="background:rgba(195,157,255,0.18);border:1px solid #c39dff;color:#d8c3ff;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;">🔁 Re-stage pumps</button><button data-ar-restage="facilities" title="Rebuild the ghosts of every UNREVIEWED pad that has a facility outline (6+ corners or ≥ 250 ft) with the edge walk — missions stay" style="background:rgba(195,157,255,0.18);border:1px solid #c39dff;color:#d8c3ff;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;">🔁 Re-stage facilities</button><button data-ar-restage="all" title="Rebuild the ghosts of EVERY unreviewed mission with the current template — missions stay, nothing is deleted" style="background:rgba(195,157,255,0.18);border:1px solid #c39dff;color:#d8c3ff;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;">🔁 Re-stage all</button><button data-ar-delete title="Select every UNREVIEWED mission in the list and open 🗑 Delete (backup file + Delete Guard + slider) — start the run over" style="background:rgba(255,82,82,0.18);border:1px solid #ff5252;color:#ff8a8a;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;" ${left.filter(x => x.mid != null && x.created !== false).length ? '' : 'disabled'}>🗑 Delete unreviewed (${left.filter(x => x.mid != null && x.created !== false).length})</button><button data-ar-clear title="Forget this site's review list (missions stay)" style="background:rgba(255,255,255,0.12);border:none;color:#ff8a8a;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;">Forget list</button><button data-ar-close style="background:rgba(255,255,255,0.12);border:none;color:#fff;width:22px;height:22px;border-radius:4px;cursor:pointer;">✕</button></span>
+                <span style="display:flex;gap:6px;align-items:center;"><select data-ar-sort title="Sort the unreviewed rows" style="background:#0f1216;border:1px solid #2a3340;color:#cfe;border-radius:4px;font:inherit;font-size:11px;padding:2px 4px;">${Object.keys(GEN_REVIEW_SORTS).map(k => `<option value="${k}" ${k === sortMode ? 'selected' : ''}>${GEN_REVIEW_SORTS[k]}</option>`).join('')}</select><button data-ar-copy style="background:rgba(255,255,255,0.12);border:none;color:#fff;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;">Copy</button>${gone.length ? `<button data-ar-recreate-all title="Rebuild every DELETED mission in this list with the current template" style="background:rgba(255,138,138,0.15);border:1px solid #ff8a8a;color:#ffb3b3;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;">↻ Recreate deleted (${gone.length})</button>` : ''}<button data-ar-restage="pumps" title="Rebuild the ghosts of every UNREVIEWED pad that has a lone pumping unit with the current template — missions stay, nothing is deleted" style="background:rgba(195,157,255,0.18);border:1px solid #c39dff;color:#d8c3ff;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;">🔁 Re-stage pumps</button><button data-ar-restage="facilities" title="Rebuild the ghosts of every UNREVIEWED pad that has a facility outline (6+ corners or ≥ 250 ft) with the edge walk — missions stay" style="background:rgba(195,157,255,0.18);border:1px solid #c39dff;color:#d8c3ff;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;">🔁 Re-stage facilities</button><button data-ar-restage="all" title="Rebuild the ghosts of EVERY unreviewed mission with the current template — missions stay, nothing is deleted" style="background:rgba(195,157,255,0.18);border:1px solid #c39dff;color:#d8c3ff;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;">🔁 Re-stage all</button><button data-ar-delete title="Select every UNREVIEWED mission in the list and open 🗑 Delete (backup file + Delete Guard + slider) — start the run over" style="background:rgba(255,82,82,0.18);border:1px solid #ff5252;color:#ff8a8a;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;" ${left.filter(x => x.mid != null && x.created !== false).length ? '' : 'disabled'}>🗑 Delete unreviewed (${left.filter(x => x.mid != null && x.created !== false).length})</button><button data-ar-clear title="Forget this site's review list (missions stay)" style="background:rgba(255,255,255,0.12);border:none;color:#ff8a8a;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;">Forget list</button><button data-ar-close style="background:rgba(255,255,255,0.12);border:none;color:#fff;width:22px;height:22px;border-radius:4px;cursor:pointer;">✕</button></span>
             </div>
-            <div style="padding:5px 12px;font-size:10px;color:#9ad;border-bottom:1px solid #2a2f38;">${headline ? escapeHtml(headline) + ' · ' : ''}click a row to open the mission · tick ☐ when it is reviewed / fixed · yellow = flagged (big asset, pulled-in or swung angles, splits), green = built clean</div>
-            <div style="overflow:auto;flex:1;padding:4px 10px;font-size:11px;">${items.length ? flagged.map(row).join('') + clean.map(row).join('') + (done.length ? `<div style="padding:6px 4px 2px;color:#789;font-size:10px;">done (${done.length})</div>` + done.map(row).join('') : '') : '<div style="padding:10px;color:#888;">No Auto-shots runs recorded for this site yet.</div>'}</div>`;
+            <div style="padding:5px 12px;font-size:10px;color:#9ad;border-bottom:1px solid #2a2f38;">${headline ? escapeHtml(headline) + ' · ' : ''}click a row to open the mission · tick ☐ when it is reviewed / fixed · ▸ n = build notes · aims = the points the snapshots look at (one aim can be shot by several navs) · yellow = flagged (big asset, pulled-in or swung angles, splits), green = built clean</div>
+            <div style="overflow:auto;flex:1;padding:4px 10px;font-size:11px;">${items.length ? ordered.map(row).join('') + (done.length ? `<div style="padding:6px 4px 2px;color:#789;font-size:10px;">done (${done.length})</div>` + done.map(row).join('') : '') : '<div style="padding:10px;color:#888;">No Auto-shots runs recorded for this site yet.</div>'}</div>`;
         p.querySelector('[data-ar-close]').onclick = () => p.remove();
+        const scrollEl = () => p.querySelector('div[style*="overflow:auto"]') || p;
+        const rerender = () => { const st = scrollEl().scrollTop; genReviewOpen(sid, headline); try { const np = document.getElementById(ID); if (np) (np.querySelector('div[style*="overflow:auto"]') || np).scrollTop = st; } catch (e) {} };
+        p.querySelector('[data-ar-sort]').onchange = (ev) => { try { gmSet(GEN_REVIEW_SORT_KEY, ev.target.value); } catch (e) {} rerender(); };
+        p.querySelectorAll('[data-ar-notes-t]').forEach(b => b.onclick = (ev) => { ev.stopPropagation(); const k = b.getAttribute('data-ar-notes-t'); const box = p.querySelector(`[data-ar-notes="${CSS.escape(k)}"]`); const open = !genReviewNotesOpen.has(k); if (open) genReviewNotesOpen.add(k); else genReviewNotesOpen.delete(k); if (box) box.style.display = open ? 'block' : 'none'; b.textContent = `${open ? '▾' : '▸'} ${b.textContent.replace(/^[▸▾]\s*/, '')}`; });
         p.querySelector('[data-ar-copy]').onclick = () => { try { navigator.clipboard.writeText(text()); showToast('Review list copied.', '#5fff5f', 2000); } catch (e) { console.warn(`${TAG} [review] copy failed`, e); } };
         p.querySelectorAll('[data-ar-restage]').forEach(b => b.onclick = () => { const filter = b.getAttribute('data-ar-restage'); const todo = left.filter(x => x.mid != null && x.created !== false); if (!todo.length) { showToast('Nothing unreviewed.', '#ff9800', 2500); return; } genRestageItems(sid, todo, filter); });
         p.querySelector('[data-ar-delete]').onclick = (ev) => {
@@ -9672,7 +9715,7 @@
             openBulkDeletePopover(ev.currentTarget);
         };
         p.querySelector('[data-ar-clear]').onclick = () => { if (!confirm('Forget this site’s review list (missions are untouched)?')) return; const all = genReviewAll(); delete all[envSiteKey(sid)]; genReviewSave(all); p.remove(); };
-        p.querySelectorAll('[data-ar-done]').forEach(cb => cb.onchange = () => { const mid = Number(cb.getAttribute('data-ar-done')); if (!Number.isFinite(mid)) return; genReviewSetDone(sid, mid, cb.checked); const st = p.scrollTop; genReviewOpen(sid, headline); try { const np = document.getElementById(ID); if (np) np.querySelector('div[style*="overflow:auto"]').scrollTop = st; } catch (e) {} });
+        p.querySelectorAll('[data-ar-done]').forEach(cb => cb.onchange = () => { const mid = Number(cb.getAttribute('data-ar-done')); if (!Number.isFinite(mid)) return; genReviewSetDone(sid, mid, cb.checked); rerender(); });
         p.querySelectorAll('[data-ar-recreate]').forEach(b => b.onclick = (ev) => { ev.stopPropagation(); const mid = b.getAttribute('data-ar-recreate'); const it = items.find(x => (mid && String(x.mid) === mid) || (!mid && x.name === b.getAttribute('data-ar-recreate-name'))); if (it) genRecreateItems(sid, [it]); });
         const rcAll = p.querySelector('[data-ar-recreate-all]'); if (rcAll) rcAll.onclick = () => genRecreateItems(sid, gone);
         p.querySelectorAll('[data-ar-open]').forEach(el => el.onclick = () => {
