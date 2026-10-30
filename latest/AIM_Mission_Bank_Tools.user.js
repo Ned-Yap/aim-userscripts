@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.98
+// @version      3.99
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.98';
+    const SCRIPT_VERSION = '3.99';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -9697,7 +9697,7 @@
         const row = r => `<div style="display:flex;gap:6px;align-items:flex-start;padding:5px 4px;border-bottom:1px solid #20262e;${r.done ? 'opacity:0.45;' : ''}">
                 <input type="checkbox" data-ar-done="${r.mid != null ? r.mid : ''}" ${r.done ? 'checked' : ''} ${r.mid == null ? 'disabled' : ''} title="Done — reviewed / fixed" style="margin-top:2px;flex:0 0 auto;">
                 <div data-ar-open="${r.mid != null && !r.gone ? r.mid : ''}" title="${r.gone ? 'This mission was deleted — ↻ Recreate rebuilds it' : (r.mid != null ? 'Open this mission in the editor and zoom to the pad' : '')}" style="flex:1;min-width:0;${r.mid != null && !r.gone ? 'cursor:pointer;' : ''}">
-                    <div style="display:flex;gap:8px;align-items:baseline;"><span style="flex:1;font-weight:700;color:${r.gone ? '#ff8a8a' : (r.done ? '#9ad' : (r.flags.length ? '#ffd54f' : '#7dff7d'))};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(r.name)}</span>${(!r.done && r.flags.length) ? `<button data-ar-notes-t="${r.mid != null ? r.mid : r.name}" title="Show / hide the build notes" style="background:none;border:1px solid #2a3340;color:#9ad;border-radius:3px;cursor:pointer;font-size:10px;padding:0 5px;line-height:1.4;">${genReviewNotesOpen.has(String(r.mid != null ? r.mid : r.name)) ? '▾' : '▸'} ${r.flags.length}</button>` : ''}${r.gone || r.created === false ? `<button data-ar-recreate="${r.mid != null ? r.mid : ''}" data-ar-recreate-name="${escapeHtml(r.name)}" title="Rebuild this pad with the current Auto-shots template and create the mission again" style="background:rgba(255,138,138,0.15);border:1px solid #ff8a8a;color:#ffb3b3;border-radius:3px;cursor:pointer;font-size:10px;padding:0 6px;">↻ Recreate</button>` : ''}<span style="color:#9ad;white-space:nowrap;font-size:10px;">${r.aims} aim${r.aims === 1 ? '' : 's'} · ${r.navs} nav · ${r.snaps} snap${r.gone ? ' · <b style="color:#ff5252;">DELETED</b>' : (r.created === false ? ' · <b style="color:#ff5252;">NOT CREATED</b>' : '')}</span></div>
+                    <div style="display:flex;gap:8px;align-items:baseline;"><span style="flex:1;font-weight:700;color:${r.gone ? '#ff8a8a' : (r.done ? '#9ad' : (r.flags.length ? '#ffd54f' : '#7dff7d'))};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(r.name)}</span>${(!r.done && r.flags.length) ? `<button data-ar-notes-t="${r.mid != null ? r.mid : r.name}" title="Show / hide the build notes" style="background:none;border:1px solid #2a3340;color:#9ad;border-radius:3px;cursor:pointer;font-size:10px;padding:0 5px;line-height:1.4;">${genReviewNotesOpen.has(String(r.mid != null ? r.mid : r.name)) ? '▾' : '▸'} ${r.flags.length}</button>` : ''}${(!r.done && !r.gone && r.created !== false && r.mid != null) ? `<button data-ar-restage-one="${r.mid}" title="Rebuild THIS pad's ghosts with the current template (a committed mission gets them staged on top — commit replaces its navs)" style="background:rgba(195,157,255,0.15);border:1px solid #c39dff;color:#d8c3ff;border-radius:3px;cursor:pointer;font-size:10px;padding:0 5px;">🔁</button>` : ''}${r.gone || r.created === false ? `<button data-ar-recreate="${r.mid != null ? r.mid : ''}" data-ar-recreate-name="${escapeHtml(r.name)}" title="Rebuild this pad with the current Auto-shots template and create the mission again" style="background:rgba(255,138,138,0.15);border:1px solid #ff8a8a;color:#ffb3b3;border-radius:3px;cursor:pointer;font-size:10px;padding:0 6px;">↻ Recreate</button>` : ''}<span style="color:#9ad;white-space:nowrap;font-size:10px;">${r.aims} aim${r.aims === 1 ? '' : 's'} · ${r.navs} nav · ${r.snaps} snap${r.gone ? ' · <b style="color:#ff5252;">DELETED</b>' : (r.created === false ? ' · <b style="color:#ff5252;">NOT CREATED</b>' : '')}</span></div>
                     ${r.done ? '' : `<div data-ar-notes="${r.mid != null ? r.mid : r.name}" style="display:${genReviewNotesOpen.has(String(r.mid != null ? r.mid : r.name)) ? 'block' : 'none'};">${r.flags.map(f => `<div style="color:#cfb;font-size:10px;padding-left:10px;">⚠ ${escapeHtml(f)}</div>`).join('')}</div>`}
                 </div>
             </div>`;
@@ -9730,6 +9730,7 @@
         };
         p.querySelector('[data-ar-clear]').onclick = () => { if (!confirm('Forget this site’s review list (missions are untouched)?')) return; const all = genReviewAll(); delete all[envSiteKey(sid)]; genReviewSave(all); p.remove(); };
         p.querySelectorAll('[data-ar-done]').forEach(cb => cb.onchange = () => { const mid = Number(cb.getAttribute('data-ar-done')); if (!Number.isFinite(mid)) return; genReviewSetDone(sid, mid, cb.checked); rerender(); });
+        p.querySelectorAll('[data-ar-restage-one]').forEach(b => b.onclick = (ev) => { ev.stopPropagation(); const mid = Number(b.getAttribute('data-ar-restage-one')); const it = items.find(x => x.mid === mid); if (it) genRestageItems(sid, [it], 'all'); });
         p.querySelectorAll('[data-ar-recreate]').forEach(b => b.onclick = (ev) => { ev.stopPropagation(); const mid = b.getAttribute('data-ar-recreate'); const it = items.find(x => (mid && String(x.mid) === mid) || (!mid && x.name === b.getAttribute('data-ar-recreate-name'))); if (it) genRecreateItems(sid, [it]); });
         const rcAll = p.querySelector('[data-ar-recreate-all]'); if (rcAll) rcAll.onclick = () => genRecreateItems(sid, gone);
         p.querySelectorAll('[data-ar-open]').forEach(el => el.onclick = () => {
