@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.75
+// @version      3.76
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.75';
+    const SCRIPT_VERSION = '3.76';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -8459,7 +8459,7 @@
                         <span title="A nav may shoot at most this many aims">· max aims/nav</span><input data-gen-auto-maxnav type="number" min="1" max="6" style="width:40px;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px;">
                     </div>
                     <label style="display:flex;align-items:center;gap:6px;margin-top:5px;cursor:pointer;color:#d8c3ff;" title="Create the mission with only the stock centroid shot and stage the plan as ghosts on it: open the mission, reorder ↑↓ / drop ✕ / ⟲ auto-order in the 🎯 HUD, then ⚡ commit (the stock shot is replaced, wrap chosen at commit)"><input type="checkbox" data-gen-auto-ghost> 👻 Stage as ghosts — review / reorder in the editor, ⚡ commit when ready</label>
-                    <div style="color:#9a8bb8;font-size:10px;margin-top:3px;">Rows (wells within row ≤): trios → broadside navs on both sides with one shot per gap (two wells per image) + one end-on shot of the group. Pumping units (name has “pump”): both ends + the long side away from the FFZ edge, square to the box at the standoff — only a blocked shot swings. Other lone assets: distance (band) → angle (≥ min, 90° first) → count → sharing (≤ max/nav). Never outside the FFZ / over an asset or NFZ · ordered from base · 🎞 wrap at Create (or at commit for ghosts) · review list after.</div>
+                    <div style="color:#9a8bb8;font-size:10px;margin-top:3px;">Rows (wells within row ≤): trios → broadside navs on both sides with one shot per gap (two wells per image) + one end-on shot of the group. Pumping units (type says “pumping”): both ends + the long side away from the FFZ edge, square to the box at the standoff — only a blocked shot swings. Other lone assets: distance (band) → angle (≥ min, 90° first) → count → sharing (≤ max/nav). Never outside the FFZ / over an asset or NFZ · ordered from base · 🎞 wrap at Create (or at commit for ghosts) · review list after.</div>
                 </div>
                 <div style="display:flex;align-items:center;gap:6px;margin-top:7px;"><label style="color:#cfe;white-space:nowrap;">Name</label><input data-gen-bulk-name value="{section} - {asset}" title="Tokens: {section} = N/E/S/W · {asset} = asset name" style="flex:1;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:2px 6px;border-radius:3px;font:inherit;font-size:11px;"></div>
                 <div style="color:#789;font-size:10px;margin-top:2px;">Tokens: <b>{section}</b> = N/E/S/W · <b>{asset}</b> = asset name (e.g. <b>NNE - {asset}</b>)</div>
@@ -8680,7 +8680,7 @@
         const rows = [], dots = [];
         // v3.75: a lone PUMPING unit (name says pump) gets the fixed 3-face template, never the solver
         const pumps = [];
-        byRoot.forEach(list => { if (list.length >= 2) rows.push(list); else { const a = list[0]; if (GEN_PUMP_RE.test(String(a.name || ''))) { pumps.push(a); return; } const c = genCentroid(a.ring); dots.push({ lat: c.lat, lng: c.lng, rings: [a.ring], name: a.name || String(a.id), kind: 'asset' }); } });
+        byRoot.forEach(list => { if (list.length >= 2) rows.push(list); else { const a = list[0]; if (genIsPump(a)) { pumps.push(a); return; } const c = genCentroid(a.ring); dots.push({ lat: c.lat, lng: c.lng, rings: [a.ring], name: a.name || String(a.id), kind: 'asset' }); } });
         (ent.nfzs || []).forEach(z => {
             if (!z.ring || z.ring.length < 3) return;
             const c = genCentroid(z.ring);
@@ -8703,7 +8703,9 @@
     // AWAY from the nearest FFZ border (the side toward the border is the one we skip).
     // A shot that can't sit exactly at the standoff (outside the FFZ / over something)
     // swings in 5° steps, then slides inside the band — the other two never move.
+    // v3.76: the word lives in the TYPE string (custom.poi_type_str = "P1 - v - pumping rod - empty"), not the name
     const GEN_PUMP_RE = /pump/i;
+    function genIsPump(a) { return !!a && (GEN_PUMP_RE.test(String(a.poi || '')) || GEN_PUMP_RE.test(String(a.name || ''))); }
     function genRingAxis(ring) {
         const c = genCentroid(ring), mLat = 110540, mLng = 111320 * Math.cos(c.lat * Math.PI / 180);
         let u = { x: 1, y: 0 }, far = 0.01;
