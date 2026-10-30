@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.73
+// @version      3.74
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.73';
+    const SCRIPT_VERSION = '3.74';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -4527,7 +4527,9 @@
         focus: null, targetRing: null, targetName: '', ent: null, live: [], liveLayers: [], stagedLayers: [], stagedKey: '', canvas: null,
         container: null, wheelOn: false, sid: null, mid: null, downAt: null, gap: [], gapFt: 50, fine: false,
         // v3.60 📍 Points mode: the user drops the aim points, the solver places the fewest navs
-        mode: 'ring', dots: [], plan: null, dotK: 3, shareLo: 95, shareHi: 110, pairFt: 30, minSep: 45, maxPerNav: 2, hover: null, hoverName: '', replace: false };
+        mode: 'ring', dots: [], plan: null, dotK: 3, shareLo: 95, shareHi: 110, pairFt: 30, minSep: 45, maxPerNav: 2, hover: null, hoverName: '', replace: false,
+        // v3.74: drag-to-move / R-click-remove on STAGED ghosts (navs + aims)
+        drag: null, suppressClick: false, hitCursor: false, stagedGroups: [] };
     const SG_GAP_KEY = 'aim-mb-sg-gap', SG_MODE_KEY = 'aim-mb-sg-mode', SG_DOTK_KEY = 'aim-mb-sg-dotk', SG_BAND_KEY = 'aim-mb-sg-band';
     try { const m = String(gmGet(SG_MODE_KEY, 'ring') || 'ring'); if (m === 'dots') sg.mode = 'dots'; const k = Number(gmGet(SG_DOTK_KEY, 3)); if (Number.isFinite(k) && k >= 1 && k <= 6) sg.dotK = k; } catch (e) {}
     try { const b = gmGet(SG_BAND_KEY, null); if (b && typeof b === 'object') { if (Number(b.lo) >= SG_MIN_FT) sg.shareLo = Number(b.lo); if (Number(b.hi) > sg.shareLo) sg.shareHi = Number(b.hi); if (Number(b.pair) >= 0) sg.pairFt = Number(b.pair); if (Number(b.sep) >= 5) sg.minSep = Number(b.sep); if (Number(b.max) >= 1) sg.maxPerNav = Number(b.max); } } catch (e) {}
@@ -4894,13 +4896,19 @@
         const groups = (mid && sid) ? sgGhostsFor(sid, mid) : [];
         const key = `${sid}:${mid}:${groups.map(g => g.gid).join(',')}`;
         if (!force && key === sg.stagedKey) return;
-        sg.stagedKey = key;
+        sg.stagedKey = key; sg.stagedGroups = groups;
+        sgRenderStaged(groups);
+    }
+    // v3.74: render a given group list (sgDrawStaged reads storage; a live drag passes its
+    // working copy so GM storage isn't re-read on every mousemove).
+    function sgRenderStaged(groups) {
         sgClearLayers(sg.stagedLayers);
         if (!groups.length) return;
         const L = composerGetL(), map = getLeafletMap(); if (!L || !map) return;
         sgEnsureStyle();
         const cv = sgCanvas(L);
         const keep = l => { sg.stagedLayers.push(l); l.addTo(map); return l; };
+        const dragging = sg.drag ? sg.drag : null;
         groups.forEach((g, gi) => {
             try {
                 if (Array.isArray(g.dots) && g.dots.length) {
@@ -4909,9 +4917,12 @@
                 (g.navs || []).forEach((p, i) => {
                     const aims = (p.aims && p.aims.length) ? p.aims : [g.focus];
                     aims.forEach(a => keep(L.polyline([[a.lat, a.lng], [p.lat, p.lng]], { renderer: cv || undefined, interactive: false, color: '#c39dff', weight: 2, dashArray: '3 5', opacity: 0.8 })));
-                    keep(L.circleMarker([p.lat, p.lng], { renderer: cv || undefined, interactive: false, radius: 8, color: '#c39dff', weight: 2, fillColor: '#c39dff', fillOpacity: 0.35 }));
+                    const hot = dragging && dragging.gi === gi && dragging.ni === i;
+                    keep(L.circleMarker([p.lat, p.lng], { renderer: cv || undefined, interactive: false, radius: hot ? 10 : 8, color: hot ? '#ffd54f' : '#c39dff', weight: hot ? 3 : 2, fillColor: '#c39dff', fillOpacity: 0.35 }));
                     const ns = (p.aims && p.aims.length) ? p.aims.length : (p.snaps || g.snapsPerNav || 1);
-                    keep(sgChip(L, p.lat, p.lng, `G${gi + 1} · N${i + 1}${ns > 1 ? ` · ${ns} snaps` : ''}`, '#c39dff', 920));
+                    // chip carries nav→aim ft so a dragged nav can be kept inside the band
+                    const fts = (p.aims && p.aims.length) ? p.aims.map(a => { const ft = Math.round(sgLLFt(p, a)); const st = sgFtStatus(ft, true); return `<span style="color:${SG_COL[st]}">${ft}</span>`; }) : [];
+                    keep(sgChip(L, p.lat, p.lng, `G${gi + 1} · N${i + 1}${fts.length ? ` · ${fts.join('/')} ft` : (ns > 1 ? ` · ${ns} snaps` : '')}`, hot ? '#ffd54f' : '#c39dff', hot ? 960 : 920));
                 });
             } catch (e) { console.warn(`${TAG} [🎯] staged draw failed`, e); }
         });
@@ -5176,13 +5187,84 @@
         }
         window.removeEventListener('keydown', sgOnKey, true);
         try { if (!caModeOn) document.documentElement.removeAttribute('data-aim-clickadd'); } catch (e) {}
+        try { if (sg.drag) sgDragEnd(null); } catch (e) {}
+        sg.hitCursor = false; if (sg.container) sg.container.style.cursor = '';
         sg.wheelOn = false;
         sgClearLayers(sg.liveLayers);
         sgUpdateHud(); sgUpdateBtn();
         if (!silent) showToast('🎯 Ghost dropped.', '#888', 1500);
     }
+    // ── v3.74: edit STAGED ghosts on the map — drag a nav or an aim, R-click removes one ──
+    function sgLLFt(a, b) { const kx = Math.cos((a.lat + b.lat) / 2 * Math.PI / 180) * 111320, ky = 110540; return Math.hypot((b.lng - a.lng) * kx, (b.lat - a.lat) * ky) * 3.28084; }
+    function sgHitStaged(e, fresh) {
+        const map = getLeafletMap(), sid = getCurrentSiteID(), mid = sgMid(); if (!map || !sid || !mid) return null;
+        // hover uses the rendered list (no GM read per mousemove); a press/R-click re-reads storage
+        const groups = fresh ? sgGhostsFor(sid, mid) : (sg.stagedGroups || []); if (!groups.length) return null;
+        let px; try { const r = map.getContainer().getBoundingClientRect(); px = { x: e.clientX - r.left, y: e.clientY - r.top }; } catch (err) { return null; }
+        const pxOf = (p) => { try { const q = map.latLngToContainerPoint([p.lat, p.lng]); return Math.hypot(q.x - px.x, q.y - px.y); } catch (err) { return Infinity; } };
+        let best = null, bd = 13;
+        groups.forEach((g, gi) => (g.navs || []).forEach((p, ni) => { const d = pxOf(p); if (d < bd) { bd = d; best = { gi, ni, kind: 'nav', ai: -1, groups }; } }));
+        if (best) return best;
+        bd = 10;
+        groups.forEach((g, gi) => (g.navs || []).forEach((p, ni) => (p.aims || []).forEach((a, ai) => { const d = pxOf(a); if (d < bd) { bd = d; best = { gi, ni, kind: 'aim', ai, groups }; } })));
+        return best;
+    }
+    function sgDragPoint(d) { const p = d.groups[d.gi].navs[d.ni]; return d.kind === 'aim' ? p.aims[d.ai] : p; }
+    function sgDragStart(e, hit) {
+        const map = getLeafletMap();
+        sg.drag = Object.assign({ moved: false, raf: 0, start: { x: e.clientX, y: e.clientY } }, hit);
+        try { if (map && map.dragging && map.dragging.enabled()) { map.dragging.disable(); sg.drag.reDrag = true; } } catch (err) {}
+        window.addEventListener('mousemove', sgDragMove, true);
+        window.addEventListener('mouseup', sgDragEnd, true);
+        if (sg.container) sg.container.style.cursor = 'grabbing';
+    }
+    function sgDragMove(e) {
+        const d = sg.drag; if (!d) return;
+        e.preventDefault(); e.stopPropagation();
+        if (!d.moved && Math.abs(e.clientX - d.start.x) < 3 && Math.abs(e.clientY - d.start.y) < 3) return;
+        d.moved = true;
+        const ll = caClickToLatLng(e); if (!ll) return;
+        const p = sgDragPoint(d); p.lat = ll.lat; p.lng = ll.lng;
+        if (!d.raf) d.raf = requestAnimationFrame(() => { d.raf = 0; try { sgRenderStaged(d.groups); } catch (err) { console.warn(`${TAG} [🎯] drag draw failed`, err); } });
+    }
+    function sgDragEnd(e) {
+        const d = sg.drag; if (!d) return;
+        window.removeEventListener('mousemove', sgDragMove, true);
+        window.removeEventListener('mouseup', sgDragEnd, true);
+        if (d.raf) { cancelAnimationFrame(d.raf); d.raf = 0; }
+        sg.drag = null;
+        try { const map = getLeafletMap(); if (d.reDrag && map && map.dragging) map.dragging.enable(); } catch (err) {}
+        if (sg.container) sg.container.style.cursor = '';
+        if (e) { e.preventDefault(); e.stopPropagation(); }
+        sg.suppressClick = true; setTimeout(() => { sg.suppressClick = false; }, 300);
+        if (d.moved) {
+            try { const p = sgDragPoint(d); fetchElevation(p.lat, p.lng); } catch (err) {}
+            sgGroupsMutate(() => d.groups);
+            showToast(`🎯 G${d.gi + 1} · ${d.kind === 'aim' ? `S${d.ai + 1} of N${d.ni + 1}` : `N${d.ni + 1}`} moved.`, '#c39dff', 1200);
+        } else sgDrawStaged(true);
+    }
+    // R-click on a staged nav drops that nav (the group when it was the last one); on an
+    // aim drops that snapshot (a nav keeps at least one). Returns true when it ate the click.
+    function sgContextStaged(e) {
+        const hit = sgHitStaged(e, true); if (!hit) return false;
+        const g = hit.groups[hit.gi], p = g.navs[hit.ni];
+        let msg;
+        if (hit.kind === 'aim') {
+            if (!p.aims || p.aims.length < 2) { showToast(`N${hit.ni + 1} has one snapshot — R-click the nav to drop both.`, '#ff9800', 2500); return true; }
+            p.aims.splice(hit.ai, 1); msg = `S${hit.ai + 1} of N${hit.ni + 1} dropped`;
+        } else {
+            g.navs.splice(hit.ni, 1); msg = `N${hit.ni + 1} dropped`;
+            if (!g.navs.length) { hit.groups.splice(hit.gi, 1); msg = `G${hit.gi + 1} dropped`; }
+        }
+        sgGroupsMutate(() => hit.groups);
+        showToast(`🎯 ${msg}.`, '#c39dff', 1500);
+        return true;
+    }
     function sgOnMove(e) {
         if (!sg.active) return;
+        if (sg.drag) return;
+        // cursor hint over a staged nav / aim
+        try { const on = !!sgHitStaged(e); if (on !== sg.hitCursor) { sg.hitCursor = on; if (sg.container) sg.container.style.cursor = on ? 'grab' : ''; } } catch (err) {}
         if (sg.mode === 'dots') {
             const ll = caClickToLatLng(e); if (!ll) return;
             sg.hover = { lat: ll.lat, lng: ll.lng };
@@ -5195,9 +5277,18 @@
         const t = sgFindTarget(sg.focus); sg.targetRing = t ? t.ring : null; sg.targetName = t ? `${t.kind === 'nfz' ? 'NFZ ' : ''}${t.name}` : '';
         sgDrawLive();
     }
-    function sgOnDown(e) { if (!sg.active) return; sg.downAt = { x: e.clientX, y: e.clientY, t: Date.now() }; }
+    function sgOnDown(e) {
+        if (!sg.active) return;
+        sg.downAt = { x: e.clientX, y: e.clientY, t: Date.now() };
+        if (e.button !== 0 || sg.drag) return;
+        if (e.target && e.target.closest && e.target.closest('#' + SG_HUD_ID + ', [id^="aim-"], button, input, select')) return;
+        const hit = sgHitStaged(e, true); if (!hit) return;
+        e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+        sgDragStart(e, hit);
+    }
     function sgOnClick(e) {
         if (!sg.active) return;
+        if (sg.suppressClick || sg.drag) { e.preventDefault(); e.stopPropagation(); return; }   // v3.74: the click that ends a ghost drag places nothing
         if (e.target && e.target.closest && e.target.closest('#' + SG_HUD_ID + ', [id^="aim-"], button, input, select')) return;
         // a press that travelled is a map pan — never a placement
         if (sg.downAt && (Math.abs(e.clientX - sg.downAt.x) > 5 || Math.abs(e.clientY - sg.downAt.y) > 5)) { sg.downAt = null; return; }
@@ -5225,7 +5316,7 @@
             sg.dots.splice(bi, 1); sgResolveDots(); sgDrawLive(); return true;
         } catch (err) { console.warn(`${TAG} [📍] remove failed`, err); return false; }
     }
-    function sgOnContext(e) { if (!sg.active) return; e.preventDefault(); e.stopPropagation(); if (sg.mode === 'dots') { sgRemoveDotAt(e); return; } if (sg.pinned) { sg.pinned = false; sg.targetRing = null; sg.targetName = ''; const ll = caClickToLatLng(e); if (ll) sg.focus = { lat: ll.lat, lng: ll.lng }; sgDrawLive(); } }
+    function sgOnContext(e) { if (!sg.active) return; e.preventDefault(); e.stopPropagation(); if (sgContextStaged(e)) return; if (sg.mode === 'dots') { sgRemoveDotAt(e); return; } if (sg.pinned) { sg.pinned = false; sg.targetRing = null; sg.targetName = ''; const ll = caClickToLatLng(e); if (ll) sg.focus = { lat: ll.lat, lng: ll.lng }; sgDrawLive(); } }
     function sgPin(ll) {
         sg.focus = { lat: ll.lat, lng: ll.lng }; sg.pinned = true;
         const t = sgFindTarget(sg.focus); sg.targetRing = t ? t.ring : null; sg.targetName = t ? `${t.kind === 'nfz' ? 'NFZ ' : ''}${t.name}` : '';
@@ -5648,7 +5739,7 @@
     // Per-tick: keep the staged ghosts drawn for the open mission (cheap key compare).
     function sgTick() {
         if (CONTEXT !== 'IFRAME') return;
-        try { if (caEditing()) sgDrawStaged(false); else if (sg.stagedLayers.length || sg.active) { sgStop(true); sgClearLayers(sg.stagedLayers); sg.stagedKey = ''; } } catch (e) {}
+        try { if (caEditing()) sgDrawStaged(false); else if (sg.stagedLayers.length || sg.active) { sgStop(true); sgClearLayers(sg.stagedLayers); sg.stagedKey = ''; sg.stagedGroups = []; } } catch (e) {}
     }
     // Nav group (1-based) of the step currently open in the editor — Click-to-Add + 🎯 insert after it.
     function caOpenStepNavGroup() {
