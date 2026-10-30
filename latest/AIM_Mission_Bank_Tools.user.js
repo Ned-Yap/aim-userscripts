@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.72
+// @version      3.73
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.72';
+    const SCRIPT_VERSION = '3.73';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -6740,35 +6740,60 @@
             ordered = composerDomIds().map(id => byId[id]).filter(Boolean);
         }
         const K = (lat, lng) => `${(+lat).toFixed(6)},${(+lng).toFixed(6)}`;
-        const lookup = {}; let navN = 0, snapN = 0;
+        // v3.73: a coordinate may hold SEVERAL steps (stacked snapshots) → keep them all, in
+        // step order; each nav remembers the snapshots that follow it (hover tooltip).
+        const lookup = {}; let navN = 0, snapN = 0, curNav = null;
         ordered.forEach(s => {
             if (!s || !s.location || s.location.lat == null) return;
-            if (s.type_name === 'navigate' || s.type === 1) { navN++; lookup[K(s.location.lat, s.location.lng)] = { num: navN, kind: 'nav', id: String(s.id) }; }
-            else if (s.type_name === 'snapshot' || s.type === 6) { snapN++; lookup[K(s.location.lat, s.location.lng)] = { num: snapN, kind: 'snap', id: String(s.id) }; }
+            let info = null;
+            if (s.type_name === 'navigate' || s.type === 1) { navN++; info = { num: navN, kind: 'nav', id: String(s.id), snaps: [] }; curNav = info; }
+            else if (s.type_name === 'snapshot' || s.type === 6) { snapN++; info = { num: snapN, kind: 'snap', id: String(s.id) }; if (curNav) curNav.snaps.push(`S${snapN}`); }
             // Flag Pole (type 16) — tag its native marker so it's selectable + movable
             // + Alt-deletable like nav/snap. We DON'T restyle/number it, so its native
             // flag-pole icon stays as-is (the user wants that icon to remain).
-            else if (s.type_name === 'flag pole' || s.type === 16) { lookup[K(s.location.lat, s.location.lng)] = { kind: 'flag', id: String(s.id) }; }
+            else if (s.type_name === 'flag pole' || s.type === 16) info = { kind: 'flag', id: String(s.id) };
+            if (!info) return;
+            const k = K(s.location.lat, s.location.lng);
+            (lookup[k] = lookup[k] || []).push(info);
         });
-        let matched = 0, seen = 0;
+        let matched = 0, seen = 0; const hits = {};
         map.eachLayer(layer => {
             const el = layer && layer._icon;
             if (!el || !el.classList) return;
             const ll = layer._latlng;
             if (!ll) return;
-            const info = lookup[K(ll.lat, ll.lng)];
+            const k = K(ll.lat, ll.lng), infos = lookup[k];
             if (el.classList.contains('instruction-marker')) {
                 // Percepto's nav/snap markers.
                 seen++;
-                if (info && info.kind !== 'flag') { matched++; composerStyleOneMarker(el, info, [ll.lat, ll.lng]); }
+                if (infos && infos[0].kind !== 'flag') { matched++; (hits[k] = hits[k] || []).push({ layer, el, ll }); }
             } else if (el.classList.contains('leaflet-marker-icon')) {
                 // The Flag Pole renders as a GENERIC location-marker (not an
                 // instruction-marker), so match it to the flag-pole instruction by
                 // lat/lng and tag it selectable. Other generic markers (GMs) sit at
                 // different coords → no lookup hit → left alone.
-                if (info && info.kind === 'flag') composerStyleOneMarker(el, info, [ll.lat, ll.lng]);
+                if (infos && infos[0].kind === 'flag') composerStyleOneMarker(el, infos[0], [ll.lat, ll.lng]);
             }
         });
+        // Stacks: markers at one coordinate in DOM order = Percepto's render order = step order,
+        // so the i-th marker is the i-th step there (each keeps its OWN number + id). The stack's
+        // labels + ids ride on every marker for the hover chooser.
+        Object.keys(hits).forEach(k => {
+            const ms = hits[k], infos = lookup[k].filter(i => i.kind !== 'flag');
+            if (ms.length > 1) ms.sort((a, b) => ((a.el.compareDocumentPosition(b.el) & Node.DOCUMENT_POSITION_FOLLOWING) ? -1 : 1));
+            const stackLbl = infos.length > 1 ? infos.map(i => `${i.kind === 'nav' ? 'N' : 'S'}${i.num}`).join(',') : '';
+            const stackIds = infos.length > 1 ? infos.map(i => i.id).join(',') : '';
+            ms.forEach((m, i) => {
+                const info = infos[Math.min(i, infos.length - 1)];
+                composerStyleOneMarker(m.el, info, [m.ll.lat, m.ll.lng]);
+                if (m.el.getAttribute('data-aim-stack') !== stackLbl) { if (stackLbl) { m.el.setAttribute('data-aim-stack', stackLbl); m.el.setAttribute('data-aim-stack-ids', stackIds); } else { m.el.removeAttribute('data-aim-stack'); m.el.removeAttribute('data-aim-stack-ids'); } }
+                const snaps = info.kind === 'nav' ? info.snaps.join(',') : '';
+                if (m.el.getAttribute('data-aim-snaps') !== snaps) { if (snaps) m.el.setAttribute('data-aim-snaps', snaps); else m.el.removeAttribute('data-aim-snaps'); }
+                m.layer.__aimStepId = info.id;
+            });
+        });
+        composerRaiseOpenMarker(map);
+        composerHoverInstall();
         if (!matched && seen && !loggedNoMarkers) {
             loggedNoMarkers = true;
             console.warn(`${TAG} [map-badges] saw ${seen} instruction-markers but matched 0 by lat/lng — Leaflet layer model differs; tell me and I'll switch to pixel matching.`);
@@ -6806,6 +6831,62 @@
                 display:flex; align-items:center; justify-content:center; color:#fff; -webkit-text-fill-color:#fff;
                 font:800 11px/1 'Lato',sans-serif; pointer-events:none; z-index:2; }
         `;
+    }
+    // The marker of the step OPEN in the editor rides on top of its stack (so it is the one you drag).
+    function composerRaiseOpenMarker(map) {
+        const open = getOpenStepId(); if (open == null) return;
+        try {
+            map.eachLayer(l => {
+                if (l.__aimStepId == null || typeof l.setZIndexOffset !== 'function') return;
+                const want = String(l.__aimStepId) === String(open) ? 5000 : 0;
+                if ((l.options.zIndexOffset || 0) !== want) l.setZIndexOffset(want);
+            });
+        } catch (e) { console.warn(`${TAG} [map-badges] raise failed`, e); }
+    }
+    // Hover a nav → "N7 → S8 · S13" + its snapshots glow; hover a stack → chips to open (and raise) one.
+    let composerHoverInstalled = false, composerHoverT = null;
+    function composerHoverEl() {
+        let h = document.getElementById('aim-mb-hover');
+        if (!h) {
+            h = document.createElement('div'); h.id = 'aim-mb-hover';
+            h.style.cssText = 'position:fixed;z-index:2147483600;display:none;background:rgba(10,12,16,0.94);border:1px solid #7adfe6;border-radius:6px;color:#e6e6e6;font:11px/1.3 "Lato","Segoe UI",sans-serif;padding:5px 8px;box-shadow:0 3px 12px rgba(0,0,0,0.7);pointer-events:auto;white-space:nowrap;';
+            h.addEventListener('mousedown', e => e.stopPropagation());
+            h.addEventListener('pointerdown', e => e.stopPropagation());
+            h.addEventListener('mouseenter', () => clearTimeout(composerHoverT));
+            h.addEventListener('mouseleave', () => composerHoverHide());
+            document.body.appendChild(h);
+        }
+        return h;
+    }
+    function composerHoverHide() {
+        clearTimeout(composerHoverT);
+        composerHoverT = setTimeout(() => { const h = document.getElementById('aim-mb-hover'); if (h) h.style.display = 'none'; document.querySelectorAll('.instruction-marker.aim-mb-hl').forEach(el => el.classList.remove('aim-mb-hl')); }, 180);
+    }
+    function composerHoverInstall() {
+        if (composerHoverInstalled) return; composerHoverInstalled = true;
+        let st = document.getElementById('aim-mb-hover-css');
+        if (!st) { st = document.createElement('style'); st.id = 'aim-mb-hover-css'; st.textContent = '.instruction-marker.aim-mb-hl .instruction-marker__icon{box-shadow:0 0 0 3px #ffd54f,0 0 10px 4px rgba(255,213,79,0.8) !important;}'; (document.head || document.documentElement).appendChild(st); }
+        window.addEventListener('mouseover', (e) => {
+            const t = e.target;
+            if (t && t.closest && t.closest('#aim-mb-hover')) { clearTimeout(composerHoverT); return; }
+            const m = t && t.closest ? t.closest('.instruction-marker[data-aim-id]') : null;
+            if (!m) { composerHoverHide(); return; }
+            clearTimeout(composerHoverT);
+            const h = composerHoverEl();
+            const lbl = m.getAttribute('data-aim-num') || '', snaps = (m.getAttribute('data-aim-snaps') || '').split(',').filter(Boolean);
+            const stack = (m.getAttribute('data-aim-stack') || '').split(',').filter(Boolean), ids = (m.getAttribute('data-aim-stack-ids') || '').split(',').filter(Boolean);
+            const openId = getOpenStepId();
+            let html = `<b style="color:${m.getAttribute('data-aim-kind') === 'nav' ? '#7aa9ff' : '#ff8ad2'};">${escapeHtml(lbl)}</b>`;
+            if (snaps.length) html += ` <span style="color:#789;">→</span> <span style="color:#ff8ad2;">${snaps.map(escapeHtml).join(' · ')}</span>`;
+            if (stack.length > 1) html += `<div style="margin-top:4px;color:#9ad;">stacked · click to open &amp; raise:</div><div style="display:flex;gap:4px;margin-top:3px;">${stack.map((s, i) => `<button data-hv-open="${escapeHtml(ids[i] || '')}" style="background:${String(ids[i]) === String(openId) ? 'rgba(255,138,210,0.35)' : 'rgba(255,255,255,0.08)'};border:1px solid ${String(ids[i]) === String(openId) ? '#ff8ad2' : '#456'};color:#fff;border-radius:3px;cursor:pointer;font:700 11px 'Lato',sans-serif;padding:1px 6px;">${escapeHtml(s)}</button>`).join('')}</div>`;
+            h.innerHTML = html;
+            h.querySelectorAll('[data-hv-open]').forEach(b => b.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); const id = b.getAttribute('data-hv-open'); if (id) { composerOpenStepEdit(id); setTimeout(() => { try { const map = getLeafletMap(); if (map) composerRaiseOpenMarker(map); } catch (err) {} }, 400); } });
+            const r = m.getBoundingClientRect();
+            h.style.display = 'block';
+            h.style.left = `${Math.round(r.right + 8)}px`; h.style.top = `${Math.round(r.top - 6)}px`;
+            document.querySelectorAll('.instruction-marker.aim-mb-hl').forEach(el => el.classList.remove('aim-mb-hl'));
+            snaps.forEach(s => document.querySelectorAll(`.instruction-marker[data-aim-num="${s}"]`).forEach(el => el.classList.add('aim-mb-hl')));
+        }, true);
     }
     function composerStyleOneMarker(el, info, ll) {
         el.setAttribute('data-aim-id', info.id);
@@ -8685,35 +8766,71 @@
         report.navs = next.filter(s => s.type === 1).length; report.snaps = next.filter(s => s.type === 6).length;
         return { instructions: next, name: stock.name, report, stock: stock.instructions, ghostGroups };
     }
-    // Review list after an Auto-shots run: flagged pads first, copyable.
+    // ── Review list (v3.73): persisted per site, a ☐ done box per pad so you know where you are.
+    // Reopen from the toolbar (📋 Review). New runs merge in by mission id; done state sticks.
+    const GEN_REVIEW_KEY = 'aim-mb-gen-review';
+    function genReviewAll() { try { const o = gmGet(GEN_REVIEW_KEY, {}); return (o && typeof o === 'object') ? o : {}; } catch (e) { console.warn(`${TAG} [review] read failed`, e); return {}; } }
+    function genReviewSave(all) { try { gmSet(GEN_REVIEW_KEY, all); } catch (e) { console.warn(`${TAG} [review] save failed`, e); } }
+    function genReviewItems(sid) { const s = genReviewAll()[envSiteKey(sid)]; return (s && Array.isArray(s.items)) ? s.items : []; }
+    function genReviewMerge(sid, reports) {
+        const all = genReviewAll(); const sk = envSiteKey(sid);
+        const items = (all[sk] && Array.isArray(all[sk].items)) ? all[sk].items : [];
+        reports.forEach(r => {
+            let center = null;
+            if (r.ring && r.ring.length) { let la = 0, ln = 0; r.ring.forEach(p => { la += p.lat; ln += p.lng; }); center = { lat: la / r.ring.length, lng: ln / r.ring.length }; }
+            const it = { mid: r.mid != null ? r.mid : null, name: r.name, aims: r.aims, navs: r.navs, snaps: r.snaps, flags: (r.flags || []).slice(0, 40), created: r.created !== false, center, at: Date.now(), done: false };
+            const i = it.mid != null ? items.findIndex(x => x.mid === it.mid) : -1;
+            if (i >= 0) { it.done = !!items[i].done; items[i] = it; } else items.push(it);
+        });
+        all[sk] = { at: Date.now(), items };
+        genReviewSave(all);
+    }
+    function genReviewSetDone(sid, mid, done) {
+        const all = genReviewAll(); const sk = envSiteKey(sid); if (!all[sk]) return;
+        const it = (all[sk].items || []).find(x => x.mid === mid); if (!it) return;
+        it.done = !!done; it.doneAt = done ? Date.now() : null;
+        genReviewSave(all);
+    }
     function genAutoReport(reports, created) {
+        const sid = getCurrentSiteID();
+        try { genReviewMerge(sid, reports); } catch (e) { console.warn(`${TAG} [review] merge failed`, e); }
+        genReviewOpen(sid, `${created} created this run`);
+    }
+    function genReviewOpen(sid, headline) {
         const ID = 'aim-mb-gen-auto-report';
         const old = document.getElementById(ID); if (old) old.remove();
-        const flagged = reports.filter(r => r.flags.length), clean = reports.filter(r => !r.flags.length);
+        if (!sid) return;
+        const items = genReviewItems(sid);
+        const left = items.filter(x => !x.done), done = items.filter(x => x.done);
+        const flagged = left.filter(x => x.flags.length), clean = left.filter(x => !x.flags.length);
         const p = document.createElement('div'); p.id = ID;
-        p.style.cssText = 'position:fixed;top:60px;right:24px;width:460px;max-height:82vh;display:flex;flex-direction:column;z-index:2147483603;background:#161a20;border:1px solid #7dff7d;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;';
-        const row = r => `<div data-ar-open="${r.mid != null ? r.mid : ''}" title="${r.mid != null ? 'Open this mission in the editor and zoom to the pad' : ''}" style="padding:5px 4px;border-bottom:1px solid #20262e;${r.mid != null ? 'cursor:pointer;' : ''}">
-                <div style="display:flex;gap:8px;align-items:baseline;"><span style="flex:1;font-weight:700;color:${r.flags.length ? '#ffd54f' : '#7dff7d'};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(r.name)}</span><span style="color:#9ad;white-space:nowrap;font-size:10px;">${r.aims} aim${r.aims === 1 ? '' : 's'} · ${r.navs} nav · ${r.snaps} snap${r.created === false ? ' · <b style="color:#ff5252;">NOT CREATED</b>' : ''}</span></div>
-                ${r.flags.map(f => `<div style="color:#cfb;font-size:10px;padding-left:10px;">⚠ ${escapeHtml(f)}</div>`).join('')}
+        p.style.cssText = 'position:fixed;top:60px;right:24px;width:470px;max-height:82vh;display:flex;flex-direction:column;z-index:2147483603;background:#161a20;border:1px solid #7dff7d;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;';
+        const row = r => `<div style="display:flex;gap:6px;align-items:flex-start;padding:5px 4px;border-bottom:1px solid #20262e;${r.done ? 'opacity:0.45;' : ''}">
+                <input type="checkbox" data-ar-done="${r.mid != null ? r.mid : ''}" ${r.done ? 'checked' : ''} ${r.mid == null ? 'disabled' : ''} title="Done — reviewed / fixed" style="margin-top:2px;flex:0 0 auto;">
+                <div data-ar-open="${r.mid != null ? r.mid : ''}" title="${r.mid != null ? 'Open this mission in the editor and zoom to the pad' : ''}" style="flex:1;min-width:0;${r.mid != null ? 'cursor:pointer;' : ''}">
+                    <div style="display:flex;gap:8px;align-items:baseline;"><span style="flex:1;font-weight:700;color:${r.done ? '#9ad' : (r.flags.length ? '#ffd54f' : '#7dff7d')};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(r.name)}</span><span style="color:#9ad;white-space:nowrap;font-size:10px;">${r.aims} aim${r.aims === 1 ? '' : 's'} · ${r.navs} nav · ${r.snaps} snap${r.created === false ? ' · <b style="color:#ff5252;">NOT CREATED</b>' : ''}</span></div>
+                    ${r.done ? '' : r.flags.map(f => `<div style="color:#cfb;font-size:10px;padding-left:10px;">⚠ ${escapeHtml(f)}</div>`).join('')}
+                </div>
             </div>`;
-        const text = () => reports.map(r => `${r.name}\t${r.aims} aims\t${r.navs} navs\t${r.snaps} snaps${r.created === false ? '\tNOT CREATED' : ''}${r.flags.length ? '\t' + r.flags.join(' | ') : ''}`).join('\n');
+        const text = () => items.map(r => `${r.done ? '[x]' : '[ ]'}\t${r.name}\t${r.aims} aims\t${r.navs} navs\t${r.snaps} snaps${r.created === false ? '\tNOT CREATED' : ''}${r.flags.length ? '\t' + r.flags.join(' | ') : ''}`).join('\n');
         p.innerHTML = `<div style="display:flex;align-items:center;justify-content:space-between;gap:14px;padding:9px 12px;background:rgba(125,255,125,0.08);border-bottom:1px solid rgba(125,255,125,0.3);">
-                <span style="font-weight:800;color:#7dff7d;font-size:13px;">🎯 Auto-shots — ${created} created · ${flagged.length} to review</span>
-                <span style="display:flex;gap:6px;"><button data-ar-copy style="background:rgba(255,255,255,0.12);border:none;color:#fff;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;">Copy</button><button data-ar-close style="background:rgba(255,255,255,0.12);border:none;color:#fff;width:22px;height:22px;border-radius:4px;cursor:pointer;">✕</button></span>
+                <span style="font-weight:800;color:#7dff7d;font-size:13px;">📋 Review — ${done.length} / ${items.length} done · ${left.length} left</span>
+                <span style="display:flex;gap:6px;"><button data-ar-copy style="background:rgba(255,255,255,0.12);border:none;color:#fff;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;">Copy</button><button data-ar-clear title="Forget this site's review list" style="background:rgba(255,255,255,0.12);border:none;color:#ff8a8a;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;">Clear</button><button data-ar-close style="background:rgba(255,255,255,0.12);border:none;color:#fff;width:22px;height:22px;border-radius:4px;cursor:pointer;">✕</button></span>
             </div>
-            <div style="padding:5px 12px;font-size:10px;color:#9ad;border-bottom:1px solid #2a2f38;">Yellow = open it and look (big asset → the centroid may not be the part you care about; dropped / pulled-in angles; merges). Green = built clean.</div>
-            <div style="overflow:auto;flex:1;padding:4px 10px;font-size:11px;">${flagged.map(row).join('')}${clean.length ? `<div style="padding:6px 4px 2px;color:#789;font-size:10px;">clean (${clean.length})</div>` + clean.map(row).join('') : ''}</div>`;
+            <div style="padding:5px 12px;font-size:10px;color:#9ad;border-bottom:1px solid #2a2f38;">${headline ? escapeHtml(headline) + ' · ' : ''}click a row to open the mission · tick ☐ when it is reviewed / fixed · yellow = flagged (big asset, pulled-in or swung angles, splits), green = built clean</div>
+            <div style="overflow:auto;flex:1;padding:4px 10px;font-size:11px;">${items.length ? flagged.map(row).join('') + clean.map(row).join('') + (done.length ? `<div style="padding:6px 4px 2px;color:#789;font-size:10px;">done (${done.length})</div>` + done.map(row).join('') : '') : '<div style="padding:10px;color:#888;">No Auto-shots runs recorded for this site yet.</div>'}</div>`;
         p.querySelector('[data-ar-close]').onclick = () => p.remove();
+        p.querySelector('[data-ar-copy]').onclick = () => { try { navigator.clipboard.writeText(text()); showToast('Review list copied.', '#5fff5f', 2000); } catch (e) { console.warn(`${TAG} [review] copy failed`, e); } };
+        p.querySelector('[data-ar-clear]').onclick = () => { if (!confirm('Forget this site’s review list (missions are untouched)?')) return; const all = genReviewAll(); delete all[envSiteKey(sid)]; genReviewSave(all); p.remove(); };
+        p.querySelectorAll('[data-ar-done]').forEach(cb => cb.onchange = () => { const mid = Number(cb.getAttribute('data-ar-done')); if (!Number.isFinite(mid)) return; genReviewSetDone(sid, mid, cb.checked); const st = p.scrollTop; genReviewOpen(sid, headline); try { const np = document.getElementById(ID); if (np) np.querySelector('div[style*="overflow:auto"]').scrollTop = st; } catch (e) {} });
         p.querySelectorAll('[data-ar-open]').forEach(el => el.onclick = () => {
             const mid = el.getAttribute('data-ar-open'); if (!mid) return;
-            const r = reports.find(x => String(x.mid) === mid);
-            try { const cur = location.hash || ''; const mm = cur.match(/^(.*\/mission-bank)(?:\/\d+)?/); if (mm) location.hash = `${mm[1]}/${mid}`; } catch (e) { console.warn(`${TAG} [gen-auto] open failed`, e); }
-            try { const map = getLeafletMap(); if (map && r && r.ring) map.fitBounds(r.ring.map(q => [q.lat, q.lng]), { padding: [60, 60], maxZoom: 19 }); } catch (e) {}
+            const r = items.find(x => String(x.mid) === mid);
+            try { const cur = location.hash || ''; const mm = cur.match(/^(.*\/mission-bank)(?:\/\d+)?/); if (mm) location.hash = `${mm[1]}/${mid}`; } catch (e) { console.warn(`${TAG} [review] open failed`, e); }
+            try { const map = getLeafletMap(); if (map && r && r.center) map.setView([r.center.lat, r.center.lng], Math.max(map.getZoom(), 18)); } catch (e) {}
         });
-        p.querySelector('[data-ar-copy]').onclick = () => { try { navigator.clipboard.writeText(text()); showToast('Report copied.', '#5fff5f', 2000); } catch (e) { console.warn(`${TAG} [gen-auto] copy failed`, e); } };
         document.body.appendChild(p);
         try { mbPanelMovable(p, p.firstElementChild); } catch (e) {}
-        console.log(`${TAG} [gen-auto] report\n${text()}`);
     }
     async function genBulkCommit(assets, ffzs, opts, statusEl, goBtn) {
         if (!generatorUnlocked) return;   // generator locked off on this install
@@ -16725,6 +16842,7 @@
                 <button class="aim-mb-tbtn" data-msf-check title="Check every mission's navs + flag poles against the site's NFZs (Percepto refuses the save) and FFZs — fills the 🚩 column. Runs only when clicked; takes a while on big sites but the panel stays usable.">${msfRunning ? '🚩 …' : '🚩 Check'}</button>
                 <button class="aim-mb-tbtn" data-gen-open title="▣ Generate missions for every pad without one (tiers, template, 👁 map, skip states) — the bulk generator panel.">▣ Generate</button>
                 <button class="aim-mb-tbtn" data-sg-open title="🎯 Ghosts staged on this site's missions (shot templates placed in the editor but not committed yet) — review, drop, or ⚡ Commit all: one save per mission with the 🎞 wrap applied after every new snapshot.">🎯 Ghosts</button>
+                <button class="aim-mb-tbtn" data-gen-review title="📋 Auto-shots review list for this site — click a pad to open it, tick it done when reviewed / fixed.">📋 Review</button>
                 <button class="aim-mb-tbtn" data-mrs-open title="Restore a mission: re-create one Delete Guard banked in the last 72 h, or restore in place from a backup JSON this script downloaded before a bulk edit. Same write path as every in-place tool; verified by re-fetch.">↩ Restore</button>
                 <button class="aim-mb-tbtn ${panelState.distanceUnit === 'imperial' ? 'active' : ''}" data-unit="imperial">mi</button>
                 <button class="aim-mb-tbtn ${panelState.distanceUnit === 'metric' ? 'active' : ''}" data-unit="metric">km</button>
@@ -17425,6 +17543,9 @@
         // v3.52 — 🎯 ghosts panel
         const sgOpenBtn = panelEl.querySelector('[data-sg-open]');
         if (sgOpenBtn) sgOpenBtn.onclick = () => sgOpenPanel();
+        // v3.73 — 📋 persistent review list
+        const revBtn = panelEl.querySelector('[data-gen-review]');
+        if (revBtn) revBtn.onclick = () => genReviewOpen(getCurrentSiteID(), '');
         // v3.43 — 🚩 manual step check
         const msfBtn = panelEl.querySelector('[data-msf-check]');
         if (msfBtn) { msfBtn.disabled = !!msfRunning; msfBtn.onclick = () => msfRun(getCurrentSiteID(), { fresh: !!(msfCache && msfCache.sid === getCurrentSiteID()) }); }
