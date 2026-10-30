@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.97
+// @version      3.98
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.97';
+    const SCRIPT_VERSION = '3.98';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -5387,13 +5387,27 @@
         }
         return out;
     }
+    // v3.98: ⟲ orders EVERY nav as one route (legal path, NN + 2-opt from the arrival point) —
+    // group boundaries no longer matter (4 pumpjacks × 3 navs used to be ordered group by group and
+    // zig-zagged). The result is written back as one group per nav, in route order.
     function sgAutoOrder() {
         const sid = getCurrentSiteID(), mid = sgMid(); if (!sid || !mid) return;
         const groups = sgGhostsFor(sid, mid); if (groups.length < 1) return;
-        const out = sgOrderGroups(groups, sgArrivalPoint(groups) || groups[0].focus, sg.ent || genEntCache[sid] || null);
+        const ent = sg.ent || genEntCache[sid] || null;
+        const start = sgArrivalPoint(groups) || groups[0].focus;
+        const flat = [], dots = []; let replace = false;
+        groups.forEach(g => {
+            if (g.replace) replace = true; (g.dots || []).forEach(d => dots.push(d));
+            (g.navs || []).forEach(p => { const aims = (p.aims && p.aims.length) ? p.aims.map(a => ({ lat: a.lat, lng: a.lng })) : [{ lat: g.focus.lat, lng: g.focus.lng }]; flat.push({ lat: p.lat, lng: p.lng, aims, snaps: aims.length, target: g.target || '', tpl: g.tpl || '' }); });
+        });
+        if (flat.length < 2) { showToast('⟲ Nothing to order — one nav.', '#9ad', 2000); return; }
+        let ordered;
+        try { ordered = sgOrderNavs(flat, start, ent); } catch (e) { console.warn(`${TAG} [🎯] auto-order failed`, e); showToast('⟲ Auto-order failed — see console.', '#ff5252', 3000); return; }
+        const a0 = groups[0].afterNav, base = (a0 && a0 >= 1) ? a0 : null, stamp = Date.now().toString(36);
+        const out = ordered.map((p, i) => ({ gid: `ord${i}${stamp}`, focus: { lat: p.aims[0].lat, lng: p.aims[0].lng }, navs: [{ lat: p.lat, lng: p.lng, snaps: p.snaps, aims: p.aims }], snapsPerNav: p.snaps, afterNav: base != null ? base + i : null, target: p.target, tpl: p.tpl, dots: i === 0 ? dots : [], replace: i === 0 ? replace : false, createdAt: Date.now() }));
         sgGhostsSet(sid, mid, composerMission.name || '', out);
         sgDrawStaged(true); sgUpdateBtn(); sgUpdateHud();
-        showToast(`⟲ ${out.length} ghost group(s) re-ordered nearest-next (legal path, around NFZs) from the arrival point.`, '#c39dff', 3500);
+        showToast(`⟲ ${out.length} nav(s) re-ordered as ONE route from the arrival point (legal path, around NFZs / assets).`, '#c39dff', 3500);
     }
     function sgApplyTpl(name) {
         const all = sgTplAll(); const t = all[name] || all['3-shot 90°'];
