@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.80
+// @version      3.81
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.80';
+    const SCRIPT_VERSION = '3.81';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -7003,8 +7003,60 @@
         clearTimeout(composerHoverT);
         composerHoverT = setTimeout(() => { const h = document.getElementById('aim-mb-hover'); if (h) h.style.display = 'none'; document.querySelectorAll('.instruction-marker.aim-mb-hl').forEach(el => el.classList.remove('aim-mb-hl')); }, 180);
     }
+    // v3.81 STACK DRAG — with a stacked step OPEN in the editor, press-and-drag the stack and we
+    // carry the OPEN step (whatever marker Leaflet has on top), then drop it with a native map
+    // click at the cursor: Percepto moves the open step to a map click, so no React surgery.
+    // (v3.73's z-index raise never stuck — Percepto re-renders the markers.)
+    let stackDrag = null, composerSuppressClick = false;
+    function stackDragInstall() {
+        window.addEventListener('mousedown', (e) => {
+            if (e.button !== 0 || e.shiftKey || e.ctrlKey || e.altKey || stackDrag) return;
+            if (sg.active || caArmed(e)) return;
+            const m = e.target && e.target.closest ? e.target.closest('.instruction-marker[data-aim-stack]') : null; if (!m) return;
+            const ids = (m.getAttribute('data-aim-stack-ids') || '').split(',').filter(Boolean), lbls = (m.getAttribute('data-aim-stack') || '').split(',');
+            if (!document.querySelector('[data-testid="btn-save-instruction"]')) return;   // a step editor must be open
+            const open = getOpenStepId(); if (open == null) return;
+            const oi = ids.findIndex(x => String(x) === String(open)); if (oi < 0) return;   // the open step isn't in this stack → native
+            e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+            const map = getLeafletMap();
+            stackDrag = { id: open, lbl: lbls[oi] || '', x0: e.clientX, y0: e.clientY, moved: false, map, reDrag: false, dot: null };
+            try { if (map && map.dragging && map.dragging.enabled()) { map.dragging.disable(); stackDrag.reDrag = true; } } catch (err) {}
+            window.addEventListener('mousemove', stackDragMove, true);
+            window.addEventListener('mouseup', stackDragEnd, true);
+        }, true);
+        // the browser's own click after our drag must reach nobody (Percepto would move the step AGAIN / switch)
+        window.addEventListener('click', (e) => { if (composerSuppressClick && !e.__aimStackDrop) { e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); } }, true);
+    }
+    function stackDragMove(e) {
+        const d = stackDrag; if (!d) return;
+        e.preventDefault(); e.stopPropagation();
+        if (!d.moved && Math.abs(e.clientX - d.x0) < 3 && Math.abs(e.clientY - d.y0) < 3) return;
+        d.moved = true;
+        if (!d.dot) { d.dot = document.createElement('div'); d.dot.id = 'aim-mb-stack-drag'; d.dot.style.cssText = 'position:fixed;z-index:2147483600;pointer-events:none;transform:translate(-50%,-50%);min-width:24px;height:24px;padding:0 5px;border-radius:12px;background:#ff8ad2;border:2px solid #fff;box-shadow:0 0 8px #000;color:#000;font:800 11px/20px Lato,sans-serif;text-align:center;white-space:nowrap;'; d.dot.textContent = d.lbl; document.body.appendChild(d.dot); }
+        d.dot.style.left = e.clientX + 'px'; d.dot.style.top = e.clientY + 'px';
+    }
+    function stackDragEnd(e) {
+        const d = stackDrag; if (!d) return;
+        window.removeEventListener('mousemove', stackDragMove, true); window.removeEventListener('mouseup', stackDragEnd, true);
+        stackDrag = null;
+        if (d.dot) d.dot.remove();
+        try { if (d.reDrag && d.map && d.map.dragging) d.map.dragging.enable(); } catch (err) {}
+        if (!d.moved) return;   // a plain click → the normal marker click handles it
+        e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+        composerSuppressClick = true; setTimeout(() => { composerSuppressClick = false; }, 350);
+        try {
+            const c = d.map && d.map.getContainer(); if (!c) return;
+            const r = c.getBoundingClientRect();
+            if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) { showToast('Dropped outside the map — step not moved.', '#ff9800', 2500); return; }
+            const ev = new MouseEvent('click', { bubbles: true, cancelable: true, clientX: e.clientX, clientY: e.clientY, view: window });
+            ev.__aimStackDrop = true;
+            c.dispatchEvent(ev);   // Leaflet reads latlng off clientX/Y → Percepto's map click moves the OPEN step
+            showToast(`${d.lbl} moved here — save the step.`, '#ff8ad2', 2200);
+        } catch (err) { console.warn(`${TAG} [stack-drag] drop failed`, err); showToast('Stack drop failed — see console.', '#ff5252', 3000); }
+    }
     function composerHoverInstall() {
         if (composerHoverInstalled) return; composerHoverInstalled = true;
+        try { stackDragInstall(); } catch (e) { console.warn(`${TAG} [stack-drag] install failed`, e); }
         let st = document.getElementById('aim-mb-hover-css');
         if (!st) { st = document.createElement('style'); st.id = 'aim-mb-hover-css'; st.textContent = '.instruction-marker.aim-mb-hl .instruction-marker__icon{box-shadow:0 0 0 3px #ffd54f,0 0 10px 4px rgba(255,213,79,0.8) !important;}'; (document.head || document.documentElement).appendChild(st); }
         window.addEventListener('mouseover', (e) => {
@@ -7019,7 +7071,7 @@
             const openId = getOpenStepId();
             let html = `<b style="color:${m.getAttribute('data-aim-kind') === 'nav' ? '#7aa9ff' : '#ff8ad2'};">${escapeHtml(lbl)}</b>`;
             if (snaps.length) html += ` <span style="color:#789;">→</span> <span style="color:#ff8ad2;">${snaps.map(escapeHtml).join(' · ')}</span>`;
-            if (stack.length > 1) html += `<div style="margin-top:4px;color:#9ad;">stacked · click to open &amp; raise:</div><div style="display:flex;gap:4px;margin-top:3px;">${stack.map((s, i) => `<button data-hv-open="${escapeHtml(ids[i] || '')}" style="background:${String(ids[i]) === String(openId) ? 'rgba(255,138,210,0.35)' : 'rgba(255,255,255,0.08)'};border:1px solid ${String(ids[i]) === String(openId) ? '#ff8ad2' : '#456'};color:#fff;border-radius:3px;cursor:pointer;font:700 11px 'Lato',sans-serif;padding:1px 6px;">${escapeHtml(s)}</button>`).join('')}</div>`;
+            if (stack.length > 1) html += `<div style="margin-top:4px;color:#9ad;">stacked · click one to open it, then <b style="color:#ff8ad2;">drag the stack</b> to move that one:</div><div style="display:flex;gap:4px;margin-top:3px;">${stack.map((s, i) => `<button data-hv-open="${escapeHtml(ids[i] || '')}" style="background:${String(ids[i]) === String(openId) ? 'rgba(255,138,210,0.35)' : 'rgba(255,255,255,0.08)'};border:1px solid ${String(ids[i]) === String(openId) ? '#ff8ad2' : '#456'};color:#fff;border-radius:3px;cursor:pointer;font:700 11px 'Lato',sans-serif;padding:1px 6px;">${escapeHtml(s)}</button>`).join('')}</div>`;
             h.innerHTML = html;
             h.querySelectorAll('[data-hv-open]').forEach(b => b.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); const id = b.getAttribute('data-hv-open'); if (id) { composerOpenStepEdit(id); setTimeout(() => { try { const map = getLeafletMap(); if (map) composerRaiseOpenMarker(map); } catch (err) {} }, 400); } });
             const r = m.getBoundingClientRect();
