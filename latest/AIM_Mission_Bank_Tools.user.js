@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.85
+// @version      3.86
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.85';
+    const SCRIPT_VERSION = '3.86';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -4513,7 +4513,7 @@
             body = `<div style="display:flex;gap:5px;flex-wrap:wrap;">${B(`data-sm-open="${myId}"`, '✏ open', 'Open this step')}${B(`data-sm-del="${myId}"`, '🗑 nav only', 'Delete just this nav (its snapshots fall to the previous nav)', '#ff8a8a')}${B(`data-sm-leg="${myId}"`, `🗑 nav + ${snaps} snap${snaps === 1 ? '' : 's'} + wrap`, 'Delete this nav and everything it takes until the next nav', '#ff5252')}${B(`data-sm-order="${myId}"`, '↕ reorder', 'Move this step in the order')}</div>`;
         } else {
             const whole = shotSet(rows.map(r => r.id));
-            body = rows.map(r => `<div style="display:flex;gap:5px;align-items:center;padding:2px 0;"><b style="color:#ff8ad2;min-width:30px;">${escapeHtml(r.lbl)}</b>${B(`data-sm-open="${r.id}"`, '✏ open', 'Open this snapshot')}${B(`data-sm-snap="${r.id}"`, `🗑 snap${wrapN(r.id) ? ` + ${wrapN(r.id)} wrap` : ''}`, 'Delete this snapshot and its camera / GEM / wait steps; its nav stays', '#ff8a8a')}${B(`data-sm-order="${r.id}"`, '↕', 'Move this step in the order')}</div>`).join('')
+            body = rows.map(r => `<div style="display:flex;gap:5px;align-items:center;padding:2px 0;"><b style="color:#ff8ad2;min-width:30px;">${escapeHtml(r.lbl)}</b>${B(`data-sm-open="${r.id}"`, '✏ open', 'Open this snapshot')}${B(`data-sm-snap="${r.id}"`, `🗑 snap${wrapN(r.id) ? ` + ${wrapN(r.id)} wrap` : ''}${shotSet([r.id]).size > snapBlock(r.id).length ? ' + nav' : ''}`, 'Delete this snapshot and its camera / GEM / wait steps — and its nav, when nothing else uses that nav', '#ff8a8a')}${B(`data-sm-order="${r.id}"`, '↕', 'Move this step in the order')}</div>`).join('')
                 + `<div style="margin-top:5px;border-top:1px solid #2a2f38;padding-top:5px;">${B('data-sm-shot', `🗑 whole shot (${whole.size} step${whole.size === 1 ? '' : 's'}: ${rows.length} snap${rows.length === 1 ? '' : 's'} + wrap + nav${rows.length === 1 ? '' : 's'})`, 'Delete these snapshots, their wrap steps and each nav that only served them', '#ff5252')}</div>`;
         }
         const p = document.createElement('div'); p.id = ID;
@@ -4528,8 +4528,21 @@
         p.querySelectorAll('[data-sm-order]').forEach(b => b.onclick = () => { const id = b.getAttribute('data-sm-order'); const r = rows.find(x => String(x.id) === String(id)); const n = parseInt(((r && r.lbl) || myLbl).replace(/[^0-9]/g, ''), 10) || 1; close(); composerEditOrder(kind, id, n, m.__aimLL); });
         p.querySelectorAll('[data-sm-del]').forEach(b => b.onclick = () => { close(); composerDeleteSteps(new Set([String(b.getAttribute('data-sm-del'))]), `${myLbl} nav`); });
         p.querySelectorAll('[data-sm-leg]').forEach(b => b.onclick = () => { close(); composerDeleteSteps(new Set(navLeg(b.getAttribute('data-sm-leg'))), `${myLbl} + its snapshots`); });
-        p.querySelectorAll('[data-sm-snap]').forEach(b => b.onclick = () => { const id = b.getAttribute('data-sm-snap'); const r = rows.find(x => String(x.id) === String(id)); close(); composerDeleteSteps(new Set(snapBlock(id)), `${(r && r.lbl) || 'snapshot'} + wrap`); });
+        p.querySelectorAll('[data-sm-snap]').forEach(b => b.onclick = () => { const id = b.getAttribute('data-sm-snap'); const r = rows.find(x => String(x.id) === String(id)); close(); const set = shotSet([id]); composerDeleteSteps(set, `${(r && r.lbl) || 'snapshot'}${set.size > snapBlock(id).length ? ' + its nav' : ''}`); });
         const shot = p.querySelector('[data-sm-shot]'); if (shot) shot.onclick = () => { close(); composerDeleteSteps(shotSet(rows.map(r => r.id)), `shot ${rows.map(r => r.lbl).join('/')}`); };
+    }
+    // v3.86: deleting a snapshot takes its wrap AND its nav when that nav serves no other snapshot.
+    function composerShotQuickDelete(id, lbl) {
+        const instrs = composerEditorInstrs(findMissionAppCtx());
+        const isNav = st => st && (st.type_name === 'navigate' || st.type === 1);
+        const isSnap = st => st && (st.type_name === 'snapshot' || st.type === 6);
+        const isWrap = st => st && (st.type_name === 'cameraSelect' || st.type === 7 || st.type_name === 'gemMode' || st.type === 24 || st.type_name === 'wait' || st.type === 5);
+        const i = instrs.findIndex(st => st && String(st.id) === String(id)); if (i < 0) { showToast('Could not find that step.', '#ff9800', 2500); return; }
+        let end = i + 1; while (end < instrs.length && isWrap(instrs[end])) end++;
+        const set = new Set(instrs.slice(i, end).map(st => String(st.id)));
+        let ni = -1; for (let j = i - 1; j >= 0; j--) if (isNav(instrs[j])) { ni = j; break; }
+        if (ni >= 0) { let other = false; for (let j = ni + 1; j < instrs.length && !isNav(instrs[j]); j++) if (isSnap(instrs[j]) && !set.has(String(instrs[j].id))) { other = true; break; } if (!other) set.add(String(instrs[ni].id)); }
+        composerDeleteSteps(set, `${lbl}${ni >= 0 && set.has(String(instrs[ni].id)) ? ' + its nav' : ''}`);
     }
     function composerDeleteStep(id) {
         const ctx = findMissionAppCtx();
@@ -7366,7 +7379,7 @@
             const id = m.getAttribute('data-aim-id'), kind = m.getAttribute('data-aim-kind');
             // Alt + right-click = DELETE this step (Ctrl+Z restores it). Otherwise
             // the plain right-click opens the reorder editor as before.
-            if (e.altKey) { composerDeleteStep(id); return; }
+            if (e.altKey) { if (kind === 'snap') { composerShotQuickDelete(id, m.getAttribute('data-aim-num') || 'snapshot'); } else composerDeleteStep(id); return; }
             // Flag Pole: M2 opens its editor (the nav/snap reorder popup doesn't apply).
             if (kind === 'flag') { composerOpenStepEdit(id); return; }
             // Number lives on the marker el as data-aim-num (e.g. "N3"/"S5") —
