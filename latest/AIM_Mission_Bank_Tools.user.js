@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.82
+// @version      3.83
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.82';
+    const SCRIPT_VERSION = '3.83';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -9180,6 +9180,28 @@
         } catch (e) { console.warn(`${TAG} [restage] failed`, e); showToast(`Re-stage failed: ${(e && e.message) || e}`, '#ff5252', 5000); }
         finally { genRestageBusy = false; }
     }
+    // v3.83 ↻ Recreate: the mission was deleted (or never created) — forget the old row + its ghosts
+    // and run the normal generator for that pad with the CURRENT Auto-shots settings (ghost or direct).
+    async function genRecreateItems(sid, items) {
+        if (!generatorUnlocked) { showToast('Generator is locked on this install.', '#ff9800', 3000); return; }
+        if (genBulkBusy) { showToast('Generator busy — wait for the current run.', '#ff9800', 2500); return; }
+        try {
+            let ent = genEntCache[sid]; if (!ent) { showToast('Loading site entities…', '#9ad', 2000); ent = await genFetchEntities(sid); genEntCache[sid] = ent; }
+            const roots = (ent.assets || []).filter(a => a.parentId == null && a.ring && a.ring.length >= 3);
+            const findPad = it => (it.pad && roots.find(a => a.name === it.pad)) || (it.center ? roots.filter(a => genPointInPoly(it.center, a.ring)).sort((x, y) => mbRingArea(x.ring) - mbRingArea(y.ring))[0] : null) || null;
+            const pads = [], miss = [];
+            items.forEach(it => { const pad = findPad(it); if (pad && !pads.includes(pad)) pads.push(pad); else if (!pad) miss.push(it.name); });
+            if (miss.length) console.warn(`${TAG} [recreate] pad not found for:\n${miss.join('\n')}`);
+            if (!pads.length) { showToast('Could not match those rows to a pad — see console.', '#ff9800', 4000); return; }
+            if (!confirm(`Recreate ${pads.length} mission(s) with the current Auto-shots settings?\n\n${pads.map(a => a.name).join('\n')}`)) return;
+            const ap = genAutoPrefs();
+            let wrapSteps = [];
+            if (!ap.ghost) { const wrap = await sgPickWrap(`↻ Recreate ${pads.length} pad(s) · template "${ap.tpl}" · wrap after every snapshot`); if (!wrap) return; wrapSteps = wrap.steps || []; }
+            items.forEach(it => { try { if (it.mid != null) { genReviewForget(sid, it.mid); sgGhostsSet(sid, it.mid, '', []); } } catch (e) {} });
+            const auto = { tpl: ap.tpl, pairFt: ap.pairFt, shareLo: ap.shareLo, shareHi: ap.shareHi, minSep: ap.minSep, maxPerNav: ap.maxPerNav, ghost: !!ap.ghost, wrapSteps };
+            await genBulkCommit(pads, ent.ffzs || [], { inspectionScan: false, nameTemplate: '{section} - {asset}', template: null, auto }, null, null);
+        } catch (e) { console.warn(`${TAG} [recreate] failed`, e); showToast(`Recreate failed: ${(e && e.message) || e}`, '#ff5252', 5000); }
+    }
     function genReviewSetDone(sid, mid, done) {
         const all = genReviewAll(); const sk = envSiteKey(sid); if (!all[sk]) return;
         const it = (all[sk].items || []).find(x => x.mid === mid); if (!it) return;
@@ -9196,21 +9218,27 @@
         const old = document.getElementById(ID); if (old) old.remove();
         if (!sid) return;
         const items = genReviewItems(sid);
+        // v3.83: a mission deleted since the run (natively or by us) is marked GONE — its row no longer
+        // opens a dead editor; ↻ Recreate rebuilds the pad with the current template.
+        const loaded = (missionsBySite[sid] && missionsBySite[sid].missions) || null;
+        const have = loaded && loaded.length ? new Set(loaded.map(m => m.id)) : null;
+        items.forEach(x => { x.gone = !!(have && x.mid != null && x.created !== false && !have.has(x.mid)); });
+        const gone = items.filter(x => x.gone);
         const left = items.filter(x => !x.done), done = items.filter(x => x.done);
         const flagged = left.filter(x => x.flags.length), clean = left.filter(x => !x.flags.length);
         const p = document.createElement('div'); p.id = ID;
         p.style.cssText = 'position:fixed;top:60px;right:24px;width:470px;max-height:82vh;display:flex;flex-direction:column;z-index:2147483603;background:#161a20;border:1px solid #7dff7d;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;';
         const row = r => `<div style="display:flex;gap:6px;align-items:flex-start;padding:5px 4px;border-bottom:1px solid #20262e;${r.done ? 'opacity:0.45;' : ''}">
                 <input type="checkbox" data-ar-done="${r.mid != null ? r.mid : ''}" ${r.done ? 'checked' : ''} ${r.mid == null ? 'disabled' : ''} title="Done — reviewed / fixed" style="margin-top:2px;flex:0 0 auto;">
-                <div data-ar-open="${r.mid != null ? r.mid : ''}" title="${r.mid != null ? 'Open this mission in the editor and zoom to the pad' : ''}" style="flex:1;min-width:0;${r.mid != null ? 'cursor:pointer;' : ''}">
-                    <div style="display:flex;gap:8px;align-items:baseline;"><span style="flex:1;font-weight:700;color:${r.done ? '#9ad' : (r.flags.length ? '#ffd54f' : '#7dff7d')};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(r.name)}</span><span style="color:#9ad;white-space:nowrap;font-size:10px;">${r.aims} aim${r.aims === 1 ? '' : 's'} · ${r.navs} nav · ${r.snaps} snap${r.created === false ? ' · <b style="color:#ff5252;">NOT CREATED</b>' : ''}</span></div>
+                <div data-ar-open="${r.mid != null && !r.gone ? r.mid : ''}" title="${r.gone ? 'This mission was deleted — ↻ Recreate rebuilds it' : (r.mid != null ? 'Open this mission in the editor and zoom to the pad' : '')}" style="flex:1;min-width:0;${r.mid != null && !r.gone ? 'cursor:pointer;' : ''}">
+                    <div style="display:flex;gap:8px;align-items:baseline;"><span style="flex:1;font-weight:700;color:${r.gone ? '#ff8a8a' : (r.done ? '#9ad' : (r.flags.length ? '#ffd54f' : '#7dff7d'))};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(r.name)}</span>${r.gone || r.created === false ? `<button data-ar-recreate="${r.mid != null ? r.mid : ''}" data-ar-recreate-name="${escapeHtml(r.name)}" title="Rebuild this pad with the current Auto-shots template and create the mission again" style="background:rgba(255,138,138,0.15);border:1px solid #ff8a8a;color:#ffb3b3;border-radius:3px;cursor:pointer;font-size:10px;padding:0 6px;">↻ Recreate</button>` : ''}<span style="color:#9ad;white-space:nowrap;font-size:10px;">${r.aims} aim${r.aims === 1 ? '' : 's'} · ${r.navs} nav · ${r.snaps} snap${r.gone ? ' · <b style="color:#ff5252;">DELETED</b>' : (r.created === false ? ' · <b style="color:#ff5252;">NOT CREATED</b>' : '')}</span></div>
                     ${r.done ? '' : r.flags.map(f => `<div style="color:#cfb;font-size:10px;padding-left:10px;">⚠ ${escapeHtml(f)}</div>`).join('')}
                 </div>
             </div>`;
         const text = () => items.map(r => `${r.done ? '[x]' : '[ ]'}\t${r.name}\t${r.aims} aims\t${r.navs} navs\t${r.snaps} snaps${r.created === false ? '\tNOT CREATED' : ''}${r.flags.length ? '\t' + r.flags.join(' | ') : ''}`).join('\n');
         p.innerHTML = `<div style="display:flex;align-items:center;justify-content:space-between;gap:14px;padding:9px 12px;background:rgba(125,255,125,0.08);border-bottom:1px solid rgba(125,255,125,0.3);">
                 <span style="font-weight:800;color:#7dff7d;font-size:13px;">📋 Review — ${done.length} / ${items.length} done · ${left.length} left</span>
-                <span style="display:flex;gap:6px;"><button data-ar-copy style="background:rgba(255,255,255,0.12);border:none;color:#fff;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;">Copy</button><button data-ar-restage="pumps" title="Rebuild the ghosts of every UNREVIEWED pad that has a lone pumping unit with the current template — missions stay, nothing is deleted" style="background:rgba(195,157,255,0.18);border:1px solid #c39dff;color:#d8c3ff;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;">🔁 Re-stage pumps</button><button data-ar-restage="all" title="Rebuild the ghosts of EVERY unreviewed mission with the current template — missions stay, nothing is deleted" style="background:rgba(195,157,255,0.18);border:1px solid #c39dff;color:#d8c3ff;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;">🔁 Re-stage all</button><button data-ar-delete title="Select every UNREVIEWED mission in the list and open 🗑 Delete (backup file + Delete Guard + slider) — start the run over" style="background:rgba(255,82,82,0.18);border:1px solid #ff5252;color:#ff8a8a;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;" ${left.filter(x => x.mid != null && x.created !== false).length ? '' : 'disabled'}>🗑 Delete unreviewed (${left.filter(x => x.mid != null && x.created !== false).length})</button><button data-ar-clear title="Forget this site's review list (missions stay)" style="background:rgba(255,255,255,0.12);border:none;color:#ff8a8a;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;">Forget list</button><button data-ar-close style="background:rgba(255,255,255,0.12);border:none;color:#fff;width:22px;height:22px;border-radius:4px;cursor:pointer;">✕</button></span>
+                <span style="display:flex;gap:6px;"><button data-ar-copy style="background:rgba(255,255,255,0.12);border:none;color:#fff;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;">Copy</button>${gone.length ? `<button data-ar-recreate-all title="Rebuild every DELETED mission in this list with the current template" style="background:rgba(255,138,138,0.15);border:1px solid #ff8a8a;color:#ffb3b3;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;">↻ Recreate deleted (${gone.length})</button>` : ''}<button data-ar-restage="pumps" title="Rebuild the ghosts of every UNREVIEWED pad that has a lone pumping unit with the current template — missions stay, nothing is deleted" style="background:rgba(195,157,255,0.18);border:1px solid #c39dff;color:#d8c3ff;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;">🔁 Re-stage pumps</button><button data-ar-restage="all" title="Rebuild the ghosts of EVERY unreviewed mission with the current template — missions stay, nothing is deleted" style="background:rgba(195,157,255,0.18);border:1px solid #c39dff;color:#d8c3ff;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;">🔁 Re-stage all</button><button data-ar-delete title="Select every UNREVIEWED mission in the list and open 🗑 Delete (backup file + Delete Guard + slider) — start the run over" style="background:rgba(255,82,82,0.18);border:1px solid #ff5252;color:#ff8a8a;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;" ${left.filter(x => x.mid != null && x.created !== false).length ? '' : 'disabled'}>🗑 Delete unreviewed (${left.filter(x => x.mid != null && x.created !== false).length})</button><button data-ar-clear title="Forget this site's review list (missions stay)" style="background:rgba(255,255,255,0.12);border:none;color:#ff8a8a;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;">Forget list</button><button data-ar-close style="background:rgba(255,255,255,0.12);border:none;color:#fff;width:22px;height:22px;border-radius:4px;cursor:pointer;">✕</button></span>
             </div>
             <div style="padding:5px 12px;font-size:10px;color:#9ad;border-bottom:1px solid #2a2f38;">${headline ? escapeHtml(headline) + ' · ' : ''}click a row to open the mission · tick ☐ when it is reviewed / fixed · yellow = flagged (big asset, pulled-in or swung angles, splits), green = built clean</div>
             <div style="overflow:auto;flex:1;padding:4px 10px;font-size:11px;">${items.length ? flagged.map(row).join('') + clean.map(row).join('') + (done.length ? `<div style="padding:6px 4px 2px;color:#789;font-size:10px;">done (${done.length})</div>` + done.map(row).join('') : '') : '<div style="padding:10px;color:#888;">No Auto-shots runs recorded for this site yet.</div>'}</div>`;
@@ -9232,6 +9260,8 @@
         };
         p.querySelector('[data-ar-clear]').onclick = () => { if (!confirm('Forget this site’s review list (missions are untouched)?')) return; const all = genReviewAll(); delete all[envSiteKey(sid)]; genReviewSave(all); p.remove(); };
         p.querySelectorAll('[data-ar-done]').forEach(cb => cb.onchange = () => { const mid = Number(cb.getAttribute('data-ar-done')); if (!Number.isFinite(mid)) return; genReviewSetDone(sid, mid, cb.checked); const st = p.scrollTop; genReviewOpen(sid, headline); try { const np = document.getElementById(ID); if (np) np.querySelector('div[style*="overflow:auto"]').scrollTop = st; } catch (e) {} });
+        p.querySelectorAll('[data-ar-recreate]').forEach(b => b.onclick = (ev) => { ev.stopPropagation(); const mid = b.getAttribute('data-ar-recreate'); const it = items.find(x => (mid && String(x.mid) === mid) || (!mid && x.name === b.getAttribute('data-ar-recreate-name'))); if (it) genRecreateItems(sid, [it]); });
+        const rcAll = p.querySelector('[data-ar-recreate-all]'); if (rcAll) rcAll.onclick = () => genRecreateItems(sid, gone);
         p.querySelectorAll('[data-ar-open]').forEach(el => el.onclick = () => {
             const mid = el.getAttribute('data-ar-open'); if (!mid) return;
             const r = items.find(x => String(x.mid) === mid);
