@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.88
+// @version      3.89
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.88';
+    const SCRIPT_VERSION = '3.89';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -4921,7 +4921,17 @@
         return { rings: pick.map(x => x.a.ring), name: pick.map(x => x.a.name || String(x.a.id)).join(' + ') };
     }
     // ── drawing ──
-    function sgCanvas(L) { if (!sg.canvas) { try { sg.canvas = L.canvas({ padding: 0.5 }); } catch (e) { sg.canvas = null; } } return sg.canvas; }
+    function sgCanvas(L) {
+        const map = getLeafletMap();
+        if (!sg.canvas || sg.canvasMap !== map) {
+            try {
+                // v3.89: own pane ABOVE the overlay pane (NFZ / asset SVG fills) and below markers
+                if (map && !map.getPane('aim-sg')) { const pane = map.createPane('aim-sg'); pane.style.zIndex = 450; pane.style.pointerEvents = 'none'; }
+                sg.canvas = L.canvas({ padding: 0.5, pane: map && map.getPane('aim-sg') ? 'aim-sg' : undefined }); sg.canvasMap = map;
+            } catch (e) { console.warn(`${TAG} [🎯] canvas renderer failed`, e); sg.canvas = null; }
+        }
+        return sg.canvas;
+    }
     function sgEnsureStyle() {
         if (document.getElementById('aim-mb-sg-style')) return;
         const st = document.createElement('style'); st.id = 'aim-mb-sg-style';
@@ -5071,11 +5081,14 @@
         const cv = sgCanvas(L);
         const keep = l => { sg.stagedLayers.push(l); l.addTo(map); return l; };
         const dragging = sg.drag ? sg.drag : null;
+        // v3.89: the pink dots are the AIMS — where the snapshots look (one dot per distinct point, "×3" =
+        // three navs shoot it). Those are what you drag. Unit centroids (g.dots) are grey reference rings.
+        const aimsAll = [];
+        groups.forEach(g => (g.navs || []).forEach(p => { const as = (p.aims && p.aims.length) ? p.aims : [g.focus]; as.forEach(a => { const hit = aimsAll.find(x => mbApproxMeters(x.lat, x.lng, a.lat, a.lng) < 0.3); if (hit) hit.n++; else aimsAll.push({ lat: a.lat, lng: a.lng, n: 1 }); }); }));
+        groups.forEach(g => { (g.dots || []).forEach(d => { if (!aimsAll.some(x => mbApproxMeters(x.lat, x.lng, d.lat, d.lng) < 0.3)) keep(L.circleMarker([d.lat, d.lng], { renderer: cv || undefined, interactive: false, radius: 4, color: '#cfd8dc', weight: 1.5, fill: false, opacity: 0.9 })); }); });
+        aimsAll.forEach((a, k) => { keep(L.circleMarker([a.lat, a.lng], { renderer: cv || undefined, interactive: false, radius: 8, color: '#ffffff', weight: 2, fillColor: '#ff8ad2', fillOpacity: 1 })); keep(sgChip(L, a.lat, a.lng, `A${k + 1}${a.n > 1 ? ` ×${a.n}` : ''}`, '#ff8ad2', 915, 'dl')); });
         groups.forEach((g, gi) => {
             try {
-                if (Array.isArray(g.dots) && g.dots.length) {
-                    g.dots.forEach((d, di) => { keep(L.circleMarker([d.lat, d.lng], { renderer: cv || undefined, interactive: false, radius: 7, color: '#ffffff', weight: 2, fillColor: '#ff8ad2', fillOpacity: 1 })); keep(sgChip(L, d.lat, d.lng, `G${gi + 1} · S${di + 1}`, '#ff8ad2', 915, 'dl')); });
-                } else keep(L.circleMarker([g.focus.lat, g.focus.lng], { renderer: cv || undefined, interactive: false, radius: 7, color: '#ffffff', weight: 2, fillColor: '#ff8ad2', fillOpacity: 1 }));
                 (g.navs || []).forEach((p, i) => {
                     const aims = (p.aims && p.aims.length) ? p.aims : [g.focus];
                     aims.forEach(a => keep(L.polyline([[a.lat, a.lng], [p.lat, p.lng]], { renderer: cv || undefined, interactive: false, color: '#c39dff', weight: 3, dashArray: '7 4', opacity: 1 })));
@@ -5407,15 +5420,22 @@
         if (best) return best;
         bd = 14;
         groups.forEach((g, gi) => (g.navs || []).forEach((p, ni) => (p.aims || []).forEach((a, ai) => { const d = pxOf(a); if (d < bd) { bd = d; best = { gi, ni, kind: 'aim', ai, groups }; } })));
+        if (best) return best;
+        groups.forEach((g, gi) => { if (!g.focus || !(g.navs || []).some(p => !(p.aims && p.aims.length))) return; const d = pxOf(g.focus); if (d < bd) { bd = d; best = { gi, ni: -1, kind: 'focus', ai: -1, groups }; } });
         return best;
     }
-    function sgDragPoint(d) { const p = d.groups[d.gi].navs[d.ni]; return d.kind === 'aim' ? p.aims[d.ai] : p; }
+    function sgDragPoint(d) { const g = d.groups[d.gi]; if (d.kind === 'focus') return g.focus; const p = g.navs[d.ni]; return d.kind === 'aim' ? p.aims[d.ai] : p; }
     function sgDragStart(e, hit) {
         const map = getLeafletMap();
         sg.drag = Object.assign({ moved: false, raf: 0, start: { x: e.clientX, y: e.clientY } }, hit);
         // v3.82: an AIM drag carries the whole shot — every nav (any group) aiming at this point, and
         // their copies of the aim, move by the same delta so the 100 ft / angles are preserved.
-        if (hit.kind === 'aim') {
+        if (hit.kind === 'focus') {
+            // a ring's focus carries the whole ring (navs without their own aims)
+            const g = hit.groups[hit.gi]; sg.drag.orig = { lat: g.focus.lat, lng: g.focus.lng };
+            sg.drag.cluster = (g.navs || []).filter(p => !(p.aims && p.aims.length)).map(p => ({ p, p0: { lat: p.lat, lng: p.lng }, aims: [] }));
+            sg.drag.dots = [];
+        } else if (hit.kind === 'aim') {
             const a0 = sgDragPoint(sg.drag); sg.drag.orig = { lat: a0.lat, lng: a0.lng }; sg.drag.cluster = [];
             hit.groups.forEach(g => (g.navs || []).forEach(p => {
                 const near = (p.aims || []).map((a, i) => ({ a, i })).filter(x => mbApproxMeters(x.a.lat, x.a.lng, a0.lat, a0.lng) < 0.3);
@@ -5436,8 +5456,9 @@
         if (!d.moved && Math.abs(e.clientX - d.start.x) < 3 && Math.abs(e.clientY - d.start.y) < 3) return;
         d.moved = true;
         const ll = caClickToLatLng(e); if (!ll) return;
-        if (d.kind === 'aim' && d.cluster && d.cluster.length) {
+        if ((d.kind === 'aim' || d.kind === 'focus') && d.cluster) {
             const dLat = ll.lat - d.orig.lat, dLng = ll.lng - d.orig.lng;
+            if (d.kind === 'focus') { const g = d.groups[d.gi]; g.focus.lat = d.orig.lat + dLat; g.focus.lng = d.orig.lng + dLng; }
             d.cluster.forEach(c => { c.p.lat = c.p0.lat + dLat; c.p.lng = c.p0.lng + dLng; c.aims.forEach(x => { x.a.lat = x.a0.lat + dLat; x.a.lng = x.a0.lng + dLng; }); });
             (d.dots || []).forEach(x => { x.d.lat = x.d0.lat + dLat; x.d.lng = x.d0.lng + dLng; });
         } else { const p = sgDragPoint(d); p.lat = ll.lat; p.lng = ll.lng; }
@@ -5456,16 +5477,17 @@
         if (d.moved) {
             try { const p = sgDragPoint(d); fetchElevation(p.lat, p.lng); } catch (err) {}
             sgGroupsMutate(() => d.groups);
-            showToast(`🎯 ${d.kind === 'aim' ? `shot moved with ${(d.cluster || []).length} nav(s)` : `G${d.gi + 1} · N${d.ni + 1} moved (nav only)`}.`, '#c39dff', 1500);
+            showToast(`🎯 ${d.kind === 'aim' || d.kind === 'focus' ? `shot moved with ${(d.cluster || []).length} nav(s)` : `G${d.gi + 1} · N${d.ni + 1} moved (nav only)`}.`, '#c39dff', 1500);
         } else sgDrawStaged(true);
     }
     // R-click on a staged nav drops that nav (the group when it was the last one); on an
     // aim drops that snapshot (a nav keeps at least one). Returns true when it ate the click.
     function sgContextStaged(e) {
         const hit = sgHitStaged(e, true); if (!hit) return false;
-        const g = hit.groups[hit.gi], p = g.navs[hit.ni];
+        const g = hit.groups[hit.gi], p = hit.ni >= 0 ? g.navs[hit.ni] : null;
         let msg;
-        if (hit.kind === 'aim') {
+        if (hit.kind === 'focus') { hit.groups.splice(hit.gi, 1); msg = `G${hit.gi + 1} dropped`; }
+        else if (hit.kind === 'aim') {
             if (!p.aims || p.aims.length < 2) { showToast(`N${hit.ni + 1} has one snapshot — R-click the nav to drop both.`, '#ff9800', 2500); return true; }
             p.aims.splice(hit.ai, 1); msg = `S${hit.ai + 1} of N${hit.ni + 1} dropped`;
         } else {
