@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.86
+// @version      3.87
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.86';
+    const SCRIPT_VERSION = '3.87';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -9369,9 +9369,12 @@
         const items = genReviewItems(sid);
         // v3.83: a mission deleted since the run (natively or by us) is marked GONE — its row no longer
         // opens a dead editor; ↻ Recreate rebuilds the pad with the current template.
-        const loaded = (missionsBySite[sid] && missionsBySite[sid].missions) || null;
+        const cache = missionsBySite[sid] || null, loaded = (cache && cache.missions) || null;
         const have = loaded && loaded.length ? new Set(loaded.map(m => m.id)) : null;
-        items.forEach(x => { x.gone = !!(have && x.mid != null && x.created !== false && !have.has(x.mid)); });
+        const fetchedAt = (cache && cache.fetchedAt) || 0;
+        // v3.87: a row is GONE only when a list fetched AFTER the row was written lacks it — the panel's
+        // cache from before the run flagged all 70 fresh missions as DELETED.
+        items.forEach(x => { x.gone = !!(have && x.mid != null && x.created !== false && fetchedAt > (x.at || 0) + 1500 && !have.has(x.mid)); });
         const gone = items.filter(x => x.gone);
         const left = items.filter(x => !x.done), done = items.filter(x => x.done);
         const flagged = left.filter(x => x.flags.length), clean = left.filter(x => !x.flags.length);
@@ -9459,10 +9462,12 @@
             if (auto) await new Promise(r => setTimeout(r, 120));
         }
         genBulkBusy = false;
-        if (auto && reports.length) { try { genAutoReport(reports, ok); } catch (e) { console.warn(`${TAG} [gen-auto] report failed`, e); } }
         setStatus(`Done — created ${ok}${fail ? `, ${fail} failed` : ''}.`);
         // Refresh Percepto's sidebar list in place so the new missions appear now.
         const refreshed = ok ? refreshMissionList() : false;
+        // v3.87: refetch OUR cache before the review opens, so new missions aren't judged against a stale list
+        if (ok) { try { await new Promise(res => { try { fetchMissions(getCurrentSiteID(), () => res(), () => res()); } catch (e) { res(); } setTimeout(res, 6000); }); } catch (e) {} }
+        if (auto && reports.length) { try { genAutoReport(reports, ok); } catch (e) { console.warn(`${TAG} [gen-auto] report failed`, e); } }
         showToast(`▣ Bulk generate: created ${ok}${fail ? ` · ${fail} failed (see console)` : ''}.${ok && !refreshed ? ' Reload the list to see them.' : ''}`, ok ? '#5fff5f' : '#ff5252', 7000);
         console.log(`${TAG} [gen-bulk] created ${ok}, failed ${fail}`);
         if (goBtn) goBtn.disabled = false;
