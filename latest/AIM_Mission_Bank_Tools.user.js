@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.81
+// @version      3.82
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.81';
+    const SCRIPT_VERSION = '3.82';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -4436,6 +4436,10 @@
         if (rec.op === 'replace') {
             newInstrs = (rec.prev || []).map(s => Object.assign({}, s));
             msg = `↩ Restored the steps "${rec.name}" replaced (${newInstrs.length}).`;
+        } else if (rec.op === 'move') {
+            const by = new Map((rec.prev || []).map(p => [String(p.id), p]));
+            newInstrs = instrs.map(s => { const p = s && by.get(String(s.id)); return p ? Object.assign({}, s, { location: Object.assign({}, s.location, { lat: p.lat, lng: p.lng }) }) : Object.assign({}, s); });
+            msg = `↩ Moved ${(rec.prev || []).length} step(s) back.`;
         } else if (rec.op === 'tpl') {
             // A wrap-template apply is one undo unit: strip every step it added.
             const ids = new Set((rec.ids || []).map(String));
@@ -5262,6 +5266,16 @@
     function sgDragStart(e, hit) {
         const map = getLeafletMap();
         sg.drag = Object.assign({ moved: false, raf: 0, start: { x: e.clientX, y: e.clientY } }, hit);
+        // v3.82: an AIM drag carries the whole shot — every nav (any group) aiming at this point, and
+        // their copies of the aim, move by the same delta so the 100 ft / angles are preserved.
+        if (hit.kind === 'aim') {
+            const a0 = sgDragPoint(sg.drag); sg.drag.orig = { lat: a0.lat, lng: a0.lng }; sg.drag.cluster = [];
+            hit.groups.forEach(g => (g.navs || []).forEach(p => {
+                const near = (p.aims || []).map((a, i) => ({ a, i })).filter(x => mbApproxMeters(x.a.lat, x.a.lng, a0.lat, a0.lng) < 0.3);
+                if (!near.length) return;
+                sg.drag.cluster.push({ p, p0: { lat: p.lat, lng: p.lng }, aims: near.map(x => ({ a: x.a, a0: { lat: x.a.lat, lng: x.a.lng } })) });
+            }));
+        }
         try { if (map && map.dragging && map.dragging.enabled()) { map.dragging.disable(); sg.drag.reDrag = true; } } catch (err) {}
         window.addEventListener('mousemove', sgDragMove, true);
         window.addEventListener('mouseup', sgDragEnd, true);
@@ -5273,7 +5287,10 @@
         if (!d.moved && Math.abs(e.clientX - d.start.x) < 3 && Math.abs(e.clientY - d.start.y) < 3) return;
         d.moved = true;
         const ll = caClickToLatLng(e); if (!ll) return;
-        const p = sgDragPoint(d); p.lat = ll.lat; p.lng = ll.lng;
+        if (d.kind === 'aim' && d.cluster && d.cluster.length) {
+            const dLat = ll.lat - d.orig.lat, dLng = ll.lng - d.orig.lng;
+            d.cluster.forEach(c => { c.p.lat = c.p0.lat + dLat; c.p.lng = c.p0.lng + dLng; c.aims.forEach(x => { x.a.lat = x.a0.lat + dLat; x.a.lng = x.a0.lng + dLng; }); });
+        } else { const p = sgDragPoint(d); p.lat = ll.lat; p.lng = ll.lng; }
         if (!d.raf) d.raf = requestAnimationFrame(() => { d.raf = 0; try { sgRenderStaged(d.groups); } catch (err) { console.warn(`${TAG} [🎯] drag draw failed`, err); } });
     }
     function sgDragEnd(e) {
@@ -5289,7 +5306,7 @@
         if (d.moved) {
             try { const p = sgDragPoint(d); fetchElevation(p.lat, p.lng); } catch (err) {}
             sgGroupsMutate(() => d.groups);
-            showToast(`🎯 G${d.gi + 1} · ${d.kind === 'aim' ? `S${d.ai + 1} of N${d.ni + 1}` : `N${d.ni + 1}`} moved.`, '#c39dff', 1200);
+            showToast(`🎯 ${d.kind === 'aim' ? `shot moved with ${(d.cluster || []).length} nav(s)` : `G${d.gi + 1} · N${d.ni + 1} moved (nav only)`}.`, '#c39dff', 1500);
         } else sgDrawStaged(true);
     }
     // R-click on a staged nav drops that nav (the group when it was the last one); on an
@@ -7008,31 +7025,97 @@
     // click at the cursor: Percepto moves the open step to a map click, so no React surgery.
     // (v3.73's z-index raise never stuck — Percepto re-renders the markers.)
     let stackDrag = null, composerSuppressClick = false;
+    function composerEditorInstrs(ctx) {
+        let instrs = (ctx && ctx.currentApp && ctx.currentApp.instructions) || [];
+        if (!instrs.length) { try { const lc = findMissionEditorCtx(); if (lc && Array.isArray(lc.instrs) && lc.instrs.length) instrs = lc.instrs; } catch (e) {} }
+        return instrs;
+    }
+    // The "shot" a snapshot belongs to: every step sitting on its spot (stacked snapshots + any
+    // wrap steps parked there) plus each snapshot's OWNING nav (the nearest nav before it).
+    function composerShotCluster(instrs, lat, lng) {
+        const isNav = st => st && (st.type_name === 'navigate' || st.type === 1);
+        const ids = new Set(); const navIds = new Set(); let snaps = 0;
+        instrs.forEach((st, i) => {
+            if (!st || !st.location || st.location.lat == null) return;
+            if (mbApproxMeters(st.location.lat, st.location.lng, lat, lng) > 0.3) return;
+            if (isNav(st)) return;
+            ids.add(String(st.id)); if (st.type_name === 'snapshot' || st.type === 6) snaps++;
+            for (let j = i - 1; j >= 0; j--) { if (isNav(instrs[j])) { navIds.add(String(instrs[j].id)); break; } }
+        });
+        return { ids, navIds, snaps };
+    }
+    // Write new locations into the editor's app (same path as Click-add / 🎯 commit) — one undo unit.
+    function composerMoveSteps(moves, label) {
+        const ctx = findMissionAppCtx();
+        if (!ctx || typeof ctx.setCurrentApp !== 'function' || !ctx.currentApp) { showToast('Open a mission in the editor first.', '#ff9800', 3000); return false; }
+        const app = ctx.currentApp, instrs = composerEditorInstrs(ctx);
+        const by = new Map(moves.map(m => [String(m.id), m]));
+        const prev = [];
+        const next = instrs.map(st => {
+            const m = st && by.get(String(st.id)); if (!m) return Object.assign({}, st);
+            prev.push({ id: st.id, lat: st.location.lat, lng: st.location.lng });
+            return Object.assign({}, st, { location: Object.assign({}, st.location, { lat: m.lat, lng: m.lng }) });
+        });
+        if (!prev.length) return false;
+        next.forEach((st, k) => { if (st) st.index_in_app = k; });
+        try {
+            ctx.setCurrentApp(Object.assign({}, app, { instructions: next }));
+            caUndoStack.push({ op: 'move', prev, name: label || 'move', appId: app.id });
+            try { composerStyleNativeMarkers(); } catch (e) {}
+            try { updateCaBanner(); } catch (e) {}
+            return true;
+        } catch (e) { console.warn(`${TAG} [move] setCurrentApp failed`, e); showToast('Move failed — see console.', '#ff5252', 3000); return false; }
+    }
     function stackDragInstall() {
         window.addEventListener('mousedown', (e) => {
-            if (e.button !== 0 || e.shiftKey || e.ctrlKey || e.altKey || stackDrag) return;
+            if (e.button !== 0 || e.shiftKey || e.ctrlKey || e.altKey || stackDrag) return;   // Alt+drag = native single marker
             if (sg.active || caArmed(e)) return;
-            const m = e.target && e.target.closest ? e.target.closest('.instruction-marker[data-aim-stack]') : null; if (!m) return;
+            const m = e.target && e.target.closest ? e.target.closest('.instruction-marker[data-aim-kind="snap"]') : null; if (!m) return;
+            const myId = m.getAttribute('data-aim-id'); const ll = m.__aimLL; if (!ll) return;
             const ids = (m.getAttribute('data-aim-stack-ids') || '').split(',').filter(Boolean), lbls = (m.getAttribute('data-aim-stack') || '').split(',');
-            if (!document.querySelector('[data-testid="btn-save-instruction"]')) return;   // a step editor must be open
-            const open = getOpenStepId(); if (open == null) return;
-            const oi = ids.findIndex(x => String(x) === String(open)); if (oi < 0) return;   // the open step isn't in this stack → native
+            const editorOpen = !!document.querySelector('[data-testid="btn-save-instruction"]');
+            const map = getLeafletMap(); if (!map) return;
+            let d = null;
+            if (editorOpen) {
+                // a step editor is open: only its own step may move (through Percepto's map click)
+                const open = getOpenStepId(); if (open == null) return;
+                const oi = ids.findIndex(x => String(x) === String(open));
+                if (oi < 0 && String(open) !== String(myId)) return;
+                d = { mode: 'single', id: open, lbl: oi >= 0 ? (lbls[oi] || '') : (m.getAttribute('data-aim-num') || ''), from: ll };
+            } else {
+                const ctx = findMissionAppCtx(); if (!ctx || typeof ctx.setCurrentApp !== 'function') return;
+                const cl = composerShotCluster(composerEditorInstrs(ctx), ll[0], ll[1]);
+                if (!cl.ids.size) return;
+                d = { mode: 'cluster', ids: cl.ids, navIds: cl.navIds, lbl: `${cl.snaps} snap${cl.snaps === 1 ? '' : 's'} + ${cl.navIds.size} nav${cl.navIds.size === 1 ? '' : 's'}`, from: ll };
+            }
             e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
-            const map = getLeafletMap();
-            stackDrag = { id: open, lbl: lbls[oi] || '', x0: e.clientX, y0: e.clientY, moved: false, map, reDrag: false, dot: null };
-            try { if (map && map.dragging && map.dragging.enabled()) { map.dragging.disable(); stackDrag.reDrag = true; } } catch (err) {}
+            stackDrag = Object.assign({ x0: e.clientX, y0: e.clientY, moved: false, map, reDrag: false, dot: null, snapTo: null }, d);
+            try { if (map.dragging && map.dragging.enabled()) { map.dragging.disable(); stackDrag.reDrag = true; } } catch (err) {}
             window.addEventListener('mousemove', stackDragMove, true);
             window.addEventListener('mouseup', stackDragEnd, true);
         }, true);
-        // the browser's own click after our drag must reach nobody (Percepto would move the step AGAIN / switch)
         window.addEventListener('click', (e) => { if (composerSuppressClick && !e.__aimStackDrop) { e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); } }, true);
+    }
+    // Snap target: another snapshot marker (outside the moving set) within 12 px of the cursor.
+    function stackSnapTarget(d, x, y) {
+        let best = null, bd = 12;
+        document.querySelectorAll('.instruction-marker[data-aim-kind="snap"][data-aim-id]').forEach(el => {
+            const id = el.getAttribute('data-aim-id');
+            if (d.mode === 'cluster' ? d.ids.has(String(id)) : String(id) === String(d.id)) return;
+            const r = el.getBoundingClientRect(); const dd = Math.hypot(r.left + r.width / 2 - x, r.top + r.height / 2 - y);
+            if (dd < bd && el.__aimLL) { bd = dd; best = { el, ll: el.__aimLL, num: el.getAttribute('data-aim-num') || '' }; }
+        });
+        return best;
     }
     function stackDragMove(e) {
         const d = stackDrag; if (!d) return;
         e.preventDefault(); e.stopPropagation();
         if (!d.moved && Math.abs(e.clientX - d.x0) < 3 && Math.abs(e.clientY - d.y0) < 3) return;
         d.moved = true;
-        if (!d.dot) { d.dot = document.createElement('div'); d.dot.id = 'aim-mb-stack-drag'; d.dot.style.cssText = 'position:fixed;z-index:2147483600;pointer-events:none;transform:translate(-50%,-50%);min-width:24px;height:24px;padding:0 5px;border-radius:12px;background:#ff8ad2;border:2px solid #fff;box-shadow:0 0 8px #000;color:#000;font:800 11px/20px Lato,sans-serif;text-align:center;white-space:nowrap;'; d.dot.textContent = d.lbl; document.body.appendChild(d.dot); }
+        if (!d.dot) { d.dot = document.createElement('div'); d.dot.id = 'aim-mb-stack-drag'; d.dot.style.cssText = 'position:fixed;z-index:2147483600;pointer-events:none;transform:translate(-50%,-50%);min-width:24px;height:24px;padding:0 7px;border-radius:12px;background:#ff8ad2;border:2px solid #fff;box-shadow:0 0 8px #000;color:#000;font:800 11px/20px Lato,sans-serif;text-align:center;white-space:nowrap;'; document.body.appendChild(d.dot); }
+        d.snapTo = stackSnapTarget(d, e.clientX, e.clientY);
+        d.dot.textContent = d.snapTo ? `${d.lbl} → stack on ${d.snapTo.num}` : d.lbl;
+        d.dot.style.background = d.snapTo ? '#ffd54f' : '#ff8ad2';
         d.dot.style.left = e.clientX + 'px'; d.dot.style.top = e.clientY + 'px';
     }
     function stackDragEnd(e) {
@@ -7047,12 +7130,24 @@
         try {
             const c = d.map && d.map.getContainer(); if (!c) return;
             const r = c.getBoundingClientRect();
-            if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) { showToast('Dropped outside the map — step not moved.', '#ff9800', 2500); return; }
-            const ev = new MouseEvent('click', { bubbles: true, cancelable: true, clientX: e.clientX, clientY: e.clientY, view: window });
-            ev.__aimStackDrop = true;
-            c.dispatchEvent(ev);   // Leaflet reads latlng off clientX/Y → Percepto's map click moves the OPEN step
-            showToast(`${d.lbl} moved here — save the step.`, '#ff8ad2', 2200);
-        } catch (err) { console.warn(`${TAG} [stack-drag] drop failed`, err); showToast('Stack drop failed — see console.', '#ff5252', 3000); }
+            if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) { showToast('Dropped outside the map — nothing moved.', '#ff9800', 2500); return; }
+            if (d.mode === 'single') {
+                // the open step moves through Percepto's own map click (its form picks the new spot up)
+                const x = d.snapTo ? d.snapTo.el.getBoundingClientRect().left + d.snapTo.el.getBoundingClientRect().width / 2 : e.clientX;
+                const y = d.snapTo ? d.snapTo.el.getBoundingClientRect().top + d.snapTo.el.getBoundingClientRect().height / 2 : e.clientY;
+                const ev = new MouseEvent('click', { bubbles: true, cancelable: true, clientX: x, clientY: y, view: window });
+                ev.__aimStackDrop = true; c.dispatchEvent(ev);
+                showToast(`${d.lbl} moved${d.snapTo ? ` onto ${d.snapTo.num}` : ''} — save the step.`, '#ff8ad2', 2200);
+                return;
+            }
+            // cluster: exact delta (snap target = exact lat/lng so the stack is a true stack again)
+            const to = d.snapTo ? { lat: d.snapTo.ll[0], lng: d.snapTo.ll[1] } : d.map.mouseEventToLatLng(e);
+            const dLat = to.lat - d.from[0], dLng = to.lng - d.from[1];
+            const instrs = composerEditorInstrs(findMissionAppCtx());
+            const moves = [];
+            instrs.forEach(st => { if (!st || !st.location || st.location.lat == null) return; const id = String(st.id); if (d.ids.has(id) || d.navIds.has(id)) moves.push({ id: st.id, lat: st.location.lat + dLat, lng: st.location.lng + dLng }); });
+            if (composerMoveSteps(moves, 'shot move')) showToast(`${d.lbl} moved together${d.snapTo ? ` — stacked on ${d.snapTo.num}` : ''}. Ctrl+Z undoes · SAVE the mission.`, '#ff8ad2', 3000);
+        } catch (err) { console.warn(`${TAG} [stack-drag] drop failed`, err); showToast('Drop failed — see console.', '#ff5252', 3000); }
     }
     function composerHoverInstall() {
         if (composerHoverInstalled) return; composerHoverInstalled = true;
@@ -7071,7 +7166,7 @@
             const openId = getOpenStepId();
             let html = `<b style="color:${m.getAttribute('data-aim-kind') === 'nav' ? '#7aa9ff' : '#ff8ad2'};">${escapeHtml(lbl)}</b>`;
             if (snaps.length) html += ` <span style="color:#789;">→</span> <span style="color:#ff8ad2;">${snaps.map(escapeHtml).join(' · ')}</span>`;
-            if (stack.length > 1) html += `<div style="margin-top:4px;color:#9ad;">stacked · click one to open it, then <b style="color:#ff8ad2;">drag the stack</b> to move that one:</div><div style="display:flex;gap:4px;margin-top:3px;">${stack.map((s, i) => `<button data-hv-open="${escapeHtml(ids[i] || '')}" style="background:${String(ids[i]) === String(openId) ? 'rgba(255,138,210,0.35)' : 'rgba(255,255,255,0.08)'};border:1px solid ${String(ids[i]) === String(openId) ? '#ff8ad2' : '#456'};color:#fff;border-radius:3px;cursor:pointer;font:700 11px 'Lato',sans-serif;padding:1px 6px;">${escapeHtml(s)}</button>`).join('')}</div>`;
+            if (stack.length > 1) html += `<div style="margin-top:4px;color:#9ad;"><b style="color:#ff8ad2;">drag</b> = move the whole shot (stack + navs) · <b>Alt+drag</b> = this marker only · click one to open it, then drag to move just that one:</div><div style="display:flex;gap:4px;margin-top:3px;">${stack.map((s, i) => `<button data-hv-open="${escapeHtml(ids[i] || '')}" style="background:${String(ids[i]) === String(openId) ? 'rgba(255,138,210,0.35)' : 'rgba(255,255,255,0.08)'};border:1px solid ${String(ids[i]) === String(openId) ? '#ff8ad2' : '#456'};color:#fff;border-radius:3px;cursor:pointer;font:700 11px 'Lato',sans-serif;padding:1px 6px;">${escapeHtml(s)}</button>`).join('')}</div>`;
             h.innerHTML = html;
             h.querySelectorAll('[data-hv-open]').forEach(b => b.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); const id = b.getAttribute('data-hv-open'); if (id) { composerOpenStepEdit(id); setTimeout(() => { try { const map = getLeafletMap(); if (map) composerRaiseOpenMarker(map); } catch (err) {} }, 400); } });
             const r = m.getBoundingClientRect();
