@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.94
+// @version      3.95
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.94';
+    const SCRIPT_VERSION = '3.95';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -4756,21 +4756,25 @@
     // Compute the live ring: [{lat,lng,bearing,edgeFt,inFfz,clamped,status}]
     function sgFtStatus(ft, inFfz) { const r = Math.round(ft); return (!inFfz || r < SG_MIN_FT) ? 'red' : ((r < SG_IDEAL_LO || r > SG_IDEAL_HI) ? 'amber' : 'green'); }
     // Each row → {lat,lng,bearing,focusFt,focusStatus,edgeFt,edgeStatus,status,inFfz,clamped,snaps}
+    const SG_EDGE_MAX_FT = 120;   // targets wider than this are shot from the focus point, not their edge
     function sgComputeRing(focus, shape, rot, flip, targetRing, entOv) {
         const ent = entOv || sg.ent;   // v3.59: ▣ Auto-shots passes the site entities directly
         const ffzs = (ent && ent.ffzs) || [];
         const rows = (shape.rows && shape.rows.length) ? shape.rows : [{ angle: 0, distFt: shape.distFt, snaps: shape.snapsPerNav }];
         const nfzs = (ent && ent.nfzs) || [], assets = ((ent && ent.assets) || []).filter(sgTargetable);
+        // v3.95: the edge-based standoff is for SMALL targets (a 70 ft tank shot from its end). Pin the
+        // focus inside a facility-sized outline and the nav must sit 100 ft from the POINT you chose —
+        // edge-based put it 100 ft outside a 300 ft NFZ, i.e. 240 ft from the focus.
+        const edgeBased = !!(targetRing && genRingSpanFt(targetRing) < SG_EDGE_MAX_FT);
         const out = rows.map(r => {
             const bearing = ((rot + r.angle) % 360 + 360) % 360;
-            // v3.61: standoff is from the target's EDGE when there is one (the 80 ft rule is edge-based too)
-            const distM = targetRing ? sgEdgeRayM(focus, bearing, r.distFt, [targetRing]) : r.distFt / 3.28084;
+            const distM = edgeBased ? sgEdgeRayM(focus, bearing, r.distFt, [targetRing]) : r.distFt / 3.28084;
             const c = sgClampRay(focus, bearing, distM, ffzs);
             const inFfz = c.ok && sgInAnyFfz(c.pt, ffzs);
             const overNfz = nfzs.some(z => z.ring && z.ring.length >= 3 && genPointInPoly(c.pt, z.ring));      // Percepto refuses the save
             const overAsset = !overNfz && assets.some(a => genPointInPoly(c.pt, a.ring));                     // never fly over an asset
             const focusFt = mbApproxMeters(c.pt.lat, c.pt.lng, focus.lat, focus.lng) * 3.28084;
-            const edgeFt = targetRing ? mbPointToPolygonMeters(c.pt.lat, c.pt.lng, targetRing) * 3.28084 : null;
+            const edgeFt = edgeBased ? mbPointToPolygonMeters(c.pt.lat, c.pt.lng, targetRing) * 3.28084 : null;
             const focusStatus = sgFtStatus(focusFt, inFfz);
             const edgeStatus = edgeFt == null ? null : sgFtStatus(edgeFt, inFfz);
             const status = (overNfz || overAsset) ? 'red' : (edgeStatus || focusStatus);
@@ -5123,7 +5127,8 @@
                     keep(L.circleMarker([p.lat, p.lng], { renderer: cv || undefined, interactive: false, radius: hot ? 11 : 9, color: hot ? '#ffd54f' : (bad ? '#ff5252' : '#ffffff'), weight: hot || bad ? 3 : 2, fillColor: bad ? '#ff5252' : '#c39dff', fillOpacity: 0.95 }));
                     const ns = (p.aims && p.aims.length) ? p.aims.length : (p.snaps || g.snapsPerNav || 1);
                     // chip carries nav→aim ft so a dragged nav can be kept inside the band
-                    const fts = (p.aims && p.aims.length) ? p.aims.map(a => { const ft = Math.round(sgLLFt(p, a)); const st = sgFtStatus(ft, true); return `<span style="color:${SG_COL[st]}">${ft}</span>`; }) : [];
+                    const aimPts = (p.aims && p.aims.length) ? p.aims : (g.focus ? [g.focus] : []);
+                    const fts = aimPts.map(a => { const ft = Math.round(sgLLFt(p, a)); const st = sgFtStatus(ft, true); return `<span style="color:${SG_COL[st]}">${ft}</span>`; });
                     keep(sgChip(L, p.lat, p.lng, `G${gi + 1} · N${i + 1}${fts.length ? ` · ${fts.join('/')} ft` : (ns > 1 ? ` · ${ns} snaps` : '')}`, hot ? '#ffd54f' : '#c39dff', hot ? 960 : 920));
                 });
             } catch (e) { console.warn(`${TAG} [🎯] staged draw failed`, e); }
@@ -5467,7 +5472,9 @@
             hit.groups.forEach(g => (g.navs || []).forEach(p => {
                 const near = (p.aims || []).map((a, i) => ({ a, i })).filter(x => mbApproxMeters(x.a.lat, x.a.lng, a0.lat, a0.lng) < 0.3);
                 if (!near.length) return;
-                sg.drag.cluster.push({ p, p0: { lat: p.lat, lng: p.lng }, aims: near.map(x => ({ a: x.a, a0: { lat: x.a.lat, lng: x.a.lng } })) });
+                const k = (p.aims && p.aims.length) || 1;
+                const mid0 = { lat: p.aims.reduce((t, a) => t + a.lat, 0) / k, lng: p.aims.reduce((t, a) => t + a.lng, 0) / k };
+                sg.drag.cluster.push({ p, p0: { lat: p.lat, lng: p.lng }, share: near.length / k, mid0, aims: near.map(x => ({ a: x.a, a0: { lat: x.a.lat, lng: x.a.lng } })) });
             }));
             sg.drag.dots = [];
             hit.groups.forEach(g => (g.dots || []).forEach(dd => { if (mbApproxMeters(dd.lat, dd.lng, a0.lat, a0.lng) < 0.3) sg.drag.dots.push({ d: dd, d0: { lat: dd.lat, lng: dd.lng } }); }));
@@ -5486,7 +5493,7 @@
         if ((d.kind === 'aim' || d.kind === 'focus') && d.cluster) {
             const dLat = ll.lat - d.orig.lat, dLng = ll.lng - d.orig.lng;
             if (d.kind === 'focus') { const g = d.groups[d.gi]; g.focus.lat = d.orig.lat + dLat; g.focus.lng = d.orig.lng + dLng; }
-            d.cluster.forEach(c => { c.p.lat = c.p0.lat + dLat; c.p.lng = c.p0.lng + dLng; c.aims.forEach(x => { x.a.lat = x.a0.lat + dLat; x.a.lng = x.a0.lng + dLng; }); });
+            d.cluster.forEach(c => { const sh = c.share == null ? 1 : c.share; c.p.lat = c.p0.lat + dLat * sh; c.p.lng = c.p0.lng + dLng * sh; c.aims.forEach(x => { x.a.lat = x.a0.lat + dLat; x.a.lng = x.a0.lng + dLng; }); });
             (d.dots || []).forEach(x => { x.d.lat = x.d0.lat + dLat; x.d.lng = x.d0.lng + dLng; });
         } else { const p = sgDragPoint(d); p.lat = ll.lat; p.lng = ll.lng; }
         if (!d.raf) d.raf = requestAnimationFrame(() => { d.raf = 0; try { sgRenderStaged(d.groups); } catch (err) { console.warn(`${TAG} [🎯] drag draw failed`, err); } });
@@ -5521,7 +5528,12 @@
                 if (!ent) note = ' · FFZ check skipped (entities not loaded yet)';
                 else {
                     const aim = sgDragPoint(d); let swung = 0, stuck = 0;
-                    d.cluster.forEach(c => { const r = sgRelegalNav(c.p, aim, c.p0, d.orig, ent); if (r === 'moved') swung++; else if (r === 'stuck') stuck++; });
+                    d.cluster.forEach(c => {
+                        // re-place around the centre of the nav's aims (one aim = that aim)
+                        let aimNow = aim, aim0 = d.orig;
+                        if (c.mid0 && c.p.aims && c.p.aims.length > 1) { const k = c.p.aims.length; aimNow = { lat: c.p.aims.reduce((t, a) => t + a.lat, 0) / k, lng: c.p.aims.reduce((t, a) => t + a.lng, 0) / k }; aim0 = c.mid0; }
+                        const r = sgRelegalNav(c.p, aimNow, c.p0, aim0, ent); if (r === 'moved') swung++; else if (r === 'stuck') stuck++;
+                    });
                     if (swung) note += ` · ${swung} nav(s) swung to stay in the FFZ`;
                     if (stuck) note += ` · ⚠ ${stuck} nav(s) have NO legal spot — move the shot again`;
                 }
