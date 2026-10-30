@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.76
+// @version      3.77
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.76';
+    const SCRIPT_VERSION = '3.77';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -8718,12 +8718,14 @@
         const { c, u, n } = genRingAxis(ring);
         const brg = v => (Math.atan2(v.x, v.y) * 180 / Math.PI + 360) % 360;
         const ffzs = (ent && ent.ffzs) || [];
-        const ffzEdgeFt = p => { let best = Infinity; ffzs.forEach(f => { if (f.ring && f.ring.length >= 3 && genPointInPoly(p, f.ring)) { const d = genEdgeDistM(p, f.ring) * 3.28084; if (d < best) best = d; } }); return best; };   // Infinity = not inside any FFZ
+        // signed room from the FFZ border: +ft inside, −ft when the shot is OUTSIDE (the worst case —
+        // v3.76 returned Infinity for outside and the `<` test then KEPT the wall side, the exact side to skip)
+        const ffzEdgeFt = p => { let inside = Infinity, outside = Infinity; ffzs.forEach(f => { if (!f.ring || f.ring.length < 3) return; const d = genEdgeDistM(p, f.ring) * 3.28084; if (genPointInPoly(p, f.ring)) { if (d < inside) inside = d; } else if (d < outside) outside = d; }); return Number.isFinite(inside) ? inside : -(Number.isFinite(outside) ? outside : 9999); };
         const sideA = { k: 'side A', b: brg(n) }, sideB = { k: 'side B', b: brg({ x: -n.x, y: -n.y }) };
         const edgeOf = f => ffzEdgeFt(sgOffset(c, f.b, distFt / 3.28084));
         const eA = edgeOf(sideA), eB = edgeOf(sideB);
         // skip the long side whose shot sits closest to (or beyond) the FFZ border
-        const skip = (eA === eB) ? sideA : (eA < eB ? sideA : sideB), keepSide = skip === sideA ? sideB : sideA;
+        const skip = eA <= eB ? sideA : sideB, keepSide = skip === sideA ? sideB : sideA;
         const faces = [{ k: 'end A', b: brg(u) }, keepSide, { k: 'end B', b: brg({ x: -u.x, y: -u.y }) }];
         const swings = [0]; for (let d = 5; d <= 60; d += 5) swings.push(d, -d);
         const dists = [distFt]; for (let d = band.lo; d <= band.hi; d += 5) if (d !== distFt) dists.push(d);
@@ -8740,7 +8742,7 @@
             navs.push({ lat: r.p.lat, lng: r.p.lng, snaps: 1, aims: [{ lat: c.lat, lng: c.lng }] });
         });
         const skipFt = skip === sideA ? eA : eB;
-        flags.push(`pump ${name}: ${navs.length} face shot(s) — skipped ${skip.k} (${Number.isFinite(skipFt) ? `${Math.round(skipFt)} ft from the FFZ edge` : 'outside the FFZ'})${notes.length ? ' · ' + notes.join(' · ') : ''}`);
+        flags.push(`pump ${name}: ${navs.length} face shot(s) — skipped ${skip.k} (${skipFt >= 0 ? `${Math.round(skipFt)} ft from the FFZ edge` : `${Math.round(-skipFt)} ft OUTSIDE the FFZ`})${notes.length ? ' · ' + notes.join(' · ') : ''}`);
         return navs;
     }
     // Virtual units along a long polygon's axis (farthest vertex pair), ~30 ft apart, inset half a step.
