@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.92
+// @version      3.93
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.92';
+    const SCRIPT_VERSION = '3.93';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -9350,7 +9350,8 @@
             let center = null;
             if (r.ring && r.ring.length) { let la = 0, ln = 0; r.ring.forEach(p => { la += p.lat; ln += p.lng; }); center = { lat: la / r.ring.length, lng: ln / r.ring.length }; }
             const it = { pad: r.pad || null, mid: r.mid != null ? r.mid : null, name: r.name, aims: r.aims, navs: r.navs, snaps: r.snaps, flags: (r.flags || []).slice(0, 40), created: r.created !== false, center, at: Date.now(), done: false };
-            const i = it.mid != null ? items.findIndex(x => x.mid === it.mid) : -1;
+            let i = it.mid != null ? items.findIndex(x => x.mid === it.mid) : -1;
+            if (i < 0 && it.name) i = items.findIndex(x => String(x.name || '').trim() === String(it.name).trim());   // v3.93: same mission, new id
             if (i >= 0) { it.done = !!items[i].done; items[i] = it; } else items.push(it);
         });
         all[sk] = { at: Date.now(), items };
@@ -9449,8 +9450,16 @@
         const cache = missionsBySite[sid] || null, loaded = (cache && cache.missions) || null;
         const have = loaded && loaded.length ? new Set(loaded.map(m => m.id)) : null;
         const fetchedAt = (cache && cache.fetchedAt) || 0;
-        // v3.87: a row is GONE only when a list fetched AFTER the row was written lacks it — the panel's
-        // cache from before the run flagged all 70 fresh missions as DELETED.
+        // v3.93: Percepto mints a NEW mission id on every SAVE — a row keyed by the id from creation goes
+        // stale the moment the mission is committed + saved. Re-point each row at the live mission of the
+        // same NAME (names are unique per site) before judging it; gone = no mission of that name in a list
+        // fetched after the row was written (v3.87 rule).
+        let remapped = 0;
+        if (loaded && loaded.length) {
+            const byName = new Map(loaded.map(m => [String(m.name || '').trim(), m]));
+            items.forEach(x => { if (x.mid != null && !have.has(x.mid)) { const live = byName.get(String(x.name || '').trim()); if (live && live.id != null) { x.mid = live.id; remapped++; } } });
+            if (remapped) { try { const all = genReviewAll(); const sk = envSiteKey(sid); if (all[sk]) { all[sk].items = items; genReviewSave(all); } } catch (e) { console.warn(`${TAG} [review] remap save failed`, e); } }
+        }
         items.forEach(x => { x.gone = !!(have && x.mid != null && x.created !== false && fetchedAt > (x.at || 0) + 1500 && !have.has(x.mid)); });
         const gone = items.filter(x => x.gone);
         const left = items.filter(x => !x.done), done = items.filter(x => x.done);
