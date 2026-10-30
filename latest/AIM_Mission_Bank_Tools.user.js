@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.84
+// @version      3.85
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.84';
+    const SCRIPT_VERSION = '3.85';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -4468,6 +4468,69 @@
     // Alt + right-click on a Nav/Snapshot marker → delete that step. A snapshot also
     // takes its trailing scan-wrap block (contiguous camera/GEM/wait) so no orphans.
     // Pushed to the shared undo stack, so Ctrl+Z restores it verbatim at its spot.
+    // v3.85 — remove an arbitrary set of steps as ONE undo unit (Ctrl+Z restores the whole list).
+    function composerDeleteSteps(idSet, label) {
+        const ctx = findMissionAppCtx();
+        if (!ctx || typeof ctx.setCurrentApp !== 'function' || !ctx.currentApp) { showToast('Open a mission in the editor first.', '#ff9800', 3000); return false; }
+        const app = ctx.currentApp;
+        let instrs = app.instructions || [];
+        if (!instrs.length) { try { const lc = findMissionEditorCtx(); if (lc && Array.isArray(lc.instrs) && lc.instrs.length) instrs = lc.instrs; } catch (e) {} }
+        const next = instrs.filter(st => !(st && idSet.has(String(st.id)))).map(st => Object.assign({}, st));
+        const n = instrs.length - next.length; if (!n) { showToast('Nothing to delete.', '#9ad', 2000); return false; }
+        next.forEach((st, k) => { if (st) st.index_in_app = k; });
+        if (caUndoStack.length && caUndoStack[caUndoStack.length - 1].appId !== app.id) caUndoStack = [];
+        caUndoStack.push({ op: 'replace', prev: instrs.map(st => Object.assign({}, st)), name: label, appId: app.id });
+        try {
+            ctx.setCurrentApp(Object.assign({}, app, { instructions: next }));
+            try { composerStyleNativeMarkers(); } catch (e) {}
+            try { updateCaBanner(); } catch (e) {}
+            showToast(`🗑 ${label} — ${n} step(s) removed. Ctrl+Z restores · SAVE when done.`, '#ff9d3a', 3200);
+            return true;
+        } catch (e) { console.warn(`${TAG} [delete] failed`, e); showToast('Delete failed — see console.', '#ff5252', 3000); return false; }
+    }
+    // v3.85 — M2 on a nav/snapshot marker: one menu for everything you do to a shot.
+    function composerShotMenu(m, e) {
+        const ID = 'aim-mb-shot-menu'; const old = document.getElementById(ID); if (old) old.remove();
+        const kind = m.getAttribute('data-aim-kind'), myId = m.getAttribute('data-aim-id'), myLbl = m.getAttribute('data-aim-num') || '';
+        const sIds = (m.getAttribute('data-aim-stack-ids') || '').split(',').filter(Boolean), sLbls = (m.getAttribute('data-aim-stack') || '').split(',').filter(Boolean);
+        const rows = sIds.length > 1 ? sIds.map((id, i) => ({ id, lbl: sLbls[i] || id })) : [{ id: myId, lbl: myLbl }];
+        const instrs = composerEditorInstrs(findMissionAppCtx());
+        const isNav = st => st && (st.type_name === 'navigate' || st.type === 1);
+        const isSnap = st => st && (st.type_name === 'snapshot' || st.type === 6);
+        const isWrap = st => st && (st.type_name === 'cameraSelect' || st.type === 7 || st.type_name === 'gemMode' || st.type === 24 || st.type_name === 'wait' || st.type === 5);
+        const isEnd = st => st && (st.type_name === 'returnHome' || st.type === 99);
+        const idxOf = id => instrs.findIndex(st => st && String(st.id) === String(id));
+        const snapBlock = id => { const i = idxOf(id); if (i < 0) return []; let end = i + 1; while (end < instrs.length && isWrap(instrs[end])) end++; return instrs.slice(i, end).map(st => String(st.id)); };
+        const ownerNav = id => { for (let j = idxOf(id) - 1; j >= 0; j--) if (isNav(instrs[j])) return j; return -1; };
+        const navLeg = id => { const i = idxOf(id); if (i < 0) return []; let end = i + 1; while (end < instrs.length && !isNav(instrs[end]) && !isEnd(instrs[end])) end++; return instrs.slice(i, end).map(st => String(st.id)); };
+        const navHasOtherSnaps = (ni, except) => { for (let j = ni + 1; j < instrs.length && !isNav(instrs[j]); j++) if (isSnap(instrs[j]) && !except.has(String(instrs[j].id))) return true; return false; };
+        const shotSet = ids => { const set = new Set(); ids.forEach(id => snapBlock(id).forEach(x => set.add(x))); ids.forEach(id => { const ni = ownerNav(id); if (ni >= 0 && !navHasOtherSnaps(ni, set)) set.add(String(instrs[ni].id)); }); return set; };
+        const wrapN = id => Math.max(0, snapBlock(id).length - 1);
+        const B = (attr, txt, title, col) => `<button ${attr} title="${title}" style="background:rgba(255,255,255,0.06);border:1px solid ${col || '#456'};color:${col || '#cfe'};border-radius:4px;cursor:pointer;font:700 11px 'Lato',sans-serif;padding:3px 7px;white-space:nowrap;">${txt}</button>`;
+        let body = '';
+        if (kind === 'nav') {
+            const leg = navLeg(myId), snaps = leg.filter(x => { const st = instrs[idxOf(x)]; return isSnap(st); }).length;
+            body = `<div style="display:flex;gap:5px;flex-wrap:wrap;">${B(`data-sm-open="${myId}"`, '✏ open', 'Open this step')}${B(`data-sm-del="${myId}"`, '🗑 nav only', 'Delete just this nav (its snapshots fall to the previous nav)', '#ff8a8a')}${B(`data-sm-leg="${myId}"`, `🗑 nav + ${snaps} snap${snaps === 1 ? '' : 's'} + wrap`, 'Delete this nav and everything it takes until the next nav', '#ff5252')}${B(`data-sm-order="${myId}"`, '↕ reorder', 'Move this step in the order')}</div>`;
+        } else {
+            const whole = shotSet(rows.map(r => r.id));
+            body = rows.map(r => `<div style="display:flex;gap:5px;align-items:center;padding:2px 0;"><b style="color:#ff8ad2;min-width:30px;">${escapeHtml(r.lbl)}</b>${B(`data-sm-open="${r.id}"`, '✏ open', 'Open this snapshot')}${B(`data-sm-snap="${r.id}"`, `🗑 snap${wrapN(r.id) ? ` + ${wrapN(r.id)} wrap` : ''}`, 'Delete this snapshot and its camera / GEM / wait steps; its nav stays', '#ff8a8a')}${B(`data-sm-order="${r.id}"`, '↕', 'Move this step in the order')}</div>`).join('')
+                + `<div style="margin-top:5px;border-top:1px solid #2a2f38;padding-top:5px;">${B('data-sm-shot', `🗑 whole shot (${whole.size} step${whole.size === 1 ? '' : 's'}: ${rows.length} snap${rows.length === 1 ? '' : 's'} + wrap + nav${rows.length === 1 ? '' : 's'})`, 'Delete these snapshots, their wrap steps and each nav that only served them', '#ff5252')}</div>`;
+        }
+        const p = document.createElement('div'); p.id = ID;
+        p.style.cssText = `position:fixed;left:${Math.min(e.clientX + 8, window.innerWidth - 330)}px;top:${Math.min(e.clientY + 8, window.innerHeight - 200)}px;z-index:2147483604;min-width:260px;max-width:320px;background:rgba(16,19,26,0.97);border:1px solid #ff8ad2;border-radius:7px;color:#e6e6e6;font:11px/1.35 "Lato","Segoe UI",sans-serif;padding:8px 10px;box-shadow:0 6px 20px rgba(0,0,0,0.8);`;
+        p.innerHTML = `<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;"><b style="color:${kind === 'nav' ? '#7aa9ff' : '#ff8ad2'};">${kind === 'nav' ? 'Nav' : (rows.length > 1 ? 'Stack' : 'Shot')} ${escapeHtml(rows.length > 1 ? rows.map(r => r.lbl).join(' · ') : myLbl)}</b><span style="flex:1;"></span><span style="color:#789;font-size:10px;">Ctrl+Z undoes</span></div>${body}`;
+        document.body.appendChild(p);
+        const close = () => { p.remove(); document.removeEventListener('mousedown', outside, true); window.removeEventListener('keydown', onKey, true); };
+        const outside = ev => { if (!p.contains(ev.target)) close(); };
+        const onKey = ev => { if (ev.key === 'Escape') { close(); ev.stopPropagation(); } };
+        setTimeout(() => { document.addEventListener('mousedown', outside, true); window.addEventListener('keydown', onKey, true); }, 0);
+        p.querySelectorAll('[data-sm-open]').forEach(b => b.onclick = () => { close(); composerOpenStepEdit(b.getAttribute('data-sm-open')); });
+        p.querySelectorAll('[data-sm-order]').forEach(b => b.onclick = () => { const id = b.getAttribute('data-sm-order'); const r = rows.find(x => String(x.id) === String(id)); const n = parseInt(((r && r.lbl) || myLbl).replace(/[^0-9]/g, ''), 10) || 1; close(); composerEditOrder(kind, id, n, m.__aimLL); });
+        p.querySelectorAll('[data-sm-del]').forEach(b => b.onclick = () => { close(); composerDeleteSteps(new Set([String(b.getAttribute('data-sm-del'))]), `${myLbl} nav`); });
+        p.querySelectorAll('[data-sm-leg]').forEach(b => b.onclick = () => { close(); composerDeleteSteps(new Set(navLeg(b.getAttribute('data-sm-leg'))), `${myLbl} + its snapshots`); });
+        p.querySelectorAll('[data-sm-snap]').forEach(b => b.onclick = () => { const id = b.getAttribute('data-sm-snap'); const r = rows.find(x => String(x.id) === String(id)); close(); composerDeleteSteps(new Set(snapBlock(id)), `${(r && r.lbl) || 'snapshot'} + wrap`); });
+        const shot = p.querySelector('[data-sm-shot]'); if (shot) shot.onclick = () => { close(); composerDeleteSteps(shotSet(rows.map(r => r.id)), `shot ${rows.map(r => r.lbl).join('/')}`); };
+    }
     function composerDeleteStep(id) {
         const ctx = findMissionAppCtx();
         if (!ctx || typeof ctx.setCurrentApp !== 'function' || !ctx.currentApp) { showToast('Open a mission in the editor first.', '#ff9800', 3000); return; }
@@ -4533,7 +4596,7 @@
         // v3.60 📍 Points mode: the user drops the aim points, the solver places the fewest navs
         mode: 'ring', dots: [], plan: null, dotK: 3, shareLo: 95, shareHi: 110, pairFt: 30, minSep: 45, maxPerNav: 2, hover: null, hoverName: '', replace: false,
         // v3.74: drag-to-move / R-click-remove on STAGED ghosts (navs + aims)
-        drag: null, suppressClick: false, hitCursor: false, stagedGroups: [], passiveEl: null };
+        drag: null, suppressClick: false, hitCursor: false, stagedGroups: [], passiveEl: null, idle: false };
     const SG_GAP_KEY = 'aim-mb-sg-gap', SG_MODE_KEY = 'aim-mb-sg-mode', SG_DOTK_KEY = 'aim-mb-sg-dotk', SG_BAND_KEY = 'aim-mb-sg-band';
     try { const m = String(gmGet(SG_MODE_KEY, 'ring') || 'ring'); if (m === 'dots') sg.mode = 'dots'; const k = Number(gmGet(SG_DOTK_KEY, 3)); if (Number.isFinite(k) && k >= 1 && k <= 6) sg.dotK = k; } catch (e) {}
     try { const b = gmGet(SG_BAND_KEY, null); if (b && typeof b === 'object') { if (Number(b.lo) >= SG_MIN_FT) sg.shareLo = Number(b.lo); if (Number(b.hi) > sg.shareLo) sg.shareHi = Number(b.hi); if (Number(b.pair) >= 0) sg.pairFt = Number(b.pair); if (Number(b.sep) >= 5) sg.minSep = Number(b.sep); if (Number(b.max) >= 1) sg.maxPerNav = Number(b.max); } } catch (e) {}
@@ -4908,6 +4971,7 @@
         sgUpdateHud();
     }
     function sgDrawLive() {
+        if (sg.idle) { sgClearLayers(sg.liveLayers); return; }
         if (sg.mode === 'dots') { sgDrawDots(); return; }
         sgClearLayers(sg.liveLayers);
         if (!sg.active || !sg.focus) return;
@@ -4997,13 +5061,13 @@
         groups.forEach((g, gi) => {
             try {
                 if (Array.isArray(g.dots) && g.dots.length) {
-                    g.dots.forEach((d, di) => { keep(L.circleMarker([d.lat, d.lng], { renderer: cv || undefined, interactive: false, radius: 5, color: '#ff8ad2', weight: 2, fillColor: '#ff8ad2', fillOpacity: 0.8 })); keep(sgChip(L, d.lat, d.lng, `G${gi + 1} · S${di + 1}`, '#ff8ad2', 915, 'dl')); });
-                } else keep(L.circleMarker([g.focus.lat, g.focus.lng], { renderer: cv || undefined, interactive: false, radius: 6, color: '#ff8ad2', weight: 2, fillColor: '#ff8ad2', fillOpacity: 0.7 }));
+                    g.dots.forEach((d, di) => { keep(L.circleMarker([d.lat, d.lng], { renderer: cv || undefined, interactive: false, radius: 7, color: '#ffffff', weight: 2, fillColor: '#ff8ad2', fillOpacity: 1 })); keep(sgChip(L, d.lat, d.lng, `G${gi + 1} · S${di + 1}`, '#ff8ad2', 915, 'dl')); });
+                } else keep(L.circleMarker([g.focus.lat, g.focus.lng], { renderer: cv || undefined, interactive: false, radius: 7, color: '#ffffff', weight: 2, fillColor: '#ff8ad2', fillOpacity: 1 }));
                 (g.navs || []).forEach((p, i) => {
                     const aims = (p.aims && p.aims.length) ? p.aims : [g.focus];
-                    aims.forEach(a => keep(L.polyline([[a.lat, a.lng], [p.lat, p.lng]], { renderer: cv || undefined, interactive: false, color: '#c39dff', weight: 2, dashArray: '3 5', opacity: 0.8 })));
+                    aims.forEach(a => keep(L.polyline([[a.lat, a.lng], [p.lat, p.lng]], { renderer: cv || undefined, interactive: false, color: '#c39dff', weight: 3, dashArray: '7 4', opacity: 1 })));
                     const hot = dragging && dragging.gi === gi && dragging.ni === i;
-                    keep(L.circleMarker([p.lat, p.lng], { renderer: cv || undefined, interactive: false, radius: hot ? 10 : 8, color: hot ? '#ffd54f' : '#c39dff', weight: hot ? 3 : 2, fillColor: '#c39dff', fillOpacity: 0.35 }));
+                    keep(L.circleMarker([p.lat, p.lng], { renderer: cv || undefined, interactive: false, radius: hot ? 11 : 9, color: hot ? '#ffd54f' : '#ffffff', weight: hot ? 3 : 2, fillColor: '#c39dff', fillOpacity: 0.95 }));
                     const ns = (p.aims && p.aims.length) ? p.aims.length : (p.snaps || g.snapsPerNav || 1);
                     // chip carries nav→aim ft so a dragged nav can be kept inside the band
                     const fts = (p.aims && p.aims.length) ? p.aims.map(a => { const ft = Math.round(sgLLFt(p, a)); const st = sgFtStatus(ft, true); return `<span style="color:${SG_COL[st]}">${ft}</span>`; }) : [];
@@ -5031,6 +5095,7 @@
         const h = sgHudEl(); if (!h) return;
         if (!sg.active) { h.remove(); return; }
         if (h.contains(document.activeElement) && document.activeElement.tagName === 'INPUT') return;   // typing in the table — don't rebuild under the cursor
+        if (sg.idle) { sgUpdateHudIdle(h); return; }
         if (sg.mode === 'dots') { sgUpdateHudDots(h); return; }
         const all = sgTplAll();
         const worst = sg.live.reduce((w, p) => (p.status === 'red' ? 'red' : (p.status === 'amber' && w !== 'red' ? 'amber' : w)), 'green');
@@ -5171,6 +5236,32 @@
         const clr = h.querySelector('[data-sg-g-clear]'); if (clr) clr.onclick = () => { if (confirm('Drop every staged ghost on this mission?')) sgGroupsMutate(() => []); };
         const auto = h.querySelector('[data-sg-auto]'); if (auto) auto.onclick = () => sgAutoOrder();
     }
+    // v3.85 idle HUD: the mission already has ghosts — edit them on the map, list + order here.
+    function sgUpdateHudIdle(h) {
+        const btn = (attr, txt, title, col) => `<button ${attr} title="${title}" style="background:rgba(255,255,255,0.06);border:1px solid ${col || '#456'};color:${col || '#cfe'};border-radius:4px;cursor:pointer;font-size:11px;font-weight:800;padding:3px 7px;">${txt}</button>`;
+        h.innerHTML = `<div style="display:flex;align-items:center;gap:6px;margin-bottom:5px;"><b style="color:#ff8ad2;">🎯 Ghosts here</b><span style="flex:1;"></span>${btn('data-sg-idle-close', '✕', 'Close (Esc)')}</div>
+            <div style="color:#9ad;line-height:1.4;">drag a <b style="color:#c39dff;">nav</b> · drag a <b style="color:#ff8ad2;">pink aim</b> = its navs follow · <b>R-click</b> drops one</div>
+            <div style="display:flex;gap:5px;margin-top:6px;flex-wrap:wrap;">${btn('data-sg-idle-place', '➕ New shot', 'Place another shot template on this mission', '#ff8ad2')}${btn('data-sg-idle-commit', '⚡ Commit', 'Commit every ghost into the editor (then SAVE)', '#7dff7d')}</div>
+            ${sgStagedListHtml()}`;
+        h.querySelector('[data-sg-idle-close]').onclick = () => sgStop();
+        h.querySelector('[data-sg-idle-place]').onclick = () => { sg.idle = false; sgUpdateHud(); sgDrawLive(); showToast(sg.mode === 'dots' ? '📍 click every spot you want a snapshot of · Enter = stage · Esc' : '🎯 move to the asset, click to pin · Enter = stage · Esc', '#ff8ad2', 4000); };
+        h.querySelector('[data-sg-idle-commit]').onclick = () => { try { sgCommitOpen(); } catch (e) { console.warn(`${TAG} [🎯] commit failed`, e); } };
+        sgWireStagedList(h);
+    }
+    function sgWireStagedList(h) {
+        h.querySelectorAll('[data-sg-g]').forEach(b => b.onclick = () => {
+            const i = Number(b.getAttribute('data-sg-g')), act = b.getAttribute('data-sg-act');
+            sgGroupsMutate(groups => {
+                if (act === 'up' && i > 0) { const t = groups[i - 1]; groups[i - 1] = groups[i]; groups[i] = t; }
+                else if (act === 'down' && i < groups.length - 1) { const t = groups[i + 1]; groups[i + 1] = groups[i]; groups[i] = t; }
+                else if (act === 'del') groups.splice(i, 1);
+                else if (act === 'rev') groups[i].navs.reverse();
+                return groups;
+            });
+        });
+        const clr = h.querySelector('[data-sg-g-clear]'); if (clr) clr.onclick = () => { if (confirm('Drop every staged ghost on this mission?')) sgGroupsMutate(() => []); };
+        const auto = h.querySelector('[data-sg-auto]'); if (auto) auto.onclick = () => sgAutoOrder();
+    }
     function sgStagedListHtml() {
         const sid = getCurrentSiteID(), mid = sgMid();
         const groups = (sid && mid) ? sgGhostsFor(sid, mid) : [];
@@ -5254,6 +5345,7 @@
         sg.active = true; sg.pinned = false; sg.focus = null; sg.targetRing = null; sg.targetName = ''; sg.rot = 0; sg.flip = false;
         sg.dots = []; sg.plan = null; sg.hover = null; sg.hoverName = ''; sg.replace = false;
         sg.sid = sid; sg.mid = sgMid();
+        sg.idle = sgGhostsFor(sid, sg.mid).length > 0;   // v3.85: ghosts already here → edit them, no follow ring until ➕
         sg.container = caMapContainer();
         if (sg.passiveEl) { sg.passiveEl.style.cursor = ''; sg.hitCursor = false; }
         sg.wheelOn = false;   // v3.56: plain wheel keeps zooming the map; Shift+wheel spins
@@ -5268,12 +5360,13 @@
         try { document.documentElement.setAttribute('data-aim-clickadd', '1'); } catch (e) {}   // other scripts' M2 handlers stand down
         genFetchEntities(sid).then(ent => { sg.ent = ent; sgDrawLive(); }).catch(e => { console.warn(`${TAG} [🎯] entity load failed`, e); showToast('🎯 Could not load FFZs/assets — rails are off.', '#ff9800', 4000); sg.ent = { assets: [], ffzs: [], nfzs: [] }; });
         sgUpdateHud(); sgUpdateBtn();
-        if (sg.mode === 'dots') showToast('📍 Points — click every spot you want a snapshot of; the plan redraws after each click. R-click a point removes it · 1–6 angles per point · Ctrl+wheel standoff · Enter = stage · P = ring mode · Esc.', '#ff8ad2', 7000);
+        if (sg.idle) showToast('🎯 Ghosts on this mission — drag a nav · drag a pink aim (its navs follow) · R-click drops one. ➕ in the panel places a NEW shot · M2 the 🎯 button = ⚡ commit · Esc closes.', '#c39dff', 6000);
+        else if (sg.mode === 'dots') showToast('📍 Points — click every spot you want a snapshot of; the plan redraws after each click. R-click a point removes it · 1–6 angles per point · Ctrl+wheel standoff · Enter = stage · P = ring mode · Esc.', '#ff8ad2', 7000);
         else showToast('🎯 Ghost live — move to the asset, click to pin, Shift+wheel = spin (X = 1° steps) · Ctrl+wheel = standoff · Alt+wheel = fan · 1–6 sets · −/+ snaps · F flip · Enter = stage · P = points mode · Esc = drop.', '#ff8ad2', 7000);
     }
     function sgStop(silent) {
         if (!sg.active) return;
-        sg.active = false; sg.pinned = false; sg.focus = null; sg.targetRing = null; sg.dots = []; sg.plan = null; sg.hover = null;
+        sg.active = false; sg.idle = false; sg.pinned = false; sg.focus = null; sg.targetRing = null; sg.dots = []; sg.plan = null; sg.hover = null;
         if (sg.container) {
             try { sg.container.removeEventListener('mousedown', sgOnDown, true); sg.container.removeEventListener('mousemove', sgOnMove, true); sg.container.removeEventListener('click', sgOnClick, true); sg.container.removeEventListener('contextmenu', sgOnContext, true); sg.container.removeEventListener('wheel', sgOnWheel, { capture: true }); } catch (e) {}
         }
@@ -5314,6 +5407,8 @@
                 if (!near.length) return;
                 sg.drag.cluster.push({ p, p0: { lat: p.lat, lng: p.lng }, aims: near.map(x => ({ a: x.a, a0: { lat: x.a.lat, lng: x.a.lng } })) });
             }));
+            sg.drag.dots = [];
+            hit.groups.forEach(g => (g.dots || []).forEach(dd => { if (mbApproxMeters(dd.lat, dd.lng, a0.lat, a0.lng) < 0.3) sg.drag.dots.push({ d: dd, d0: { lat: dd.lat, lng: dd.lng } }); }));
         }
         try { if (map && map.dragging && map.dragging.enabled()) { map.dragging.disable(); sg.drag.reDrag = true; } } catch (err) {}
         window.addEventListener('mousemove', sgDragMove, true);
@@ -5329,6 +5424,7 @@
         if (d.kind === 'aim' && d.cluster && d.cluster.length) {
             const dLat = ll.lat - d.orig.lat, dLng = ll.lng - d.orig.lng;
             d.cluster.forEach(c => { c.p.lat = c.p0.lat + dLat; c.p.lng = c.p0.lng + dLng; c.aims.forEach(x => { x.a.lat = x.a0.lat + dLat; x.a.lng = x.a0.lng + dLng; }); });
+            (d.dots || []).forEach(x => { x.d.lat = x.d0.lat + dLat; x.d.lng = x.d0.lng + dLng; });
         } else { const p = sgDragPoint(d); p.lat = ll.lat; p.lng = ll.lng; }
         if (!d.raf) d.raf = requestAnimationFrame(() => { d.raf = 0; try { sgRenderStaged(d.groups); } catch (err) { console.warn(`${TAG} [🎯] drag draw failed`, err); } });
     }
@@ -5370,6 +5466,7 @@
         if (sg.drag) return;
         // cursor hint over a staged nav / aim
         try { const on = !!sgHitStaged(e); if (on !== sg.hitCursor) { sg.hitCursor = on; if (sg.container) sg.container.style.cursor = on ? 'grab' : ''; } } catch (err) {}
+        if (sg.idle) return;
         if (sg.mode === 'dots') {
             const ll = caClickToLatLng(e); if (!ll) return;
             sg.hover = { lat: ll.lat, lng: ll.lng };
@@ -5395,6 +5492,7 @@
         if (!sg.active) return;
         if (sg.suppressClick || sg.drag) { e.preventDefault(); e.stopPropagation(); return; }   // v3.74: the click that ends a ghost drag places nothing
         if (e.target && e.target.closest && e.target.closest('#' + SG_HUD_ID + ', [id^="aim-"], button, input, select')) return;
+        if (sg.idle) return;   // editing existing ghosts only — a map click places nothing
         // a press that travelled is a map pan — never a placement
         if (sg.downAt && (Math.abs(e.clientX - sg.downAt.x) > 5 || Math.abs(e.clientY - sg.downAt.y) > 5)) { sg.downAt = null; return; }
         sg.downAt = null;
@@ -5421,7 +5519,7 @@
             sg.dots.splice(bi, 1); sgResolveDots(); sgDrawLive(); return true;
         } catch (err) { console.warn(`${TAG} [📍] remove failed`, err); return false; }
     }
-    function sgOnContext(e) { if (!sg.active) return; e.preventDefault(); e.stopPropagation(); if (sgContextStaged(e)) return; if (sg.mode === 'dots') { sgRemoveDotAt(e); return; } if (sg.pinned) { sg.pinned = false; sg.targetRing = null; sg.targetName = ''; const ll = caClickToLatLng(e); if (ll) sg.focus = { lat: ll.lat, lng: ll.lng }; sgDrawLive(); } }
+    function sgOnContext(e) { if (!sg.active) return; e.preventDefault(); e.stopPropagation(); if (sgContextStaged(e)) return; if (sg.idle) return; if (sg.mode === 'dots') { sgRemoveDotAt(e); return; } if (sg.pinned) { sg.pinned = false; sg.targetRing = null; sg.targetName = ''; const ll = caClickToLatLng(e); if (ll) sg.focus = { lat: ll.lat, lng: ll.lng }; sgDrawLive(); } }
     function sgPin(ll) {
         sg.focus = { lat: ll.lat, lng: ll.lng }; sg.pinned = true;
         const t = sgFindTarget(sg.focus); sg.targetRing = t ? t.ring : null; sg.targetName = t ? `${t.kind === 'nfz' ? 'NFZ ' : ''}${t.name}` : '';
@@ -5430,7 +5528,7 @@
     }
     function sgSpinStep() { return sg.fine ? 1 : 5; }
     function sgOnWheel(e) {
-        if (!sg.active) return;
+        if (!sg.active || sg.idle) return;
         if (e.target && e.target.closest && e.target.closest('#' + SG_HUD_ID)) return;
         if (!e.shiftKey && !e.ctrlKey && !e.altKey) return;   // plain wheel = map zoom, untouched
         e.preventDefault(); e.stopPropagation();
@@ -5446,6 +5544,7 @@
         if (!sg.active || caIsTypingTarget(e.target)) return;
         const k = e.key;
         let used = true;
+        if (sg.idle) { if (k === 'Escape') { sgStop(); e.preventDefault(); e.stopPropagation(); } return; }
         if (k === 'p' || k === 'P') { sgSetMode(sg.mode === 'dots' ? 'ring' : 'dots'); e.preventDefault(); e.stopPropagation(); return; }
         if (sg.mode === 'dots') {
             if (k === 'Escape') sgStop();
@@ -5835,7 +5934,7 @@
         const b = document.getElementById(SG_BTN_ID); if (!b) return;
         const sid = getCurrentSiteID(), mid = sgMid();
         const n = (sid && mid) ? sgGhostsFor(sid, mid).length : 0;
-        b.textContent = sg.active ? '🎯 LIVE' : (n ? `🎯 ⚡ ${n}` : '🎯 Shots');
+        b.textContent = sg.active ? (sg.idle ? '🎯 EDIT' : '🎯 LIVE') : (n ? `🎯 ⚡ ${n}` : '🎯 Shots');
         b.style.background = sg.active ? 'rgba(255,138,210,0.25)' : (n ? 'rgba(195,157,255,0.2)' : 'rgba(255,138,210,0.1)');
         b.style.border = `1px solid ${sg.active ? '#ff8ad2' : (n ? '#c39dff' : 'rgba(255,138,210,0.5)')}`;
         b.style.color = sg.active ? '#ffb0e0' : (n ? '#d8c3ff' : '#ff8ad2');
@@ -7273,9 +7372,7 @@
             // Number lives on the marker el as data-aim-num (e.g. "N3"/"S5") —
             // the v0.99 hover fix moved it here from the inner icon's old
             // data-aim-label, so read it from `m`, not a child.
-            const lbl = m.getAttribute('data-aim-num') || '';
-            const n = parseInt(lbl.replace(/[^0-9]/g, ''), 10) || 1;
-            composerEditOrder(kind, id, n, m.__aimLL);
+            composerShotMenu(m, e);   // v3.85: open / delete this snap + wrap / whole shot / nav leg / reorder
         }, true);
         // Left-click (M1) on a marker:
         //  • No step editor open → native scroll + open that step's editor (as before).
