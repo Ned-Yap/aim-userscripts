@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.100
+// @version      3.101
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.100';
+    const SCRIPT_VERSION = '3.101';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -4090,6 +4090,7 @@
         stdBtn.type = 'button';
         stdBtn.style.cssText = 'flex:0 0 auto;margin-left:5px;padding:5px 9px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;';
         stdBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); stdSetRings(!stdRingsOn); };
+        stdBtn.oncontextmenu = (e) => { e.preventDefault(); e.stopPropagation(); stdSetMode(stdMode === 'all' ? 'focus' : 'all'); };
         const wrapBtn = document.createElement('button');
         wrapBtn.id = WRAP_BTN_ID;
         wrapBtn.type = 'button';
@@ -6199,15 +6200,36 @@
     const STD_RING_FT = 100, STD_BAND_MIN_FT = 95, STD_BAND_MAX_FT = 110;
     const STD_BTN_ID = 'aim-mb-std-btn';
     let stdRingsOn = gmGet(STD_RINGS_KEY, false);
+    // v3.101 — 'focus' (default) = only the group you're working on; 'all' = every snapshot. M2 on 📏 flips it.
+    const STD_MODE_KEY = 'aim-mb-std-mode';
+    let stdMode = gmGet(STD_MODE_KEY, 'focus') === 'all' ? 'all' : 'focus';
+    let stdHoverId = null;   // marker under the cursor (its group joins the focus set)
     const stdRings = { layers: [], key: '', map: null };
     function stdRingPts(c, m, n) { const out = []; for (let i = 0; i < n; i++) { const q = sgOffset(c, i * 360 / n, m); out.push([q.lat, q.lng]); } return out; }
     // Distinct snapshot spots of the open mission — the live editor list first (it has the
     // un-saved ones), the tagged DOM markers as the fallback.
+    // Focus mode = the snapshots of the group you're working on: the group of the step OPEN in the
+    // editor, else the group of the marker under the cursor, else the Click-add "Insert at" group,
+    // else the LAST group (where hand-placed steps land). Snapshots before the first nav always show.
     function stdSnapPoints() {
         const pts = [];
         const add = (lat, lng) => { if (lat == null || lng == null) return; if (!pts.some(q => mbApproxMeters(q.lat, q.lng, lat, lng) < 0.3)) pts.push({ lat, lng }); };
-        try { composerEditorInstrs(null).forEach(st => { if (st && (st.type_name === 'snapshot' || st.type === 6) && st.location) add(st.location.lat, st.location.lng); }); } catch (e) { console.warn(`${TAG} [📏] editor read failed`, e); }
-        if (!pts.length) document.querySelectorAll('.instruction-marker[data-aim-kind="snap"]').forEach(el => { if (el.__aimLL) add(el.__aimLL[0], el.__aimLL[1]); });
+        let instrs = [];
+        try { instrs = composerEditorInstrs(null) || []; } catch (e) { console.warn(`${TAG} [📏] editor read failed`, e); }
+        if (!instrs.length) { document.querySelectorAll('.instruction-marker[data-aim-kind="snap"]').forEach(el => { if (el.__aimLL) add(el.__aimLL[0], el.__aimLL[1]); }); return pts; }
+        const isNav = st => st && (st.type_name === 'navigate' || st.type === 1);
+        const isSnap = st => st && (st.type_name === 'snapshot' || st.type === 6);
+        const groupOf = {}; let g = 0, last = 0;
+        instrs.forEach(st => { if (!st) return; if (isNav(st)) g++; groupOf[String(st.id)] = g; last = g; });
+        let focus = null;
+        if (stdMode === 'focus') {
+            const open = getOpenStepId();
+            if (open != null && groupOf[String(open)] != null) focus = groupOf[String(open)];
+            else if (stdHoverId != null && groupOf[String(stdHoverId)] != null) focus = groupOf[String(stdHoverId)];
+            else if (caInsertAtNav != null && caInsertAtNav >= 1 && caInsertAtNav <= last) focus = caInsertAtNav;
+            else focus = last;
+        }
+        instrs.forEach(st => { if (!isSnap(st) || !st.location) return; const sg2 = groupOf[String(st.id)]; if (focus != null && sg2 !== focus && sg2 !== 0) return; add(st.location.lat, st.location.lng); });
         return pts;
     }
     function stdRingsClear() { if (stdRings.layers.length) sgClearLayers(stdRings.layers); stdRings.key = ''; }
@@ -6216,7 +6238,7 @@
         if (!stdRingsOn || !caEditing()) { stdRingsClear(); return; }
         const L = composerGetL(), map = getLeafletMap(); if (!L || !map) { stdRingsClear(); return; }
         const pts = stdSnapPoints();
-        const key = pts.map(q => `${q.lat.toFixed(7)},${q.lng.toFixed(7)}`).join('|');
+        const key = stdMode + '|' + pts.map(q => `${q.lat.toFixed(7)},${q.lng.toFixed(7)}`).join('|');
         if (key === stdRings.key && stdRings.map === map) return;
         stdRingsClear(); stdRings.key = key; stdRings.map = map;
         if (!pts.length) return;
@@ -6236,10 +6258,15 @@
         updateStdBtn(); stdRingsDraw();
         showToast(stdRingsOn ? `📏 Standoff rings ON — dashed purple = ${STD_RING_FT} ft from each snapshot, green band = ${STD_BAND_MIN_FT}–${STD_BAND_MAX_FT} ft: drop the nav inside the band.` : '📏 Standoff rings OFF.', stdRingsOn ? '#c39dff' : '#888', stdRingsOn ? 4500 : 1500);
     }
+    function stdSetMode(mode) {
+        stdMode = mode === 'all' ? 'all' : 'focus'; gmSet(STD_MODE_KEY, stdMode);
+        updateStdBtn(); stdRingsDraw();
+        showToast(stdMode === 'all' ? '📏 Rings: ALL snapshots.' : '📏 Rings: FOCUS — only the group you\'re working on (open step › hovered marker › Insert-at › last group).', '#c39dff', 3500);
+    }
     function updateStdBtn() {
         const btn = document.getElementById(STD_BTN_ID); if (!btn) return;
-        btn.textContent = stdRingsOn ? '📏 Rings: ON' : '📏 Rings';
-        btn.title = `Standoff rings around every snapshot of the open mission: dashed purple = ${STD_RING_FT} ft, green band = ${STD_BAND_MIN_FT}–${STD_BAND_MAX_FT} ft (drop the nav inside the band). For hand placement — 🎯 ghosts carry their own distances.`;
+        btn.textContent = stdRingsOn ? (stdMode === 'all' ? '📏 Rings: ALL' : '📏 Rings: focus') : '📏 Rings';
+        btn.title = `Standoff rings around snapshots of the open mission: dashed purple = ${STD_RING_FT} ft, green band = ${STD_BAND_MIN_FT}–${STD_BAND_MAX_FT} ft (drop the nav inside the band). Click = on/off · RIGHT-click = focus (the group you're working on: open step › hovered marker › Insert-at › last group) ⇄ ALL. For hand placement — 🎯 ghosts carry their own distances.`;
         btn.style.background = stdRingsOn ? 'rgba(195,157,255,0.25)' : 'transparent';
         btn.style.border = stdRingsOn ? '1px solid #c39dff' : '1px solid rgba(195,157,255,0.45)';
         btn.style.color = stdRingsOn ? '#d9c4ff' : '#a98fd6';
@@ -7595,6 +7622,7 @@
             const t = e.target;
             if (t && t.closest && t.closest('#aim-mb-hover')) { clearTimeout(composerHoverT); return; }
             const m = t && t.closest ? t.closest('.instruction-marker[data-aim-id]') : null;
+            try { const hid = m ? m.getAttribute('data-aim-id') : null; if (hid !== stdHoverId) { stdHoverId = hid; if (stdRingsOn && stdMode === 'focus') stdRingsDraw(); } } catch (err) { console.warn(`${TAG} [📏] hover track failed`, err); }   // v3.101 — hovered marker's group joins the focus set
             if (!m) { composerHoverHide(); return; }
             clearTimeout(composerHoverT);
             const h = composerHoverEl();
@@ -7831,7 +7859,7 @@
     let liveEditorTimer = null;
     function startLiveEditorSync() {
         if (liveEditorTimer || CONTEXT !== 'IFRAME') return;
-        liveEditorTimer = setInterval(() => { try { genUpdateBtn(); } catch (e) {} try { liveEditorTick(); } catch (e) {} try { if (stdRings.layers.length && !caEditing()) stdRingsClear(); } catch (e) {} }, 700);   // v3.53: button visibility tracks editor open/close
+        liveEditorTimer = setInterval(() => { try { genUpdateBtn(); } catch (e) {} try { liveEditorTick(); } catch (e) {} try { if (stdRings.layers.length && !caEditing()) stdRingsClear(); else if (stdRingsOn && stdMode === 'focus') stdRingsDraw(); } catch (e) {} }, 700);   // v3.53: button visibility tracks editor open/close
     }
     function liveEditorTick() {
         if (CONTEXT !== 'IFRAME' || !document.querySelector('.mission-edit__content')) return;
