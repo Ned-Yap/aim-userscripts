@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.78
+// @version      3.79
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.78';
+    const SCRIPT_VERSION = '3.79';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -5739,6 +5739,7 @@
     // Per-tick: keep the staged ghosts drawn for the open mission (cheap key compare).
     function sgTick() {
         if (CONTEXT !== 'IFRAME') return;
+        try { if (genOverlayOn && caEditing()) { genClearOverlay(); genOverlayOn = false; genUpdateBtn(); } } catch (e) {}   // v3.79: ⊕ asset overlay is a list-view tool
         try { if (caEditing()) sgDrawStaged(false); else if (sg.stagedLayers.length || sg.active) { sgStop(true); sgClearLayers(sg.stagedLayers); sg.stagedKey = ''; sg.stagedGroups = []; } } catch (e) {}
     }
     // Nav group (1-based) of the step currently open in the editor — Click-to-Add + 🎯 insert after it.
@@ -7700,9 +7701,10 @@
     }
 
     function genClearOverlay() {
+        // v3.79: remove from the map the layer was ADDED to (layer.remove()) — the editor swaps the
+        // map instance, and removeLayer on the new map left the old overlay + its M2 handlers alive.
         const map = getLeafletMap();
-        if (genLayer && map) { try { map.removeLayer(genLayer); } catch (e) {} }
-        if (genPreviewLayer && map) { try { map.removeLayer(genPreviewLayer); } catch (e) {} }
+        [genLayer, genPreviewLayer].forEach(l => { if (!l) return; try { if (typeof l.remove === 'function') l.remove(); } catch (e) {} try { if (map) map.removeLayer(l); } catch (e) {} });
         genLayer = null; genPreviewLayer = null;
     }
     function genDrawOverlay() {
@@ -7723,7 +7725,7 @@
                     if (skip) skipped++; else valid++;
                     const col = skip ? '#ff6b6b' : '#fff';
                     const poly = L.polygon(a.ring.map(p => [p.lat, p.lng]), { color: col, weight: 1.5, fillColor: col, fillOpacity: skip ? 0.05 : 0.08, className: 'aim-gen-asset' });
-                    poly.on('contextmenu', ev => { try { L.DomEvent.stop(ev); } catch (e) {} genShowGeneratePopup(a, ffzs, ev); });
+                    poly.on('contextmenu', ev => { if (caEditing() || sg.active) return; try { L.DomEvent.stop(ev); } catch (e) {} genShowGeneratePopup(a, ffzs, ev); });   // v3.79: list-view tool only
                     poly.addTo(group);
                 } catch (e) {}
             });
