@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.79
+// @version      3.80
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.79';
+    const SCRIPT_VERSION = '3.80';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -4762,12 +4762,55 @@
         return { navs, unmet, snaps: navs.reduce((a, n) => a + n.aims.length, 0) };
     }
     // Nearest-next from `start`, then 2-opt — small N, instant.
-    function sgOrderNavs(navs, start) {
+    // v3.80: LEGAL-PATH metric — the drone can't cross an NFZ or leave the FFZ, so nav order is
+    // judged on the shortest route that stays inside the FFZ and goes AROUND NFZs (visibility
+    // graph over NFZ corners pushed 2.5 m out + FFZ corners pulled 2.5 m in, Dijkstra per point).
+    // Straight-line ordering sent the drone "across" a tank-battery NFZ and it had to double back.
+    function sgLegalMetric(pts, ent, bboxFrom) {
+        const ffzs = ((ent && ent.ffzs) || []).filter(f => f.ring && f.ring.length >= 3);
+        const nfzs = ((ent && ent.nfzs) || []).filter(z => z.ring && z.ring.length >= 3);
+        if (!ffzs.length || pts.length < 2) return null;
+        const src = (bboxFrom && bboxFrom.length) ? bboxFrom : pts;
+        let la0 = Infinity, la1 = -Infinity, ln0 = Infinity, ln1 = -Infinity;
+        src.forEach(p => { if (p.lat < la0) la0 = p.lat; if (p.lat > la1) la1 = p.lat; if (p.lng < ln0) ln0 = p.lng; if (p.lng > ln1) ln1 = p.lng; });
+        const mLat = 110540, mLng = 111320 * Math.cos(((la0 + la1) / 2) * Math.PI / 180), padM = 150;
+        la0 -= padM / mLat; la1 += padM / mLat; ln0 -= padM / mLng; ln1 += padM / mLng;
+        const near = ring => ring.some(p => p.lat >= la0 && p.lat <= la1 && p.lng >= ln0 && p.lng <= ln1);
+        const F = ffzs.filter(f => near(f.ring)), Z = nfzs.filter(z => near(z.ring));
+        if (!F.length) return null;
+        const legalPt = p => F.some(f => genPointInPoly(p, f.ring)) && !Z.some(z => genPointInPoly(p, z.ring));
+        // interior samples only — an endpoint a hair outside the FFZ must not sever every edge from it
+        const segOk = (a, b) => { const m = mbApproxMeters(a.lat, a.lng, b.lat, b.lng); const n = Math.max(2, Math.ceil(m / 3)); for (let i = 1; i < n; i++) { const t = i / n; if (!legalPt({ lat: a.lat + (b.lat - a.lat) * t, lng: a.lng + (b.lng - a.lng) * t })) return false; } return true; };
+        const nodes = pts.map(p => ({ lat: p.lat, lng: p.lng }));
+        const corners = (ring, out) => { const c = genCentroid(ring); ring.forEach(v => { let dx = (v.lng - c.lng) * mLng, dy = (v.lat - c.lat) * mLat; const L = Math.hypot(dx, dy) || 1; dx /= L; dy /= L; const sgn = out ? 2.5 : -2.5; const q = { lat: v.lat + dy * sgn / mLat, lng: v.lng + dx * sgn / mLng }; if (legalPt(q)) nodes.push(q); }); };
+        Z.forEach(z => corners(z.ring, true)); F.forEach(f => corners(f.ring, false));
+        const N = nodes.length; if (N > 450) { console.warn(`${TAG} [🎯] legal metric skipped — ${N} graph nodes`); return null; }
+        const okC = new Map();
+        const ok = (i, j) => { const k = i < j ? i * N + j : j * N + i; let v = okC.get(k); if (v === undefined) { v = segOk(nodes[i], nodes[j]); okC.set(k, v); } return v; };
+        const dist = (i, j) => mbApproxMeters(nodes[i].lat, nodes[i].lng, nodes[j].lat, nodes[j].lng);
+        const Pn = pts.length, M = Array.from({ length: Pn }, () => new Array(Pn).fill(Infinity));
+        for (let s0 = 0; s0 < Pn; s0++) {
+            const D = new Array(N).fill(Infinity), done = new Array(N).fill(false); D[s0] = 0;
+            for (let it = 0; it < N; it++) {
+                let u = -1, bd = Infinity; for (let i = 0; i < N; i++) if (!done[i] && D[i] < bd) { bd = D[i]; u = i; }
+                if (u < 0) break; done[u] = true;
+                for (let v = 0; v < N; v++) { if (done[v]) continue; const dv = dist(u, v); if (D[u] + dv >= D[v]) continue; if (!ok(u, v)) continue; D[v] = D[u] + dv; }
+            }
+            for (let t = 0; t < Pn; t++) M[s0][t] = D[t];
+        }
+        // no legal route (other lobe / start outside the FFZ) → straight × 3 keeps the order sane
+        for (let i = 0; i < Pn; i++) for (let j = 0; j < Pn; j++) if (!Number.isFinite(M[i][j])) M[i][j] = (i === j) ? 0 : mbApproxMeters(pts[i].lat, pts[i].lng, pts[j].lat, pts[j].lng) * 3;
+        return M;
+    }
+    function sgOrderNavs(navs, start, ent) {
         if (navs.length < 2) return navs.slice();
-        const d = (p, q) => mbApproxMeters(p.lat, p.lng, q.lat, q.lng);
-        let cur = start || navs[0]; const left = navs.slice(); const out = [];
+        const off = start ? 1 : 0, pts = (start ? [start] : []).concat(navs);
+        let M = null; if (ent) { try { M = sgLegalMetric(pts, ent, navs); } catch (e) { console.warn(`${TAG} [🎯] legal metric failed`, e); } }
+        const d = (i, j) => M ? M[i][j] : mbApproxMeters(pts[i].lat, pts[i].lng, pts[j].lat, pts[j].lng);
+        const left = navs.map((_, i) => i + off); const out = [];
+        let cur; if (start) cur = 0; else { cur = left.shift(); out.push(cur); }
         while (left.length) { let bi = 0, bd = Infinity; left.forEach((n, i) => { const dd = d(cur, n); if (dd < bd) { bd = dd; bi = i; } }); cur = left.splice(bi, 1)[0]; out.push(cur); }
-        const len = arr => { let t = start ? d(start, arr[0]) : 0; for (let i = 1; i < arr.length; i++) t += d(arr[i - 1], arr[i]); return t; };
+        const len = arr => { let t = start ? d(0, arr[0]) : 0; for (let i = 1; i < arr.length; i++) t += d(arr[i - 1], arr[i]); return t; };
         let improved = true, guard = 0;
         while (improved && guard++ < 50) {
             improved = false;
@@ -4776,13 +4819,13 @@
                 if (len(cand) + 0.01 < len(out)) { out.splice(0, out.length, ...cand); improved = true; }
             }
         }
-        return out;
+        return out.map(i => pts[i]);
     }
     function sgResolveDots() {
         if (!sg.dots.length) { sg.plan = null; return; }
         try {
             const plan = sgSolveDots(sg.dots, sg.dotK, sg.distFt, { lo: sg.shareLo, hi: sg.shareHi }, null, { minSep: sg.minSep, maxPerNav: sg.maxPerNav });
-            plan.navs = sgOrderNavs(plan.navs, sgArrivalPoint([]) || sg.dots[0]);
+            plan.navs = sgOrderNavs(plan.navs, sgArrivalPoint([]) || sg.dots[0], sg.ent);
             sg.plan = plan;
         } catch (e) { console.warn(`${TAG} [📍] solve failed`, e); sg.plan = null; showToast('📍 Solver failed — see console.', '#ff5252', 3000); }
     }
@@ -5117,10 +5160,16 @@
     }
     // Greedy nearest-next over groups; each ring may run forward or reversed, entering at
     // the end nearest the drone and leaving from the other — kills the double-backs.
-    function sgOrderGroups(groups, start) {
-        let cur = start || (groups[0] && groups[0].focus);
+    function sgOrderGroups(groups, start, ent) {
+        if (!groups.length) return [];
+        const ends = []; groups.forEach(g => { ends.push(g.navs[0], g.navs[g.navs.length - 1]); });
+        const st = start || (groups[0] && groups[0].focus);
+        const pts = [st].concat(ends);
+        let M = null; if (ent) { try { M = sgLegalMetric(pts, ent, ends); } catch (e) { console.warn(`${TAG} [🎯] legal metric failed`, e); } }
+        const idx = new Map(); pts.forEach((p, i) => { if (!idx.has(p)) idx.set(p, i); });
+        const d = (p, q) => (M && idx.has(p) && idx.has(q)) ? M[idx.get(p)][idx.get(q)] : mbApproxMeters(p.lat, p.lng, q.lat, q.lng);
+        let cur = st;
         const left = groups.slice(); const out = [];
-        const d = (p, q) => mbApproxMeters(p.lat, p.lng, q.lat, q.lng);
         while (left.length) {
             let bi = 0, bRev = false, bd = Infinity;
             left.forEach((g, i) => {
@@ -5139,10 +5188,10 @@
     function sgAutoOrder() {
         const sid = getCurrentSiteID(), mid = sgMid(); if (!sid || !mid) return;
         const groups = sgGhostsFor(sid, mid); if (groups.length < 1) return;
-        const out = sgOrderGroups(groups, sgArrivalPoint(groups) || groups[0].focus);
+        const out = sgOrderGroups(groups, sgArrivalPoint(groups) || groups[0].focus, sg.ent || genEntCache[sid] || null);
         sgGhostsSet(sid, mid, composerMission.name || '', out);
         sgDrawStaged(true); sgUpdateBtn(); sgUpdateHud();
-        showToast(`⟲ ${out.length} ghost group(s) re-ordered nearest-next from the arrival point.`, '#c39dff', 3500);
+        showToast(`⟲ ${out.length} ghost group(s) re-ordered nearest-next (legal path, around NFZs) from the arrival point.`, '#c39dff', 3500);
     }
     function sgApplyTpl(name) {
         const all = sgTplAll(); const t = all[name] || all['3-shot 90°'];
@@ -8893,7 +8942,7 @@
         }
         const groups = [];
         if (navs.length) {
-            const ordered = sgOrderNavs(navs, ent.base || null);
+            const ordered = sgOrderNavs(navs, ent.base || null, ent);   // v3.80 legal-path order (around NFZs)
             let lat = 0, lng = 0; allDots.forEach(d => { lat += d.lat; lng += d.lng; });
             groups.push({ gid: 'auto', focus: { lat: lat / allDots.length, lng: lng / allDots.length }, navs: ordered.map(n => ({ lat: n.lat, lng: n.lng, snaps: n.aims.length, aims: n.aims.map(a => ({ lat: a.lat, lng: a.lng })) })), snapsPerNav: 1, target: `${allDots.length} aim(s)`, tpl: 'points', dots: allDots.map(d => ({ lat: d.lat, lng: d.lng, name: d.name })) });
         } else {
