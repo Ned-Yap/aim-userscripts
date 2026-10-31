@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.104
+// @version      3.105
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.104';
+    const SCRIPT_VERSION = '3.105';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -11524,7 +11524,25 @@
     // Name match stays as the fallback for a pad the detector sees no steps on (flagged).
     // Several micros on one pad → the one the name ladder picks, else the most recently saved
     // (highest id — Percepto mints a new id per save); the others are listed in the report.
-    function tmResolveRows(inside, ent, missions, byAsset, cfg) {
+    // v3.105 — which micro wins when a pad carries several. Keeper family = names that
+    // start with a BASE CODE (HF…/EL… — HFNC = Horn Frog North Central, ELSE = Elias
+    // South East); the un-coded NNE/N family and junk names (TEST, DUP, Base Hop,
+    // timestamped copies) lose. Ties → stripped name equals the pad name → newest id.
+    const TM_JUNK_RE = /\bTEST\b|\bDUP\b|Base Hop|\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}/i;
+    function tmNorm(s) { return String(s || '').replace(/^\s*Pad\s*-\s*/i, '').replace(/^[A-Z]{1,6}\s*-\s*/, '').toLowerCase().replace(/[\s\-_]+/g, ' ').trim(); }
+    function tmPick(cands, padName, codes) {
+        const live = cands.filter(m => !TM_JUNK_RE.test(m.name || ''));
+        const pool = live.length ? live : cands;
+        const codeRe = codes.length ? new RegExp('^(' + codes.map(c => c.replace(/[^A-Za-z0-9]/g, '')).filter(Boolean).join('|') + ')[A-Z]*\\s*-', 'i') : null;
+        const want = tmNorm(padName);
+        const score = m => (codeRe && codeRe.test(m.name || '') ? 100 : 0) + (tmNorm(m.name) === want ? 10 : 0);
+        const best = pool.slice().sort((x, y) => (score(y) - score(x)) || (Number(y.id) - Number(x.id)))[0];
+        const sc = score(best);
+        const why = sc >= 110 ? 'base-coded + name match' : sc >= 100 ? 'base-coded' : sc >= 10 ? 'name match (no base-coded micro!)' : 'newest (no base-coded micro!)';
+        return { mission: best, why, junkOnly: !live.length, dropped: cands.length - pool.length };
+    }
+    function tmResolveRows(inside, ent, missions, byAsset, cfg, codes) {
+        codes = codes || [];
         const rows = [], skipped = [];
         const skip = (a, reason) => skipped.push({ name: a.name, reason, pt: genCentroid(a.ring) });
         let det = null;
@@ -11534,17 +11552,19 @@
         inside.forEach(a => {
             let cands = microsOf.get(a.id) || [];
             let note = '';
+            let viaName = false;
             if (!cands.length) {
-                const byName = rankMatchMissions(a.name, missions);
-                if (byName.length === 1) { cands = byName; note = 'name match only — no steps detected on this pad, check it'; }
-                else { skip(a, byName.length > 1 ? `no steps on the pad · ${byName.length} name matches` : 'no micro on this pad (no steps on it, no name match)'); return; }
+                const byName = rankMatchMissions(a.name, missions).filter(m => !TM_JUNK_RE.test(m.name || ''));
+                if (!byName.length) { skip(a, 'no micro on this pad (no steps on it, no name match)'); return; }
+                cands = byName; viaName = true;
             }
-            let mission = cands[0];
-            if (cands.length > 1) {
-                const byName = rankMatchMissions(a.name, missions).filter(m => cands.some(c => c.id === m.id));
-                mission = byName.length === 1 ? byName[0] : cands.slice().sort((x, y) => Number(y.id) - Number(x.id))[0];
-                note = `${cands.length} micros on this pad: chose "${mission.name}" (${byName.length === 1 ? 'name match' : 'most recently saved'}) · others: ${cands.filter(m => m.id !== mission.id).map(m => `"${m.name}"`).join(', ')}`;
-            }
+            const pk = tmPick(cands, a.name, codes);
+            const mission = pk.mission;
+            const others = cands.filter(m => m.id !== mission.id);
+            if (viaName) note = `name match only — no steps detected on this pad, check it (${pk.why}${others.length ? ` · ${others.length} other name matches: ${others.map(m => `"${m.name}"`).join(', ')}` : ''})`;
+            else if (cands.length > 1) note = `${cands.length} micros on this pad: chose "${mission.name}" (${pk.why}) · others: ${others.map(m => `"${m.name}"`).join(', ')}`;
+            if (pk.junkOnly) note = (note ? note + ' · ' : '') + 'ONLY junk-named micros here (TEST/DUP/timestamp/Base Hop) — check it';
+            if (/no base-coded/.test(pk.why) && !viaName && cands.length > 1) note += ' · no HF/EL-prefixed micro on this pad';
             const r = byAsset.get(a.id);
             if (!r || r.status !== 'ok') { skip(a, r ? (r.status === 'no-ffz' ? 'no FFZ' : 'no legal route') : 'no range data'); return; }
             if (!r.verified || r.disagree) { skip(a, 'range unverified (see console)'); return; }
@@ -11558,7 +11578,7 @@
         const cfg = agCfg();
         const inside = roots.filter(a => tiers.includes(tierOf.get(a.id)));
         if (!inside.length) { showToast('🏁 No pads carry the chosen tiers.', '#ff9800', 3500); return; }
-        const { rows, skipped, folded } = tmResolveRows(inside, ent, missions, byAsset, cfg);
+        const { rows, skipped, folded } = tmResolveRows(inside, ent, missions, byAsset, cfg, bases.map((b, bi) => codeOf[bi] || tmDefaultCode(b.name)));
         if (!rows.length) { showToast(`🏁 ${inside.length} tiered pads, none usable — ${skipped.length} skipped (see the popup).`, '#ff9800', 4500); tm.last = { sid: getCurrentSiteID(), ent, bases, codeOf, tiers, roots, tierOf, inside, rows, skipped, folded, pw: { baseKeys: [], idxOf: new Map(), dBaseEach: () => [] }, homeOf: new Map(), variants: [], offN: 0, at: new Date() }; lassoShowResults([], skipped, missions, ent, 0, folded); tmAddReportBtn(); return; }
         const pw = lassoBuildPairwise(rows, ent, byAsset);
         if (!pw.ok) { showToast('🏁 Route graph failed — see console. Nothing built.', '#ff5252', 4500); return; }
