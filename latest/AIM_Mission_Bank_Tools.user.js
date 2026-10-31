@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.102
+// @version      3.103
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.102';
+    const SCRIPT_VERSION = '3.103';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -11388,6 +11388,7 @@
     // annotates battery breaks. Output = the 🖊 results popup, one 🔗 Stage per mission.
     const TM_KEY = 'aim-mb-tier-macros';
     const TM_TIERS = ['P1', 'P2', 'P3'];
+    const tm = { last: null };   // v3.103: last build, for the 📋 report (also window.__aimTierReport())
     function tmCfg() { const c = gmGet(TM_KEY, null); return (c && typeof c === 'object') ? c : { tiers: TM_TIERS.slice(), codes: {} }; }
     function tmSaveCfg(c) { gmSet(TM_KEY, c); }
     function tmDefaultCode(name) {
@@ -11458,13 +11459,71 @@
         const sim = agSimulate(order, pw.dPad, dBase, pw.costOf, budgetFt);
         return { rows: order.map(i => pw.rows[i]), sim };
     }
+    // 📋 report: one row per tiered pad (usable / skipped / folded) with its tier, micro, route ft to
+    // EVERY base, straight-line ft, home base + why, mission + position. Header block = what was found.
+    function tmReportText() {
+        const d = tm.last; if (!d) return '';
+        const codeOf = d.codeOf, bases = d.bases;
+        const ftS = (a, b) => Math.round(mbApproxMeters(a.lat, a.lng, b.lat, b.lng) * 3.28084);
+        const posOf = new Map(); d.variants.forEach(v => v.rows.forEach((r, i) => posOf.set(r, { name: v.name, i: i + 1, n: v.rows.length })));
+        const H = [];
+        H.push(`🏁 Tier macros report · site ${d.sid} · ${d.at.toLocaleString()} · MBT ${SCRIPT_VERSION}`);
+        H.push(`Bases found (${bases.length}; source ${d.ent.baseEnts && d.ent.baseEnts.length ? 'type-8 installs' : 'fallback'}): ${bases.map(b => `${codeOf[b.i]} = "${b.name}" @ ${b.lat.toFixed(5)},${b.lng.toFixed(5)}`).join(' · ')}`);
+        H.push(`Route graph base keys: ${d.pw.baseKeys.length} · legs off-graph: ${d.offN}`);
+        H.push(`Pad roots: ${d.roots.length} · tiers chosen: ${d.tiers.join(' ')} · per tier: ${TM_TIERS.map(t => `${t} ${d.roots.filter(a => d.tierOf.get(a.id) === t).length}`).join(' / ')} · untiered/other: ${d.roots.filter(a => !TM_TIERS.includes(d.tierOf.get(a.id))).length}`);
+        H.push(`Tiered pads in: ${d.inside.length} → usable rows: ${d.rows.length} · skipped: ${d.skipped.length} · folded: ${d.folded.length}`);
+        H.push(`Missions: ${d.variants.map(v => `${v.name} (${v.rows.length} pads${v.sim ? `, ${(v.sim.totalFt / 1000).toFixed(1)}k ft, ${v.sim.flights.length} flight${v.sim.flights.length === 1 ? '' : 's'}` : ''})`).join(' · ') || 'none'}`);
+        const cols = ['Pad', 'Tier', 'Status', 'Micro mission', 'Home', 'Why'].concat(bases.map(b => `Route ft ${codeOf[b.i]}`)).concat(bases.map(b => `Straight ft ${codeOf[b.i]}`)).concat(['Mission', '# in mission', 'Pad lat', 'Pad lng']);
+        const lines = [cols.join('\t')];
+        const skipByName = new Map(d.skipped.map(x => [x.name, x.reason]));
+        const foldByName = new Map(d.folded.map(x => [x.name, x.mission]));
+        const rowByAsset = new Map(d.rows.map(r => [r.asset.id, r]));
+        d.inside.slice().sort((a, b) => String(a.name).localeCompare(String(b.name))).forEach(a => {
+            const c = genCentroid(a.ring); const tier = d.tierOf.get(a.id) || '';
+            const r = rowByAsset.get(a.id);
+            const straight = bases.map(b => ftS(c, b));
+            let status, micro = '', home = '', why = '', route = bases.map(() => ''), mission = '', pos = '';
+            if (r) {
+                const i = d.pw.idxOf.get(r); const each = d.pw.dBaseEach(i) || [];
+                route = bases.map((b, k) => each[k] == null ? 'off-graph' : Math.round(each[k]));
+                const h = d.homeOf.get(r); home = h ? codeOf[h.bi] : '';
+                const onGraph = each.some(x => x != null);
+                why = onGraph ? `shortest route (${Math.round(h.ft)} ft)` : `straight-line (off-graph for every base, ${Math.round(h.ft)} ft)`;
+                status = 'usable'; micro = r.mission.name;
+                const pz = posOf.get(r); if (pz) { mission = pz.name; pos = `${pz.i}/${pz.n}`; } else { status = 'usable but NOT in any mission'; }
+            } else if (skipByName.has(a.name)) { status = 'SKIPPED'; why = skipByName.get(a.name); }
+            else if (foldByName.has(a.name)) { status = 'folded'; micro = foldByName.get(a.name); why = 'covered by that pad mission'; }
+            else { status = 'UNACCOUNTED'; why = 'not a row, not skipped, not folded — look at this one'; }
+            lines.push([a.name, tier, status, micro, home, why].concat(route).concat(straight).concat([mission, pos, c.lat.toFixed(6), c.lng.toFixed(6)]).join('\t'));
+        });
+        return H.join('\n') + '\n\n' + lines.join('\n');
+    }
+    function tmReport() {
+        if (!tm.last) { showToast('🏁 Build the tier macros first.', '#ff9800', 3000); return ''; }
+        const text = tmReportText();
+        try { navigator.clipboard.writeText(text); } catch (e) { console.warn(`${TAG} [tiers] clipboard failed`, e); }
+        try { downloadTextFile(`tier-macros-${tm.last.sid}.tsv`, text, 'text/tab-separated-values'); } catch (e) { console.warn(`${TAG} [tiers] download failed`, e); }
+        console.log(`${TAG} [tiers] report\n${text}`);
+        showToast('📋 Tier report copied + downloaded (also in the console).', '#5fff5f', 3500);
+        return text;
+    }
+    try { (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window).__aimTierReport = tmReport; } catch (e) {}
+    function tmAddReportBtn() {
+        const el = lasso.resultEl; if (!el || el.querySelector('[data-tm-report]')) return;
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex;gap:6px;margin-top:8px;padding-top:6px;border-top:1px solid #2a3340;';
+        row.innerHTML = '<button data-tm-report style="flex:1;padding:4px 10px;background:rgba(255,213,79,0.18);border:1px solid #ffd54f;color:#ffd54f;border-radius:5px;cursor:pointer;font-weight:800;font-size:11px;">📋 Tier report</button><button data-tm-again style="padding:4px 10px;background:none;border:1px solid #456;color:#cfe;border-radius:5px;cursor:pointer;font-size:11px;">🏁 Again</button>';
+        el.appendChild(row);
+        row.querySelector('[data-tm-report]').onclick = () => tmReport();
+        row.querySelector('[data-tm-again]').onclick = () => { lassoCloseResults(); tmOpen().catch(e => console.error(`${TAG} [tiers] reopen failed`, e)); };
+    }
     function tmBuild(d) {
         const { ent, missions, byAsset, bases, codeOf, tiers, roots, tierOf } = d;
         const cfg = agCfg();
         const inside = roots.filter(a => tiers.includes(tierOf.get(a.id)));
         if (!inside.length) { showToast('🏁 No pads carry the chosen tiers.', '#ff9800', 3500); return; }
         const { rows, skipped, folded } = lassoResolveRows(inside, ent, missions, byAsset, cfg);
-        if (!rows.length) { showToast(`🏁 ${inside.length} tiered pads, none usable — ${skipped.length} skipped (see the popup).`, '#ff9800', 4500); lassoShowResults([], skipped, missions, ent, 0, folded); return; }
+        if (!rows.length) { showToast(`🏁 ${inside.length} tiered pads, none usable — ${skipped.length} skipped (see the popup).`, '#ff9800', 4500); tm.last = { sid: getCurrentSiteID(), ent, bases, codeOf, tiers, roots, tierOf, inside, rows, skipped, folded, pw: { baseKeys: [], idxOf: new Map(), dBaseEach: () => [] }, homeOf: new Map(), variants: [], offN: 0, at: new Date() }; lassoShowResults([], skipped, missions, ent, 0, folded); tmAddReportBtn(); return; }
         const pw = lassoBuildPairwise(rows, ent, byAsset);
         if (!pw.ok) { showToast('🏁 Route graph failed — see console. Nothing built.', '#ff5252', 4500); return; }
         if (pw.baseKeys.length !== bases.length) console.warn(`${TAG} [tiers] graph has ${pw.baseKeys.length} base keys, panel ${bases.length} — assignment uses graph order`);
@@ -11490,7 +11549,9 @@
         });
         const offN = pw.offCount();
         if (offN) console.warn(`${TAG} [tiers] ${offN} pad-pair legs estimated off-graph (straight ×1.25)`);
+        tm.last = { sid: getCurrentSiteID(), ent, bases, codeOf, tiers, roots, tierOf, inside, rows, skipped, folded, pw, homeOf, variants, offN, at: new Date() };
         lassoShowResults(variants, skipped, missions, ent, offN, folded);
+        tmAddReportBtn();
         const tally = bases.map((b, bi) => `${codeOf[bi]}: ${tiers.map(t => `${t} ${rows.filter(r => homeOf.get(r).bi === bi && tierOfRow(r) === t).length}`).join(' / ')}`).join(' · ');
         console.log(`${TAG} [tiers] ${inside.length} tiered pads → ${rows.length} usable → ${variants.length} missions (${tally}) · ${skipped.length} skipped · ${folded.length} folded`);
         showToast(`🏁 ${variants.length} tier missions ready — ${tally}. 🔗 Stage each, check, SAVE.`, '#ffd54f', 6000);
