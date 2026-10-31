@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.103
+// @version      3.104
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.103';
+    const SCRIPT_VERSION = '3.104';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -11490,6 +11490,7 @@
                 const onGraph = each.some(x => x != null);
                 why = onGraph ? `shortest route (${Math.round(h.ft)} ft)` : `straight-line (off-graph for every base, ${Math.round(h.ft)} ft)`;
                 status = 'usable'; micro = r.mission.name;
+                if (r.note) why += ` · ${r.note}`;
                 const pz = posOf.get(r); if (pz) { mission = pz.name; pos = `${pz.i}/${pz.n}`; } else { status = 'usable but NOT in any mission'; }
             } else if (skipByName.has(a.name)) { status = 'SKIPPED'; why = skipByName.get(a.name); }
             else if (foldByName.has(a.name)) { status = 'folded'; micro = foldByName.get(a.name); why = 'covered by that pad mission'; }
@@ -11517,12 +11518,47 @@
         row.querySelector('[data-tm-report]').onclick = () => tmReport();
         row.querySelector('[data-tm-again]').onclick = () => { lassoCloseResults(); tmOpen().catch(e => console.error(`${TAG} [tiers] reopen failed`, e)); };
     }
+    // v3.104: pad → micro by GEOMETRY (the 🧩 detector: a mission whose steps sit on exactly one pad),
+    // the same link ▣ Generate's "have a micro" uses. The name ladder missed the legacy micros
+    // ("HFNC - Adams 47 2" vs pad "Pad - ADAMS 47 2": 98 of 184 tiered pads skipped on 1637).
+    // Name match stays as the fallback for a pad the detector sees no steps on (flagged).
+    // Several micros on one pad → the one the name ladder picks, else the most recently saved
+    // (highest id — Percepto mints a new id per save); the others are listed in the report.
+    function tmResolveRows(inside, ent, missions, byAsset, cfg) {
+        const rows = [], skipped = [];
+        const skip = (a, reason) => skipped.push({ name: a.name, reason, pt: genCentroid(a.ring) });
+        let det = null;
+        try { det = mcvDetect(ent, missions); } catch (e) { console.warn(`${TAG} [tiers] detector failed — name match only`, e); }
+        const microsOf = new Map();
+        ((det && det.solos) || []).forEach(sl => { const k = sl.pad.id; if (!microsOf.has(k)) microsOf.set(k, []); if (!microsOf.get(k).some(m => m.id === sl.mission.id)) microsOf.get(k).push(sl.mission); });
+        inside.forEach(a => {
+            let cands = microsOf.get(a.id) || [];
+            let note = '';
+            if (!cands.length) {
+                const byName = rankMatchMissions(a.name, missions);
+                if (byName.length === 1) { cands = byName; note = 'name match only — no steps detected on this pad, check it'; }
+                else { skip(a, byName.length > 1 ? `no steps on the pad · ${byName.length} name matches` : 'no micro on this pad (no steps on it, no name match)'); return; }
+            }
+            let mission = cands[0];
+            if (cands.length > 1) {
+                const byName = rankMatchMissions(a.name, missions).filter(m => cands.some(c => c.id === m.id));
+                mission = byName.length === 1 ? byName[0] : cands.slice().sort((x, y) => Number(y.id) - Number(x.id))[0];
+                note = `${cands.length} micros on this pad: chose "${mission.name}" (${byName.length === 1 ? 'name match' : 'most recently saved'}) · others: ${cands.filter(m => m.id !== mission.id).map(m => `"${m.name}"`).join(', ')}`;
+            }
+            const r = byAsset.get(a.id);
+            if (!r || r.status !== 'ok') { skip(a, r ? (r.status === 'no-ffz' ? 'no FFZ' : 'no legal route') : 'no range data'); return; }
+            if (!r.verified || r.disagree) { skip(a, 'range unverified (see console)'); return; }
+            if (r.worstFt > cfg.tulipRadiusFt) { skip(a, `over ${(cfg.tulipRadiusFt / 1000).toFixed(0)}k ft one way`); return; }
+            rows.push({ asset: a, mission, ft: r.worstFt, tulip: r.worstFt > cfg.tattuRadiusFt, note });
+        });
+        return { rows, skipped, folded: [] };
+    }
     function tmBuild(d) {
         const { ent, missions, byAsset, bases, codeOf, tiers, roots, tierOf } = d;
         const cfg = agCfg();
         const inside = roots.filter(a => tiers.includes(tierOf.get(a.id)));
         if (!inside.length) { showToast('🏁 No pads carry the chosen tiers.', '#ff9800', 3500); return; }
-        const { rows, skipped, folded } = lassoResolveRows(inside, ent, missions, byAsset, cfg);
+        const { rows, skipped, folded } = tmResolveRows(inside, ent, missions, byAsset, cfg);
         if (!rows.length) { showToast(`🏁 ${inside.length} tiered pads, none usable — ${skipped.length} skipped (see the popup).`, '#ff9800', 4500); tm.last = { sid: getCurrentSiteID(), ent, bases, codeOf, tiers, roots, tierOf, inside, rows, skipped, folded, pw: { baseKeys: [], idxOf: new Map(), dBaseEach: () => [] }, homeOf: new Map(), variants: [], offN: 0, at: new Date() }; lassoShowResults([], skipped, missions, ent, 0, folded); tmAddReportBtn(); return; }
         const pw = lassoBuildPairwise(rows, ent, byAsset);
         if (!pw.ok) { showToast('🏁 Route graph failed — see console. Nothing built.', '#ff5252', 4500); return; }
