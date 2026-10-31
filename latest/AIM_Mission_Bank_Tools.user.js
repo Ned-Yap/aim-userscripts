@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.101
+// @version      3.102
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.101';
+    const SCRIPT_VERSION = '3.102';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -11256,6 +11256,12 @@
         const inLoop = (a) => genPointInPoly(genCentroid(a.ring), ring) || a.ring.some(p => genPointInPoly(p, ring));
         const inside = (ent.assets || []).filter(a => a.ring && a.ring.length >= 3 && inLoop(a));
         if (!inside.length) { showToast('🖊 No pads inside the loop.', '#ff9800', 3500); return; }
+        const { rows, skipped, folded } = lassoResolveRows(inside, ent, missions, byAsset, cfg);
+        lassoFinish(rows, skipped, folded, inside.length, ent, missions, byAsset, cfg);
+    }
+    // v3.102: polygons → one row per micro mission (name ladder, _ID owners, range gates, folds) —
+    // shared by 🖊 Lasso (polygons inside the loop) and 🏁 Tiers (every tiered pad on the site).
+    function lassoResolveRows(inside, ent, missions, byAsset, cfg) {
         const rows = [], skipped = [], folded = [];
         const skip = (a, reason) => skipped.push({ name: a.name, reason, pt: genCentroid(a.ring) });
         // v2.91: several asset polygons can resolve to the SAME mission now
@@ -11329,6 +11335,9 @@
             const host = pt && claims.find(cl => rowByMission.has(cl.mission.id) && genPointInPoly(pt, cl.a.ring));
             if (host) { folded.push({ name: skipped[i].name, mission: host.mission.name }); skipped.splice(i, 1); }
         }
+        return { rows, skipped, folded };
+    }
+    function lassoFinish(rows, skipped, folded, insideN, ent, missions, byAsset, cfg) {
         // Pre-order = bearing sweep around base with the seam at the largest
         // angular gap — the human "walk the loop" order. It feeds the
         // optimizer as a seed AND is the tie-break when the simulator sees
@@ -11366,9 +11375,125 @@
         }
         const offN = (pw && pw.ok) ? pw.offCount() : 0;
         if (offN) console.warn(`${TAG} [lasso] ${offN} pad-pair legs estimated off-graph (straight ×1.25)`);
-        if (!variants.length) { showToast(`🖊 ${inside.length} pads in loop, none usable — ${skipped.length} skipped (see the popup).`, '#ff9800', 4500); }
+        if (!variants.length) { showToast(`🖊 ${insideN} pads in loop, none usable — ${skipped.length} skipped (see the popup).`, '#ff9800', 4500); }
         lassoShowResults(variants, skipped, missions, ent, offN, folded);
-        console.log(`${TAG} [lasso] ${inside.length} pads in loop → ${rows.length} usable (${tulips.length} Tulip) · ${folded.length} folded into pad missions · ${skipped.length} skipped`);
+        console.log(`${TAG} [lasso] ${insideN} pads in loop → ${rows.length} usable (${tulips.length} Tulip) · ${folded.length} folded into pad missions · ${skipped.length} skipped`);
+    }
+    // ── 🏁 Tier macros (v3.102) ─────────────────────────────────────────────
+    // Account-manager ask (2026-10-30): per BASE, one macro per priority tier — every P1 pad
+    // nearest Horn Frog in one mission, every P2 in another, P3 likewise; same three at Elias.
+    // No co-mixing of tiers, P4 (quarterly) not built. Pad → base = shortest LEGAL route on the
+    // 🔋 graph (not straight-line); a pad over the one-way radius is skipped (same gate as 🖊).
+    // Each set is ordered far→near on its OWN base's distances (branch walk); the simulator only
+    // annotates battery breaks. Output = the 🖊 results popup, one 🔗 Stage per mission.
+    const TM_KEY = 'aim-mb-tier-macros';
+    const TM_TIERS = ['P1', 'P2', 'P3'];
+    function tmCfg() { const c = gmGet(TM_KEY, null); return (c && typeof c === 'object') ? c : { tiers: TM_TIERS.slice(), codes: {} }; }
+    function tmSaveCfg(c) { gmSet(TM_KEY, c); }
+    function tmDefaultCode(name) {
+        const words = String(name || '').replace(/base|station|bs/ig, ' ').trim().split(/[\s\-_]+/).filter(Boolean);
+        if (words.length >= 2) return (words[0][0] + words[1][0]).toUpperCase();
+        return String(words[0] || 'B').slice(0, 2).toUpperCase();
+    }
+    function tmClosePopover() { const el = document.getElementById('aim-mb-tm-pop'); if (el) el.remove(); }
+    async function tmOpen() {
+        const sid = getCurrentSiteID();
+        if (!sid) { showToast('No site loaded.', '#ff5252', 3000); return; }
+        tmClosePopover();
+        showToast('🏁 Tiers — loading pads, missions + verified ranges…', '#7adfe6', 2500);
+        let ent, missions, sol;
+        try {
+            [ent, missions] = await Promise.all([genFetchEntities(sid), new Promise((res, rej) => fetchMissions(sid, res, rej))]);
+            sol = rngSolveCached(ent);
+        } catch (e) { console.warn(`${TAG} [tiers] load failed`, e); showToast('🏁 Tiers: failed to load site data (see console).', '#ff5252', 4000); return; }
+        const byAsset = new Map(sol.results.map(r => [r.asset.id, r]));
+        const bases = (ent.baseEnts && ent.baseEnts.length) ? ent.baseEnts.map((b, i) => ({ i, name: b.name || `Base ${i + 1}`, lat: b.coords[0].lat, lng: b.coords[0].lng })) : (ent.base ? [{ i: 0, name: 'Base', lat: ent.base.lat, lng: ent.base.lng }] : []);
+        if (!bases.length) { showToast('🏁 Tiers: no base station on this site.', '#ff5252', 4000); return; }
+        const cfg = tmCfg(); const sk = envSiteKey(sid); const codes = (cfg.codes && cfg.codes[sk]) || {};
+        // tier per pad root (best over root + descendants, P0 = untiered)
+        const byId = new Map((ent.assets || []).map(a => [a.id, a]));
+        const roots = (ent.assets || []).filter(a => a.ring && a.ring.length >= 3 && (a.rootId == null || a.rootId === a.id));
+        const tierOf = new Map(roots.map(a => [a.id, genPadTier(a, byId)]));
+        const counts = {}; TM_TIERS.forEach(t => { counts[t] = roots.filter(a => tierOf.get(a.id) === t).length; });
+        const el = document.createElement('div'); el.id = 'aim-mb-tm-pop';
+        el.style.cssText = 'position:fixed;right:24px;bottom:20px;width:330px;z-index:2147483602;background:#161a20;border:1px solid #ffd54f;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font:12px/1.4 "Lato","Segoe UI",sans-serif;padding:10px 12px;';
+        el.innerHTML = `<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;"><b style="color:#ffd54f;">🏁 Tier macros</b><span style="color:#789;font-size:11px;">one mission per base × tier</span><button data-tm-close style="margin-left:auto;background:none;border:1px solid #456;color:#cfe;border-radius:4px;cursor:pointer;padding:0 6px;">✕</button></div>
+            <div style="display:flex;gap:10px;align-items:center;margin-bottom:6px;">${TM_TIERS.map(t => `<label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" data-tm-tier="${t}" ${(cfg.tiers || TM_TIERS).includes(t) ? 'checked' : ''}> <b>${t}</b> <span style="color:#789;">${counts[t]}</span></label>`).join('')}<span style="margin-left:auto;color:#789;font-size:11px;">${roots.length} pads</span></div>
+            <div style="color:#9ad;font-size:11px;margin-bottom:3px;">Bases — code goes in the name (<b style="color:#cde;">CODE - P1</b>). Pads go to the base with the shortest flown route.</div>
+            ${bases.map(b => `<div style="display:flex;align-items:center;gap:6px;margin:2px 0;"><input type="text" data-tm-code="${b.i}" value="${escapeHtml(codes[b.name] || tmDefaultCode(b.name))}" maxlength="6" style="width:46px;background:#0f1216;border:1px solid #ffd54f;color:#fff;border-radius:3px;padding:2px 5px;font:inherit;text-align:center;font-weight:800;"><span style="color:#cde;">${escapeHtml(b.name)}</span></div>`).join('')}
+            <div style="color:#789;font-size:11px;margin-top:6px;">Skipped: pads over the one-way radius (${(agCfg().tulipRadiusFt / 1000).toFixed(0)}k ft), no micro / ambiguous name, no legal route. Each mission is ordered far → near on its own base's routes; 🔋 lines mark battery breaks.</div>
+            <div style="display:flex;gap:6px;margin-top:8px;"><button data-tm-go style="flex:1;padding:5px 10px;background:#ffd54f;border:none;color:#221a00;border-radius:5px;cursor:pointer;font-weight:800;">Build</button><button data-tm-cancel style="padding:5px 10px;background:none;border:1px solid #456;color:#cfe;border-radius:5px;cursor:pointer;">Cancel</button></div>`;
+        document.body.appendChild(el);
+        el.addEventListener('mousedown', e => e.stopPropagation());
+        el.querySelector('[data-tm-close]').onclick = tmClosePopover; el.querySelector('[data-tm-cancel]').onclick = tmClosePopover;
+        el.querySelector('[data-tm-go]').onclick = () => {
+            const tiers = TM_TIERS.filter(t => { const cb = el.querySelector(`[data-tm-tier="${t}"]`); return cb && cb.checked; });
+            if (!tiers.length) { showToast('Pick at least one tier.', '#ff9800', 2500); return; }
+            const codeOf = {}; bases.forEach(b => { const inp = el.querySelector(`[data-tm-code="${b.i}"]`); codeOf[b.i] = ((inp && inp.value) || tmDefaultCode(b.name)).trim().toUpperCase() || tmDefaultCode(b.name); });
+            const c2 = tmCfg(); c2.tiers = tiers; c2.codes = c2.codes || {}; c2.codes[sk] = {}; bases.forEach(b => { c2.codes[sk][b.name] = codeOf[b.i]; }); tmSaveCfg(c2);
+            tmClosePopover();
+            try { tmBuild({ ent, missions, byAsset, bases, codeOf, tiers, roots, tierOf }); }
+            catch (e) { console.error(`${TAG} [tiers] build failed`, e); showToast('🏁 Tiers: build failed — see console.', '#ff5252', 4000); }
+        };
+    }
+    // Far→near branch walk on ONE base's distances (lassoOrderRows walks on the nearest-base ft).
+    function tmOrderRows(subset, bi, pw, budgetFt) {
+        const dB = new Map();
+        const dBase = i => { if (!dB.has(i)) { const e = pw.dBaseEach(i); dB.set(i, (e && e[bi] != null) ? e[bi] : pw.dBase(i)); } return dB.get(i); };
+        const idx = subset.map(r => pw.idxOf.get(r));
+        if (idx.length < 2) { const sim = idx.length ? agSimulate(idx, pw.dPad, dBase, pw.costOf, budgetFt) : null; return { rows: subset.slice(), sim }; }
+        const remaining = new Set(idx);
+        const junc = (a, b) => Math.max(0, (dBase(a) + dBase(b) - pw.dPad(a, b)) / 2);
+        const order = []; let cur = null;
+        while (remaining.size) {
+            let pick = null;
+            if (cur == null) remaining.forEach(i => { if (pick == null || dBase(i) > dBase(pick)) pick = i; });
+            else {
+                let maxJ = -Infinity; const js = new Map();
+                remaining.forEach(i => { const j = junc(cur, i); js.set(i, j); if (j > maxJ) maxJ = j; });
+                remaining.forEach(i => { if (js.get(i) >= maxJ - 500 && (pick == null || dBase(i) > dBase(pick))) pick = i; });
+            }
+            order.push(pick); remaining.delete(pick); cur = pick;
+        }
+        const sim = agSimulate(order, pw.dPad, dBase, pw.costOf, budgetFt);
+        return { rows: order.map(i => pw.rows[i]), sim };
+    }
+    function tmBuild(d) {
+        const { ent, missions, byAsset, bases, codeOf, tiers, roots, tierOf } = d;
+        const cfg = agCfg();
+        const inside = roots.filter(a => tiers.includes(tierOf.get(a.id)));
+        if (!inside.length) { showToast('🏁 No pads carry the chosen tiers.', '#ff9800', 3500); return; }
+        const { rows, skipped, folded } = lassoResolveRows(inside, ent, missions, byAsset, cfg);
+        if (!rows.length) { showToast(`🏁 ${inside.length} tiered pads, none usable — ${skipped.length} skipped (see the popup).`, '#ff9800', 4500); lassoShowResults([], skipped, missions, ent, 0, folded); return; }
+        const pw = lassoBuildPairwise(rows, ent, byAsset);
+        if (!pw.ok) { showToast('🏁 Route graph failed — see console. Nothing built.', '#ff5252', 4500); return; }
+        if (pw.baseKeys.length !== bases.length) console.warn(`${TAG} [tiers] graph has ${pw.baseKeys.length} base keys, panel ${bases.length} — assignment uses graph order`);
+        // pad → nearest base by LEGAL route (straight-line only when a pad is off-graph for every base)
+        const homeOf = new Map();
+        rows.forEach(r => {
+            const i = pw.idxOf.get(r); const each = pw.dBaseEach(i);
+            let bi = -1, best = Infinity;
+            each.forEach((ft, k) => { if (ft != null && ft < best) { best = ft; bi = k; } });
+            if (bi < 0) { const c = genCentroid(r.asset.ring); bases.forEach((b, k) => { const ft = mbApproxMeters(c.lat, c.lng, b.lat, b.lng) * 3.28084; if (ft < best) { best = ft; bi = k; } }); console.warn(`${TAG} [tiers] "${r.asset.name}" off-graph for every base — straight-line home`); }
+            homeOf.set(r, { bi, ft: best });
+        });
+        const tierOfRow = r => tierOf.get(r.asset.id) || tierOf.get(r.asset.rootId) || '';
+        const variants = [];
+        bases.forEach((b, bi) => {
+            tiers.forEach(t => {
+                const set = rows.filter(r => homeOf.get(r).bi === bi && tierOfRow(r) === t);
+                if (!set.length) return;
+                const o = tmOrderRows(set, bi, pw, cfg.tulipBudgetFt);
+                const far = Math.max.apply(null, set.map(r => homeOf.get(r).ft));
+                variants.push({ name: `${codeOf[bi] || tmDefaultCode(b.name)} - ${t}`, sub: `${b.name} · ${t} · ${set.length} pads · farthest ${(far / 1000).toFixed(1)}k ft · far→near on this base's routes`, rows: o.rows, sim: o.sim });
+            });
+        });
+        const offN = pw.offCount();
+        if (offN) console.warn(`${TAG} [tiers] ${offN} pad-pair legs estimated off-graph (straight ×1.25)`);
+        lassoShowResults(variants, skipped, missions, ent, offN, folded);
+        const tally = bases.map((b, bi) => `${codeOf[bi]}: ${tiers.map(t => `${t} ${rows.filter(r => homeOf.get(r).bi === bi && tierOfRow(r) === t).length}`).join(' / ')}`).join(' · ');
+        console.log(`${TAG} [tiers] ${inside.length} tiered pads → ${rows.length} usable → ${variants.length} missions (${tally}) · ${skipped.length} skipped · ${folded.length} folded`);
+        showToast(`🏁 ${variants.length} tier missions ready — ${tally}. 🔗 Stage each, check, SAVE.`, '#ffd54f', 6000);
     }
     function lassoShowResults(variants, skipped, missions, ent, offN, folded) {
         lassoCloseResults();
@@ -17838,6 +17963,7 @@
                 <button class="aim-mb-tbtn ${pcm.on ? 'active' : ''}" data-pcm-toggle title="Merge missions by right-clicking pads on the map in order (pad name = mission name)">🔗 Merge</button>
                 <button class="aim-mb-tbtn ${rng.on ? 'active' : ''}" data-rng-toggle title="Color every pad's FFZ by the TRUE shortest LEGAL route from base (inside FFZ/FP only, triple-verified: path audit + dense second opinion + lower bound). Overlay is click-through — M2 merge picking still works.">🔋 Range</button>
                 <button class="aim-mb-tbtn ${lasso.armed ? 'active' : ''}" data-lasso-toggle title="Draw a freehand loop around pads → auto-build a furthest→closest merge list (Tulip pads auto-split into a separate '2' mission) and stage it in the merge editor for inspection.">🖊 Lasso</button>
+                <button class="aim-mb-tbtn" data-tm-open title="Tier macros: one mission per base × priority tier (P1 / P2 / P3) — every tiered pad goes to the base with the shortest flown route; each mission ordered far → near; 🔗 Stage each from the results popup">🏁 Tiers</button>
                 <button class="aim-mb-tbtn ${mcv.on ? 'active' : ''}" data-mcv-toggle title="Show which pads are already claimed by macro (merged) missions — each macro gets a color + name chip; white dashed pads have missions but no macro yet. Click-through.">🧩 Macros</button>
                 <button class="aim-mb-tbtn" data-srm-open title="Remove tab: find every step of a chosen type across ALL missions on this site (flag poles, 1s waits, …) and remove them after a per-row review; flag poles take their paired nav too. Update tab: set every wait of the ticked durations to a new value. Backup JSON downloads before anything saves.">🧹 Steps</button>
                 <button class="aim-mb-tbtn" data-msf-check title="Check every mission's navs + flag poles against the site's NFZs (Percepto refuses the save) and FFZs — fills the 🚩 column. Runs only when clicked; takes a while on big sites but the panel stays usable.">${msfRunning ? '🚩 …' : '🚩 Check'}</button>
@@ -18533,6 +18659,8 @@
         if (lassoBtn) lassoBtn.onclick = () => lassoToggle(lassoBtn);
         const mcvBtn = panelEl.querySelector('[data-mcv-toggle]');
         if (mcvBtn) mcvBtn.onclick = () => mcvToggle(mcvBtn);
+        const tmBtn = panelEl.querySelector('[data-tm-open]');
+        if (tmBtn) tmBtn.onclick = () => { tmOpen().catch(e => { console.error(`${TAG} [tiers] open failed`, e); showToast('🏁 Tiers failed — see console.', '#ff5252', 4000); }); };
         // v2.56 — 🧹 site-wide step removal
         const srmBtn = panelEl.querySelector('[data-srm-open]');
         if (srmBtn) srmBtn.onclick = () => srmOpen();
