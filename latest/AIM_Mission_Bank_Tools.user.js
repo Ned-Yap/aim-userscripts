@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.106
+// @version      3.107
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.106';
+    const SCRIPT_VERSION = '3.107';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -8715,12 +8715,48 @@
                 let node = start, depth = 0;
                 while (node && depth < 160) {
                     let v; try { v = node.memoizedProps && node.memoizedProps.value; } catch (e) { v = null; }
-                    if (v && typeof v === 'object' && typeof v.saveApp === 'function' && typeof v.setCurrentApp === 'function') return v;
+                    if (v && typeof v === 'object' && typeof v.saveApp === 'function' && typeof v.setCurrentApp === 'function') return mbGuardCtx(v);
                     node = node.return; depth++;
                 }
             }
         }
         return null;
+    }
+    // v3.107: name-collision guard on EVERY create our tools make. Percepto does not
+    // reject a new mission whose name already exists on the site — the server saves it
+    // as "<name>-2026-10-30 05:10:16.523171" (Python timestamp). 1637 got two such
+    // copies from a same-site Copy run. The guard wraps the React ctx (prototype
+    // chain, Percepto's own object untouched): a create (app.id == null) first
+    // re-reads the site's mission names and throws on a match. Updates pass through.
+    async function mbNameTaken(name) {
+        const sid = getCurrentSiteID();
+        const want = String(name || '').trim().toLowerCase();
+        if (!sid || !want) return null;
+        let list = null;
+        try {
+            const r = await fetch(`/available_app/?site_id=${encodeURIComponent(sid)}&type=1&only=id,name`, { credentials: 'include' });
+            if (r.ok) { const j = await r.json(); list = Array.isArray(j) ? j : (j && (j.results || j.data)) || null; }
+            else console.warn(`${TAG} [name-guard] list fetch ${r.status} — create proceeds unchecked`);
+        } catch (e) { console.warn(`${TAG} [name-guard] list fetch failed — create proceeds unchecked`, e); }
+        if (!Array.isArray(list)) return null;
+        return list.find(x => String(x && x.name || '').trim().toLowerCase() === want) || null;
+    }
+    function mbGuardCtx(v) {
+        if (!v || v.__aimNameGuard) return v;
+        const w = Object.create(v);
+        Object.defineProperty(w, '__aimNameGuard', { value: true });
+        w.saveApp = async function (app, name) {
+            if (app && app.id == null) {
+                const clash = await mbNameTaken(name);
+                if (clash) {
+                    const msg = `"${name}" already exists on this site (id ${clash.id}) — not creating a duplicate. Percepto would have saved it as "${name}-<timestamp>".`;
+                    console.warn(`${TAG} [name-guard] ${msg}`);
+                    throw new Error(msg);
+                }
+            }
+            return v.saveApp(app, name);
+        };
+        return w;
     }
     // Find Percepto's mission-LIST refetch — the zero-arg fn that re-GETs
     // /available_app/ (the sidebar list query, projected to only:"id,name") and
