@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.105
+// @version      3.106
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.105';
+    const SCRIPT_VERSION = '3.106';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -11026,7 +11026,7 @@
     // stages into the pad-click merge editor (numbered badges) for inspection
     // before Create. Drawing is a one-shot pen: press 🖊, drag a loop, done.
     // ════════════════════════════════════════════════════════════════════════
-    const lasso = { armed: false, drawing: false, pts: [], line: null, data: null, handlers: null, resultEl: null, resultLayers: [] };
+    const lasso = { armed: false, drawing: false, pts: [], line: null, data: null, handlers: null, resultEl: null, resultLayers: [], variantLayers: new Map(), hidden: new Set() };
     function lassoCleanupDraw() {
         const map = getLeafletMap();
         try { if (map && map.dragging && lasso.dragWasEnabled) map.dragging.enable(); } catch (e) {}
@@ -11046,6 +11046,25 @@
         if (lasso.resultEl) { try { lasso.resultEl.remove(); } catch (e) {} lasso.resultEl = null; }
         lasso.resultLayers.forEach(l => { try { l.remove(); } catch (e) {} });
         lasso.resultLayers = [];
+        lasso.variantLayers = new Map(); lasso.hidden = new Set();
+    }
+    // v3.106: per-variant show/hide + solo for the result overlay (same gestures as the 🧩 legend)
+    function lassoSetVis(i, visible) {
+        const lys = lasso.variantLayers.get(i) || [];
+        const map = getLeafletMap();
+        if (visible) { lasso.hidden.delete(i); if (map) lys.forEach(l => { try { l.addTo(map); } catch (e) {} }); }
+        else { lasso.hidden.add(i); lys.forEach(l => { try { l.remove(); } catch (e) {} }); }
+        if (lasso.resultEl) {
+            const card = lasso.resultEl.querySelector(`[data-lasso-card="${i}"]`); if (card) card.style.opacity = visible ? '1' : '0.42';
+            const cb = lasso.resultEl.querySelector(`input[data-lasso-vis="${i}"]`); if (cb) cb.checked = visible;
+        }
+    }
+    function lassoSolo(i) {
+        const ids = Array.from(lasso.variantLayers.keys());
+        const others = ids.filter(x => x !== i);
+        const alreadySolo = !lasso.hidden.has(i) && others.length > 0 && others.every(x => lasso.hidden.has(x));
+        if (alreadySolo) ids.forEach(x => lassoSetVis(x, true));
+        else ids.forEach(x => lassoSetVis(x, x === i));
     }
     async function lassoToggle(btn) {
         if (lasso.armed) { lassoCleanupDraw(); showToast('🖊 Lasso cancelled.', '#888', 2000); return; }
@@ -11628,6 +11647,34 @@
                 } catch (e) {}
             });
         }
+        // v3.106: 🗺 overlay — every variant painted like 🧩 Macros: solid pad fill in the
+        // variant's colour, visit-order badge on each pad (white ring = first pad of a flight),
+        // name chip on the first pad. Card checkbox hides one, swatch click solos, header All/None.
+        const LV_COLORS = ['#7adfe6', '#ffd54f', '#ff8ad2', '#9dff8a', '#c39dff', '#ffab73', '#8ab6ff', '#f3ff7a', '#ff9e9e', '#7affc9'];
+        const lvColor = i => LV_COLORS[i % LV_COLORS.length];
+        if (Lx && mapx) variants.forEach((v, i) => {
+            const col = lvColor(i); const lys = [];
+            const keep = l => { lasso.resultLayers.push(l); lys.push(l); l.addTo(mapx); return l; };
+            const starts = new Set([0]);
+            if (v.sim && v.sim.flights && v.sim.flights.length > 1) { let acc = 0; v.sim.flights.slice(0, -1).forEach(f => { acc += f.pads.length; starts.add(acc); }); }
+            v.rows.forEach((r, n) => {
+                const a = r.asset; if (!a || !a.ring || !a.ring.length) return;
+                try {
+                    keep(Lx.polygon(a.ring.map(p => [p.lat, p.lng]), { color: col, weight: 3, opacity: 0.95, fill: true, fillColor: col, fillOpacity: 0.55, interactive: false }));
+                    const c2 = genCentroid(a.ring);
+                    const fs = starts.has(n);
+                    keep(Lx.marker([c2.lat, c2.lng], {
+                        icon: Lx.divIcon({ className: 'aim-mb-rng-chip', html: `<div title="" style="pointer-events:none;width:19px;height:19px;border-radius:50%;background:${col};color:#10131a;font:800 11px/19px monospace;text-align:center;border:1.5px solid ${fs ? '#fff' : '#10131a'};box-shadow:${fs ? '0 0 6px 2px rgba(255,255,255,0.6)' : '0 1px 4px rgba(0,0,0,0.7)'};">${n + 1}</div>`, iconSize: [19, 19], iconAnchor: [10, 10] }),
+                        interactive: false, keyboard: false, zIndexOffset: -300,
+                    }));
+                    if (n === 0) keep(Lx.marker([c2.lat, c2.lng], {
+                        icon: Lx.divIcon({ className: 'aim-mb-rng-chip', html: `<div style="pointer-events:none;background:${col};color:#10131a;font:800 11px/1 'Lato',sans-serif;padding:3px 7px;border-radius:4px;border:1.5px solid #10131a;box-shadow:0 1px 5px rgba(0,0,0,0.7);white-space:nowrap;">${escapeHtml(String(v.name || '').slice(0, 24))}</div>`, iconSize: [0, 0], iconAnchor: [0, 22] }),
+                        interactive: false, keyboard: false, zIndexOffset: -400,
+                    }));
+                } catch (e) { console.warn(`${TAG} [lasso] overlay draw failed for "${a.name}"`, e); }
+            });
+            lasso.variantLayers.set(i, lys);
+        });
         const el = document.createElement('div');
         el.style.cssText = 'position:fixed;right:24px;bottom:20px;width:330px;max-height:60vh;overflow:auto;z-index:2147483601;'
             + 'background:#161a20;border:1px solid #7adfe6;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;padding:10px 12px;';
@@ -11640,9 +11687,11 @@
             const simLine = v.sim
                 ? `<div style="color:#9ad;font-size:10px;margin-top:2px;">est <b style="color:#cde;">${(v.sim.totalFt / 1000).toFixed(1)}k ft</b> · 🔋 ${v.sim.flights.length} flight${v.sim.flights.length === 1 ? '' : 's'} · land ${v.sim.flights.map(f => f.reservePct + '%').join(' / ')}</div>`
                 : '';
-            return `<div style="margin:5px 0;padding:6px 8px;border:1px solid #2a3a2a;border-radius:6px;">
-            <div style="display:flex;align-items:center;gap:8px;">
-                <span style="flex:1;font-weight:800;color:#7dff7d;">⛟ ${escapeHtml(v.name)}</span>
+            return `<div data-lasso-card="${i}" style="margin:5px 0;padding:6px 8px;border:1px solid ${lvColor(i)}55;border-radius:6px;">
+            <div style="display:flex;align-items:center;gap:6px;">
+                <input type="checkbox" data-lasso-vis="${i}" checked title="Show/hide this mission on the map" style="margin:0;cursor:pointer;accent-color:${lvColor(i)};">
+                <span data-lasso-solo="${i}" title="Solo — show ONLY this mission (click again to show all)" style="width:11px;height:11px;border-radius:2px;background:${lvColor(i)};flex:none;cursor:pointer;"></span>
+                <span style="flex:1;font-weight:800;color:${lvColor(i)};">⛟ ${escapeHtml(v.name)}</span>
                 <button data-lasso-stage="${i}" style="padding:3px 10px;background:#5fff5f;border:none;color:#04220a;border-radius:5px;cursor:pointer;font-weight:800;font-size:11px;">🔗 Stage</button>
             </div>
             <div style="color:#9ad;font-size:10px;margin-top:2px;">${escapeHtml(v.sub)}</div>
@@ -11652,15 +11701,21 @@
         };
         el.innerHTML = `<div style="display:flex;align-items:center;gap:10px;margin-bottom:5px;">
                 <b style="color:#7adfe6;">🖊 Lasso result</b>
+                ${variants.length > 1 ? '<button data-lasso-all title="Show every mission on the map" style="padding:1px 6px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">All</button><button data-lasso-none title="Hide every mission — then tick the ones you want" style="padding:1px 6px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">None</button>' : ''}
                 <span data-lasso-close style="margin-left:auto;cursor:pointer;color:#888;font-weight:800;">✕</span>
             </div>
             ${variants.map(vBtn).join('') || '<div style="color:#888;font-size:11px;">No stageable missions.</div>'}
             ${offN ? `<div style="margin-top:5px;color:#ffb74d;font-size:10px;">⚠ ${offN} pad-pair leg(s) estimated off-graph — order may be imperfect (see console)</div>` : ''}
             ${skipped.length ? `<div style="margin-top:6px;color:#ff9800;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;">Skipped (${skipped.length}) — marked ✕ on the map</div>${skipped.map(s => `<div style="color:#caa;font-size:10px;">${escapeHtml(s.name)} — ${escapeHtml(s.reason)}</div>`).join('')}` : ''}
             ${(folded && folded.length) ? `<div style="margin-top:6px;color:#7adfe6;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;">Folded into pad missions (${folded.length})</div><div style="max-height:96px;overflow:auto;">${folded.map(f => `<div style="color:#678;font-size:10px;">${escapeHtml(f.name)} → ${escapeHtml(f.mission)}</div>`).join('')}</div>` : ''}
-            <div style="color:#789;font-size:10px;margin-top:6px;">Stage a variant → inspect the numbered badges → 🔗 Create. Panel stays open so you can stage the other one after.</div>`;
+            <div style="color:#789;font-size:10px;margin-top:6px;">Map: filled pads = in a mission, numbers = visit order, white ring = first pad of a flight. Stage a variant → 🔗 Create. Panel stays open so you can stage the next one after.</div>`;
         document.body.appendChild(el);
         el.querySelector('[data-lasso-close]').onclick = lassoCloseResults;
+        el.querySelectorAll('[data-lasso-vis]').forEach(cb => cb.onchange = () => lassoSetVis(Number(cb.getAttribute('data-lasso-vis')), cb.checked));
+        el.querySelectorAll('[data-lasso-solo]').forEach(sw => sw.onclick = () => lassoSolo(Number(sw.getAttribute('data-lasso-solo'))));
+        const allB = el.querySelector('[data-lasso-all]'), noneB = el.querySelector('[data-lasso-none]');
+        if (allB) allB.onclick = () => variants.forEach((v, i) => lassoSetVis(i, true));
+        if (noneB) noneB.onclick = () => variants.forEach((v, i) => lassoSetVis(i, false));
         el.querySelectorAll('[data-lasso-stage]').forEach(b => b.onclick = () => {
             const v = variants[Number(b.getAttribute('data-lasso-stage'))];
             if (!v) return;
