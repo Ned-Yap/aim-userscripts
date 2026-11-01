@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.110
+// @version      3.111
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.110';
+    const SCRIPT_VERSION = '3.111';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -11483,7 +11483,9 @@
     const TM_KEY = 'aim-mb-tier-macros';
     const TM_TIERS = ['P1', 'P2', 'P3'];
     const tm = { last: null };   // v3.103: last build, for the 📋 report (also window.__aimTierReport())
+    const TM_MAX_STEPS_DEFAULT = 800;   // v3.111: a base×tier mission over this many steps is split into _1, _2, … at flight boundaries
     function tmCfg() { const c = gmGet(TM_KEY, null); return (c && typeof c === 'object') ? c : { tiers: TM_TIERS.slice(), codes: {} }; }
+    function tmMaxSteps(c) { const n = Number(c && c.maxSteps); return Number.isFinite(n) && n >= 0 ? n : TM_MAX_STEPS_DEFAULT; }
     function tmSaveCfg(c) { gmSet(TM_KEY, c); }
     function tmDefaultCode(name) {
         const words = String(name || '').replace(/base|station|bs/ig, ' ').trim().split(/[\s\-_]+/).filter(Boolean);
@@ -11517,6 +11519,7 @@
             <div style="color:#9ad;font-size:11px;margin-bottom:3px;">Bases — code goes in the name (<b style="color:#cde;">CODE - P1</b>). Pads go to the base with the shortest flown route.</div>
             ${bases.map(b => `<div style="display:flex;align-items:center;gap:6px;margin:2px 0;"><input type="text" data-tm-code="${b.i}" value="${escapeHtml(codes[b.name] || tmDefaultCode(b.name))}" maxlength="6" style="width:46px;background:#0f1216;border:1px solid #ffd54f;color:#fff;border-radius:3px;padding:2px 5px;font:inherit;text-align:center;font-weight:800;"><span style="color:#cde;">${escapeHtml(b.name)}</span></div>`).join('')}
             <div style="color:#789;font-size:11px;margin-top:6px;">Skipped: pads over the one-way radius (${(agCfg().tulipRadiusFt / 1000).toFixed(0)}k ft), no micro / ambiguous name, no legal route. Each mission is ordered far → near on its own base's routes; 🔋 lines mark battery breaks.</div>
+            <div style="display:flex;align-items:center;gap:6px;margin-top:6px;color:#9ad;font-size:11px;" title="A mission over this many steps is split into CODE - P1_1, CODE - P1_2, … — cut at battery-return boundaries, parts as even as the flights allow. 0 = never split.">Split a mission over <input type="number" data-tm-max min="0" step="50" value="${tmMaxSteps(cfg)}" style="width:62px;background:#0f1216;border:1px solid #2a3340;color:#e6e6e6;border-radius:4px;padding:2px 5px;font-size:11px;"> steps into _1, _2 …</div>
             <div style="display:flex;gap:6px;margin-top:8px;"><button data-tm-go style="flex:1;padding:5px 10px;background:#ffd54f;border:none;color:#221a00;border-radius:5px;cursor:pointer;font-weight:800;">Build</button><button data-tm-cancel style="padding:5px 10px;background:none;border:1px solid #456;color:#cfe;border-radius:5px;cursor:pointer;">Cancel</button></div>`;
         document.body.appendChild(el);
         el.addEventListener('mousedown', e => e.stopPropagation());
@@ -11525,9 +11528,10 @@
             const tiers = TM_TIERS.filter(t => { const cb = el.querySelector(`[data-tm-tier="${t}"]`); return cb && cb.checked; });
             if (!tiers.length) { showToast('Pick at least one tier.', '#ff9800', 2500); return; }
             const codeOf = {}; bases.forEach(b => { const inp = el.querySelector(`[data-tm-code="${b.i}"]`); codeOf[b.i] = ((inp && inp.value) || tmDefaultCode(b.name)).trim().toUpperCase() || tmDefaultCode(b.name); });
-            const c2 = tmCfg(); c2.tiers = tiers; c2.codes = c2.codes || {}; c2.codes[sk] = {}; bases.forEach(b => { c2.codes[sk][b.name] = codeOf[b.i]; }); tmSaveCfg(c2);
+            const mx = el.querySelector('[data-tm-max]'); const maxSteps = mx ? Math.max(0, Math.round(Number(mx.value) || 0)) : TM_MAX_STEPS_DEFAULT;
+            const c2 = tmCfg(); c2.tiers = tiers; c2.codes = c2.codes || {}; c2.codes[sk] = {}; bases.forEach(b => { c2.codes[sk][b.name] = codeOf[b.i]; }); c2.maxSteps = maxSteps; tmSaveCfg(c2);
             tmClosePopover();
-            try { tmBuild({ ent, missions, byAsset, bases, codeOf, tiers, roots, tierOf }); }
+            try { tmBuild({ ent, missions, byAsset, bases, codeOf, tiers, roots, tierOf, maxSteps }); }
             catch (e) { console.error(`${TAG} [tiers] build failed`, e); showToast('🏁 Tiers: build failed — see console.', '#ff5252', 4000); }
         };
     }
@@ -11536,7 +11540,7 @@
         const dB = new Map();
         const dBase = i => { if (!dB.has(i)) { const e = pw.dBaseEach(i); dB.set(i, (e && e[bi] != null) ? e[bi] : pw.dBase(i)); } return dB.get(i); };
         const idx = subset.map(r => pw.idxOf.get(r));
-        if (idx.length < 2) { const sim = idx.length ? agSimulate(idx, pw.dPad, dBase, pw.costOf, budgetFt) : null; return { rows: subset.slice(), sim }; }
+        if (idx.length < 2) { const sim = idx.length ? agSimulate(idx, pw.dPad, dBase, pw.costOf, budgetFt) : null; return { rows: subset.slice(), sim, dBase }; }
         const remaining = new Set(idx);
         const junc = (a, b) => Math.max(0, (dBase(a) + dBase(b) - pw.dPad(a, b)) / 2);
         const order = []; let cur = null;
@@ -11551,7 +11555,37 @@
             order.push(pick); remaining.delete(pick); cur = pick;
         }
         const sim = agSimulate(order, pw.dPad, dBase, pw.costOf, budgetFt);
-        return { rows: order.map(i => pw.rows[i]), sim };
+        return { rows: order.map(i => pw.rows[i]), sim, dBase };
+    }
+    // v3.111: step count a micro contributes to the merged mission (its body — takeoff/return are wrapped once)
+    function tmStepsOf(r) { return (((r && r.mission && r.mission.instructions) || [])).filter(st => st && String(st.type) !== '0' && String(st.type) !== '99').length; }
+    // Split an ordered base×tier set into ≤ maxSteps parts. The order is kept; cuts land on
+    // battery-return boundaries (never mid-flight), chosen so the parts' step counts are as
+    // even as the flights allow. Each part is re-simulated on its own.
+    function tmSplitParts(o, pw, budgetFt, maxSteps) {
+        const rows = o.rows; const total = rows.reduce((a, r) => a + tmStepsOf(r), 0);
+        if (!maxSteps || total <= maxSteps || rows.length < 2) return [{ rows, sim: o.sim, steps: total, part: 1, parts: 1 }];
+        const nParts = Math.ceil(total / maxSteps);
+        let cuts = [];
+        if (o.sim && o.sim.flights && o.sim.flights.length > 1) { let acc = 0; o.sim.flights.slice(0, -1).forEach(f => { acc += f.pads.length; cuts.push(acc); }); }
+        if (cuts.length < nParts - 1) { cuts = rows.map((_, i) => i).slice(1); console.warn(`${TAG} [tiers] fewer flights than parts — cutting between pads instead of at flight boundaries`); }
+        const cum = []; let c = 0; rows.forEach(r => { c += tmStepsOf(r); cum.push(c); });
+        const chosen = []; let last = 0;
+        for (let k = 1; k < nParts; k++) {
+            const target = total * k / nParts; let best = null;
+            cuts.forEach(ci => { if (ci <= last || ci >= rows.length) return; if (best == null || Math.abs(cum[ci - 1] - target) < Math.abs(cum[best - 1] - target)) best = ci; });
+            if (best == null) break;
+            chosen.push(best); last = best;
+        }
+        const bounds = [0].concat(chosen, [rows.length]);
+        const parts = [];
+        for (let i = 0; i < bounds.length - 1; i++) {
+            const sub = rows.slice(bounds[i], bounds[i + 1]); if (!sub.length) continue;
+            const idx = sub.map(r => pw.idxOf.get(r));
+            parts.push({ rows: sub, sim: agSimulate(idx, pw.dPad, o.dBase, pw.costOf, budgetFt), steps: sub.reduce((a, r) => a + tmStepsOf(r), 0) });
+        }
+        parts.forEach((x, i) => { x.part = i + 1; x.parts = parts.length; if (x.steps > maxSteps) console.warn(`${TAG} [tiers] part ${i + 1} still ${x.steps} steps (> ${maxSteps}) — one flight alone exceeds the cap`); });
+        return parts;
     }
     // 📋 report: one row per tiered pad (usable / skipped / folded) with its tier, micro, route ft to
     // EVERY base, straight-line ft, home base + why, mission + position. Header block = what was found.
@@ -11672,6 +11706,7 @@
     }
     function tmBuild(d) {
         const { ent, missions, byAsset, bases, codeOf, tiers, roots, tierOf } = d;
+        const maxSteps = d.maxSteps != null ? d.maxSteps : tmMaxSteps(tmCfg());
         const cfg = agCfg();
         const inside = roots.filter(a => tiers.includes(tierOf.get(a.id)));
         if (!inside.length) { showToast('🏁 No pads carry the chosen tiers.', '#ff9800', 3500); return; }
@@ -11696,8 +11731,13 @@
                 const set = rows.filter(r => homeOf.get(r).bi === bi && tierOfRow(r) === t);
                 if (!set.length) return;
                 const o = tmOrderRows(set, bi, pw, cfg.tulipBudgetFt);
-                const far = Math.max.apply(null, set.map(r => homeOf.get(r).ft));
-                variants.push({ name: `${codeOf[bi] || tmDefaultCode(b.name)} - ${t}`, sub: `${b.name} · ${t} · ${set.length} pads · farthest ${(far / 1000).toFixed(1)}k ft · far→near on this base's routes`, rows: o.rows, sim: o.sim });
+                const parts = tmSplitParts(o, pw, cfg.tulipBudgetFt, maxSteps);
+                const code = codeOf[bi] || tmDefaultCode(b.name);
+                parts.forEach(pt => {
+                    const far = Math.max.apply(null, pt.rows.map(r => homeOf.get(r).ft));
+                    const nm = pt.parts > 1 ? `${code} - ${t}_${pt.part}` : `${code} - ${t}`;
+                    variants.push({ name: nm, sub: `${b.name} · ${t}${pt.parts > 1 ? ` · part ${pt.part}/${pt.parts}` : ''} · ${pt.rows.length} pads · ~${pt.steps} steps · farthest ${(far / 1000).toFixed(1)}k ft · far→near on this base's routes`, rows: pt.rows, sim: pt.sim, steps: pt.steps });
+                });
             });
         });
         const offN = pw.offCount();
