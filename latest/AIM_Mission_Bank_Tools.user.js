@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.108
+// @version      3.109
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.108';
+    const SCRIPT_VERSION = '3.109';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -7956,7 +7956,21 @@
         if (!GEN_SKIP_TYPE_RE.test(p)) return null;
         return /^AVOID/i.test(p) ? 'avoid (3rd party)' : 'P&A';
     }
-    function genSkipReason(asset) {
+    // v3.109: 'unshielded' is lifted when the asset already sits inside an FFZ — the envelope
+    // has been built (SpiderWeb / hand), so it IS flyable and only lacks a mission (1637
+    // "Pad - SHOCKLEY 9A", p3 - battery - unshielded, FFZ + FPs built, never listed by ▣).
+    // Pass `ffzs` (array of {ring}) where known; without it the old rule stands.
+    function genInsideFfz(asset, ffzs) {
+        if (!Array.isArray(ffzs) || !ffzs.length || !asset || !Array.isArray(asset.ring) || asset.ring.length < 3) return false;
+        const c = genCentroid(asset.ring);
+        return ffzs.some(f => f && Array.isArray(f.ring) && f.ring.length >= 3 && genPointInPoly(c, f.ring));
+    }
+    function genSkipReason(asset, ffzs) {
+        const r = genSkipReasonRaw(asset);
+        if (r === 'unshielded' && genInsideFfz(asset, ffzs)) return null;
+        return r;
+    }
+    function genSkipReasonRaw(asset) {
         if (asset.unshielded) return 'unshielded';
         const t = genSkipType(asset);
         if (t) return t;
@@ -8380,7 +8394,7 @@
             assets.forEach(a => {
                 try {
                     if (genEyeIsHidden(a, map, hiddenBoxes)) { hidden++; return; }
-                    const skip = genSkipReason(a);             // red = would be skipped (bad state)
+                    const skip = genSkipReason(a, ffzs);       // red = would be skipped (bad state)
                     if (skip) skipped++; else valid++;
                     const col = skip ? '#ff6b6b' : '#fff';
                     const poly = L.polygon(a.ring.map(p => [p.lat, p.lng]), { color: col, weight: 1.5, fillColor: col, fillOpacity: skip ? 0.05 : 0.08, className: 'aim-gen-asset' });
@@ -8868,7 +8882,7 @@
                 <div style="font-weight:800;color:#7adfe6;margin-bottom:6px;font-size:12px;">${escapeHtml(name)}</div>
                 <div>Snapshot @ asset center · ground+${defaultSnapAglFt} = <b>${snapAltFt} ft</b></div>
                 <div>Navigate in FFZ · ${navAltFt != null ? 'FFZ-min <b>' + navAltFt + ' ft</b>' : 'FFZ-min n/a'} · ${Math.round(nav.standoffFt)} ft out</div>
-                ${genSkipReason(asset) ? `<div style="color:#ff7a00;margin-top:4px;">⚠ Asset state: <b>${escapeHtml(genSkipReason(asset))}</b> — bulk would SKIP this one.</div>` : ''}
+                ${genSkipReason(asset, ffzs) ? `<div style="color:#ff7a00;margin-top:4px;">⚠ Asset state: <b>${escapeHtml(genSkipReason(asset, ffzs))}</b> — bulk would SKIP this one.</div>` : ''}
                 <div style="display:flex;align-items:center;gap:6px;margin-top:9px;"><label style="white-space:nowrap;color:#cfe;">Template</label><select data-gp-tpl style="flex:1;min-width:0;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:2px 6px;border-radius:3px;font:inherit;font-size:11px;"></select></div>
                 <div data-gp-tpl-sum style="color:#789;font-size:10px;margin-top:2px;"></div>
                 <label style="display:flex;align-items:center;gap:6px;margin:9px 0;cursor:pointer;"><input type="checkbox" data-gp-scan checked> Inspection scan (Thermal/GEM/Wait wrap)</label>
@@ -8987,8 +9001,8 @@
                 a.genMacros = macroOf.get(a.id) || [];
                 a.genNameHit = !a.genMicros.length && genHasMission(a, names);
             });
-            const stateSkip = roots.filter(a => genSkipReason(a));
-            const live = roots.filter(a => !genSkipReason(a));
+            const stateSkip = roots.filter(a => genSkipReason(a, ffzs));
+            const live = roots.filter(a => !genSkipReason(a, ffzs));
             const haveMission = live.filter(a => a.genMicros.length || a.genNameHit);
             const macroOnly = live.filter(a => !a.genMicros.length && !a.genNameHit && a.genMacros.length);
             const valid = live.filter(a => !a.genMicros.length && !a.genNameHit && !a.genMacros.length);
@@ -9364,7 +9378,7 @@
         const byId = new Map((ent.assets || []).map(a => [a.id, a]));
         const leaves = (pad.descendants || []).map(id => byId.get(id)).filter(a => a && sgTargetable(a));
         const skippedKids = [];
-        const kids = leaves.filter(a => { const r = genSkipReason(a); if (r) { skippedKids.push(`${a.name || a.id} (${r})`); return false; } return true; });
+        const kids = leaves.filter(a => { const r = genSkipReason(a, ent.ffzs); if (r) { skippedKids.push(`${a.name || a.id} (${r})`); return false; } return true; });
         // v3.69 ROWS: wells chained within the pair distance (edge to edge, single linkage) form a
         // row and get the row template (broadside gap shots + end-on shot); everything else is a dot
         // for the generic solver.
