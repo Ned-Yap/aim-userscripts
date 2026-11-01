@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.107
+// @version      3.108
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.107';
+    const SCRIPT_VERSION = '3.108';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -11609,8 +11609,11 @@
             let note = '';
             let viaName = false;
             if (!cands.length) {
-                const byName = rankMatchMissions(a.name, missions).filter(m => !TM_JUNK_RE.test(m.name || ''));
-                if (!byName.length) { skip(a, 'no micro on this pad (no steps on it, no name match)'); return; }
+                // v3.108: EXACT name only (prefix stripped) — the ladder's prefix match handed
+                // "Pad - SHOCKLEY 9A" the mission for "SHOCKLEY 9A 6" on 1637.
+                const wantN = tmNorm(a.name);
+                const byName = rankMatchMissions(a.name, missions).filter(m => !TM_JUNK_RE.test(m.name || '') && tmNorm(m.name) === wantN);
+                if (!byName.length) { skip(a, 'no micro on this pad (no steps on it, no exact name match)'); return; }
                 cands = byName; viaName = true;
             }
             const pk = tmPick(cands, a.name, codes);
