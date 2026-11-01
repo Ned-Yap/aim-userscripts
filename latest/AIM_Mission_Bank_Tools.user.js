@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.109
+// @version      3.110
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.109';
+    const SCRIPT_VERSION = '3.110';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -6752,8 +6752,33 @@
             const src = `${f.name}${backup.reason ? ` (${backup.reason})` : ''}${backup.savedAt ? ` ${backup.savedAt.slice(0, 16).replace('T', ' ')}` : ''}`;
             if (missions.length === 1) { confirmRow(missions[0], src, null, liveList.find(x => String(x.id) === String(missions[0].id))); return; }
             const list = p.querySelector('[data-mrs-list]');
-            list.innerHTML = `<div style="padding:4px 10px;color:#ffd54f;">${missions.length} missions in ${escapeHtml(f.name)} — pick one:</div>`
+            // v3.110: ↩ Restore all — re-creates every mission in the file whose id is gone AND whose
+            // name is free (live ids / taken names are skipped and logged, never overwritten).
+            list.innerHTML = `<div style="padding:4px 10px;color:#ffd54f;display:flex;align-items:center;gap:8px;"><span style="flex:1;">${missions.length} missions in ${escapeHtml(f.name)} — pick one, or</span><button data-mrs-all class="aim-mb-tbtn" style="border-color:#2a6;color:#7fffb0;">↩ Restore all ${missions.length}</button></div>`
                 + missions.map((m, i) => { const live = liveList.find(x => String(x.id) === String(m.id)); return `<div style="${rowS}"><span style="flex:1;"><strong>${escapeHtml(String(m.name || ''))}</strong> <span style="color:#889;">id ${escapeHtml(String(m.id))} · ${mrsFmt(mrsCounts(m.instructions))} · ${live ? 'on server → in place' : 'gone → re-create'}</span></span><button data-mrs-pick="${i}" class="aim-mb-tbtn" style="border-color:#2a6;color:#7fffb0;">Pick</button></div>`; }).join('');
+            const allBtn = list.querySelector('[data-mrs-all]');
+            if (allBtn) allBtn.onclick = async () => {
+                if (mrsBusy) { showToast('A restore is already running', '#ff9800', 2500); return; }
+                if (!confirm(`Re-create ${missions.length} missions from ${f.name}?\n\nOnly missions whose id is gone and whose name is free are created; anything live or name-taken is skipped (logged). New ids are minted.`)) return;
+                mrsBusy = true; allBtn.disabled = true;
+                let ok = 0, skip = 0, fail = 0;
+                try {
+                    for (let i = 0; i < missions.length; i++) {
+                        const m = missions[i];
+                        const nm = String(m.name || '').trim().toLowerCase();
+                        const liveNow = liveList.find(x => String(x.id) === String(m.id));
+                        const taken = liveList.find(x => String(x.name || '').trim().toLowerCase() === nm);
+                        if (liveNow) { skip++; log(`⏭ ${i + 1}/${missions.length} "${m.name}" — id ${m.id} is still live, skipped`); continue; }
+                        if (taken) { skip++; log(`⏭ ${i + 1}/${missions.length} "${m.name}" — name already exists (id ${taken.id}), skipped`); continue; }
+                        log(`${i + 1}/${missions.length} re-creating "${m.name}"…`);
+                        try { const got = await mrsRestore(m, src, null, log); ok++; if (got) liveList.push(got); }
+                        catch (err) { fail++; log(`❌ "${m.name}" — ${err && err.message ? err.message : err}`); }
+                    }
+                } finally { mrsBusy = false; allBtn.disabled = false; }
+                const line = `↩ Restore all: ${ok} re-created · ${skip} skipped · ${fail} failed`;
+                log(line); showToast(line, fail ? '#ffb347' : '#5fff5f', 7000);
+                try { const rf = findMissionListRefetch(); if (rf) rf(); } catch (e) {}
+            };
             list.querySelectorAll('[data-mrs-pick]').forEach(b => { b.onclick = () => { const m = missions[Number(b.getAttribute('data-mrs-pick'))]; confirmRow(m, src, null, liveList.find(x => String(x.id) === String(m.id))); }; });
         });
     }
