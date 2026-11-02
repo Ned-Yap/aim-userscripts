@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.494
+// @version      4.495
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.494';
+    const SCRIPT_VERSION = '4.495';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -32736,9 +32736,12 @@
             // covered half) would leave the rest of the pad unblocked. If the asset covers
             // less than padCoverPct of its FFZ-inset, use the whole FFZ inset and flag it.
             const cover = rigRingAreaFt2(pts) / Math.max(1, rigRingAreaFt2(inset));
-            if (cover < (Number(rigCfg().padCoverPct) || 75) / 100) return { points: inset, flag: true, note: `⚠ pad polygon covers only ${Math.round(cover * 100)} % of its FFZ "${ffz.name}" → NFZ = whole FFZ inset ${rigCfg().insetFt} ft (fix the pad asset to shrink it)` };
+            // v4.495: a shared FFZ (several root pads inside it — the Web design) is not a
+            // half-drawn pad; block only THIS pad, never the whole FFZ.
+            const fr = entityCoords(ffz); const padsInFfz = rigPads(sid).roots.filter(p => rigPolyTouch(rigRingOf(p), fr)).length;
+            if (padsInFfz <= 1 && cover < (Number(rigCfg().padCoverPct) || 75) / 100) return { points: inset, flag: true, note: `⚠ pad polygon covers only ${Math.round(cover * 100)} % of its FFZ "${ffz.name}" → NFZ = whole FFZ inset ${rigCfg().insetFt} ft (fix the pad asset to shrink it)` };
             const same = pts.length === ring.length && pts.every((p, i) => Math.abs(p.lat - ring[i].lat) < 1e-7 && Math.abs(p.lng - ring[i].lng) < 1e-7);
-            return { points: pts, note: same ? `pad outline (FFZ "${ffz.name}" is the standard 15 ft ring)` : `pad ∩ "${ffz.name}" inset ${rigCfg().insetFt} ft` };
+            return { points: pts, note: same ? `pad outline (FFZ "${ffz.name}" is the standard 15 ft ring)` : `pad ∩ "${ffz.name}" inset ${rigCfg().insetFt} ft${padsInFfz > 1 ? ` (shared FFZ, ${padsInFfz} pads — only this pad blocked)` : ''}` };
         } catch (e) { console.warn(`${RIG_TAG} clip failed`, e); return { points: ring.map(p => ({ lat: p.lat, lng: p.lng })), note: 'clip error → pad outline' }; }
     }
 
@@ -32800,11 +32803,11 @@
         if (!todo.length) { say('Nothing staged.'); return; }
         const dry = (() => { try { return !!document.getElementById('aim-gen-dryrun').checked; } catch (e) { return true; } })();
         // v4.391: standard FFZ ring → NFZ; custom FFZ (drone flies ON the pad) → cut the arcs inside every pad that FFZ spans.
-        const items = todo.map(([k, c]) => { const d = rigFfzDesign(sid, c.padId); c.design = d.kind; c.designPct = Math.round(d.pct * 100); c.pads = d.pads.map(p => p.name); c.padIds = d.pads.map(p => p.id); if (d.kind === 'custom') return { k, c, mode: 'cut', pads: d.pads, plan: rigCutPlan(sid, d.pads, d.ffz) }; const g = (c.nfzBody && Array.isArray(c.nfzBody.points) && c.nfzBody.points.length >= 3) ? { points: c.nfzBody.points, note: 'banked NFZ body (re-created)' } : rigGeometry(sid, c.padId); return { k, c, mode: 'nfz', pads: d.pads, g }; })
+        const items = todo.map(([k, c]) => { const d = rigFfzDesign(sid, c.padId); c.design = d.kind; c.designPct = Math.round(d.pct * 100); c.crossing = (d.crossing || []).length; c.pads = d.pads.map(p => p.name); c.padIds = d.pads.map(p => p.id); if (d.kind === 'custom') return { k, c, mode: 'cut', pads: d.pads, plan: rigCutPlan(sid, d.pads, d.ffz) }; const g = (c.nfzBody && Array.isArray(c.nfzBody.points) && c.nfzBody.points.length >= 3) ? { points: c.nfzBody.points, note: 'banked NFZ body (re-created)' } : rigGeometry(sid, c.padId); return { k, c, mode: 'nfz', pads: d.pads, g }; })
             .filter(x => x.mode === 'cut' ? true : (x.g && x.g.points.length >= 3 && !ringSelfIntersects(x.g.points)));
         for (const x of items) { try { x.c.missions = await rigMissionsOnPads(sid, x.pads); } catch (e) { console.warn(`${RIG_TAG} missions lookup failed`, e); x.c.missions = x.c.missions || []; } }
         const geoms = items.filter(x => x.mode === 'nfz'); const cuts = items.filter(x => x.mode === 'cut');
-        const describe = x => x.mode === 'cut' ? `${x.plan.reduce((n, p) => n + (p.trimmed || []).length, 0)} leg(s) TRIMMED to the ${rigCfg().standoffFt || 15} ft line + ${x.plan.reduce((n, p) => n + p.cut.length - (p.trimmed || []).length, 0)} arc(s) REMOVED in ${x.plan.map(p => `"${p.fp.name}"`).join(', ') || 'no path'} for ${x.c.well} (custom FFZ ${x.c.designPct}% standard; pads ${x.pads.map(p => p.name).join(' + ')})` : `NFZ for ${x.c.well}`;
+        const describe = x => x.mode === 'cut' ? `${x.plan.reduce((n, p) => n + (p.trimmed || []).length, 0)} leg(s) TRIMMED to the ${rigCfg().standoffFt || 15} ft line + ${x.plan.reduce((n, p) => n + p.cut.length - (p.trimmed || []).length, 0)} arc(s) REMOVED in ${x.plan.map(p => `"${p.fp.name}"`).join(', ') || 'no path'} for ${x.c.well} (${x.c.crossing || '?'} leg(s) cross the pad; pads ${x.pads.map(p => p.name).join(' + ')})` : `NFZ for ${x.c.well} (${x.g && x.g.note ? x.g.note : 'pad'})`;
         rigStateSave(sid);
         // v4.398: PREVIEW first — arcs to cut in red, NFZs dashed — then confirm (live only).
         rigPreview(sid, items);
@@ -32924,7 +32927,26 @@
         }
         const pct = n ? ok / n : 0;
         const roots = rigPads(sid).roots.filter(p => rigPolyTouch(rigRingOf(p), fr));
-        return { kind: pct >= 0.5 ? 'standard' : 'custom', pct, ffz, pads: roots.length ? roots : [pad] };
+        // v4.495: the edge-distance share is INFO only. What decides is whether a
+        // flight path passes over this pad: if none does, an NFZ the shape of the pad
+        // blocks it without touching any path (the Web design — pads inside one shared
+        // FFZ with a 15 ft margin, paths routed around the outside). Only when a path
+        // crosses the pad (old corridor design) does the tool cut legs instead.
+        const crossing = rigArcsCrossingPad(sid, ring);
+        const kind = crossing.length ? 'custom' : 'standard';
+        return { kind, pct, ffz, crossing, multi: roots.length, pads: kind === 'standard' ? [pad] : (roots.length ? roots : [pad]) };
+    }
+    // Arcs of any flight path that run over the pad: an endpoint inside the pad ring
+    // or the leg cutting through it (2 m tolerance on the edge so a leg that ENDS on
+    // the pad outline counts as crossing).
+    function rigArcsCrossingPad(sid, ring) {
+        const ents = (mapObjectsBySite[sid] && mapObjectsBySite[sid].entities) || []; const out = [];
+        const inPad = p => p && (pointInPolygon(p.lat, p.lng, ring) || pointToPolygonMeters(p.lat, p.lng, ring) <= 2);
+        ents.filter(e => e.type === 15 && Array.isArray(e.arcs)).forEach(fp => fp.arcs.forEach(a => {
+            if (!a.point_a || !a.point_b) return;
+            if (inPad(a.point_a) || inPad(a.point_b) || rigSegHit(a.point_a, a.point_b, ring)) out.push({ fp: fp.name, arc: a });
+        }));
+        return out;
     }
     // v4.396: an arc is cut when it touches the custom FFZ corridor (endpoint inside it or
     // within 2 m of its edge — that is how a path "connects" to a zone) or when it lies
@@ -33061,7 +33083,7 @@
         else o.push(`on sheet ${c.firstSeen || '?'}${c.lastSeen && c.lastSeen !== c.firstSeen ? ` → ${c.lastSeen}` : ''}${c.lastSeen && c.firstSeen ? ` (${Math.round((new Date(c.lastSeen) - new Date(c.firstSeen)) / 86400000) + 1} d)` : ''}`);
         if (c.changes && c.changes.length) o.push(`dates changed ×${c.changes.length}`);
         if (c.padId) o.push(`pad ${c.padName} via ${c.how || '?'}${c.flag ? ' ⚠' : ''}`); else if (c.how) o.push(c.how);
-        if (c.design === 'custom') o.push(`custom FFZ (${c.designPct}% standard)${c.pads && c.pads.length > 1 ? ` spanning ${c.pads.join(' + ')}` : ''}`);
+        if (c.design === 'custom') o.push(`path crosses the pad (${c.crossing || '?'} leg(s))${c.pads && c.pads.length > 1 ? `, FFZ spanning ${c.pads.join(' + ')}` : ''}`);
         if (c.fpCut && c.fpCut.length) o.push(`arcs cut ${c.committedAt || at('corrected')}: ${c.fpCut.map(f => `${f.name} −${f.cut}`).join(', ')}`);
         else if (c.manualCut) o.push(`path already disconnected by hand ${c.committedAt || ''} — RESTORE BY HAND when clear`);
         else if (c.fpCut) o.push(`no path crossed the pad — issue only ${c.committedAt || ''}`);
@@ -33142,7 +33164,7 @@
                 <td style="padding:3px 6px;color:${c.padId ? '#cfd6dc' : '#ff6060'}" title="${esc(c.how)}${c.flag ? ' · ' + esc(c.flag) : ''}">${c.padId ? esc(c.padName) : '—'}${c.flag ? ' <span style="color:#ffb347">⚠</span>' : ''}</td>
                 <td style="padding:3px 6px;color:#9aa;white-space:nowrap">${esc(c.start || '?')} → ${esc(c.end || '—')}${c.changes && c.changes.length ? ` <span style="color:#ffb347" title="${esc(c.changes.join('\n'))}">✎${c.changes.length}</span>` : ''}</td>
                 <td style="padding:3px 6px;color:#9aa;text-align:center" title="days since start">${days != null && days >= 0 && c.status !== 'upcoming' ? days : (days != null && days < 0 ? `<span style="color:#666">in ${-days} d</span>` : '')}</td>
-                <td style="padding:3px 6px;color:#9aa">${(() => { if (!c.padId || c.status === 'cleared') return ''; const d = rigFfzDesign(sid, c.padId); if (d.kind === 'custom') return `<span title="FFZ is a custom corridor (${Math.round(d.pct * 100)} % of its edge sits 15 ft off the pad) — the drone flies ON this pad, so no NFZ: the flight-path arcs inside ${d.pads.map(p => p.name).join(' + ')} get cut instead" style="color:#ff6060;cursor:help">✂ cut arcs${d.pads.length > 1 ? ` (${d.pads.length} pads)` : ''}</span> `; const g = rigGeometry(sid, c.padId); return g ? `<span title="${esc(g.note)}" style="color:${g.flag ? '#ffb347' : '#777'};cursor:help">${g.flag ? '⚠ whole FFZ' : 'NFZ'}</span> ` : ''; })()}${c.manualCut ? `<span style="color:#ffb347" title="Flight path was already disconnected by hand — nothing for the tool to restore">✂ by hand</span> ` : ''}${c.fpCut ? `<span style="color:#ff9a3d" title="${esc(c.fpCut.map(f => `${f.name}: −${f.cut} arcs, ${f.left} left`).join('\n'))}">${c.fpRestored ? 'restored' : `${c.fpCut.reduce((n, f) => n + f.cut, 0)} arcs cut`}</span>` : ''}${c.nfzName ? esc(c.nfzName) : ''}${c.issueStatus ? ` <span data-rig-act="issue-retry" data-k="${esc(k)}" style="color:${c.issueStatus === 'created' ? '#5fff5f' : c.issueStatus === 'pending' ? '#7adfe6' : '#ff6060'};cursor:pointer" title="AIM Issue: ${esc(c.issueStatus)}${c.issueId ? ' ' + esc(c.issueId) : ''}${c.issueStatus === 'created' ? ' — click to file it again (e.g. after the issue was deleted)' : ' — click to request it again (AIM Issues ≥ 1.43 must be running on this site)'}">${c.issueStatus === 'created' ? '🚩' : c.issueStatus === 'pending' ? '🚩…' : '🚩✗ retry'}</span>` : ''}${c.pulled ? ` <span style="color:#ffb347" title="mission(s) pulled — restore when cleared">⛔ ${esc(c.pulled)}</span>` : ''}</td>
+                <td style="padding:3px 6px;color:#9aa">${(() => { if (!c.padId || c.status === 'cleared') return ''; const d = rigFfzDesign(sid, c.padId); if (d.kind === 'custom') return `<span title="${d.crossing.length} flight-path leg(s) run over this pad (${[...new Set(d.crossing.map(x => x.fp))].join(', ')}) — an NFZ would sit on a path, so the legs inside ${d.pads.map(p => p.name).join(' + ')} get trimmed / cut instead" style="color:#ff6060;cursor:help">✂ cut arcs${d.pads.length > 1 ? ` (${d.pads.length} pads)` : ''}</span> `; const g = rigGeometry(sid, c.padId); return g ? `<span title="${esc(g.note)}" style="color:${g.flag ? '#ffb347' : '#777'};cursor:help">${g.flag ? '⚠ whole FFZ' : 'NFZ'}</span> ` : ''; })()}${c.manualCut ? `<span style="color:#ffb347" title="Flight path was already disconnected by hand — nothing for the tool to restore">✂ by hand</span> ` : ''}${c.fpCut ? `<span style="color:#ff9a3d" title="${esc(c.fpCut.map(f => `${f.name}: −${f.cut} arcs, ${f.left} left`).join('\n'))}">${c.fpRestored ? 'restored' : `${c.fpCut.reduce((n, f) => n + f.cut, 0)} arcs cut`}</span>` : ''}${c.nfzName ? esc(c.nfzName) : ''}${c.issueStatus ? ` <span data-rig-act="issue-retry" data-k="${esc(k)}" style="color:${c.issueStatus === 'created' ? '#5fff5f' : c.issueStatus === 'pending' ? '#7adfe6' : '#ff6060'};cursor:pointer" title="AIM Issue: ${esc(c.issueStatus)}${c.issueId ? ' ' + esc(c.issueId) : ''}${c.issueStatus === 'created' ? ' — click to file it again (e.g. after the issue was deleted)' : ' — click to request it again (AIM Issues ≥ 1.43 must be running on this site)'}">${c.issueStatus === 'created' ? '🚩' : c.issueStatus === 'pending' ? '🚩…' : '🚩✗ retry'}</span>` : ''}${c.pulled ? ` <span style="color:#ffb347" title="mission(s) pulled — restore when cleared">⛔ ${esc(c.pulled)}</span>` : ''}</td>
                 <td style="padding:3px 6px;white-space:nowrap">${act}</td></tr>`;
         }).join('');
         host.innerHTML = `
