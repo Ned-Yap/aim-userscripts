@@ -1,3 +1,12 @@
+## 2026-11-02 — ⬡ AIM Site Diff v0.83 → PROD (new script for everyone; features #174–#178, #197, #198, #206, #250 layer 2)
+
+Site Diff graduates from `latest/` to the main install list (README row 21 / install page row 18). Same v0.83 that's been in dev use since 2026-09-09 — no code changes, just the prod twin. What coworkers get, all from the Control Panel's **Site Diff** card:
+
+- **Shadow overlay** — pick any other site (or upload a raw-JSON site backup) and its FFZs / flight paths / NFZs / assets / markers draw dashed on your map, per-type show / color / opacity. Prod/QA server tabs: a QA site can shadow its prod original directly (log into both servers).
+- **Compare** — swipe divider (M1 drag = split, M2 drag = reveal), **⚖ envelope diff** (stretches of this site's flight paths outside the shadow's FFZ + FP envelope, default 30 ft, sortable results table, Copy report, 🚩 Send to Issues), focus mode.
+- **⬡ Neighbor sites** — every other site's setup within a display radius (default 1000 ft) drawn in its own color, cross-site conflicts under the threshold (default 200 ft, segment-to-segment) pinned and listed, per-neighbor on/off, access-scoped to your `/sites/` list.
+- **Migration (CSM Full mode only)** — read-only migration plan, and **📥 Import**: create-only copy of the shadow's entities (+ ⚡ power-line KMLs) onto the current site with dry-run preview, double-click arm, per-entity verify and a run log. Also the restore path for Site Setup Tools' Bulk → 🗑 Delete backups.
+
 ## 2026-11-02 — 🏗 Rigs & cranes: NFZ on the pad unless a path crosses it — Site Setup Tools latest v4.495 (latest only, feature #291)
 
 - **Rule change.** NFZ vs cut is now decided by whether any flight-path leg runs over the pad, not by how much of the FFZ edge sits 15 ft off it. No leg over the pad → NFZ the shape of the pad (pad ∩ FFZ inset). A leg over the pad (old corridor design) → trim / cut as before. Fixes the Web design (1637): pads sharing one FFZ were scored as "7 % standard" and got their legs cut instead of an NFZ.
