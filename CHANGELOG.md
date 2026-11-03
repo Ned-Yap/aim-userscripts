@@ -1,3 +1,7 @@
+## 2026-11-03 — ⬡ AIM Site Diff v0.84 (prod + latest) — 📥 Import creates parent assets before their children
+
+- Nested assets (#273) link child → parent by the parent's NAME on the server. The import loop used to post entities in list order, so a child could land before its pad existed and lose (or fail) the link. Import now sorts assets by nesting depth (roots first, then depth 1, 2, …); everything else keeps its order. Console logs how many nested assets were ordered.
+
 ## 2026-11-02 — ⬡ AIM Site Diff v0.83 → PROD (new script for everyone; features #174–#178, #197, #198, #206, #250 layer 2)
 
 Site Diff graduates from `latest/` to the main install list (README row 21 / install page row 18). Same v0.83 that's been in dev use since 2026-09-09 — no code changes, just the prod twin. What coworkers get, all from the Control Panel's **Site Diff** card:

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Site Diff
 // @namespace    http://tampermonkey.net/
-// @version      0.83
+// @version      0.84
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Site_Diff.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Site_Diff.user.js
 // @description  Site comparison suite: shadow-site ghost overlay (per-type show/color/opacity), swipe divider, significant-change diff (→ AIM Issues), and Phase 3a Import — create-only copy of shadow entities (assets etc.) onto the current site with dry-run preview + verify. v0.70: cross-SERVER shadows. v0.80 (#250 layer 2): neighboring-site overlay — shows every other site's FFZs/FPs/assets within a display radius (Site Watch snapshot bboxes prefilter, live /map_objects/ for the math) and flags cross-site conflicts under the threshold (segment-to-segment, default 200 ft).
@@ -142,7 +142,7 @@
     }
 
     const SCRIPT_ID = 'aim-site-diff';
-    const SCRIPT_VERSION = '0.83';
+    const SCRIPT_VERSION = '0.84';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const PANE_NAME = 'aim-site-diff-pane';
     const HL_PANE_NAME = 'aim-site-diff-hl';
@@ -2244,6 +2244,26 @@
         const errors = [];
         try {
             const cfg = sel.length ? await fetchTargetSiteCfg(siteID, true) : null;
+            // v0.84: nested assets (#273) — a child's parent_asset_name is a server FK by NAME, so the parent
+            // must exist on the target BEFORE the child is posted. Sort assets by nesting depth (roots first);
+            // non-assets keep their order. Depth climbs the parent chain inside the SOURCE set (cycle-safe).
+            try {
+                const srcAssets = new Map();
+                sel.forEach(x => { if (x.ent && x.ent.type === 3) srcAssets.set(String(x.ent.name || '').trim(), x.ent); });
+                const depthOf = (ent) => {
+                    let d = 0, cur = ent; const seen = new Set();
+                    while (cur && typeof cur.parent_asset_name === 'string' && cur.parent_asset_name.trim() && d < 20) {
+                        const pn = cur.parent_asset_name.trim();
+                        if (seen.has(pn)) break;
+                        seen.add(pn); cur = srcAssets.get(pn); if (!cur) break; d++;
+                    }
+                    return d;
+                };
+                sel.forEach((x, i) => { x._impOrd = i; x._impDepth = x.ent && x.ent.type === 3 ? depthOf(x.ent) : 0; });
+                sel.sort((a, b) => a._impDepth - b._impDepth || a._impOrd - b._impOrd);
+                const nested = sel.filter(x => x._impDepth > 0).length;
+                if (nested) console.log(`${TAG} import: ${nested} nested asset(s) — parents are created first (max depth ${Math.max(...sel.map(x => x._impDepth))})`);
+            } catch (e) { console.warn(`${TAG} import: parent-first sort failed, keeping list order:`, e); }
             for (let i = 0; i < sel.length; i++) {
                 const ent = sel[i].ent;
                 const label = `${typeReg(ent.type).short} "${ent.name || '(unnamed)'}"`;
