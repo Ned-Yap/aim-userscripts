@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.495
+// @version      4.496
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -16,6 +16,7 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue
+// @grant        GM_listValues
 // @grant        GM_xmlhttpRequest
 // @grant        GM_openInTab
 // @require      https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/vendor/polygon-clipping-0.15.7.umd.js
@@ -91,7 +92,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.495';
+    const SCRIPT_VERSION = '4.496';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -29007,6 +29008,7 @@
         }
         catch (e) { console.warn(`${TAG} 📥 session save failed (${why}):`, e); impStatus(`💾 save failed: ${impEsc(e && e.message || e)}`, '#ff6060'); return false; }
         imp.dirty = false; imp.lastSavedAt = data.savedAt;
+        try { impEnforceStoreBudget(why); } catch (e) { console.warn(`${TAG} 📥 budget check threw:`, e); }
         clearTimeout(impAutosaveT);
         try { impSyncUi(); } catch (e) {}
         if (why === 'manual') impStatus(`💾 progress saved (${(json.length / 1048576).toFixed(1)} MB) — resume from the Asset Import page any time, even after a reload or sign-out`);
@@ -29056,6 +29058,69 @@
             try { const raw = GM_getValue(IMP_SESSION_DATA + k + slot, ''); if (!raw || raw.length < 500000) return; const d = JSON.parse(raw); if (Array.isArray(d.rows) && d.rows.length) { d.rows = []; d.rowsFrom = 'main'; const slim = JSON.stringify(d); GM_setValue(IMP_SESSION_DATA + k + slot, slim); freed += raw.length - slim.length; } } catch (e) {}
         });
         if (freed) console.log(`${TAG} 📥 slimmed older saves: ${(freed / 1048576).toFixed(1)} MB less Tampermonkey storage to rewrite per save`);
+    }
+    // v4.496: HARD STORAGE BUDGET. Tampermonkey ships every script's whole storage into the page on EVERY load, in one
+    // extension message capped at 64 MiB. On 2026-11-03 the importer's saves (main + prev + h1..h4, several sites) reached
+    // 38 MB and Tampermonkey silently stopped injecting ALL scripts ("Message exceeded maximum allowed size of 64MiB").
+    // Keep the importer's total under IMP_STORE_BUDGET: evict other sites' history, then this site's history (oldest
+    // slot first), then other sites' main saves (oldest first). This site's main save is never evicted — if it alone is
+    // over budget we warn loudly and tell the user to back it up (⬇) and discard it.
+    const IMP_STORE_BUDGET = 12 * 1048576;
+    function impStoreEntries() {
+        if (typeof GM_listValues !== 'function') { console.warn(`${TAG} 📥 GM_listValues unavailable — storage budget can't be enforced (check @grant)`); return []; }
+        const out = [];
+        for (const key of GM_listValues()) {
+            if (typeof key !== 'string' || !key.startsWith(IMP_SESSION_DATA)) continue;
+            const rest = key.slice(IMP_SESSION_DATA.length);                      // "<envSite>" or "<envSite>:prev" / ":h1".."h4"
+            const m = rest.match(/^(.*?)(:prev|:h\d)?$/);
+            let bytes = 0; try { bytes = String(GM_getValue(key, '') || '').length; } catch (e) {}
+            let savedAt = 0; try { const meta = JSON.parse(GM_getValue(IMP_SESSION_META + rest, '') || 'null'); savedAt = (meta && Date.parse(meta.savedAt)) || 0; } catch (e) {}
+            out.push({ key, rest, site: m[1], slot: m[2] || '', bytes, savedAt });
+        }
+        return out;
+    }
+    function impEnforceStoreBudget(why) {
+        const cur = impSessionKey();
+        const entries = impStoreEntries();
+        const before = entries.reduce((sum, e) => sum + e.bytes, 0);
+        let total = before;
+        if (total <= IMP_STORE_BUDGET) return total;
+        const slotRank = sl => ({ ':h4': 0, ':h3': 1, ':h2': 2, ':h1': 3, ':prev': 4 }[sl] ?? 5);
+        const order = entries.filter(e => !(e.site === cur && e.slot === '')).sort((a, b) => {
+            const ah = a.slot !== '', bh = b.slot !== '';
+            if (ah !== bh) return ah ? -1 : 1;                                     // history copies before main saves
+            const ac = a.site === cur, bc = b.site === cur;
+            if (ac !== bc) return ac ? 1 : -1;                                     // other sites before this one
+            if (ah) return slotRank(a.slot) - slotRank(b.slot);                    // oldest history slot first
+            return a.savedAt - b.savedAt;                                          // oldest main save first
+        });
+        const dropped = [];
+        for (const e of order) {
+            if (total <= IMP_STORE_BUDGET) break;
+            try { GM_deleteValue(e.key); GM_deleteValue(IMP_SESSION_META + e.rest); }
+            catch (err) { console.warn(`${TAG} 📥 budget: delete failed for ${e.key}:`, err); continue; }
+            total -= e.bytes; dropped.push(`${e.site}${e.slot || ' (main)'} ${(e.bytes / 1048576).toFixed(1)} MB`);
+        }
+        console.warn(`${TAG} 📥 storage budget (${why}): ${(before / 1048576).toFixed(1)} MB → ${(total / 1048576).toFixed(1)} MB (cap ${IMP_STORE_BUDGET / 1048576} MB) — dropped ${dropped.length ? dropped.join(', ') : 'nothing'}`);
+        if (total > IMP_STORE_BUDGET) {
+            console.error(`${TAG} 📥 this site's saved import alone is ${(total / 1048576).toFixed(1)} MB — over budget. Back it up (⬇) and discard it, or Tampermonkey will stop loading ALL scripts past ~64 MB total`);
+            try { impStatus(`⚠ this site's saved import is ${(total / 1048576).toFixed(1)} MB — past ~64 MB total Tampermonkey stops loading ALL scripts. Back it up (⬇) then discard it`, '#ff6060'); } catch (e) {}
+        }
+        return total;
+    }
+    // Whole-script storage watchdog (all keys, not just the importer) — runs once at start-up so the problem is visible
+    // even if the importer is never opened.
+    function impStorageWatchdog() {
+        if (typeof GM_listValues !== 'function') return;
+        let total = 0; const big = [];
+        for (const key of GM_listValues()) {
+            let n = 0; try { const v = GM_getValue(key, ''); n = (typeof v === 'string' ? v : JSON.stringify(v) || '').length; } catch (e) {}
+            total += n; if (n > 1048576) big.push(`${key} ${(n / 1048576).toFixed(1)} MB`);
+        }
+        const mb = total / 1048576;
+        if (mb > 20) console.error(`${TAG} ⚠ this script's Tampermonkey storage is ${mb.toFixed(1)} MB (Tampermonkey stops injecting EVERY script past ~64 MB across all scripts). Big keys: ${big.join(', ')}`);
+        else console.log(`${TAG} storage ${mb.toFixed(1)} MB${big.length ? ' — big keys: ' + big.join(', ') : ''}`);
+        try { impEnforceStoreBudget('startup'); } catch (e) { console.warn(`${TAG} 📥 startup budget check threw:`, e); }
     }
     function impOlderSaves() {
         const k = impSessionKey(); if (!k) return [];
@@ -42142,6 +42207,8 @@
         try { if (document.getElementById(MSC_PANEL_ID) && String(getCurrentSiteID()) !== String(msc.sid)) mscClose(); }
         catch (e) { console.warn(`${TAG} 🚩 hashchange handler threw:`, e); }
     });
+
+    if (CONTEXT === 'TOP') setTimeout(() => { try { impStorageWatchdog(); } catch (e) { console.warn(`${TAG} storage watchdog threw:`, e); } }, 4000);
 
     console.log(`${TAG} v${SCRIPT_VERSION} ready`);
 })();
