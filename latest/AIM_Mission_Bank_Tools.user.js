@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.112
+// @version      3.113
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.112';
+    const SCRIPT_VERSION = '3.113';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -14762,10 +14762,12 @@
                 </div>`).join('');
             const storeNote = !moState.store ? '<span style="color:#789;">loading the shared paused list…</span>'
                 : (moState.store.source === 'github' ? '<span style="color:#5a9;">shared · all FDEs see this list</span>' : `<span style="color:#ffb74d;" title="${escapeHtml(moState.store.err || '')}">⚠ local only — ${escapeHtml(String(moState.store.err || '').slice(0, 70))}</span>`);
-            const banner = flagged.length ? `<div style="display:flex;align-items:center;gap:8px;margin:4px 0 6px;padding:4px 6px;background:rgba(255,82,82,0.16);border:1px solid rgba(255,82,82,0.55);border-radius:5px;">
-                    <span style="color:#ff8a8a;font-weight:800;">⛔ ${flagged.length} pad${flagged.length === 1 ? ' has' : 's have'} a step inside an NFZ</span>
-                    <span style="color:#caa;font-size:10px;flex:1;">The drone stops there ("Failed to navigate to destination") and the mission cannot continue past it.</span>
-                    <button data-mo-pause-all style="padding:1px 8px;background:rgba(255,183,77,0.16);border:1px solid rgba(255,183,77,0.6);color:#ffb74d;border-radius:4px;cursor:pointer;font-size:10px;font-weight:700;">⏸ Pause all flagged</button>
+            const banner = flagged.length ? `<div style="margin:4px 0 6px;padding:4px 6px;background:rgba(255,82,82,0.16);border:1px solid rgba(255,82,82,0.55);border-radius:5px;">
+                    <div style="display:flex;align-items:center;gap:8px;">
+                        <span style="color:#ff8a8a;font-weight:800;flex:1;">⛔ ${flagged.length} pad${flagged.length === 1 ? ' has' : 's have'} a step inside an NFZ</span>
+                        <button data-mo-pause-all style="padding:1px 8px;background:rgba(255,183,77,0.16);border:1px solid rgba(255,183,77,0.6);color:#ffb74d;border-radius:4px;cursor:pointer;font-size:10px;font-weight:700;white-space:nowrap;">⏸ Pause all flagged</button>
+                    </div>
+                    <div style="color:#caa;font-size:10px;margin-top:2px;">The drone stops there ("Failed to navigate to destination") and the mission cannot continue past it.</div>
                 </div>` : '';
             el.innerHTML = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;">
                     <b style="color:#7adfe6;">⇅ Pad order — ${escapeHtml(String(mc.mission.name || ''))}</b>
@@ -14799,10 +14801,10 @@
                 moState.added.forEach((info, pid) => addedSteps.set(pid, addedBody(info)));
                 let addN = 0; addedSteps.forEach(st2 => { addN += st2.length; });
                 const ok = await mcvApplyOrder(mc, ids,
-                    `⇅ Apply pad order${removedIds.size ? ' + DELETIONS' : ''}${addedSteps.size ? ' + ADDITIONS' : ''} to "${mc.mission.name}"?\n\n`
+                    `⇅ Apply pad order${removedL.length ? ' + DELETIONS' : ''}${pausedL.length ? ' + PAUSE' : ''}${resumedL.length ? ' + RESUME' : ''}${addedSteps.size > resumedL.length ? ' + ADDITIONS' : ''} to "${mc.mission.name}"?\n\n`
                     + `${order.length} pad(s) — each pad's steps stay intact and move as one group`
                     + ` (a pad with split visits gets all its steps consolidated at its new slot).\n`
-                    + (removedIds.size ? `✕ DELETING ${removedIds.size} pad(s) (−${delSteps} steps): ${removedL.map(a => a.name || a.id).join(', ')} — their micros are untouched.\n` : '')
+                    + (removedL.length ? `✕ DELETING ${removedL.length} pad(s) (−${delSteps} steps): ${removedL.map(a => a.name || a.id).join(', ')} — their micros are untouched.\n` : '')
                     + (pausedL.length ? `⏸ PAUSING ${pausedL.length} pad(s) (−${pauseSteps} steps, remembered with their slots): ${pausedL.map(a => a.name || a.id).join(', ')}.\n` : '')
                     + (resumedL.length ? `▶ RESUMING ${resumedL.length} pad(s) (frozen steps back in): ${resumedL.map(e => e.padName || e.padId).join(', ')}.\n` : '')
                     + (addedSteps.size > resumedL.length ? `＋ ADDING ${addedSteps.size - resumedL.length} pad(s) (steps from their micros): ${Array.from(moState.added.values()).filter(x => !moState.resumed.has(x.pad.id)).map(x => x.pad.name || x.pad.id).join(', ')}.\n` : '')
