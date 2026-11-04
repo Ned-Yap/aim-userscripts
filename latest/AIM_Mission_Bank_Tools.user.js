@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.114
+// @version      3.115
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.114';
+    const SCRIPT_VERSION = '3.115';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -14390,6 +14390,7 @@
     let moState = null;
     function mcvCloseOrderPanel() {
         const old = document.getElementById(MCV_ORDER_PANEL_ID); if (old) old.remove();
+        if (moState) { try { document.documentElement.removeAttribute('data-aim-merge'); } catch (e) {} }   // v3.115 (only ours — merge mode sets it too)
         moCloseBadgeRenumber();
         try { document.removeEventListener('contextmenu', moContextHandler, true); } catch (e) {}
         if (moState) {
@@ -14915,6 +14916,11 @@
         render();
         document.body.appendChild(el);
         document.addEventListener('contextmenu', moContextHandler, true);
+        // v3.115: the Asset Inspector's WINDOW-capture contextmenu handler fires before
+        // this document-capture one and pops its popup over the pad. It bails on the
+        // shared data-aim-merge flag (same protocol as 🔗 merge mode) — raise it while
+        // ⇅ is open so M2 on the map reaches moContextHandler.
+        try { document.documentElement.setAttribute('data-aim-merge', '1'); } catch (e) {}
     }
 
     // 👁 route comparison (v2.44) — draw a macro's CURRENT order (solid, the
