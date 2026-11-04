@@ -1,3 +1,7 @@
+## 2026-11-03 — 🔎 Site Setup Tools latest v4.497 (latest only) — External ID in the right-click inspector
+
+- The asset inspector popup now shows **External ID** (the client's accounting id, `custom.external_asset_id`) directly above POI ID, with "—" when the asset has none. Click the row's copy icon to copy it like any other field.
+
 ## 2026-11-03 — ⬡ AIM Site Diff v0.84 (prod + latest) — 📥 Import creates parent assets before their children
 
 - Nested assets (#273) link child → parent by the parent's NAME on the server. The import loop used to post entities in list order, so a child could land before its pad existed and lose (or fail) the link. Import now sorts assets by nesting depth (roots first, then depth 1, 2, …); everything else keeps its order. Console logs how many nested assets were ordered.
