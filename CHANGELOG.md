@@ -1,10 +1,11 @@
-## 2026-11-04 — 🧩 Mission Bank Tools latest v3.112 → v3.113 (latest only) — ⏸ Pause / ▶ Resume pads + red NFZ rows in the ⇅ Pad order panel (#327)
+## 2026-11-04 — 🧩 Mission Bank Tools latest v3.112 → v3.114 (latest only) — ⏸ Pause / ▶ Resume pads + red NFZ rows in the ⇅ Pad order panel (#327)
 
 - **Red rows.** Every pad row in ⇅ Pad order is now checked against the site's NFZs with the same 🚩 step check the save rails use. A pad with a nav or flag pole INSIDE an NFZ turns red with a ⛔ and the NFZ name on hover, and a banner at the top counts them with a **⏸ Pause all flagged** button. This is the rig-on-the-pad case: the drone stops there with "Failed to navigate to destination" and the mission cannot continue past it.
 - **⏸ Pause.** New ⏸ button on each row. On Apply the pad's steps leave the saved macro (like ✕) but the pad is REMEMBERED — frozen steps, its slot, who paused it, when, and the NFZ name — in a shared per-site file in the data repo (`pauses/<site>.json`, needs the Control Panel GitHub token; without one it stays on this browser and the panel says so). Every FDE opening the same macro sees the same ⏸ Paused list.
 - **▶ Resume.** Each paused entry has ▶ (puts the frozen steps back at the remembered slot on Apply — drag it elsewhere first if you want; warns if the pad's micro changed since, and again if the NFZ is still there) and 🗑 (forget the pause, pad stays out). Resuming a pad that is somehow already back in the macro just clears the stale entry.
 - Same rails as before: confirm → JSON backup → one save → verify. Nothing is written to the paused list unless the macro save verified.
 - **v3.113** — live-test polish: the NFZ banner stacks its text under the title (it wrapped into a tall column at panel width); the Apply confirm no longer counts a paused pad as a "DELETING 1 pad(s) (−0 steps)" line and its title says PAUSE / RESUME.
+- **v3.114** — FIX: the paused-list write ran after the save had already closed the panel, so it threw and the pad left the macro with no ▶ memory (live on 1637: LEAP FROG 47-11 E 3WA). Everything the write needs is now captured before the save; a console `[⏸]` line reports where the list went.
 
 ## 2026-11-03 — 🔎 Site Setup Tools latest v4.497 (latest only) — External ID in the right-click inspector
 

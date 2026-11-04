@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.113
+// @version      3.114
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.113';
+    const SCRIPT_VERSION = '3.114';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -14799,6 +14799,18 @@
                 const resumedL = Array.from(moState.resumed.values());
                 const addedSteps = new Map();
                 moState.added.forEach((info, pid) => addedSteps.set(pid, addedBody(info)));
+                // v3.114: everything the paused-list commit needs is captured HERE — the save
+                // path redraws the overlay, which closes this panel and nulls moState.
+                const macroName = mc.mission.name;
+                const pauseStore = moState.store;
+                const nowIso = new Date().toISOString();
+                const newEntries = pausedL.map(a => {
+                    const slot = mc.pads.findIndex(p => p.id === a.id);
+                    const flags = nfzOf(a.id);
+                    return { padId: a.id, padName: a.name || '', slot: slot < 0 ? mc.pads.length : slot, afterPadId: slot > 0 ? mc.pads[slot - 1].id : null,
+                        steps: padSteps(a.id).map(pcmNormStep), pausedAt: nowIso, pausedBy: mbPauseWho(), reason: flags.length ? 'nfz' : 'manual', nfz: flags.length ? moNfzNames(flags).join(', ') : '' };
+                });
+                const resumedIds = new Set(resumedL.map(e => e.padId));
                 let addN = 0; addedSteps.forEach(st2 => { addN += st2.length; });
                 const ok = await mcvApplyOrder(mc, ids,
                     `⇅ Apply pad order${removedL.length ? ' + DELETIONS' : ''}${pausedL.length ? ' + PAUSE' : ''}${resumedL.length ? ' + RESUME' : ''}${addedSteps.size > resumedL.length ? ' + ADDITIONS' : ''} to "${mc.mission.name}"?\n\n`
@@ -14811,27 +14823,18 @@
                     + `Mission id + name unchanged. A JSON backup downloads first.`, removedIds, addedSteps);
                 if (!ok) return;
                 // the macro saved — now commit the paused list (shared file + local mirror)
-                if (pausedL.length || resumedL.length) {
+                if (newEntries.length || resumedIds.size) {
                     try {
-                        const store = moState.store || await moPauseLoad(siteIdForPause);
-                        const name = mc.mission.name;
-                        let list = moPauseEntries(store, name).slice();
-                        const resumedIds = new Set(resumedL.map(e => e.padId));
-                        list = list.filter(e => !resumedIds.has(e.padId));
-                        const now = new Date().toISOString();
-                        pausedL.forEach(a => {
-                            const slot = mc.pads.findIndex(p => p.id === a.id);
-                            const flags = nfzOf(a.id);
-                            list = list.filter(e => e.padId !== a.id);
-                            list.push({ padId: a.id, padName: a.name || '', slot: slot < 0 ? mc.pads.length : slot, afterPadId: slot > 0 ? mc.pads[slot - 1].id : null,
-                                steps: padSteps(a.id).map(pcmNormStep), pausedAt: now, pausedBy: mbPauseWho(), reason: flags.length ? 'nfz' : 'manual', nfz: flags.length ? moNfzNames(flags).join(', ') : '' });
-                        });
-                        moPauseSetEntries(store, name, list);
-                        const msg = `pause: ${name} — ${pausedL.length ? '⏸ ' + pausedL.map(a => a.name || a.id).join(', ') : ''}${pausedL.length && resumedL.length ? ' · ' : ''}${resumedL.length ? '▶ ' + resumedL.map(e => e.padName || e.padId).join(', ') : ''} (${moEnvSite(siteIdForPause)})`;
+                        const store = pauseStore || await moPauseLoad(siteIdForPause);
+                        let list = moPauseEntries(store, macroName).filter(e => !resumedIds.has(e.padId));
+                        newEntries.forEach(ne => { list = list.filter(e => e.padId !== ne.padId); list.push(ne); });
+                        moPauseSetEntries(store, macroName, list);
+                        const msg = `pause: ${macroName} — ${newEntries.length ? '⏸ ' + newEntries.map(e => e.padName || e.padId).join(', ') : ''}${newEntries.length && resumedL.length ? ' · ' : ''}${resumedL.length ? '▶ ' + resumedL.map(e => e.padName || e.padId).join(', ') : ''} (${moEnvSite(siteIdForPause)})`;
                         await moPauseSave(siteIdForPause, store, msg);
-                        showToast(store.source === 'github' ? `⏸ Paused list updated for everyone (${list.length} paused in "${name}").` : `⚠ Paused list saved on THIS browser only — ${store.err || 'GitHub unavailable'}.`, store.source === 'github' ? '#ffb74d' : '#ff9800', 7000);
+                        console.log(`${TAG} [⏸] "${macroName}": ${newEntries.length} paused, ${resumedIds.size} resumed → ${store.source}${store.err ? ' (' + store.err + ')' : ''}`);
+                        showToast(store.source === 'github' ? `⏸ Paused list updated for everyone (${list.length} paused in "${macroName}").` : `⚠ Paused list saved on THIS browser only — ${store.err || 'GitHub unavailable'}.`, store.source === 'github' ? '#ffb74d' : '#ff9800', 7000);
                     } catch (e) {
-                        console.warn(`${TAG} [⏸] paused-list commit failed (macro WAS saved)`, e);
+                        console.warn(`${TAG} [⏸] paused-list commit failed (macro WAS saved) — frozen steps follow:`, e, newEntries);
                         showToast('⚠ Macro saved, but the paused list could not be written (see console) — the pad is out of the macro with no ▶ memory.', '#ff5252', 9000);
                     }
                 }
