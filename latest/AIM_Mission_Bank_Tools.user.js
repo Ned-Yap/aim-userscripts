@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.111
+// @version      3.112
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.111';
+    const SCRIPT_VERSION = '3.112';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -14532,6 +14532,140 @@
         el.querySelector('[data-mo-renum-x]').onclick = moCloseBadgeRenumber;
         try { inp.focus(); inp.select(); } catch (e) {}
     }
+    // ── ⏸ PAUSED PADS (feature #327, v3.112) ──────────────────────────────
+    // Percepto has no "skip this pad" — a paused pad is REMOVED from the saved
+    // macro and remembered (frozen steps + slot) in a shared per-site file in the
+    // data repo, pauses/<env-site>.json, so every FDE sees the same paused list;
+    // the GM-local mirror is the cache + the no-token fallback. ▶ re-inserts the
+    // frozen steps at the remembered slot. Keyed by macro NAME (ids change on
+    // every save). Rows with a nav inside an NFZ (🚩 core) are flagged red — the
+    // drone refuses "Failed to navigate to destination" there and the mission
+    // cannot continue past it.
+    const MO_PAUSE_GM_KEY = 'aim-mb-pauses';
+    const MO_PAUSE_REPO_DIR = 'pauses';
+    const moPauseStores = new Map();   // envSite → { data, sha, source: 'github'|'local', err }
+    function moEnvSite(sid) { return envSiteKey(sid); }   // same qa-<id> namespace as every other per-site key
+    function moPausePath(sid) { return `${MO_PAUSE_REPO_DIR}/${moEnvSite(sid)}.json`; }
+    function moPauseEmpty() { return { version: 1, macros: {} }; }
+    function moPauseNormalize(d) {
+        const out = moPauseEmpty();
+        if (d && typeof d === 'object' && d.macros && typeof d.macros === 'object') {
+            Object.keys(d.macros).forEach(k => {
+                const list = Array.isArray(d.macros[k]) ? d.macros[k].filter(e => e && e.padId != null && Array.isArray(e.steps)) : [];
+                if (list.length) out.macros[k] = list;
+            });
+        }
+        return out;
+    }
+    function moPauseLocalGet(sid) { const all = gmGet(MO_PAUSE_GM_KEY, {}); const d = (all && typeof all === 'object') ? all[moEnvSite(sid)] : null; return d ? moPauseNormalize(d) : null; }
+    function moPauseLocalSet(sid, data) { const all = gmGet(MO_PAUSE_GM_KEY, {}); const o = (all && typeof all === 'object') ? all : {}; o[moEnvSite(sid)] = data; gmSet(MO_PAUSE_GM_KEY, o); }
+    // Contents API metadata GET (sha + decoded JSON) — mbGhGetJson reads raw and has no sha.
+    async function mbGhGetMeta(path) {
+        if (!mbSharedToken) throw new Error('no GitHub token');
+        const url = `https://api.github.com/repos/${SCH_REPO}/contents/${path.split('/').map(encodeURIComponent).join('/')}?ref=main&_t=${Date.now()}`;
+        const headers = { 'Authorization': `Bearer ${mbSharedToken}`, 'Accept': 'application/vnd.github+json', 'Cache-Control': 'no-cache' };
+        const r = await mbGmRequest({ method: 'GET', url, headers, timeout: 30000 });
+        if (r.status === 404) return null;
+        if (r.status === 401 || r.status === 403) throw new Error(`GitHub token rejected (HTTP ${r.status})`);
+        if (!r.ok) throw new Error(`GitHub GET ${path}: ${r.err || ('HTTP ' + r.status)}`);
+        let j; try { j = JSON.parse(r.responseText); } catch (e) { throw new Error(`GitHub GET ${path}: bad JSON`); }
+        let json = null;
+        try { json = JSON.parse(decodeURIComponent(escape(atob(String(j.content || '').replace(/\n/g, ''))))); }
+        catch (e) { console.warn(`${TAG} [⏸] ${path}: stored file is not valid JSON — treating as empty`, e); }
+        return { sha: j.sha || null, json };
+    }
+    async function mbGhPutJson(path, obj, message, sha) {
+        if (!mbSharedToken) throw new Error('no GitHub token');
+        const url = `https://api.github.com/repos/${SCH_REPO}/contents/${path.split('/').map(encodeURIComponent).join('/')}`;
+        const headers = { 'Authorization': `Bearer ${mbSharedToken}`, 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json' };
+        const content = btoa(unescape(encodeURIComponent(JSON.stringify(obj, null, 1))));
+        let cur = sha;
+        for (let attempt = 0; attempt < 2; attempt++) {
+            const body = { message, content, branch: 'main' };
+            if (cur) body.sha = cur;
+            const r = await mbGmRequest({ method: 'PUT', url, headers, data: JSON.stringify(body), timeout: 60000 });
+            if (r.ok) { try { return JSON.parse(r.responseText).content.sha; } catch (e) { return null; } }
+            if ((r.status === 409 || r.status === 422) && attempt === 0) { const m = await mbGhGetMeta(path); cur = m ? m.sha : null; continue; }
+            if (r.status === 401 || r.status === 403) throw new Error(`GitHub PUT ${path}: token rejected (HTTP ${r.status})`);
+            throw new Error(`GitHub PUT ${path}: ${r.err || ('HTTP ' + r.status)}`);
+        }
+        throw new Error(`GitHub PUT ${path}: sha conflict twice`);
+    }
+    // Load the site's paused list: GitHub (shared) with a token, else the local
+    // mirror. A GitHub failure falls back to local and is surfaced in the panel.
+    async function moPauseLoad(sid, force) {
+        const key = moEnvSite(sid);
+        if (!force && moPauseStores.has(key)) return moPauseStores.get(key);
+        let store;
+        if (mbSharedToken) {
+            try {
+                const m = await mbGhGetMeta(moPausePath(sid));
+                store = { data: m ? moPauseNormalize(m.json) : moPauseEmpty(), sha: m ? m.sha : null, source: 'github', err: null };
+                moPauseLocalSet(sid, store.data);
+            } catch (e) {
+                console.warn(`${TAG} [⏸] shared paused list unavailable — using the local mirror`, e);
+                store = { data: moPauseLocalGet(sid) || moPauseEmpty(), sha: null, source: 'local', err: e.message || String(e) };
+            }
+        } else {
+            store = { data: moPauseLocalGet(sid) || moPauseEmpty(), sha: null, source: 'local', err: 'no GitHub token (⚙ Control Panel → GitHub token) — pauses stay on this browser only' };
+        }
+        moPauseStores.set(key, store);
+        return store;
+    }
+    // Save: local mirror always; GitHub when a token is present (sha-retry inside).
+    async function moPauseSave(sid, store, message) {
+        moPauseLocalSet(sid, store.data);
+        if (!mbSharedToken) { store.source = 'local'; store.err = 'no GitHub token — saved on this browser only'; return store; }
+        try {
+            store.sha = await mbGhPutJson(moPausePath(sid), store.data, message, store.sha);
+            store.source = 'github'; store.err = null;
+        } catch (e) {
+            console.warn(`${TAG} [⏸] shared save failed — kept locally`, e);
+            store.source = 'local'; store.err = e.message || String(e);
+        }
+        return store;
+    }
+    // who paused it — Percepto's own user record (cookie auth, origin-relative); '' until it answers
+    let mbPauseWhoCache = null;
+    function mbPauseWho() { return mbPauseWhoCache || ''; }
+    function mbPauseWhoPrefetch() {
+        if (mbPauseWhoCache != null) return;
+        mbPauseWhoCache = '';
+        fetch('/get_user_details/', { credentials: 'include' }).then(r => r.ok ? r.json() : null).then(j => {
+            if (j && typeof j === 'object') mbPauseWhoCache = String(j.username || j.email || (j.user && (j.user.username || j.user.email)) || '');
+        }).catch(e => console.warn(`${TAG} [⏸] user lookup failed — pauses will carry no name`, e));
+    }
+    function moPauseEntries(store, macroName) { return (store && store.data && store.data.macros[macroName]) || []; }
+    function moPauseSetEntries(store, macroName, list) { if (list && list.length) store.data.macros[macroName] = list; else delete store.data.macros[macroName]; }
+    // NFZ flags for a pad's steps — ONLY the inside-an-NFZ tier (the near margin is noise here).
+    function moNfzFlags(steps, ent) { return mbStepFlags(steps, ent).filter(f => f.tier === 'nfz'); }
+    function moNfzNames(flags) { return Array.from(new Set(flags.map(f => f.zoneName || (f.zoneId != null ? '#' + f.zoneId : 'NFZ')))); }
+    function moNfzLabel(flags) { return `${flags.length} step${flags.length === 1 ? '' : 's'} inside NFZ ${moNfzNames(flags).join(', ')}`; }
+    function moWhen(iso) { try { const d = new Date(iso); return isNaN(d) ? String(iso || '') : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }); } catch (e) { return String(iso || ''); } }
+    function moDropTempBadge(padId) {
+        const st = moState; if (!st || !st.tempBadges) return;
+        const ti = st.tempBadges.findIndex(tb => tb.padId === padId);
+        if (ti < 0) return;
+        try { st.tempBadges[ti].mk.remove(); } catch (e) {}
+        const reg = mcv.badgeReg.get(st.missionId); if (reg) reg.delete(padId);
+        st.tempBadges.splice(ti, 1);
+    }
+    function moTempBadge(asset, color) {
+        const st = moState; if (!st || !asset || !Array.isArray(asset.ring) || asset.ring.length < 3) return;
+        try {
+            const L = composerGetL(), map = getLeafletMap();
+            if (!L || !map) return;
+            const c = genCentroid(asset.ring);
+            const mk = L.marker([c.lat, c.lng], {
+                icon: L.divIcon({ className: 'aim-mb-rng-chip', html: mcvBadgeHtml(st.missionId, asset.id, st.order.length, color, true), iconSize: [19, 19], iconAnchor: [10, 10] }),
+                interactive: false, keyboard: false, zIndexOffset: 950,
+            }).addTo(map);
+            if (!mcv.badgeReg.has(st.missionId)) mcv.badgeReg.set(st.missionId, new Map());
+            mcv.badgeReg.get(st.missionId).set(asset.id, { mk, col: color, ax: 10 });
+            if (!st.tempBadges) st.tempBadges = [];
+            st.tempBadges.push({ padId: asset.id, mk });
+        } catch (e) { console.warn(`${TAG} [⏸] temp badge failed`, e); }
+    }
     function mcvOpenOrderPanel(missionId) {
         mcvCloseOrderPanel();
         const data = mcv.data;
@@ -14546,7 +14680,23 @@
             + 'background:rgba(16,19,26,0.96);border:1px solid #7adfe6;border-radius:8px;padding:9px 11px;color:#e6e6e6;'
             + 'font:11px "Lato","Segoe UI",sans-serif;box-shadow:0 6px 22px rgba(0,0,0,0.7);';
         let dragIdx = null;
-        moState = { missionId, mc, order: mc.pads.slice(), removed: [], added: new Map(), tempBadges: [], render: null };
+        moState = { missionId, mc, order: mc.pads.slice(), removed: [], added: new Map(), tempBadges: [], render: null,
+            paused: [], resumed: new Map(), store: null, nfz: new Map() };   // v3.112 ⏸/▶
+        const siteIdForPause = getCurrentSiteID();
+        mbPauseWhoPrefetch();
+        moPauseLoad(siteIdForPause).then(st => { if (moState && moState.missionId === missionId) { moState.store = st; if (moState.render) moState.render(); } })
+            .catch(e => console.warn(`${TAG} [⏸] paused list load failed`, e));
+        const padSteps = id => mc.blocks.reduce((s, b) => s.concat(b.aId === id ? b.steps : []), []);
+        const addedBody = info => info.steps || mbMissionBody(info.micro);
+        // NFZ flags per pad, cached for the panel's life (data.ent never changes while it is open)
+        const nfzOf = (id, stepsArr) => {
+            if (!moState.nfz.has(id)) {
+                let fl = [];
+                try { fl = moNfzFlags(stepsArr || padSteps(id), data.ent); } catch (e) { console.warn(`${TAG} [⏸] NFZ check failed for pad ${id}`, e); }
+                moState.nfz.set(id, fl);
+            }
+            return moState.nfz.get(id);
+        };
         const render = () => {
             const order = moState.order;
             const removedL = moState.removed;
@@ -14565,20 +14715,26 @@
                         iconSize: [19, 19], iconAnchor: [r.ax, 10] }));
                 } catch (e) {}
             });
-            const changed = removedL.length > 0 || moState.added.size > 0 || order.map(a => a.id).join(',') !== mc.pads.map(a => a.id).join(',');
+            const changed = removedL.length > 0 || moState.added.size > 0 || moState.paused.length > 0 || moState.resumed.size > 0 || order.map(a => a.id).join(',') !== mc.pads.map(a => a.id).join(',');
+            const flagged = order.filter(a => !moState.resumed.has(a.id) && nfzOf(a.id, moState.added.has(a.id) ? addedBody(moState.added.get(a.id)) : null).length);
             const rows = order.map((a, i) => {
                 const addedInfo = moState.added.get(a.id);
                 const v = addedInfo ? 0 : visitsOf(a.id);
-                const stCount = addedInfo ? mbMissionBody(addedInfo.micro).length : stepsOf(a.id);
-                return `<div data-mo-row="${i}" draggable="true" style="display:flex;align-items:center;gap:6px;padding:3px 4px;border-bottom:1px solid #20262e;cursor:grab;">
+                const stCount = addedInfo ? addedBody(addedInfo).length : stepsOf(a.id);
+                const fl = nfzOf(a.id, addedInfo ? addedBody(addedInfo) : null);
+                const resumedInfo = moState.resumed.get(a.id);
+                return `<div data-mo-row="${i}" draggable="true" style="display:flex;align-items:center;gap:6px;padding:3px 4px;border-bottom:1px solid #20262e;cursor:grab;${fl.length ? 'background:rgba(255,82,82,0.14);' : ''}">
                     <span style="color:#567;">⠿</span>
                     <b style="width:18px;text-align:right;color:#7adfe6;">${i + 1}</b>
-                    <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(String(a.name || ''))}">${escapeHtml(String(a.name || ('pad ' + a.id)))}</span>
+                    <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;${fl.length ? 'color:#ff8a8a;font-weight:700;' : ''}" title="${escapeHtml(String(a.name || ''))}${fl.length ? ' — ' + escapeHtml(moNfzLabel(fl)) : ''}">${escapeHtml(String(a.name || ('pad ' + a.id)))}</span>
                     ${v > 1 ? `<span title="This pad's steps are split across ${v} separate visits in the current step order — Apply pulls them together at this slot" style="color:#ffb74d;font-weight:800;">×${v}</span>` : ''}
-                    ${addedInfo ? '<span style="color:#5fff5f;font-weight:800;" title="New pad — steps pulled from its micro mission on Apply">＋NEW</span>' : ''}
+                    ${addedInfo && !resumedInfo ? '<span style="color:#5fff5f;font-weight:800;" title="New pad — steps pulled from its micro mission on Apply">＋NEW</span>' : ''}
+                    ${resumedInfo ? '<span style="color:#ffb74d;font-weight:800;" title="Resuming — its frozen steps go back into the macro on Apply">▶</span>' : ''}
+                    ${fl.length ? `<span style="color:#ff5252;font-weight:800;" title="${escapeHtml(moNfzLabel(fl))} — the drone refuses to navigate here (Failed to navigate to destination) and the mission cannot continue past it. ⏸ this pad.">⛔</span>` : ''}
                     <span style="color:#789;">${stCount} st</span>
                     <button data-mo-up="${i}" ${i === 0 ? 'disabled' : ''} style="padding:0 4px;background:#20262e;border:1px solid #2a3340;color:#9ad;border-radius:3px;cursor:pointer;font-size:10px;">▲</button>
                     <button data-mo-dn="${i}" ${i === order.length - 1 ? 'disabled' : ''} style="padding:0 4px;background:#20262e;border:1px solid #2a3340;color:#9ad;border-radius:3px;cursor:pointer;font-size:10px;">▼</button>
+                    ${resumedInfo ? '' : `<button data-mo-pause="${i}" title="⏸ Pause this pad — its steps leave the saved macro on Apply and are remembered (frozen steps + slot) in the shared paused list; ▶ puts them back later" style="padding:0 5px;background:rgba(255,183,77,0.12);border:1px solid rgba(255,183,77,0.5);color:#ffb74d;border-radius:3px;cursor:pointer;font-size:10px;">⏸</button>`}
                     <button data-mo-del="${i}" title="Delete this pad from the macro — every one of its steps is removed on Apply (its micro mission is untouched)" style="padding:0 5px;background:rgba(255,82,82,0.12);border:1px solid rgba(255,82,82,0.45);color:#ff5252;border-radius:3px;cursor:pointer;font-size:10px;">✕</button>
                 </div>`;
             }).join('');
@@ -14588,40 +14744,154 @@
                     <span style="color:#789;">−${stepsOf(a.id)} st</span>
                     <button data-mo-undel="${i}" style="padding:0 6px;background:rgba(95,255,95,0.1);border:1px solid rgba(95,255,95,0.4);color:#5fff5f;border-radius:3px;cursor:pointer;font-size:10px;">↩</button>
                 </div>`).join('');
+            const pausedNow = moState.paused;
+            const stored = moState.store ? moPauseEntries(moState.store, mc.mission.name).filter(e => !moState.resumed.has(e.padId)) : [];
+            const pausedRows = pausedNow.map((a, i) => `<div style="display:flex;align-items:center;gap:6px;padding:3px 4px;border-bottom:1px solid #20262e;opacity:0.85;">
+                    <span style="color:#ffb74d;font-weight:800;">⏸</span>
+                    <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e0b060;">${escapeHtml(String(a.name || ('pad ' + a.id)))}</span>
+                    <span style="color:#789;">−${stepsOf(a.id)} st · on Apply</span>
+                    <button data-mo-unpause="${i}" title="Keep it in the macro after all" style="padding:0 6px;background:rgba(95,255,95,0.1);border:1px solid rgba(95,255,95,0.4);color:#5fff5f;border-radius:3px;cursor:pointer;font-size:10px;">↩</button>
+                </div>`).join('')
+                + stored.map((e, i) => `<div style="display:flex;align-items:center;gap:6px;padding:3px 4px;border-bottom:1px solid #20262e;">
+                    <span style="color:#ffb74d;font-weight:800;">⏸</span>
+                    <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e0b060;" title="Paused ${escapeHtml(moWhen(e.pausedAt))}${e.pausedBy ? ' by ' + escapeHtml(e.pausedBy) : ''} · slot #${(e.slot | 0) + 1}${e.nfz ? ' · ⛔ NFZ ' + escapeHtml(e.nfz) : ''}">${escapeHtml(String(e.padName || ('pad ' + e.padId)))}</span>
+                    ${e.nfz ? '<span style="color:#ff5252;font-weight:800;" title="Paused because of an NFZ — check it is gone before ▶">⛔</span>' : ''}
+                    <span style="color:#789;">${moWhen(e.pausedAt)} · ${e.steps.length} st</span>
+                    <button data-mo-resume="${i}" title="▶ Resume — put its frozen steps back at slot #${(e.slot | 0) + 1} on Apply (drag to change)" style="padding:0 6px;background:rgba(95,255,95,0.1);border:1px solid rgba(95,255,95,0.4);color:#5fff5f;border-radius:3px;cursor:pointer;font-size:10px;">▶</button>
+                    <button data-mo-forget="${i}" title="Forget this pause — the pad stays OUT of the macro and the frozen steps are discarded (its micro is untouched)" style="padding:0 5px;background:rgba(255,82,82,0.1);border:1px solid rgba(255,82,82,0.4);color:#ff8a8a;border-radius:3px;cursor:pointer;font-size:10px;">🗑</button>
+                </div>`).join('');
+            const storeNote = !moState.store ? '<span style="color:#789;">loading the shared paused list…</span>'
+                : (moState.store.source === 'github' ? '<span style="color:#5a9;">shared · all FDEs see this list</span>' : `<span style="color:#ffb74d;" title="${escapeHtml(moState.store.err || '')}">⚠ local only — ${escapeHtml(String(moState.store.err || '').slice(0, 70))}</span>`);
+            const banner = flagged.length ? `<div style="display:flex;align-items:center;gap:8px;margin:4px 0 6px;padding:4px 6px;background:rgba(255,82,82,0.16);border:1px solid rgba(255,82,82,0.55);border-radius:5px;">
+                    <span style="color:#ff8a8a;font-weight:800;">⛔ ${flagged.length} pad${flagged.length === 1 ? ' has' : 's have'} a step inside an NFZ</span>
+                    <span style="color:#caa;font-size:10px;flex:1;">The drone stops there ("Failed to navigate to destination") and the mission cannot continue past it.</span>
+                    <button data-mo-pause-all style="padding:1px 8px;background:rgba(255,183,77,0.16);border:1px solid rgba(255,183,77,0.6);color:#ffb74d;border-radius:4px;cursor:pointer;font-size:10px;font-weight:700;">⏸ Pause all flagged</button>
+                </div>` : '';
             el.innerHTML = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;">
                     <b style="color:#7adfe6;">⇅ Pad order — ${escapeHtml(String(mc.mission.name || ''))}</b>
                     <span data-mo-x style="margin-left:auto;cursor:pointer;color:#888;font-weight:800;">✕</span>
                 </div>
-                <div style="color:#789;font-size:10px;margin-bottom:4px;">The order actually FLOWN — the map badges renumber LIVE as you move rows. Drag rows, ▲▼, or <b style="color:#9ad;">M2 a glowing badge on the map</b> to type its new number. ✕ on a row (or Ctrl+M2 a badge) DELETES that pad; M2 a grey ✕ badge restores it; M2 an OUTSIDE pad on the map ADDS it (steps from its micro, green ＋ badge). Apply saves — each pad's steps move as one intact group.${leadN ? ` ${leadN} pre-pad step(s) stay first.` : ''}</div>
+                <div style="color:#789;font-size:10px;margin-bottom:4px;">The order actually FLOWN — the map badges renumber LIVE as you move rows. Drag rows, ▲▼, or <b style="color:#9ad;">M2 a glowing badge on the map</b> to type its new number. ✕ on a row (or Ctrl+M2 a badge) DELETES that pad; M2 a grey ✕ badge restores it; M2 an OUTSIDE pad on the map ADDS it (steps from its micro, green ＋ badge). Apply saves — each pad's steps move as one intact group.${leadN ? ` ${leadN} pre-pad step(s) stay first.` : ''} <b style="color:#ff8a8a;">Red row</b> = a step inside an NFZ; <b style="color:#ffb74d;">⏸</b> pauses that pad (out of the saved macro, remembered with its slot for everyone), <b style="color:#5fff5f;">▶</b> brings it back.</div>
+                ${banner}
                 ${rows}
                 ${removedL.length ? `<div style="color:#ff5252;font-weight:700;margin-top:5px;">Deleting ${removedL.length} pad(s):</div>${removedRows}` : ''}
+                <div style="display:flex;align-items:center;gap:6px;margin-top:6px;font-size:10px;"><b style="color:#ffb74d;">⏸ Paused</b> ${storeNote}</div>
+                ${pausedRows || '<div style="color:#567;font-size:10px;padding:2px 4px;">none — ⏸ on a row pauses it (removed from the saved macro, remembered here with its slot)</div>'}
                 <div style="display:flex;align-items:center;gap:8px;margin-top:7px;">
                     <button data-mo-reset ${changed ? '' : 'disabled'} style="padding:3px 9px;background:rgba(255,255,255,0.08);border:1px solid #2a3340;color:${changed ? '#9ad' : '#456'};border-radius:5px;cursor:pointer;font-size:10px;">↺ Reset</button>
                     <button data-mo-apply ${changed ? '' : 'disabled'} style="margin-left:auto;padding:4px 12px;background:${changed ? '#5fff5f' : '#2a3340'};border:none;color:${changed ? '#04220a' : '#567'};border-radius:5px;cursor:pointer;font-weight:800;">💾 Apply order</button>
                 </div>`;
             el.querySelector('[data-mo-x]').onclick = mcvCloseOrderPanel;
-            el.querySelector('[data-mo-reset]').onclick = () => { moState.order = mc.pads.slice(); moState.removed = []; render(); };
+            el.querySelector('[data-mo-reset]').onclick = () => {
+                moState.resumed.forEach((e, pid) => { moState.added.delete(pid); moDropTempBadge(pid); });
+                moState.resumed = new Map(); moState.paused = [];
+                moState.order = mc.pads.slice(); moState.removed = []; render();
+            };
             el.querySelector('[data-mo-apply]').onclick = async () => {
                 if (!order.length) { showToast('⇅ Cannot delete EVERY pad — at least one must remain.', '#ff9800', 4000); return; }
                 const ids = order.map(a => a.id);
-                const removedIds = new Set(removedL.map(a => a.id));
+                const pausedL = moState.paused.slice();
+                const removedIds = new Set(removedL.map(a => a.id).concat(pausedL.map(a => a.id)));
                 const delSteps = removedL.reduce((t, a) => t + stepsOf(a.id), 0);
+                const pauseSteps = pausedL.reduce((t, a) => t + stepsOf(a.id), 0);
+                const resumedL = Array.from(moState.resumed.values());
                 const addedSteps = new Map();
-                moState.added.forEach((info, pid) => addedSteps.set(pid, mbMissionBody(info.micro)));
+                moState.added.forEach((info, pid) => addedSteps.set(pid, addedBody(info)));
                 let addN = 0; addedSteps.forEach(st2 => { addN += st2.length; });
                 const ok = await mcvApplyOrder(mc, ids,
                     `⇅ Apply pad order${removedIds.size ? ' + DELETIONS' : ''}${addedSteps.size ? ' + ADDITIONS' : ''} to "${mc.mission.name}"?\n\n`
                     + `${order.length} pad(s) — each pad's steps stay intact and move as one group`
                     + ` (a pad with split visits gets all its steps consolidated at its new slot).\n`
                     + (removedIds.size ? `✕ DELETING ${removedIds.size} pad(s) (−${delSteps} steps): ${removedL.map(a => a.name || a.id).join(', ')} — their micros are untouched.\n` : '')
-                    + (addedSteps.size ? `＋ ADDING ${addedSteps.size} pad(s) (+${addN} steps from their micros): ${Array.from(moState.added.values()).map(x => x.pad.name || x.pad.id).join(', ')}.\n` : '')
+                    + (pausedL.length ? `⏸ PAUSING ${pausedL.length} pad(s) (−${pauseSteps} steps, remembered with their slots): ${pausedL.map(a => a.name || a.id).join(', ')}.\n` : '')
+                    + (resumedL.length ? `▶ RESUMING ${resumedL.length} pad(s) (frozen steps back in): ${resumedL.map(e => e.padName || e.padId).join(', ')}.\n` : '')
+                    + (addedSteps.size > resumedL.length ? `＋ ADDING ${addedSteps.size - resumedL.length} pad(s) (steps from their micros): ${Array.from(moState.added.values()).filter(x => !moState.resumed.has(x.pad.id)).map(x => x.pad.name || x.pad.id).join(', ')}.\n` : '')
                     + `Mission id + name unchanged. A JSON backup downloads first.`, removedIds, addedSteps);
-                if (ok) mcvCloseOrderPanel();
+                if (!ok) return;
+                // the macro saved — now commit the paused list (shared file + local mirror)
+                if (pausedL.length || resumedL.length) {
+                    try {
+                        const store = moState.store || await moPauseLoad(siteIdForPause);
+                        const name = mc.mission.name;
+                        let list = moPauseEntries(store, name).slice();
+                        const resumedIds = new Set(resumedL.map(e => e.padId));
+                        list = list.filter(e => !resumedIds.has(e.padId));
+                        const now = new Date().toISOString();
+                        pausedL.forEach(a => {
+                            const slot = mc.pads.findIndex(p => p.id === a.id);
+                            const flags = nfzOf(a.id);
+                            list = list.filter(e => e.padId !== a.id);
+                            list.push({ padId: a.id, padName: a.name || '', slot: slot < 0 ? mc.pads.length : slot, afterPadId: slot > 0 ? mc.pads[slot - 1].id : null,
+                                steps: padSteps(a.id).map(pcmNormStep), pausedAt: now, pausedBy: mbPauseWho(), reason: flags.length ? 'nfz' : 'manual', nfz: flags.length ? moNfzNames(flags).join(', ') : '' });
+                        });
+                        moPauseSetEntries(store, name, list);
+                        const msg = `pause: ${name} — ${pausedL.length ? '⏸ ' + pausedL.map(a => a.name || a.id).join(', ') : ''}${pausedL.length && resumedL.length ? ' · ' : ''}${resumedL.length ? '▶ ' + resumedL.map(e => e.padName || e.padId).join(', ') : ''} (${moEnvSite(siteIdForPause)})`;
+                        await moPauseSave(siteIdForPause, store, msg);
+                        showToast(store.source === 'github' ? `⏸ Paused list updated for everyone (${list.length} paused in "${name}").` : `⚠ Paused list saved on THIS browser only — ${store.err || 'GitHub unavailable'}.`, store.source === 'github' ? '#ffb74d' : '#ff9800', 7000);
+                    } catch (e) {
+                        console.warn(`${TAG} [⏸] paused-list commit failed (macro WAS saved)`, e);
+                        showToast('⚠ Macro saved, but the paused list could not be written (see console) — the pad is out of the macro with no ▶ memory.', '#ff5252', 9000);
+                    }
+                }
+                mcvCloseOrderPanel();
             };
             el.querySelectorAll('[data-mo-up]').forEach(b => b.onclick = () => { const i = Number(b.getAttribute('data-mo-up')); const t = order.splice(i, 1)[0]; order.splice(i - 1, 0, t); render(); });
             el.querySelectorAll('[data-mo-dn]').forEach(b => b.onclick = () => { const i = Number(b.getAttribute('data-mo-dn')); const t = order.splice(i, 1)[0]; order.splice(i + 1, 0, t); render(); });
             el.querySelectorAll('[data-mo-del]').forEach(b => b.onclick = () => { const i = Number(b.getAttribute('data-mo-del')); moPadGesture(order[i].id, true); });
             el.querySelectorAll('[data-mo-undel]').forEach(b => b.onclick = () => { const i = Number(b.getAttribute('data-mo-undel')); moState.order.push(moState.removed.splice(i, 1)[0]); render(); });
+            // ⏸ stage a pause (an ＋NEW pad is simply dropped — nothing to remember)
+            const stagePause = (padId) => {
+                const idx = moState.order.findIndex(a => a.id === padId); if (idx < 0) return;
+                const padObj = moState.order.splice(idx, 1)[0];
+                if (moState.added.has(padId)) { moState.added.delete(padId); moDropTempBadge(padId); return; }
+                moState.paused.push(padObj);
+            };
+            el.querySelectorAll('[data-mo-pause]').forEach(b => b.onclick = () => { const i = Number(b.getAttribute('data-mo-pause')); stagePause(order[i].id); render(); });
+            const pauseAll = el.querySelector('[data-mo-pause-all]');
+            if (pauseAll) pauseAll.onclick = () => { flagged.map(a => a.id).forEach(stagePause); render(); };
+            el.querySelectorAll('[data-mo-unpause]').forEach(b => b.onclick = () => { const i = Number(b.getAttribute('data-mo-unpause')); moState.order.push(moState.paused.splice(i, 1)[0]); render(); });
+            // ▶ stage a resume: frozen steps back at the remembered slot (after its old neighbour when it still exists)
+            el.querySelectorAll('[data-mo-resume]').forEach(b => b.onclick = async () => {
+                const e = stored[Number(b.getAttribute('data-mo-resume'))]; if (!e) return;
+                if (mc.pads.some(p => p.id === e.padId) || moState.order.some(p => p.id === e.padId)) {
+                    showToast(`"${e.padName || e.padId}" is already in the macro — forgetting the stale pause.`, '#ff9800', 5000);
+                    moPauseSetEntries(moState.store, mc.mission.name, moPauseEntries(moState.store, mc.mission.name).filter(x => x.padId !== e.padId));
+                    await moPauseSave(siteIdForPause, moState.store, `pause: ${mc.mission.name} — forget stale ${e.padName || e.padId}`);
+                    render(); return;
+                }
+                let steps = e.steps.slice();
+                const asset = ((data.ent && data.ent.assets) || []).find(a => a.id === e.padId) || { id: e.padId, name: e.padName || ('pad ' + e.padId), ring: null };
+                // micro drift: offer the pad's CURRENT micro when it differs from the frozen steps
+                try {
+                    const micros = ((data.det && data.det.solos) || []).filter(sl => sl.pad.id === e.padId).map(sl => sl.mission);
+                    const micro = micros.length > 1 ? (rankMatchMissions(asset.name, micros)[0] || micros[0]) : micros[0];
+                    if (micro) {
+                        const cur = mbMissionBody(micro);
+                        const same = cur.length === steps.length && cur.every((s, k) => mcvStepSig(s) === mcvStepSig(steps[k]));
+                        if (!same && cur.length) {
+                            const useFrozen = window.confirm(`"${asset.name}" — its micro mission changed since it was paused (${steps.length} frozen steps vs ${cur.length} now).\n\nOK = put back the FROZEN steps (exactly what was flown before)\nCancel = pull the CURRENT micro instead`);
+                            if (!useFrozen) steps = cur;
+                        }
+                    }
+                } catch (e2) { console.warn(`${TAG} [⏸] micro drift check failed — using frozen steps`, e2); }
+                const nf = moNfzFlags(steps, data.ent);
+                if (nf.length && !window.confirm(`⛔ "${asset.name}" still has ${nf.length} step(s) inside NFZ ${moNfzNames(nf).join(', ')} — the drone will stop there again.\n\nResume anyway?`)) return;
+                moState.nfz.delete(e.padId);
+                moState.added.set(e.padId, { pad: asset, steps, micro: null });
+                moState.resumed.set(e.padId, e);
+                let at = e.afterPadId != null ? moState.order.findIndex(p => p.id === e.afterPadId) + 1 : -1;
+                if (at <= 0) at = Math.min(Math.max(0, e.slot | 0), moState.order.length);
+                moState.order.splice(at, 0, asset);
+                moTempBadge(asset, '#ffb74d');
+                render();
+            });
+            el.querySelectorAll('[data-mo-forget]').forEach(b => b.onclick = async () => {
+                const e = stored[Number(b.getAttribute('data-mo-forget'))]; if (!e) return;
+                if (!window.confirm(`Forget the pause on "${e.padName || e.padId}"?\n\nThe pad stays OUT of "${mc.mission.name}" and its ${e.steps.length} frozen steps are discarded. (Its micro mission is untouched — you can re-add it later with M2 on the map, from the micro.)`)) return;
+                moPauseSetEntries(moState.store, mc.mission.name, moPauseEntries(moState.store, mc.mission.name).filter(x => x.padId !== e.padId));
+                await moPauseSave(siteIdForPause, moState.store, `pause: ${mc.mission.name} — forget ${e.padName || e.padId}`);
+                render();
+            });
             el.querySelectorAll('[data-mo-row]').forEach(r => {
                 r.ondragstart = (e) => { dragIdx = Number(r.getAttribute('data-mo-row')); try { e.dataTransfer.setData('text/plain', ''); } catch (e2) {} };
                 r.ondragover = (e) => e.preventDefault();
