@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.117
+// @version      3.118
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.117';
+    const SCRIPT_VERSION = '3.118';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -12305,6 +12305,7 @@
         el.style.cssText = 'position:fixed;left:12px;top:70px;z-index:2147483599;max-height:60vh;display:flex;flex-direction:column;overflow:hidden;background:rgba(16,19,26,0.92);border:1px solid #2a3340;border-radius:8px;padding:8px 11px;color:#e6e6e6;font:11px "Lato","Segoe UI",sans-serif;box-shadow:0 4px 16px rgba(0,0,0,0.6);';
         const COLORS2 = ['#7adfe6', '#ffd54f', '#ff8ad2', '#9dff8a', '#c39dff', '#ffab73', '#8ab6ff', '#f3ff7a', '#ff9e9e', '#7affc9'];
         const forcedSet = mcvForceMacros();
+        const nfzBy = mcvNfzByMacro(det, mcv.data && mcv.data.ent);   // v3.118 ⛔ chips
         el.innerHTML = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;"><b style="color:#7adfe6;">🧩 Macro coverage</b><button data-mcv-report title="Copy the coverage report (Name / Classification / Captured / Battery / Section / Mission / Order) — colored cells, paste into Google Sheets" style="padding:1px 7px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">📋 Report</button><button data-mcv-vis-all title="Show every macro on the map" style="padding:1px 6px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">All</button><button data-mcv-vis-none title="Hide every macro — then re-check just the ones you want" style="padding:1px 6px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">None</button><button data-mcv-split-all title="✂ Split EVERY macro into per-pad micro missions in ONE combined review — pads with existing micros, name collisions, or a better copy in another macro default-skipped. Create-only." style="padding:1px 6px;background:rgba(255,138,210,0.12);border:1px solid rgba(255,138,210,0.45);color:#ff8ad2;border-radius:4px;cursor:pointer;font-size:10px;">✂ All</button><button data-mcv-sto-all title="🪄 Run the Step Optimizer analysis on EVERY macro — one ranked report: route savings, far-first fixes, wrap scrambles, duplicates, standoff violations, nav consolidations. Open any row to review + apply." style="padding:1px 6px;background:rgba(195,157,255,0.12);border:1px solid rgba(195,157,255,0.45);color:#c39dff;border-radius:4px;cursor:pointer;font-size:10px;">🪄 All</button><button data-mcv-remerge-all title="⟳ Re-merge EVERY macro from its pads' current micro missions in one review — only pads whose micro changed are pulled; pad orders, names and ids unchanged. One combined backup, sequential apply with per-macro verify." style="padding:1px 6px;background:rgba(255,213,79,0.12);border:1px solid rgba(255,213,79,0.45);color:#ffd54f;border-radius:4px;cursor:pointer;font-size:10px;">⟳ All</button><span data-mcv-x style="margin-left:auto;cursor:pointer;color:#888;font-weight:800;">✕</span></div>`
             + `<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;"><input data-mcv-search type="search" placeholder="search missions…" style="flex:1;min-width:120px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;padding:2px 5px;"><span data-mcv-count style="color:#789;font-size:10px;white-space:nowrap;">${det.macros.length} macros</span></div>`
             + `<div data-mcv-body style="overflow:auto;flex:1;min-height:0;">`
@@ -12353,10 +12354,15 @@
                     // v2.66: 🪄 step optimizer (feature #244) — always available
                     const stoBtn = `<button data-mcv-sto="${mc.mission.id}" data-mcv-sto-col="${COLORS2[i % COLORS2.length]}" title="🪄 Step Optimizer — reorder the navs/steps INSIDE this macro for the shortest legal route (intertwined pads interleave), flag snapshot standoff (info-only — pairings are pilot-tuned, moves are strictly opt-in), rebuild scrambled wraps, drop stacked duplicates. Preview first; Apply saves in place with backup + verify." style="padding:0 5px;background:rgba(195,157,255,0.12);border:1px solid rgba(195,157,255,0.45);color:#c39dff;border-radius:4px;cursor:pointer;font-size:10px;">🪄</button>`;
                     const nmBtn = `<button data-mcv-notmacro="${mc.mission.id}" title="🚫 Not a macro — this is ONE pad's mission that merely brushes a neighbouring pad's 150-ft halo. Hides it from this list and counts it as that pad's micro (per site, this install; undo at the bottom)." style="padding:0 5px;background:rgba(255,95,95,0.1);border:1px solid rgba(255,95,95,0.4);color:#ff8a8a;border-radius:4px;cursor:pointer;font-size:10px;">🚫</button>`;
-                    return `<div data-mcv-row="${mc.mission.id}" data-mcv-name="${escapeHtml(String(mc.mission.name || '').toLowerCase())}" style="display:flex;align-items:center;gap:6px;margin:2px 0;opacity:${vis ? 1 : 0.38};"><input type="checkbox" data-mcv-vis="${mc.mission.id}" ${vis ? 'checked' : ''} title="Show/hide this macro on the map" style="margin:0;cursor:pointer;accent-color:${COLORS2[i % COLORS2.length]};"><span data-mcv-solo="${mc.mission.id}" title="Solo — show ONLY this macro (click again to show all)" style="width:10px;height:10px;border-radius:2px;background:${COLORS2[i % COLORS2.length]};flex:none;cursor:pointer;"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:170px;">${escapeHtml(String(mc.mission.name || ''))}</span>${forcedSet.has(String(mc.mission.id)) ? '<span title="📌 forced macro (rules skipped) — undo at the bottom">📌</span>' : ''}${reBtn}${orderBtn}${remergeBtn}${stoBtn}${splitBtn}${nmBtn}<b style="margin-left:auto;padding-left:8px;">${mc.pads.length}</b></div>${auditLine ? auditLine.replace('style="', `style="opacity:${vis ? 1 : 0.38};`) : ''}`;
+                    const nz = nfzBy.get(mc.mission.id);
+                    const nfzChip = nz ? `<span data-mcv-order="${mc.mission.id}" title="⛔ ${nz.length} pad${nz.length === 1 ? '' : 's'} with a step inside an NFZ — the drone stops there. Click → ⇅ and ⏸ it.\n${escapeHtml(nz.map(p => `${p.name} (${p.n} step${p.n === 1 ? '' : 's'} · ${p.nfz.join(', ')})`).join('\n'))}" style="padding:0 5px;background:rgba(255,82,82,0.18);border:1px solid rgba(255,82,82,0.6);color:#ff8a8a;border-radius:4px;cursor:pointer;font-size:10px;font-weight:800;">⛔${nz.length}</span>` : '';
+                    const pauseChip = `<span data-mcv-pchip="${mc.mission.id}"></span>`;
+                    return `<div data-mcv-row="${mc.mission.id}" data-mcv-name="${escapeHtml(String(mc.mission.name || '').toLowerCase())}" style="display:flex;align-items:center;gap:6px;margin:2px 0;opacity:${vis ? 1 : 0.38};${nz ? 'background:rgba(255,82,82,0.08);border-radius:4px;' : ''}"><input type="checkbox" data-mcv-vis="${mc.mission.id}" ${vis ? 'checked' : ''} title="Show/hide this macro on the map" style="margin:0;cursor:pointer;accent-color:${COLORS2[i % COLORS2.length]};"><span data-mcv-solo="${mc.mission.id}" title="Solo — show ONLY this macro (click again to show all)" style="width:10px;height:10px;border-radius:2px;background:${COLORS2[i % COLORS2.length]};flex:none;cursor:pointer;"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:170px;">${escapeHtml(String(mc.mission.name || ''))}</span>${forcedSet.has(String(mc.mission.id)) ? '<span title="📌 forced macro (rules skipped) — undo at the bottom">📌</span>' : ''}${nfzChip}${pauseChip}${reBtn}${orderBtn}${remergeBtn}${stoBtn}${splitBtn}${nmBtn}<b style="margin-left:auto;padding-left:8px;">${mc.pads.length}</b></div>${auditLine ? auditLine.replace('style="', `style="opacity:${vis ? 1 : 0.38};`) : ''}`;
                 }).join('')
                 : '<div style="color:#888;">No macro missions yet (≥2 pads in one mission).</div>')
             + '<div data-mcv-others></div>'
+            + (nfzBy.size ? `<div style="color:#ff8a8a;margin-top:5px;font-weight:700;">⛔ ${nfzBy.size} macro${nfzBy.size === 1 ? '' : 's'} with a pad inside an NFZ — click the ⛔ chip → ⇅ → ⏸</div>` : '')
+            + `<div data-mcv-paused-sum></div>`
             + `<div style="color:#ffb74d;margin-top:5px;">⬜ ${det.todo.length} pad(s) with missions, not in any macro</div>`
             + (() => { const t = mcvTimeCfg(); const perDay = mcvDays(1).perDay; return `<div style="display:flex;gap:5px;align-items:center;margin-top:5px;font-size:10px;color:#9ad;flex-wrap:wrap;">`
                 + `flight <input data-mcv-t="flightMin" type="number" value="${t.flightMin}" style="width:34px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;">m`
@@ -12480,6 +12486,25 @@
             if (mcv.data && mcv.data.det) { mcvClear(); mcvDraw(mcv.data.det); }
         });
         mcv.legendEl = el;
+        // v3.118: ⏸ chips from the shared paused list (async — the file lives in the data repo)
+        try {
+            const fillPaused = (st) => {
+                if (!mcv.legendEl || !st) return;
+                let macrosWithPauses = 0, padsPaused = 0;
+                mcv.legendEl.querySelectorAll('[data-mcv-pchip]').forEach(sp => {
+                    const mcRow = det.macros.find(m => String(m.mission.id) === sp.getAttribute('data-mcv-pchip'));
+                    const list = mcRow ? moPauseEntries(st, mcRow.mission.name) : [];
+                    if (!list.length) { sp.innerHTML = ''; return; }
+                    macrosWithPauses++; padsPaused += list.length;
+                    sp.innerHTML = `<span data-mcv-order="${mcRow.mission.id}" title="⏸ ${list.length} paused pad${list.length === 1 ? '' : 's'} — click → ⇅ to ▶ resume\n${escapeHtml(list.map(e => `${e.padName || e.padId} · ${moWhen(e.pausedAt)}${e.pausedBy ? ' · ' + e.pausedBy : ''}${e.note ? ' · 📝 ' + e.note : (e.nfz ? ' · ⛔ ' + e.nfz : '')}`).join('\n'))}" style="padding:0 5px;background:rgba(255,183,77,0.16);border:1px solid rgba(255,183,77,0.55);color:#ffb74d;border-radius:4px;cursor:pointer;font-size:10px;font-weight:800;">⏸${list.length}</span>`;
+                    sp.querySelectorAll('[data-mcv-order]').forEach(b => b.onclick = () => mcvOpenOrderPanel(mcRow.mission.id));
+                });
+                const sum = mcv.legendEl.querySelector('[data-mcv-paused-sum]');
+                if (sum) sum.innerHTML = macrosWithPauses ? `<div style="color:#ffb74d;margin-top:3px;">⏸ ${padsPaused} paused pad${padsPaused === 1 ? '' : 's'} in ${macrosWithPauses} macro${macrosWithPauses === 1 ? '' : 's'}${st.source === 'github' ? '' : ' <span style="color:#ff9800;">(local list only)</span>'}</div>` : '';
+            };
+            if (mcv.data && mcv.data.pauseStore) fillPaused(mcv.data.pauseStore);
+            else moPauseLoad(getCurrentSiteID()).then(st => { if (mcv.data) mcv.data.pauseStore = st; fillPaused(st); }).catch(e => console.warn(`${TAG} [⏸] paused list unavailable for the 🧩 chips`, e));
+        } catch (e) { console.warn(`${TAG} [⏸] chip fill failed`, e); }
         // subtle dashed white outline on not-yet-covered pads — the TODO list
         det.todo.forEach(a => {
             try { mcv.layers.push(L.polygon(a.ring.map(p => [p.lat, p.lng]), { color: '#ffffff', weight: 2, dashArray: '2 6', opacity: 0.65, fill: false, interactive: false }).addTo(map)); } catch (e) {}
@@ -14638,6 +14663,29 @@
         fetch('/get_user_details/', { credentials: 'include' }).then(r => r.ok ? r.json() : null).then(j => {
             if (j && typeof j === 'object') mbPauseWhoCache = String(j.username || j.email || (j.user && (j.user.username || j.user.email)) || '');
         }).catch(e => console.warn(`${TAG} [⏸] user lookup failed — pauses will carry no name`, e));
+    }
+    // v3.118: NFZ scan for EVERY macro (🧩 list chips) — per pad block, cached on the detection result.
+    function mcvNfzByMacro(det, ent) {
+        if (!det) return new Map();
+        if (det._nfzBy) return det._nfzBy;
+        const out = new Map();
+        (det.macros || []).forEach(mc => {
+            try {
+                const byPad = new Map();
+                (mc.blocks || []).forEach(b => { if (b.aId == null) return; if (!byPad.has(b.aId)) byPad.set(b.aId, []); b.steps.forEach(st => byPad.get(b.aId).push(st)); });
+                const pads = [];
+                byPad.forEach((steps, aId) => {
+                    const fl = moNfzFlags(steps, ent);
+                    if (!fl.length) return;
+                    const a = mc.pads.find(p => p.id === aId);
+                    pads.push({ id: aId, name: a ? (a.name || String(aId)) : String(aId), n: fl.length, nfz: moNfzNames(fl) });
+                });
+                if (pads.length) out.set(mc.mission.id, pads);
+            } catch (e) { console.warn(`${TAG} [⏸] NFZ scan failed for "${mc.mission.name}"`, e); }
+        });
+        det._nfzBy = out;
+        if (out.size) console.log(`${TAG} [⏸] ${out.size} macro(s) have a pad inside an NFZ: ${Array.from(out.entries()).map(([id, pads]) => { const mc = det.macros.find(m => m.mission.id === id); return `"${mc ? mc.mission.name : id}" (${pads.map(p => p.name).join(', ')})`; }).join(' · ')}`);
+        return out;
     }
     function moPauseEntries(store, macroName) { return (store && store.data && store.data.macros[macroName]) || []; }
     function moPauseSetEntries(store, macroName, list) { if (list && list.length) store.data.macros[macroName] = list; else delete store.data.macros[macroName]; }

@@ -1,4 +1,4 @@
-## 2026-11-04 — 🧩 Mission Bank Tools latest v3.112 → v3.117 (latest only) — ⏸ Pause / ▶ Resume pads + red NFZ rows in the ⇅ Pad order panel (#327)
+## 2026-11-04 — 🧩 Mission Bank Tools latest v3.112 → v3.118 (latest only) — ⏸ Pause / ▶ Resume pads + red NFZ rows in the ⇅ Pad order panel (#327)
 
 - **Red rows.** Every pad row in ⇅ Pad order is now checked against the site's NFZs with the same 🚩 step check the save rails use. A pad with a nav or flag pole INSIDE an NFZ turns red with a ⛔ and the NFZ name on hover, and a banner at the top counts them with a **⏸ Pause all flagged** button. This is the rig-on-the-pad case: the drone stops there with "Failed to navigate to destination" and the mission cannot continue past it.
 - **⏸ Pause.** New ⏸ button on each row. On Apply the pad's steps leave the saved macro (like ✕) but the pad is REMEMBERED — frozen steps, its slot, who paused it, when, and the NFZ name — in a shared per-site file in the data repo (`pauses/<site>.json`, needs the Control Panel GitHub token; without one it stays on this browser and the panel says so). Every FDE opening the same macro sees the same ⏸ Paused list.
@@ -9,6 +9,7 @@
 - **v3.115** — FIX: M2 on the map while ⇅ is open popped the Asset Inspector instead of adding / renumbering the pad (its window-level right-click handler runs first). ⇅ now raises the same shared flag 🔗 merge mode uses, so the inspector stands down while the panel is open.
 - **v3.116** — ⏸ asks for a short note (pre-filled "Rig on pad — <NFZ>" on a red row; Cancel = don't pause; one note for ⏸ Pause all). The paused row shows 📝 + the note, and hovering the name gives the full record: paused when, by whom, slot, step count, NFZ, note. FIX: the ⇅ Apply verify looked the mission up by its OLD id — Percepto mints a new id on every save — so a good save reported "verify mismatched"; it now falls back to the mission NAME and logs the id change.
 - **v3.117** — the staged (not yet applied) paused row's hover now says who will be recorded and that the time is stamped at save, plus slot, steps and the note.
+- **v3.118** — one place to see it all: every macro row in the 🧩 list gets a red **⛔N** chip when N of its pads have a step inside an NFZ (hover lists pad + NFZ names; click opens ⇅) and an amber **⏸N** chip when it has paused pads (hover shows pad · date · who · note; click opens ⇅). Summary lines under the list count both.
 
 ## 2026-11-03 — 🔎 Site Setup Tools latest v4.497 (latest only) — External ID in the right-click inspector
 
