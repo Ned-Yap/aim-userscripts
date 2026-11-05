@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.115
+// @version      3.116
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.115';
+    const SCRIPT_VERSION = '3.116';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -13181,8 +13181,11 @@
             // verify: fresh fetch → same pad set, new order, same step count
             await new Promise(r => setTimeout(r, 1200));
             const after = await mbFetchMissionsFull(getCurrentSiteID());
-            const m2 = after.find(x => x.id === m.id);
+            // v3.116: Percepto mints a NEW mission id on save — verify by id, else by NAME
+            let m2 = after.find(x => x.id === m.id);
+            if (!m2) { m2 = after.find(x => x.name === m.name); if (m2) console.log(`${TAG} [mcv] "${m.name}" id ${m.id} → ${m2.id} on save (verified by name)`); }
             let good = false;
+            if (!m2) console.warn(`${TAG} [mcv] verify: "${m.name}" not found after save by id ${m.id} or name`);
             if (m2) {
                 const det2 = mcvDetect(data.ent, [m2]);
                 const mc2 = det2.macros[0];
@@ -14642,6 +14645,11 @@
     function moNfzFlags(steps, ent) { return mbStepFlags(steps, ent).filter(f => f.tier === 'nfz'); }
     function moNfzNames(flags) { return Array.from(new Set(flags.map(f => f.zoneName || (f.zoneId != null ? '#' + f.zoneId : 'NFZ')))); }
     function moNfzLabel(flags) { return `${flags.length} step${flags.length === 1 ? '' : 's'} inside NFZ ${moNfzNames(flags).join(', ')}`; }
+    function moPauseTitle(e) {
+        let when = String(e.pausedAt || '');
+        try { const d = new Date(e.pausedAt); if (!isNaN(d)) when = d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); } catch (e2) {}
+        return `Paused ${when}${e.pausedBy ? ' by ' + e.pausedBy : ''} · slot #${(e.slot | 0) + 1} · ${e.steps.length} steps${e.nfz ? ' · ⛔ NFZ ' + e.nfz : ''}${e.note ? '\n📝 ' + e.note : ''}`;
+    }
     function moWhen(iso) { try { const d = new Date(iso); return isNaN(d) ? String(iso || '') : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }); } catch (e) { return String(iso || ''); } }
     function moDropTempBadge(padId) {
         const st = moState; if (!st || !st.tempBadges) return;
@@ -14682,7 +14690,7 @@
             + 'font:11px "Lato","Segoe UI",sans-serif;box-shadow:0 6px 22px rgba(0,0,0,0.7);';
         let dragIdx = null;
         moState = { missionId, mc, order: mc.pads.slice(), removed: [], added: new Map(), tempBadges: [], render: null,
-            paused: [], resumed: new Map(), store: null, nfz: new Map() };   // v3.112 ⏸/▶
+            paused: [], resumed: new Map(), store: null, nfz: new Map(), pauseNotes: new Map() };   // v3.112 ⏸/▶ · v3.116 notes
         const siteIdForPause = getCurrentSiteID();
         mbPauseWhoPrefetch();
         moPauseLoad(siteIdForPause).then(st => { if (moState && moState.missionId === missionId) { moState.store = st; if (moState.render) moState.render(); } })
@@ -14750,14 +14758,14 @@
             const pausedRows = pausedNow.map((a, i) => `<div style="display:flex;align-items:center;gap:6px;padding:3px 4px;border-bottom:1px solid #20262e;opacity:0.85;">
                     <span style="color:#ffb74d;font-weight:800;">⏸</span>
                     <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e0b060;">${escapeHtml(String(a.name || ('pad ' + a.id)))}</span>
-                    <span style="color:#789;">−${stepsOf(a.id)} st · on Apply</span>
+                    <span style="color:#789;" title="${escapeHtml(moState.pauseNotes.get(a.id) || '')}">${moState.pauseNotes.get(a.id) ? '📝 ' : ''}−${stepsOf(a.id)} st · on Apply</span>
                     <button data-mo-unpause="${i}" title="Keep it in the macro after all" style="padding:0 6px;background:rgba(95,255,95,0.1);border:1px solid rgba(95,255,95,0.4);color:#5fff5f;border-radius:3px;cursor:pointer;font-size:10px;">↩</button>
                 </div>`).join('')
                 + stored.map((e, i) => `<div style="display:flex;align-items:center;gap:6px;padding:3px 4px;border-bottom:1px solid #20262e;">
                     <span style="color:#ffb74d;font-weight:800;">⏸</span>
-                    <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e0b060;" title="Paused ${escapeHtml(moWhen(e.pausedAt))}${e.pausedBy ? ' by ' + escapeHtml(e.pausedBy) : ''} · slot #${(e.slot | 0) + 1}${e.nfz ? ' · ⛔ NFZ ' + escapeHtml(e.nfz) : ''}">${escapeHtml(String(e.padName || ('pad ' + e.padId)))}</span>
+                    <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e0b060;" title="${escapeHtml(moPauseTitle(e))}">${escapeHtml(String(e.padName || ('pad ' + e.padId)))}</span>
                     ${e.nfz ? '<span style="color:#ff5252;font-weight:800;" title="Paused because of an NFZ — check it is gone before ▶">⛔</span>' : ''}
-                    <span style="color:#789;">${moWhen(e.pausedAt)} · ${e.steps.length} st</span>
+                    <span style="color:#789;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(moPauseTitle(e))}">${e.note ? '📝 ' + escapeHtml(String(e.note).slice(0, 26)) : moWhen(e.pausedAt) + ' · ' + e.steps.length + ' st'}</span>
                     <button data-mo-resume="${i}" title="▶ Resume — put its frozen steps back at slot #${(e.slot | 0) + 1} on Apply (drag to change)" style="padding:0 6px;background:rgba(95,255,95,0.1);border:1px solid rgba(95,255,95,0.4);color:#5fff5f;border-radius:3px;cursor:pointer;font-size:10px;">▶</button>
                     <button data-mo-forget="${i}" title="Forget this pause — the pad stays OUT of the macro and the frozen steps are discarded (its micro is untouched)" style="padding:0 5px;background:rgba(255,82,82,0.1);border:1px solid rgba(255,82,82,0.4);color:#ff8a8a;border-radius:3px;cursor:pointer;font-size:10px;">🗑</button>
                 </div>`).join('');
@@ -14787,7 +14795,7 @@
             el.querySelector('[data-mo-x]').onclick = mcvCloseOrderPanel;
             el.querySelector('[data-mo-reset]').onclick = () => {
                 moState.resumed.forEach((e, pid) => { moState.added.delete(pid); moDropTempBadge(pid); });
-                moState.resumed = new Map(); moState.paused = [];
+                moState.resumed = new Map(); moState.paused = []; moState.pauseNotes = new Map();
                 moState.order = mc.pads.slice(); moState.removed = []; render();
             };
             el.querySelector('[data-mo-apply]').onclick = async () => {
@@ -14809,7 +14817,7 @@
                     const slot = mc.pads.findIndex(p => p.id === a.id);
                     const flags = nfzOf(a.id);
                     return { padId: a.id, padName: a.name || '', slot: slot < 0 ? mc.pads.length : slot, afterPadId: slot > 0 ? mc.pads[slot - 1].id : null,
-                        steps: padSteps(a.id).map(pcmNormStep), pausedAt: nowIso, pausedBy: mbPauseWho(), reason: flags.length ? 'nfz' : 'manual', nfz: flags.length ? moNfzNames(flags).join(', ') : '' };
+                        steps: padSteps(a.id).map(pcmNormStep), pausedAt: nowIso, pausedBy: mbPauseWho(), reason: flags.length ? 'nfz' : 'manual', nfz: flags.length ? moNfzNames(flags).join(', ') : '', note: moState.pauseNotes.get(a.id) || '' };
                 });
                 const resumedIds = new Set(resumedL.map(e => e.padId));
                 let addN = 0; addedSteps.forEach(st2 => { addN += st2.length; });
@@ -14846,16 +14854,32 @@
             el.querySelectorAll('[data-mo-del]').forEach(b => b.onclick = () => { const i = Number(b.getAttribute('data-mo-del')); moPadGesture(order[i].id, true); });
             el.querySelectorAll('[data-mo-undel]').forEach(b => b.onclick = () => { const i = Number(b.getAttribute('data-mo-undel')); moState.order.push(moState.removed.splice(i, 1)[0]); render(); });
             // ⏸ stage a pause (an ＋NEW pad is simply dropped — nothing to remember)
-            const stagePause = (padId) => {
+            const stagePause = (padId, note) => {
                 const idx = moState.order.findIndex(a => a.id === padId); if (idx < 0) return;
                 const padObj = moState.order.splice(idx, 1)[0];
                 if (moState.added.has(padId)) { moState.added.delete(padId); moDropTempBadge(padId); return; }
                 moState.paused.push(padObj);
+                if (note) moState.pauseNotes.set(padId, note); else moState.pauseNotes.delete(padId);
             };
-            el.querySelectorAll('[data-mo-pause]').forEach(b => b.onclick = () => { const i = Number(b.getAttribute('data-mo-pause')); stagePause(order[i].id); render(); });
+            // v3.116: a note travels with the pause (who + when are recorded automatically). Cancel = don't pause.
+            const askNote = (label, flags) => {
+                const dflt = flags && flags.length ? `Rig on pad — ${moNfzNames(flags).join(', ')}` : '';
+                const n = window.prompt(`⏸ Pause ${label}\n\nWhy? (shown to every FDE on hover; who/when are added automatically)`, dflt);
+                return n === null ? null : n.trim();
+            };
+            el.querySelectorAll('[data-mo-pause]').forEach(b => b.onclick = () => {
+                const i = Number(b.getAttribute('data-mo-pause')); const a = order[i]; if (!a) return;
+                const note = askNote(`"${a.name || a.id}"`, nfzOf(a.id, moState.added.has(a.id) ? addedBody(moState.added.get(a.id)) : null));
+                if (note === null) return;
+                stagePause(a.id, note); render();
+            });
             const pauseAll = el.querySelector('[data-mo-pause-all]');
-            if (pauseAll) pauseAll.onclick = () => { flagged.map(a => a.id).forEach(stagePause); render(); };
-            el.querySelectorAll('[data-mo-unpause]').forEach(b => b.onclick = () => { const i = Number(b.getAttribute('data-mo-unpause')); moState.order.push(moState.paused.splice(i, 1)[0]); render(); });
+            if (pauseAll) pauseAll.onclick = () => {
+                const note = askNote(`${flagged.length} flagged pad(s)`, flagged.length ? nfzOf(flagged[0].id) : []);
+                if (note === null) return;
+                flagged.map(a => a.id).forEach(id => stagePause(id, note)); render();
+            };
+            el.querySelectorAll('[data-mo-unpause]').forEach(b => b.onclick = () => { const i = Number(b.getAttribute('data-mo-unpause')); const a = moState.paused.splice(i, 1)[0]; moState.pauseNotes.delete(a.id); moState.order.push(a); render(); });
             // ▶ stage a resume: frozen steps back at the remembered slot (after its old neighbour when it still exists)
             el.querySelectorAll('[data-mo-resume]').forEach(b => b.onclick = async () => {
                 const e = stored[Number(b.getAttribute('data-mo-resume'))]; if (!e) return;
