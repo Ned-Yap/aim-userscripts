@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.116
+// @version      3.117
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.116';
+    const SCRIPT_VERSION = '3.117';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -14757,7 +14757,7 @@
             const stored = moState.store ? moPauseEntries(moState.store, mc.mission.name).filter(e => !moState.resumed.has(e.padId)) : [];
             const pausedRows = pausedNow.map((a, i) => `<div style="display:flex;align-items:center;gap:6px;padding:3px 4px;border-bottom:1px solid #20262e;opacity:0.85;">
                     <span style="color:#ffb74d;font-weight:800;">⏸</span>
-                    <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e0b060;">${escapeHtml(String(a.name || ('pad ' + a.id)))}</span>
+                    <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e0b060;" title="${escapeHtml(`Pauses on Apply — by ${mbPauseWho() || 'you'}, stamped with the save time · slot #${mc.pads.findIndex(p => p.id === a.id) + 1} · ${stepsOf(a.id)} steps${moState.pauseNotes.get(a.id) ? '\n📝 ' + moState.pauseNotes.get(a.id) : ''}`)}">${escapeHtml(String(a.name || ('pad ' + a.id)))}</span>
                     <span style="color:#789;" title="${escapeHtml(moState.pauseNotes.get(a.id) || '')}">${moState.pauseNotes.get(a.id) ? '📝 ' : ''}−${stepsOf(a.id)} st · on Apply</span>
                     <button data-mo-unpause="${i}" title="Keep it in the macro after all" style="padding:0 6px;background:rgba(95,255,95,0.1);border:1px solid rgba(95,255,95,0.4);color:#5fff5f;border-radius:3px;cursor:pointer;font-size:10px;">↩</button>
                 </div>`).join('')
