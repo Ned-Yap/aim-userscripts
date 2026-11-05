@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.118
+// @version      3.119
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.118';
+    const SCRIPT_VERSION = '3.119';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -3265,6 +3265,11 @@
         { id: 'stepFlags', label: '🚩', key: '__stepFlags', kind: 'num', defaultVisible: true, derived: true,
             fmt: (row) => { const sid = getCurrentSiteID(); const c = msfCache && msfCache.sid === sid ? msfCache : null; if (!c) return '—'; if (c.failed) return '?'; const r = c.byMission[row.id]; return r ? (r.block ? (r.goes ? `${r.block} (${r.goes}🧹)` : String(r.block)) : '✓') : '—'; },
             sortVal: (row) => { const sid = getCurrentSiteID(); const r = msfCache && msfCache.sid === sid ? msfCache.byMission[row.id] : null; return r ? r.block : -1; } },
+        // v3.119 (#327) — ⏸ paused pads: a macro shows how many of its pads are paused; a pad's micro shows
+        // that its pad is paused in a macro. ▶ (green) = paused for an NFZ that is now gone → ready to resume.
+        { id: 'paused', label: '⏸', key: '__paused', kind: 'num', defaultVisible: true, derived: true,
+            fmt: (row) => { const sid = getCurrentSiteID(); if (!mpCache || mpCache.sid !== sid) { mpEnsure(sid); return '…'; } if (mpCache.failed) return '?'; const rec = mpCache.byName.get(String(row.name || '')); if (!rec) return '—'; const ready = rec.items.filter(it => it.live.state === 'ready').length; const n = rec.items.length; return ready ? (rec.kind === 'macro' ? `▶${ready}/${n}` : '▶ ready') : (rec.kind === 'macro' ? `⏸${n}` : '⏸'); },
+            sortVal: (row) => { const sid = getCurrentSiteID(); const rec = mpCache && mpCache.sid === sid ? mpCache.byName.get(String(row.name || '')) : null; if (!rec) return 0; return rec.items.some(it => it.live.state === 'ready') ? 2 : 1; } },
         { id: 'batteryConsumption', label: 'Battery %', key: 'batteryConsumption', kind: 'pct', defaultVisible: true },
         { id: 'estFlights', label: 'Est. Flights', key: '__estFlights', kind: 'num', defaultVisible: true, derived: true },
         { id: 'totalConsumption', label: 'Total Consumption %', key: 'totalConsumption', kind: 'pct', defaultVisible: true },
@@ -3357,6 +3362,11 @@
                 const at = vis.indexOf('steps');
                 vis.splice(at >= 0 ? at + 1 : vis.length, 0, 'stepFlags');
             }
+            // v3.119 — the ⏸ column is new: seed it once next to 🚩; '!paused' = user hid it.
+            if (byId.paused && !vis.includes('paused') && !stored.includes('!paused')) {
+                const at = vis.indexOf('stepFlags');
+                vis.splice(at >= 0 ? at + 1 : vis.length, 0, 'paused');
+            }
             return vis;
         }
         return cols.filter(c => c.defaultVisible).map(c => c.id);
@@ -3364,6 +3374,7 @@
 
     function setVisibleColumnIds(ids) {
         if (activeColById().stepFlags && !ids.includes('stepFlags') && !ids.includes('!stepFlags')) ids = ids.concat('!stepFlags');   // v3.42 — remember a hidden 🚩
+        if (activeColById().paused && !ids.includes('paused') && !ids.includes('!paused')) ids = ids.concat('!paused');   // v3.119 — remember a hidden ⏸
         gmSet(visibleColsStorageKey(), ids);
     }
 
@@ -12490,17 +12501,22 @@
         try {
             const fillPaused = (st) => {
                 if (!mcv.legendEl || !st) return;
-                let macrosWithPauses = 0, padsPaused = 0;
+                let macrosWithPauses = 0, padsPaused = 0, padsReady = 0;
                 mcv.legendEl.querySelectorAll('[data-mcv-pchip]').forEach(sp => {
                     const mcRow = det.macros.find(m => String(m.mission.id) === sp.getAttribute('data-mcv-pchip'));
                     const list = mcRow ? moPauseEntries(st, mcRow.mission.name) : [];
                     if (!list.length) { sp.innerHTML = ''; return; }
                     macrosWithPauses++; padsPaused += list.length;
-                    sp.innerHTML = `<span data-mcv-order="${mcRow.mission.id}" title="⏸ ${list.length} paused pad${list.length === 1 ? '' : 's'} — click → ⇅ to ▶ resume\n${escapeHtml(list.map(e => `${e.padName || e.padId} · ${moWhen(e.pausedAt)}${e.pausedBy ? ' · ' + e.pausedBy : ''}${e.note ? ' · 📝 ' + e.note : (e.nfz ? ' · ⛔ ' + e.nfz : '')}`).join('\n'))}" style="padding:0 5px;background:rgba(255,183,77,0.16);border:1px solid rgba(255,183,77,0.55);color:#ffb74d;border-radius:4px;cursor:pointer;font-size:10px;font-weight:800;">⏸${list.length}</span>`;
+                    const lives = list.map(e => ({ e, lv: moPauseLive(e, mcv.data && mcv.data.ent) }));
+                    const ready = lives.filter(x => x.lv.state === 'ready').length;
+                    padsReady += ready;
+                    const tip = `⏸ ${list.length} paused pad${list.length === 1 ? '' : 's'}${ready ? ` · ✅ ${ready} ready to ▶ (NFZ gone)` : ''} — click → ⇅\n` + lives.map(x => `${x.lv.state === 'blocked' ? '⛔' : x.lv.state === 'ready' ? '✅' : '⏸'} ${x.e.padName || x.e.padId} · ${moWhen(x.e.pausedAt)}${x.e.pausedBy ? ' · ' + x.e.pausedBy : ''}${x.e.note ? ' · 📝 ' + x.e.note : ''}`).join('\n');
+                    const col = ready ? '#5fff5f' : '#ffb74d', bg = ready ? 'rgba(95,255,95,0.14)' : 'rgba(255,183,77,0.16)', bd = ready ? 'rgba(95,255,95,0.55)' : 'rgba(255,183,77,0.55)';
+                    sp.innerHTML = `<span data-mcv-order="${mcRow.mission.id}" title="${escapeHtml(tip)}" style="padding:0 5px;background:${bg};border:1px solid ${bd};color:${col};border-radius:4px;cursor:pointer;font-size:10px;font-weight:800;">${ready ? `▶${ready}/${list.length}` : `⏸${list.length}`}</span>`;
                     sp.querySelectorAll('[data-mcv-order]').forEach(b => b.onclick = () => mcvOpenOrderPanel(mcRow.mission.id));
                 });
                 const sum = mcv.legendEl.querySelector('[data-mcv-paused-sum]');
-                if (sum) sum.innerHTML = macrosWithPauses ? `<div style="color:#ffb74d;margin-top:3px;">⏸ ${padsPaused} paused pad${padsPaused === 1 ? '' : 's'} in ${macrosWithPauses} macro${macrosWithPauses === 1 ? '' : 's'}${st.source === 'github' ? '' : ' <span style="color:#ff9800;">(local list only)</span>'}</div>` : '';
+                if (sum) sum.innerHTML = macrosWithPauses ? `<div style="color:#ffb74d;margin-top:3px;">⏸ ${padsPaused} paused pad${padsPaused === 1 ? '' : 's'} in ${macrosWithPauses} macro${macrosWithPauses === 1 ? '' : 's'}${padsReady ? ` · <span style="color:#5fff5f;font-weight:700;">✅ ${padsReady} ready to ▶ — NFZ gone</span>` : ''}${st.source === 'github' ? '' : ' <span style="color:#ff9800;">(local list only)</span>'}</div>` : '';
             };
             if (mcv.data && mcv.data.pauseStore) fillPaused(mcv.data.pauseStore);
             else moPauseLoad(getCurrentSiteID()).then(st => { if (mcv.data) mcv.data.pauseStore = st; fillPaused(st); }).catch(e => console.warn(`${TAG} [⏸] paused list unavailable for the 🧩 chips`, e));
@@ -14644,6 +14660,7 @@
     // Save: local mirror always; GitHub when a token is present (sha-retry inside).
     async function moPauseSave(sid, store, message) {
         moPauseLocalSet(sid, store.data);
+        mpInvalidate();
         if (!mbSharedToken) { store.source = 'local'; store.err = 'no GitHub token — saved on this browser only'; return store; }
         try {
             store.sha = await mbGhPutJson(moPausePath(sid), store.data, message, store.sha);
@@ -14686,6 +14703,50 @@
         det._nfzBy = out;
         if (out.size) console.log(`${TAG} [⏸] ${out.size} macro(s) have a pad inside an NFZ: ${Array.from(out.entries()).map(([id, pads]) => { const mc = det.macros.find(m => m.mission.id === id); return `"${mc ? mc.mission.name : id}" (${pads.map(p => p.name).join(', ')})`; }).join(' · ')}`);
         return out;
+    }
+    // v3.119: LIVE status of a paused entry against the site's current NFZs.
+    //   'blocked' = a frozen step still sits inside an NFZ · 'ready' = paused for an NFZ that is
+    //   now gone (rig left) → resume it · 'manual' = paused for another reason, no NFZ involved.
+    function moPauseLive(e, ent) {
+        let fl = [];
+        try { fl = ent ? moNfzFlags(e.steps, ent) : []; } catch (e2) { console.warn(`${TAG} [⏸] live NFZ check failed`, e2); }
+        if (fl.length) return { state: 'blocked', nfz: moNfzNames(fl) };
+        return { state: e.reason === 'nfz' ? 'ready' : 'manual', nfz: [] };
+    }
+    // Mission-table ⏸ column cache: { sid, byName: Map(missionName → { kind:'macro'|'micro', items:[{e, macro, live}] }) }
+    let mpCache = null, mpLoading = null;
+    function mpInvalidate() { mpCache = null; }
+    function mpEnsure(sid) {
+        if (mpCache && mpCache.sid === sid) return Promise.resolve(mpCache);
+        if (mpLoading && mpLoading.sid === sid) return mpLoading.p;
+        const p = Promise.all([moPauseLoad(sid), genFetchEntities(sid).catch(e => { console.warn(`${TAG} [⏸] entities unavailable for the ⏸ column — statuses show as paused only`, e); return null; })])
+            .then(([store, ent]) => {
+                const byName = new Map();
+                Object.keys((store && store.data && store.data.macros) || {}).forEach(macro => {
+                    const items = (store.data.macros[macro] || []).map(e => ({ e, macro, live: moPauseLive(e, ent) }));
+                    if (!items.length) return;
+                    byName.set(macro, { kind: 'macro', items });
+                    items.forEach(it => {
+                        const key = String(it.e.padName || '');
+                        if (!key) return;
+                        const cur = byName.get(key);
+                        if (cur && cur.kind === 'macro') return;   // a macro named like a pad — keep the macro view
+                        if (!cur) byName.set(key, { kind: 'micro', items: [it] }); else cur.items.push(it);
+                    });
+                });
+                mpCache = { sid, byName, store, ent };
+                mpLoading = null;
+                try { if (typeof renderTableView === 'function' && panelState && panelState.mode !== 'log') renderTableView(); } catch (e) { console.warn(`${TAG} [⏸] table refresh after pause load failed`, e); }
+                return mpCache;
+            }).catch(e => { mpLoading = null; console.warn(`${TAG} [⏸] ⏸ column load failed`, e); mpCache = { sid, byName: new Map(), failed: true }; return mpCache; });
+        mpLoading = { sid, p };
+        return p;
+    }
+    function mpCellTitle(rec) {
+        return rec.items.map(it => {
+            const st = it.live.state === 'blocked' ? `⛔ still inside NFZ ${it.live.nfz.join(', ')}` : it.live.state === 'ready' ? '✅ NFZ gone — ready to ▶ resume' : '⏸ paused (no NFZ)';
+            return `${rec.kind === 'macro' ? it.e.padName || it.e.padId : 'in ' + it.macro} · ${moWhen(it.e.pausedAt)}${it.e.pausedBy ? ' · ' + it.e.pausedBy : ''}${it.e.note ? ' · 📝 ' + it.e.note : ''}\n   ${st}`;
+        }).join('\n') + '\n\nOpen 🧩 → ⇅ on the macro to ▶ resume.';
     }
     function moPauseEntries(store, macroName) { return (store && store.data && store.data.macros[macroName]) || []; }
     function moPauseSetEntries(store, macroName, list) { if (list && list.length) store.data.macros[macroName] = list; else delete store.data.macros[macroName]; }
@@ -14812,7 +14873,7 @@
                 + stored.map((e, i) => `<div style="display:flex;align-items:center;gap:6px;padding:3px 4px;border-bottom:1px solid #20262e;">
                     <span style="color:#ffb74d;font-weight:800;">⏸</span>
                     <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e0b060;" title="${escapeHtml(moPauseTitle(e))}">${escapeHtml(String(e.padName || ('pad ' + e.padId)))}</span>
-                    ${e.nfz ? '<span style="color:#ff5252;font-weight:800;" title="Paused because of an NFZ — check it is gone before ▶">⛔</span>' : ''}
+                    ${(() => { const lv = moPauseLive(e, data.ent); return lv.state === 'blocked' ? `<span style="color:#ff5252;font-weight:800;" title="⛔ still inside NFZ ${escapeHtml(lv.nfz.join(', '))} — the drone would stop there again">⛔</span>` : lv.state === 'ready' ? '<span style="color:#5fff5f;font-weight:800;" title="✅ The NFZ it was paused for is gone — ready to ▶ resume">✅</span>' : ''; })()}
                     <span style="color:#789;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(moPauseTitle(e))}">${e.note ? '📝 ' + escapeHtml(String(e.note).slice(0, 26)) : moWhen(e.pausedAt) + ' · ' + e.steps.length + ' st'}</span>
                     <button data-mo-resume="${i}" title="▶ Resume — put its frozen steps back at slot #${(e.slot | 0) + 1} on Apply (drag to change)" style="padding:0 6px;background:rgba(95,255,95,0.1);border:1px solid rgba(95,255,95,0.4);color:#5fff5f;border-radius:3px;cursor:pointer;font-size:10px;">▶</button>
                     <button data-mo-forget="${i}" title="Forget this pause — the pad stays OUT of the macro and the frozen steps are discarded (its micro is untouched)" style="padding:0 5px;background:rgba(255,82,82,0.1);border:1px solid rgba(255,82,82,0.4);color:#ff8a8a;border-radius:3px;cursor:pointer;font-size:10px;">🗑</button>
@@ -18668,6 +18729,13 @@
                 const bad = v !== '✓' && v !== '…' && v !== '—' && v !== '?';
                 const unchecked = v === '—';
                 return `<td data-msf="${row.id}" title="${unchecked ? 'Not checked yet — click 🚩 Check in the toolbar' : 'Steps in an NFZ / outside the FFZ — click for the list'}" style="cursor:pointer;${bad ? 'color:#ff8a8a;font-weight:700;' : (unchecked ? 'color:#789;' : 'color:#5fff5f;')}">${escapeHtml(String(v))}</td>`;
+            }
+            if (col.id === 'paused') {
+                const sid = getCurrentSiteID();
+                const rec = mpCache && mpCache.sid === sid ? mpCache.byName.get(String(row.name || '')) : null;
+                const ready = rec && rec.items.some(it => it.live.state === 'ready');
+                const title = rec ? mpCellTitle(rec) : (v === '…' ? 'Loading the shared paused list…' : v === '?' ? 'Paused list unavailable (see console)' : 'Not paused anywhere');
+                return `<td title="${escapeHtml(title)}" style="${rec ? (ready ? 'color:#5fff5f;font-weight:800;' : 'color:#ffb74d;font-weight:800;') : 'color:#567;'}">${escapeHtml(String(v))}</td>`;
             }
             if (col.id === 'name' && editableName) {
                 // Click to rename · Tab → next mission's name (server rename via saveApp).
