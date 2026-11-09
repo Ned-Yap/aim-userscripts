@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.125
+// @version      3.126
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.125';
+    const SCRIPT_VERSION = '3.126';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -11343,7 +11343,8 @@
             // v3.125 ↩ pass-through pickup: a later pad the leg flies through is shot en route
             let finalOrder = order;
             try {
-                const padOf = (i) => { const r = pw.rows[i]; const navs = ((r.mission && r.mission.instructions) || []).filter(st => st && st.type === 1 && st.location && typeof st.location.lat === 'number').map(st => st.location); return { ring: r.asset.ring, navs }; };
+                const zones = new Map();
+                const padOf = (i) => { const r = pw.rows[i]; const navs = ((r.mission && r.mission.instructions) || []).filter(st => st && st.type === 1 && st.location && typeof st.location.lat === 'number').map(st => st.location); if (!zones.has(i)) zones.set(i, mbPadZone(r.asset.ring, pw.built.ffzs)); return { ring: r.asset.ring, zone: zones.get(i), navs }; };
                 const fx = mbPassThroughFix(order, padOf, pw.built);
                 if (fx.moves.length) {
                     finalOrder = fx.order;
@@ -11882,10 +11883,15 @@
     const PT_MIN_INSIDE_M = 20;
     const PT_SAMPLE_M = 12;
     // padOf(id) → { ring, navs: [{lat,lng}…] in flight order } (navs may be [])
+    const PT_INSET_M = 3;          // a leg hugging a zone EDGE is not "through" it
+    const PT_PREFILTER_M = 250;    // route a leg only if its straight line passes this close to a later pad's zone
+    // padOf(id) → { ring, zone, navs } — zone = the pad's FFZ ring (flight paths never
+    // enter the asset polygon; the drone crosses a pad THROUGH its FFZ), else the ring.
     function mbPassThroughScan(orderIds, padOf, built, legCache) {
         const hits = [];
         if (built && built.ffzs && !built.boxes) built.boxes = built.ffzs.map(f => agRingBbox(f.ring, MB_ENTRY_FFZ_FT / 3.28084));
         const cache = legCache || new Map();
+        const zoneOf = (p) => (p && p.zone && p.zone.length >= 3) ? p.zone : (p ? p.ring : null);
         const endsOf = (id) => { const p = padOf(id); if (!p) return null; const navs = (p.navs && p.navs.length) ? p.navs : [genCentroid(p.ring)]; return { first: navs[0], last: navs[navs.length - 1] }; };
         const legPts = (fromId, toId) => {
             const key = fromId + '>' + toId;
@@ -11905,22 +11911,34 @@
             cache.set(key, pts);
             return pts;
         };
+        const insideDeep = (p, ring) => { if (!genPointInPoly(p, ring)) return false; for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) if (mbPointToSegMeters(p.lat, p.lng, ring[j], ring[i]) < PT_INSET_M) return false; return true; };
         for (let k = 0; k + 1 < orderIds.length; k++) {
+            // prefilter: which later pads could this leg even reach? (straight line within PT_PREFILTER_M of the zone)
+            const a = endsOf(orderIds[k]), b = endsOf(orderIds[k + 1]);
+            if (!a || !b) continue;
+            const cands = [];
+            for (let j = k + 2; j < orderIds.length; j++) {
+                const c = padOf(orderIds[j]); const z = zoneOf(c);
+                if (!z) continue;
+                let near = false;
+                for (let v = 0; v < z.length && !near; v++) if (mbPointToSegMeters(z[v].lat, z[v].lng, a.last, b.first) <= PT_PREFILTER_M) near = true;
+                if (!near) { const c2 = genCentroid(z); near = mbPointToSegMeters(c2.lat, c2.lng, a.last, b.first) <= PT_PREFILTER_M; }
+                if (near) cands.push({ j, z });
+            }
+            if (!cands.length) continue;
             const pts = legPts(orderIds[k], orderIds[k + 1]);
             if (!pts || !pts.length) continue;
             const through = [];
-            for (let j = k + 2; j < orderIds.length; j++) {
-                const c = padOf(orderIds[j]);
-                if (!c || !c.ring || c.ring.length < 3) continue;
-                const bb = agRingBbox(c.ring, 5);
+            cands.forEach(({ j, z }) => {
+                const bb = agRingBbox(z, 5);
                 let inside = 0, firstAt = -1;
                 for (let s = 0; s < pts.length; s++) {
                     const p = pts[s];
                     if (p.lat < bb.s || p.lat > bb.n || p.lng < bb.w || p.lng > bb.e) continue;
-                    if (genPointInPoly(p, c.ring)) { inside += p.len; if (firstAt < 0) firstAt = s; }
+                    if (insideDeep(p, z)) { inside += p.len; if (firstAt < 0) firstAt = s; }
                 }
                 if (inside >= PT_MIN_INSIDE_M) through.push({ id: orderIds[j], slot: j, insideM: inside, firstAt });
-            }
+            });
             if (through.length) { through.sort((x, y) => x.firstAt - y.firstAt); hits.push({ k, from: orderIds[k], to: orderIds[k + 1], through }); }
         }
         return hits;
@@ -11944,11 +11962,19 @@
         return { order, moves, hits: mbPassThroughScan(order, padOf, built, cache) };
     }
     // padOf for a detected macro: navs from its own block steps
-    function mcvPadOfFor(mc) {
+    function mbPadZone(ring, ffzs) {
+        if (!ring || ring.length < 3 || !Array.isArray(ffzs)) return ring;
+        const c = genCentroid(ring);
+        let best = null, bestA = Infinity;
+        ffzs.forEach(f => { const fr = f && f.ring; if (!fr || fr.length < 3) return; if (!genPointInPoly(c, fr)) return; const ar = mbRingArea(fr); if (ar < bestA) { bestA = ar; best = fr; } });
+        return best || ring;
+    }
+    function mcvPadOfFor(mc, ffzs) {
         const byPad = new Map();
         (mc.blocks || []).forEach(b => { if (b.aId == null) return; if (!byPad.has(b.aId)) byPad.set(b.aId, []); b.steps.forEach(s => { if (s && s.type === 1 && s.location && typeof s.location.lat === 'number') byPad.get(b.aId).push(s.location); }); });
         const ring = new Map(mc.pads.map(a => [a.id, a]));
-        return (id) => { const a = ring.get(id); return a ? { ring: a.ring, navs: byPad.get(id) || [] } : null; };
+        const zones = new Map();
+        return (id) => { const a = ring.get(id); if (!a) return null; if (!zones.has(id)) zones.set(id, mbPadZone(a.ring, ffzs)); return { ring: a.ring, zone: zones.get(id), navs: byPad.get(id) || [] }; };
     }
     function mcvPassLabel(hits, padName) {
         return hits.map(h => h.through.map(t => `leg #${h.k + 1}→#${h.k + 2} flies through #${t.slot + 1} ${padName(t.id)} (${Math.round(t.insideM * 3.28084)} ft inside) — picked up later`).join('\n')).join('\n');
@@ -13171,6 +13197,7 @@
         const byAsset = new Map(sol.results.map(r => [r.asset.id, r]));
         const cfg = agCfg();
         const audits = new Map();
+        let passMs = 0;
         det.macros.forEach(mc => {
             try {
                 const stepsByPad = new Map();
@@ -13238,10 +13265,13 @@
                 }
                 let pass = null;
                 try {
-                    const padOf = mcvPadOfFor(mc);
+                    const tp = Date.now();
+                    const padOf = mcvPadOfFor(mc, (ent && ent.ffzs) || pw.built.ffzs);
                     const built = pw.built;
                     const hits = mbPassThroughScan(mc.pads.map(a => a.id), padOf, built);
                     if (hits.length) { const fx = mbPassThroughFix(mc.pads.map(a => a.id), padOf, built); pass = { hits, fixedOrder: fx.order, moves: fx.moves, left: fx.hits.length }; }
+                    passMs += Date.now() - tp;
+                    if (hits.length) console.log(`${TAG} [mcv] ↩ "${mc.mission.name}": ${mcvPassLabel(hits, id => { const a = mc.pads.find(p => p.id === id); return a ? a.name : String(id); }).replace(/\n/g, ' · ')}`);
                 } catch (e) { console.warn(`${TAG} [mcv] pass-through scan failed for "${mc.mission.name}"`, e); }
                 audits.set(mc.mission.id, { cur, re: re.sim, reRows: re.rows, unknown, budget, calib, pass });
             } catch (e) {
@@ -13250,6 +13280,7 @@
             }
         });
         console.log(`${TAG} [mcv] audit: ${det.macros.length} macro(s) in ${Date.now() - t0} ms`);
+        console.log(`${TAG} [mcv] audit ${det.macros.length} macro(s) in ${Date.now() - t0} ms (↩ pass-through scan ${passMs} ms, ${Array.from(audits.values()).filter(a => a && a.pass).length} flagged)`);
         return audits;
     }
     // ♻ resequence a macro's per-pad blocks into the replan order, in place.
@@ -15307,12 +15338,13 @@
             try {
                 const built = mcvRouteBuilt();
                 if (!moState.legCache) moState.legCache = new Map();
-                const padOfBase = mcvPadOfFor(mc);
+                const ffzsNow = (mcv.data && mcv.data.ent && mcv.data.ent.ffzs) || [];
+                const padOfBase = mcvPadOfFor(mc, ffzsNow);
                 const padOf = (id) => {
                     const a = order.find(p => p.id === id); if (!a) return null;
                     const info = moState.added.get(id);
-                    if (info) return { ring: a.ring, navs: addedBody(info).filter(st => st && st.type === 1 && st.location && typeof st.location.lat === 'number').map(st => st.location) };
-                    return padOfBase(id) || { ring: a.ring, navs: [] };
+                    if (info) return { ring: a.ring, zone: mbPadZone(a.ring, ffzsNow), navs: addedBody(info).filter(st => st && st.type === 1 && st.location && typeof st.location.lat === 'number').map(st => st.location) };
+                    return padOfBase(id) || { ring: a.ring, zone: mbPadZone(a.ring, ffzsNow), navs: [] };
                 };
                 passHits = mbPassThroughScan(order.map(a => a.id), padOf, built, moState.legCache);
                 if (passHits.length) moState.passFix = () => {
