@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.128
+// @version      3.129
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.128';
+    const SCRIPT_VERSION = '3.129';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -11346,7 +11346,7 @@
                 const zones = new Map();
                 const allRings = ((pw.ent && pw.ent.assets) || []).map(a => a.ring).filter(r => r && r.length >= 3);
                 const padOf = (i) => { const r = pw.rows[i]; const navs = ((r.mission && r.mission.instructions) || []).filter(st => st && st.type === 1 && st.location && typeof st.location.lat === 'number').map(st => st.location); if (!zones.has(i)) zones.set(i, mbPadZone(r.asset.ring, pw.built.ffzs, allRings)); return { ring: r.asset.ring, zone: zones.get(i), navs }; };
-                const fx = mbPassThroughFix(order, padOf, pw.built, null, { dist: (i, j) => pw.dPad(i, j), dBase: (i) => pw.dBase(i) });
+                const fx = mbPassThroughFix(order, padOf, pw.built, null, { dist: (i, j) => pw.dPad(i, j), dBase: (i) => pw.dBase(i), path: (i, j) => mbPassPathFromRuns(pw, i, j) });
                 if (fx.moves.length) {
                     finalOrder = fx.order;
                     console.log(`${TAG} [lasso] ↩ pass-through pickup: ${fx.moves.map(m => `"${pw.rows[m.id].asset.name}" #${m.fromSlot}→#${m.toSlot}`).join(', ')}${fx.hits.length ? ` · ${fx.hits.length} leg(s) still cross a later pad` : ''}`);
@@ -11899,6 +11899,10 @@
         const hits = [];
         const dist = opts && typeof opts.dist === 'function' ? opts.dist : null;
         const dBase = opts && typeof opts.dBase === 'function' ? opts.dBase : null;
+        // v3.129: leg geometry from the pairwise engine's Dijkstra runs (opts.path) —
+        // mpvLegalPath per leg = temp-attach over EVERY graph vertex + a fresh Dijkstra,
+        // 19 s of the 39 s 🧩 open on 1637. Fallback only for pads the engine has no row for.
+        const pathOf = opts && typeof opts.path === 'function' ? opts.path : null;
         const gainOf = (k, j) => {
             if (!dist) return null;
             const A = orderIds[k], B = orderIds[k + 1], C = orderIds[j];
@@ -11922,7 +11926,7 @@
             const a = endsOf(fromId), b = endsOf(toId);
             let pts = null;
             if (a && b) {
-                const raw = (built ? mpvLegalPath(built, a.last, b.first) : null) || [[a.last.lat, a.last.lng], [b.first.lat, b.first.lng]];
+                const raw = (pathOf ? pathOf(fromId, toId) : null) || (built ? mpvLegalPath(built, a.last, b.first) : null) || [[a.last.lat, a.last.lng], [b.first.lat, b.first.lng]];
                 pts = [];
                 for (let i = 1; i < raw.length; i++) {
                     const p0 = { lat: raw[i - 1][0], lng: raw[i - 1][1] }, p1 = { lat: raw[i][0], lng: raw[i][1] };
@@ -11997,7 +12001,28 @@
         return {
             dist: (a, b) => { const i = idx.get(a), j = idx.get(b); return (i == null || j == null) ? null : pw.dPad(i, j); },
             dBase: (a) => { const i = idx.get(a); return i == null ? null : pw.dBase(i); },
+            path: (a, b) => { const i = idx.get(a), j = idx.get(b); return (i == null || j == null) ? null : mbPassPathFromRuns(pw, i, j); },
         };
+    }
+    // Route geometry pad i → pad j walked out of the pairwise engine's Dijkstra run
+    // from i (prev pointers) — no new graph work. null when the run never reached j
+    // (the engine fell back to straight-line for that pair too).
+    function mbPassPathFromRuns(pw, i, j) {
+        if (!pw || !pw.runs || !pw.padKeys || !pw.built) return null;
+        const run = pw.runs[i], start = pw.padKeys[i], target = pw.padKeys[j];
+        if (!run || !run.dist || !run.dist.has(target)) return null;
+        const verts = pw.built.graph.verts;
+        const out = [];
+        let cur = target, guard = 0;
+        while (cur !== undefined && guard++ < 20000) {
+            const v = verts.get(cur);
+            if (v) out.push([v.lat, v.lng]);
+            if (cur === start) break;
+            cur = run.prev.get(cur);
+        }
+        if (cur !== start) return null;
+        out.reverse();
+        return out.length >= 2 ? out : null;
     }
     // padOf for a detected macro: navs from its own block steps
     // The pad's own FFZ (smallest FFZ around its centroid) — but ONLY when that FFZ
@@ -13246,7 +13271,7 @@
         const byAsset = new Map(sol.results.map(r => [r.asset.id, r]));
         const cfg = agCfg();
         const audits = new Map();
-        let passMs = 0;
+        let passMs = 0, pwMs = 0, orderMs = 0;
         det.macros.forEach(mc => {
             try {
                 const stepsByPad = new Map();
@@ -13269,10 +13294,14 @@
                 });
                 if (rows.length < 2) { audits.set(mc.mission.id, null); return; }
                 const budget = rows.some(r => r.tulip) ? cfg.tulipBudgetFt : cfg.tattuBudgetFt;
+                const tpw = Date.now();
                 const pw = lassoBuildPairwise(rows, ent, byAsset);
+                pwMs += Date.now() - tpw;
                 if (!pw || !pw.ok) { audits.set(mc.mission.id, null); return; }
                 const cur = agSimulate(rows.map((_, i) => i), pw.dPad, pw.dBase, pw.costOf, budget);
+                const tor = Date.now();
                 const re = lassoOrderRows(rows, budget, pw);
+                orderMs += Date.now() - tor;
                 // Percepto calibration (v2.41): our sim runs ~2× hot in absolute
                 // terms (energy-ft conflation + conservative budgets + RTB legs)
                 // — live cross-check vs the SUM table. So absolutes anchor to
@@ -13318,8 +13347,9 @@
                     const padOf = mcvPadOfFor(mc, (ent && ent.ffzs) || pw.built.ffzs, (det.assets || []).map(a => a.ring));
                     const built = pw.built;
                     const dOpts = mbPassDistOpts(pw);
-                    const hits = mbPassThroughScan(mc.pads.map(a => a.id), padOf, built, null, dOpts);
-                    if (hits.length) { const fx = mbPassThroughFix(mc.pads.map(a => a.id), padOf, built, null, dOpts); pass = { hits, fixedOrder: fx.order, moves: fx.moves, left: fx.hits.length }; }
+                    const legCache = new Map();   // v3.129: shared by scan + fix (fix re-routed every leg from scratch)
+                    const hits = mbPassThroughScan(mc.pads.map(a => a.id), padOf, built, legCache, dOpts);
+                    if (hits.length) { const fx = mbPassThroughFix(mc.pads.map(a => a.id), padOf, built, legCache, dOpts); pass = { hits, fixedOrder: fx.order, moves: fx.moves, left: fx.hits.length }; }
                     passMs += Date.now() - tp;
                     if (hits.length) console.log(`${TAG} [mcv] ↩ "${mc.mission.name}": ${mcvPassLabel(hits, id => { const a = mc.pads.find(p => p.id === id); return a ? a.name : String(id); }).replace(/\n/g, ' · ')}`);
                 } catch (e) { console.warn(`${TAG} [mcv] pass-through scan failed for "${mc.mission.name}"`, e); }
@@ -13329,8 +13359,7 @@
                 audits.set(mc.mission.id, null);
             }
         });
-        console.log(`${TAG} [mcv] audit: ${det.macros.length} macro(s) in ${Date.now() - t0} ms`);
-        console.log(`${TAG} [mcv] audit ${det.macros.length} macro(s) in ${Date.now() - t0} ms (↩ pass-through scan ${passMs} ms, ${Array.from(audits.values()).filter(a => a && a.pass).length} flagged)`);
+        console.log(`${TAG} [mcv] audit ${det.macros.length} macro(s) in ${Date.now() - t0} ms (pairwise ${pwMs} ms · order ${orderMs} ms · ↩ pass-through scan ${passMs} ms, ${Array.from(audits.values()).filter(a => a && a.pass).length} flagged)`);
         return audits;
     }
     // ♻ resequence a macro's per-pad blocks into the replan order, in place.
