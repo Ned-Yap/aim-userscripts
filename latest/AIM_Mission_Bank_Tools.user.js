@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.121
+// @version      3.122
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.121';
+    const SCRIPT_VERSION = '3.122';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -14614,19 +14614,34 @@
         const ctrl = (typeof AbortController === 'function') ? new AbortController() : null;
         const timer = ctrl ? setTimeout(() => { try { ctrl.abort(); } catch (e) {} }, MCV_GROUP_TIMEOUT_MS) : null;
         const t0 = Date.now();
-        const p = fetch(`/mission_group/${encodeURIComponent(sid)}/2`, { credentials: 'include', signal: ctrl ? ctrl.signal : undefined })
+        // v3.122: the trailing number is NOT settled (the Launch form reads /0 on site 43;
+        // 1637's entries sat under /2 and /1 held others) — read 0, 1 and 2 together,
+        // merge by group id. Any list may 504 on a big site; one success is enough.
+        const toList = (arr) => {
+            if (Array.isArray(arr)) return arr;
+            if (arr && typeof arr === 'object') { for (const k of Object.keys(arr)) if (Array.isArray(arr[k])) return arr[k]; }
+            return [];
+        };
+        const one = (n) => fetch(`/mission_group/${encodeURIComponent(sid)}/${n}`, { credentials: 'include', signal: ctrl ? ctrl.signal : undefined })
             .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
-            .then(arr => {
-                const groups = Array.isArray(arr) ? arr : (arr && Array.isArray(arr.results) ? arr.results : []);
-                mcvGroupCache.set(key, { at: Date.now(), groups, err: null, loading: null });
-                console.log(`${TAG} [Ⓐ] incomplete list: ${groups.length} group(s) in ${((Date.now() - t0) / 1000).toFixed(1)} s${groups.length ? ' — ' + groups.map(g => `"${g.app_name}" @${g.last_app_instruction_index_executed}${g.in_progress ? ' (in flight)' : ''}`).join(' · ') : ''}`);
+            .then(arr => ({ n, groups: toList(arr), err: null }))
+            .catch(e => ({ n, groups: null, err: (e && e.name === 'AbortError') ? `timed out after ${Math.round(MCV_GROUP_TIMEOUT_MS / 1000)} s` : (e && e.message ? e.message : String(e)) }));
+        const p = Promise.all([0, 1, 2].map(one))
+            .then(parts => {
+                const seen = new Map();
+                parts.forEach(pt => (pt.groups || []).forEach(g => { if (g && !seen.has(g.id)) seen.set(g.id, g); }));
+                const groups = Array.from(seen.values());
+                const errs = parts.filter(pt => pt.err).map(pt => `/${pt.n}: ${pt.err}`);
+                if (!parts.some(pt => pt.groups)) {
+                    const msg = errs.join(' · ');
+                    console.warn(`${TAG} [Ⓐ] incomplete list fetch failed — ${msg}`);
+                    mcvGroupCache.set(key, { at: Date.now(), groups: (cur && cur.groups) || null, err: msg, loading: null });
+                    return (cur && cur.groups) || null;
+                }
+                mcvGroupCache.set(key, { at: Date.now(), groups, err: errs.length ? errs.join(' · ') : null, loading: null });
+                console.log(`${TAG} [Ⓐ] incomplete list: ${groups.length} group(s) in ${((Date.now() - t0) / 1000).toFixed(1)} s (${parts.map(pt => `/${pt.n}=${pt.groups ? pt.groups.length : 'ERR'}`).join(' ')})${groups.length ? ' — ' + groups.map(g => `"${g.app_name || (g.app && g.app.name) || '?'}" @${g.last_app_instruction_index_executed}${g.in_progress ? ' (in flight)' : ''}`).join(' · ') : ''}`);
+                if (groups.length && groups.some(g => !g.app_name && !(g.app && g.app.name))) console.log(`${TAG} [Ⓐ] group keys: ${Object.keys(groups[0]).join(', ')}`);
                 return groups;
-            })
-            .catch(e => {
-                const msg = (e && e.name === 'AbortError') ? `timed out after ${Math.round(MCV_GROUP_TIMEOUT_MS / 1000)} s` : (e && e.message ? e.message : String(e));
-                console.warn(`${TAG} [Ⓐ] incomplete list fetch failed — ${msg}`);
-                mcvGroupCache.set(key, { at: Date.now(), groups: (cur && cur.groups) || null, err: msg, loading: null });
-                return (cur && cur.groups) || null;
             })
             .finally(() => { if (timer) clearTimeout(timer); });
         mcvGroupCache.set(key, { at: cur ? cur.at : 0, groups: cur ? cur.groups : null, err: null, loading: p });
@@ -14797,7 +14812,7 @@
                     else if (r.prog && r.prog.inProgress) progLine = `<span style="color:#ffb74d;">🛸 an incomplete entry is IN FLIGHT right now (${fmtWhen(r.prog.when)}) — wait for it to land, or cut by pad below</span>`;
                     else if (r.prog) progLine = `<span style="color:#5fff5f;">▶ Incomplete entry ${fmtWhen(r.prog.when)}: stopped after step ${r.prog.last + 1}/${r.prog.total} (${escapeHtml(r.prog.lastLabel)})${r.prog.lastPadName ? ` on pad #${r.prog.lastPadSlot} ${escapeHtml(r.prog.lastPadName)}` : ''}${r.prog.redo ? ` · redoes ${r.prog.redo} step(s) from the last nav` : ' · next step is a nav, nothing redone'}</span>`;
                     else if (gc && gc.err) progLine = `<span style="color:#ff8a8a;">⚠ Incomplete list unavailable (${escapeHtml(gc.err)}) — cut by pad below</span>`;
-                    else progLine = `<span style="color:#ffb74d;">no incomplete entry for this macro (trashed, or never stopped) — cut by pad below</span>`;
+                    else progLine = `<span style="color:#ffb74d;">no incomplete entry for this macro (trashed, or never stopped)${gc && gc.err ? ` — part of the list failed: ${escapeHtml(gc.err)}` : ''} — cut by pad below</span>`;
                     // cut picker
                     const opts = [`<option value="auto" ${r.choice === 'auto' ? 'selected' : ''} ${r.autoOk ? '' : 'disabled'}>auto — from the incomplete entry's last nav</option>`]
                         .concat([`<option value="after:-1" ${r.choice === 'after:-1' ? 'selected' : ''}>whole macro minus NFZ pads (nothing flown)</option>`])
