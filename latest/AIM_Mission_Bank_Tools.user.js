@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.127
+// @version      3.128
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.127';
+    const SCRIPT_VERSION = '3.128';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -11346,7 +11346,7 @@
                 const zones = new Map();
                 const allRings = ((pw.ent && pw.ent.assets) || []).map(a => a.ring).filter(r => r && r.length >= 3);
                 const padOf = (i) => { const r = pw.rows[i]; const navs = ((r.mission && r.mission.instructions) || []).filter(st => st && st.type === 1 && st.location && typeof st.location.lat === 'number').map(st => st.location); if (!zones.has(i)) zones.set(i, mbPadZone(r.asset.ring, pw.built.ffzs, allRings)); return { ring: r.asset.ring, zone: zones.get(i), navs }; };
-                const fx = mbPassThroughFix(order, padOf, pw.built);
+                const fx = mbPassThroughFix(order, padOf, pw.built, null, { dist: (i, j) => pw.dPad(i, j), dBase: (i) => pw.dBase(i) });
                 if (fx.moves.length) {
                     finalOrder = fx.order;
                     console.log(`${TAG} [lasso] ↩ pass-through pickup: ${fx.moves.map(m => `"${pw.rows[m.id].asset.name}" #${m.fromSlot}→#${m.toSlot}`).join(', ')}${fx.hits.length ? ` · ${fx.hits.length} leg(s) still cross a later pad` : ''}`);
@@ -11889,8 +11889,29 @@
     const PT_PREFILTER_M = 250;    // route a leg only if its straight line passes this close to a later pad's zone
     // padOf(id) → { ring, zone, navs } — zone = the pad's FFZ ring (flight paths never
     // enter the asset polygon; the drone crosses a pad THROUGH its FFZ), else the ring.
-    function mbPassThroughScan(orderIds, padOf, built, legCache) {
+    const PT_MIN_GAIN_FT = 200;    // pick a pad up en route only when it saves at least this much
+    // opts.dist(idA, idB) → ft (trusted pairwise), opts.dBase(id) → ft. With them every
+    // crossing is GATED on net gain: detour to shoot it now (d(A,C)+d(C,B)-d(A,B))
+    // vs what its current slot costs (d(P,C)+d(C,N)-d(P,N); N = base at the end).
+    // Live 2026-11-09: feet-inside alone flagged brushing a neighbour's zone on the way
+    // to the pad beside it — a real crossing that saves nothing.
+    function mbPassThroughScan(orderIds, padOf, built, legCache, opts) {
         const hits = [];
+        const dist = opts && typeof opts.dist === 'function' ? opts.dist : null;
+        const dBase = opts && typeof opts.dBase === 'function' ? opts.dBase : null;
+        const gainOf = (k, j) => {
+            if (!dist) return null;
+            const A = orderIds[k], B = orderIds[k + 1], C = orderIds[j];
+            const dAB = dist(A, B), dAC = dist(A, C), dCB = dist(C, B);
+            if ([dAB, dAC, dCB].some(v => typeof v !== 'number' || !isFinite(v))) return null;
+            const detour = dAC + dCB - dAB;
+            const P = orderIds[j - 1], N = j + 1 < orderIds.length ? orderIds[j + 1] : null;
+            const dPC = dist(P, C);
+            const dCN = N != null ? dist(C, N) : (dBase ? dBase(C) : null);
+            const dPN = N != null ? dist(P, N) : (dBase ? dBase(P) : null);
+            if ([dPC, dCN, dPN].some(v => typeof v !== 'number' || !isFinite(v))) return null;
+            return (dPC + dCN - dPN) - detour;
+        };
         if (built && built.ffzs && !built.boxes) built.boxes = built.ffzs.map(f => agRingBbox(f.ring, MB_ENTRY_FFZ_FT / 3.28084));
         const cache = legCache || new Map();
         const zoneOf = (p) => (p && p.zone && p.zone.length >= 3) ? p.zone : (p ? p.ring : null);
@@ -11940,7 +11961,10 @@
                     if (p.lat < bb.s || p.lat > bb.n || p.lng < bb.w || p.lng > bb.e) continue;
                     if (through_(p, c)) { inside += p.len; if (firstAt < 0) firstAt = s; }
                 }
-                if (inside >= PT_MIN_INSIDE_M) through.push({ id: orderIds[j], slot: j, insideM: inside, firstAt });
+                if (inside < PT_MIN_INSIDE_M) return;
+                const gain = gainOf(k, j);
+                if (gain != null && gain < PT_MIN_GAIN_FT) return;   // crossing is real, moving it saves nothing
+                through.push({ id: orderIds[j], slot: j, insideM: inside, firstAt, gainFt: gain });
             });
             if (through.length) { through.sort((x, y) => x.firstAt - y.firstAt); hits.push({ k, from: orderIds[k], to: orderIds[k + 1], through }); }
         }
@@ -11948,21 +11972,32 @@
     }
     // Re-order so every flagged pad is picked up on the leg that crosses it.
     // Iterates (a move changes the legs after it) — bounded.
-    function mbPassThroughFix(orderIds, padOf, built, legCache) {
+    function mbPassThroughFix(orderIds, padOf, built, legCache, opts) {
         let order = orderIds.slice();
         const cache = legCache || new Map();
         const moves = [];
         for (let guard = 0; guard < orderIds.length * 2; guard++) {
-            const hits = mbPassThroughScan(order, padOf, built, cache);
+            const hits = mbPassThroughScan(order, padOf, built, cache, opts);
             if (!hits.length) break;
-            const h = hits[0], pick = h.through[0];
+            // biggest saving first (ties → earliest leg, first crossed)
+            let h = hits[0], pick = h.through[0];
+            hits.forEach(hh => hh.through.forEach(t => { if ((t.gainFt || 0) > (pick.gainFt || 0)) { h = hh; pick = t; } }));
             const from = order.indexOf(pick.id);
             if (from < 0) break;
             order.splice(from, 1);
             order.splice(h.k + 1, 0, pick.id);
             moves.push({ id: pick.id, fromSlot: from + 1, toSlot: h.k + 2, between: [h.from, h.to] });
         }
-        return { order, moves, hits: mbPassThroughScan(order, padOf, built, cache) };
+        return { order, moves, hits: mbPassThroughScan(order, padOf, built, cache, opts) };
+    }
+    // pairwise engine → id-keyed distance fns for the scan (pads the engine has no row for → null)
+    function mbPassDistOpts(pw) {
+        if (!pw || !pw.ok) return null;
+        const idx = new Map(pw.rows.map((r, i) => [r.asset.id, i]));
+        return {
+            dist: (a, b) => { const i = idx.get(a), j = idx.get(b); return (i == null || j == null) ? null : pw.dPad(i, j); },
+            dBase: (a) => { const i = idx.get(a); return i == null ? null : pw.dBase(i); },
+        };
     }
     // padOf for a detected macro: navs from its own block steps
     // The pad's own FFZ (smallest FFZ around its centroid) — but ONLY when that FFZ
@@ -11991,7 +12026,7 @@
         return (id) => { const a = ring.get(id); if (!a) return null; if (!zones.has(id)) zones.set(id, mbPadZone(a.ring, ffzs, rings)); return { ring: a.ring, zone: zones.get(id), navs: byPad.get(id) || [] }; };
     }
     function mcvPassLabel(hits, padName) {
-        return hits.map(h => h.through.map(t => `leg #${h.k + 1}→#${h.k + 2} flies through #${t.slot + 1} ${padName(t.id)} (${Math.round(t.insideM * 3.28084)} ft inside) — picked up later`).join('\n')).join('\n');
+        return hits.map(h => h.through.map(t => `leg #${h.k + 1}→#${h.k + 2} flies through #${t.slot + 1} ${padName(t.id)} (${Math.round(t.insideM * 3.28084)} ft inside)${t.gainFt != null ? ` — picking it up saves ~${Math.round(t.gainFt / 50) * 50} ft` : ' — picked up later'}`).join('\n')).join('\n');
     }
     // Shared stylesheet for every MBT map chip (🧩 badges, 🔋 range chips, ⇅ temp
     // badges). pointer-events: none so M2 reaches the pad under a chip.
@@ -13282,12 +13317,13 @@
                     const tp = Date.now();
                     const padOf = mcvPadOfFor(mc, (ent && ent.ffzs) || pw.built.ffzs, (det.assets || []).map(a => a.ring));
                     const built = pw.built;
-                    const hits = mbPassThroughScan(mc.pads.map(a => a.id), padOf, built);
-                    if (hits.length) { const fx = mbPassThroughFix(mc.pads.map(a => a.id), padOf, built); pass = { hits, fixedOrder: fx.order, moves: fx.moves, left: fx.hits.length }; }
+                    const dOpts = mbPassDistOpts(pw);
+                    const hits = mbPassThroughScan(mc.pads.map(a => a.id), padOf, built, null, dOpts);
+                    if (hits.length) { const fx = mbPassThroughFix(mc.pads.map(a => a.id), padOf, built, null, dOpts); pass = { hits, fixedOrder: fx.order, moves: fx.moves, left: fx.hits.length }; }
                     passMs += Date.now() - tp;
                     if (hits.length) console.log(`${TAG} [mcv] ↩ "${mc.mission.name}": ${mcvPassLabel(hits, id => { const a = mc.pads.find(p => p.id === id); return a ? a.name : String(id); }).replace(/\n/g, ' · ')}`);
                 } catch (e) { console.warn(`${TAG} [mcv] pass-through scan failed for "${mc.mission.name}"`, e); }
-                audits.set(mc.mission.id, { cur, re: re.sim, reRows: re.rows, unknown, budget, calib, pass });
+                audits.set(mc.mission.id, { cur, re: re.sim, reRows: re.rows, unknown, budget, calib, pass, pw });
             } catch (e) {
                 console.warn(`${TAG} [mcv] audit failed for "${mc.mission.name}"`, e);
                 audits.set(mc.mission.id, null);
@@ -15361,9 +15397,11 @@
                     if (info) return { ring: a.ring, zone: mbPadZone(a.ring, ffzsNow, allRings), navs: addedBody(info).filter(st => st && st.type === 1 && st.location && typeof st.location.lat === 'number').map(st => st.location) };
                     return padOfBase(id) || { ring: a.ring, zone: mbPadZone(a.ring, ffzsNow, allRings), navs: [] };
                 };
-                passHits = mbPassThroughScan(order.map(a => a.id), padOf, built, moState.legCache);
+                const auNow = (mcv.data && mcv.data.audits) ? mcv.data.audits.get(missionId) : null;
+                const dOpts = mbPassDistOpts(auNow && auNow.pw);
+                passHits = mbPassThroughScan(order.map(a => a.id), padOf, built, moState.legCache, dOpts);
                 if (passHits.length) moState.passFix = () => {
-                    const fx = mbPassThroughFix(order.map(a => a.id), padOf, built, moState.legCache);
+                    const fx = mbPassThroughFix(order.map(a => a.id), padOf, built, moState.legCache, dOpts);
                     const byId = new Map(order.map(a => [a.id, a]));
                     moState.order = fx.order.map(id => byId.get(id)).filter(Boolean);
                     console.log(`${TAG} [⇅] ↩ pick-up staged: ${fx.moves.map(m => `"${(byId.get(m.id) || {}).name}" #${m.fromSlot}→#${m.toSlot}`).join(', ')}${fx.hits.length ? ` · ${fx.hits.length} leg(s) still cross a later pad` : ''}`);
