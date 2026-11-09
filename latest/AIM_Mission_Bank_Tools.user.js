@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.124
+// @version      3.125
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.124';
+    const SCRIPT_VERSION = '3.125';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -11340,8 +11340,18 @@
                 remaining.delete(pick);
                 cur = pick;
             }
-            const sim = agSimulate(order, pw.dPad, pw.dBase, pw.costOf, budgetFt);
-            return { rows: order.map(i => pw.rows[i]), sim };
+            // v3.125 ↩ pass-through pickup: a later pad the leg flies through is shot en route
+            let finalOrder = order;
+            try {
+                const padOf = (i) => { const r = pw.rows[i]; const navs = ((r.mission && r.mission.instructions) || []).filter(st => st && st.type === 1 && st.location && typeof st.location.lat === 'number').map(st => st.location); return { ring: r.asset.ring, navs }; };
+                const fx = mbPassThroughFix(order, padOf, pw.built);
+                if (fx.moves.length) {
+                    finalOrder = fx.order;
+                    console.log(`${TAG} [lasso] ↩ pass-through pickup: ${fx.moves.map(m => `"${pw.rows[m.id].asset.name}" #${m.fromSlot}→#${m.toSlot}`).join(', ')}${fx.hits.length ? ` · ${fx.hits.length} leg(s) still cross a later pad` : ''}`);
+                }
+            } catch (e) { console.warn(`${TAG} [lasso] pass-through pickup failed — spur-walk order kept`, e); }
+            const sim = agSimulate(finalOrder, pw.dPad, pw.dBase, pw.costOf, budgetFt);
+            return { rows: finalOrder.map(i => pw.rows[i]), sim };
         } catch (e) {
             console.warn(`${TAG} [lasso] branch walk failed — plain furthest→closest`, e);
             return { rows: rowsD, sim: null };
@@ -11860,6 +11870,89 @@
     // layers are currently switched off in the legend; resets to all-visible
     // every fresh 🧩 toggle-on. macroLayers groups layers per mission id so a
     // single macro can be hidden/shown without a full redraw.
+    // ── ↩ PASS-THROUGH PICKUP (v3.125, 2026-11-09) ─────────────────────────
+    // Live on EL - P2_2: the 5→6 leg's legal route ran straight through pad #11,
+    // which the macro then came BACK for later (double-back). The order builders
+    // treat a pad as a stop, never as airspace. Rule: when the leg between two
+    // consecutive pads flies through a LATER pad's polygon, that pad is picked up
+    // en route (inserted between them). Pads already visited don't count — re-
+    // crossing a done pad is plain transit. Detection = legal leg (mpvLegalPath
+    // over the FP/FFZ graph; straight fallback) sampled every ~12 m; a pad counts
+    // when ≥ PT_MIN_INSIDE_M of the leg is inside its ring (corner nicks ignored).
+    const PT_MIN_INSIDE_M = 20;
+    const PT_SAMPLE_M = 12;
+    // padOf(id) → { ring, navs: [{lat,lng}…] in flight order } (navs may be [])
+    function mbPassThroughScan(orderIds, padOf, built, legCache) {
+        const hits = [];
+        if (built && built.ffzs && !built.boxes) built.boxes = built.ffzs.map(f => agRingBbox(f.ring, MB_ENTRY_FFZ_FT / 3.28084));
+        const cache = legCache || new Map();
+        const endsOf = (id) => { const p = padOf(id); if (!p) return null; const navs = (p.navs && p.navs.length) ? p.navs : [genCentroid(p.ring)]; return { first: navs[0], last: navs[navs.length - 1] }; };
+        const legPts = (fromId, toId) => {
+            const key = fromId + '>' + toId;
+            if (cache.has(key)) return cache.get(key);
+            const a = endsOf(fromId), b = endsOf(toId);
+            let pts = null;
+            if (a && b) {
+                const raw = (built ? mpvLegalPath(built, a.last, b.first) : null) || [[a.last.lat, a.last.lng], [b.first.lat, b.first.lng]];
+                pts = [];
+                for (let i = 1; i < raw.length; i++) {
+                    const p0 = { lat: raw[i - 1][0], lng: raw[i - 1][1] }, p1 = { lat: raw[i][0], lng: raw[i][1] };
+                    const len = mbApproxMeters(p0.lat, p0.lng, p1.lat, p1.lng);
+                    const n = Math.max(1, Math.ceil(len / PT_SAMPLE_M));
+                    for (let s = 0; s < n; s++) { const t = (s + 0.5) / n; pts.push({ lat: p0.lat + (p1.lat - p0.lat) * t, lng: p0.lng + (p1.lng - p0.lng) * t, len: len / n, at: i }); }
+                }
+            }
+            cache.set(key, pts);
+            return pts;
+        };
+        for (let k = 0; k + 1 < orderIds.length; k++) {
+            const pts = legPts(orderIds[k], orderIds[k + 1]);
+            if (!pts || !pts.length) continue;
+            const through = [];
+            for (let j = k + 2; j < orderIds.length; j++) {
+                const c = padOf(orderIds[j]);
+                if (!c || !c.ring || c.ring.length < 3) continue;
+                const bb = agRingBbox(c.ring, 5);
+                let inside = 0, firstAt = -1;
+                for (let s = 0; s < pts.length; s++) {
+                    const p = pts[s];
+                    if (p.lat < bb.s || p.lat > bb.n || p.lng < bb.w || p.lng > bb.e) continue;
+                    if (genPointInPoly(p, c.ring)) { inside += p.len; if (firstAt < 0) firstAt = s; }
+                }
+                if (inside >= PT_MIN_INSIDE_M) through.push({ id: orderIds[j], slot: j, insideM: inside, firstAt });
+            }
+            if (through.length) { through.sort((x, y) => x.firstAt - y.firstAt); hits.push({ k, from: orderIds[k], to: orderIds[k + 1], through }); }
+        }
+        return hits;
+    }
+    // Re-order so every flagged pad is picked up on the leg that crosses it.
+    // Iterates (a move changes the legs after it) — bounded.
+    function mbPassThroughFix(orderIds, padOf, built, legCache) {
+        let order = orderIds.slice();
+        const cache = legCache || new Map();
+        const moves = [];
+        for (let guard = 0; guard < orderIds.length * 2; guard++) {
+            const hits = mbPassThroughScan(order, padOf, built, cache);
+            if (!hits.length) break;
+            const h = hits[0], pick = h.through[0];
+            const from = order.indexOf(pick.id);
+            if (from < 0) break;
+            order.splice(from, 1);
+            order.splice(h.k + 1, 0, pick.id);
+            moves.push({ id: pick.id, fromSlot: from + 1, toSlot: h.k + 2, between: [h.from, h.to] });
+        }
+        return { order, moves, hits: mbPassThroughScan(order, padOf, built, cache) };
+    }
+    // padOf for a detected macro: navs from its own block steps
+    function mcvPadOfFor(mc) {
+        const byPad = new Map();
+        (mc.blocks || []).forEach(b => { if (b.aId == null) return; if (!byPad.has(b.aId)) byPad.set(b.aId, []); b.steps.forEach(s => { if (s && s.type === 1 && s.location && typeof s.location.lat === 'number') byPad.get(b.aId).push(s.location); }); });
+        const ring = new Map(mc.pads.map(a => [a.id, a]));
+        return (id) => { const a = ring.get(id); return a ? { ring: a.ring, navs: byPad.get(id) || [] } : null; };
+    }
+    function mcvPassLabel(hits, padName) {
+        return hits.map(h => h.through.map(t => `leg #${h.k + 1}→#${h.k + 2} flies through #${t.slot + 1} ${padName(t.id)} (${Math.round(t.insideM * 3.28084)} ft inside) — picked up later`).join('\n')).join('\n');
+    }
     // Shared stylesheet for every MBT map chip (🧩 badges, 🔋 range chips, ⇅ temp
     // badges). pointer-events: none so M2 reaches the pad under a chip.
     // v3.124: visibility: visible !important — Percepto's bundle runs a marker
@@ -12378,10 +12471,14 @@
                     const nz = nfzBy.get(mc.mission.id);
                     const nfzChip = nz ? `<span data-mcv-resume-open title="⛔ ${nz.length} pad${nz.length === 1 ? '' : 's'} with a step inside an NFZ — the drone stops there. Click → Ⓐ resume builder (or ⇅ to ⏸ the pad).\n${escapeHtml(nz.map(p => `${p.name} (${p.n} step${p.n === 1 ? '' : 's'} · ${p.nfz.join(', ')})`).join('\n'))}" style="padding:0 5px;background:rgba(255,82,82,0.18);border:1px solid rgba(255,82,82,0.6);color:#ff8a8a;border-radius:4px;cursor:pointer;font-size:10px;font-weight:800;">⛔${nz.length}</span>` : '';
                     const pauseChip = `<span data-mcv-pchip="${mc.mission.id}"></span>`;
-                    return `<div data-mcv-row="${mc.mission.id}" data-mcv-name="${escapeHtml(String(mc.mission.name || '').toLowerCase())}" style="display:flex;align-items:center;gap:6px;margin:2px 0;opacity:${vis ? 1 : 0.38};${nz ? 'background:rgba(255,82,82,0.08);border-radius:4px;' : ''}"><input type="checkbox" data-mcv-vis="${mc.mission.id}" ${vis ? 'checked' : ''} title="Show/hide this macro on the map" style="margin:0;cursor:pointer;accent-color:${COLORS2[i % COLORS2.length]};"><span data-mcv-solo="${mc.mission.id}" title="Solo — show ONLY this macro (click again to show all)" style="width:10px;height:10px;border-radius:2px;background:${COLORS2[i % COLORS2.length]};flex:none;cursor:pointer;"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:170px;">${escapeHtml(String(mc.mission.name || ''))}</span>${forcedSet.has(String(mc.mission.id)) ? '<span title="📌 forced macro (rules skipped) — undo at the bottom">📌</span>' : ''}${nfzChip}${pauseChip}${reBtn}${orderBtn}${remergeBtn}${stoBtn}${splitBtn}${nmBtn}<b style="margin-left:auto;padding-left:8px;">${mc.pads.length}</b></div>${auditLine ? auditLine.replace('style="', `style="opacity:${vis ? 1 : 0.38};`) : ''}`;
+                    // v3.125 ↩ pass-through chip: legs that fly through a pad the macro only comes back for later
+                    const ps = au && au.pass;
+                    const passChip = ps ? `<span data-mcv-pass="${mc.mission.id}" title="↩ ${ps.hits.length} leg${ps.hits.length === 1 ? '' : 's'} fly through a pad that is only shot later (double-back). Click → ⇅ with the pick-up order staged (review, then Apply).\n${escapeHtml(mcvPassLabel(ps.hits, id => { const a = mc.pads.find(p => p.id === id); return a ? a.name : String(id); }))}" style="padding:0 5px;background:rgba(255,183,77,0.16);border:1px solid rgba(255,183,77,0.55);color:#ffb74d;border-radius:4px;cursor:pointer;font-size:10px;font-weight:700;">↩${ps.hits.length}</span>` : '';
+                    return `<div data-mcv-row="${mc.mission.id}" data-mcv-name="${escapeHtml(String(mc.mission.name || '').toLowerCase())}" style="display:flex;align-items:center;gap:6px;margin:2px 0;opacity:${vis ? 1 : 0.38};${nz ? 'background:rgba(255,82,82,0.08);border-radius:4px;' : ''}"><input type="checkbox" data-mcv-vis="${mc.mission.id}" ${vis ? 'checked' : ''} title="Show/hide this macro on the map" style="margin:0;cursor:pointer;accent-color:${COLORS2[i % COLORS2.length]};"><span data-mcv-solo="${mc.mission.id}" title="Solo — show ONLY this macro (click again to show all)" style="width:10px;height:10px;border-radius:2px;background:${COLORS2[i % COLORS2.length]};flex:none;cursor:pointer;"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:170px;">${escapeHtml(String(mc.mission.name || ''))}</span>${forcedSet.has(String(mc.mission.id)) ? '<span title="📌 forced macro (rules skipped) — undo at the bottom">📌</span>' : ''}${nfzChip}${pauseChip}${passChip}${reBtn}${orderBtn}${remergeBtn}${stoBtn}${splitBtn}${nmBtn}<b style="margin-left:auto;padding-left:8px;">${mc.pads.length}</b></div>${auditLine ? auditLine.replace('style="', `style="opacity:${vis ? 1 : 0.38};`) : ''}`;
                 }).join('')
                 : '<div style="color:#888;">No macro missions yet (≥2 pads in one mission).</div>')
             + '<div data-mcv-others></div>'
+            + ((() => { const n = det.macros.filter(mc => { const au = mcv.data && mcv.data.audits ? mcv.data.audits.get(mc.mission.id) : null; return au && au.pass; }).length; return n ? `<div style="color:#ffb74d;margin-top:5px;font-weight:700;" title="A leg between two consecutive pads flies through a pad the macro only comes back for later. The ↩ chip on each row opens ⇅ with the pick-up order staged.">↩ ${n} macro${n === 1 ? '' : 's'} with pass-through legs (double-back)</div>` : ''; })())
             + (nfzBy.size ? `<div style="display:flex;align-items:center;gap:8px;color:#ff8a8a;margin-top:5px;font-weight:700;">⛔ ${nfzBy.size} macro${nfzBy.size === 1 ? '' : 's'} blocked by an NFZ pad <button data-mcv-resume-open style="padding:1px 8px;background:rgba(255,138,138,0.2);border:1px solid rgba(255,138,138,0.7);color:#ff8a8a;border-radius:4px;cursor:pointer;font-size:10px;font-weight:800;">Ⓐ Build resume missions</button></div>` : '')
             + `<div data-mcv-paused-sum></div>`
             + `<div style="color:#ffb74d;margin-top:5px;">⬜ ${det.todo.length} pad(s) with missions, not in any macro</div>`
@@ -12485,6 +12582,13 @@
         el.querySelector('[data-mcv-remerge-all]').onclick = () => mcvOpenRemergeAll();
         el.querySelector('[data-mcv-resume]').onclick = () => mcvResumeOpen();
         el.querySelectorAll('[data-mcv-resume-open]').forEach(b => b.onclick = () => mcvResumeOpen());
+        // v3.125 ↩ chip → ⇅ with the pick-up order already staged (user reviews, then Apply)
+        el.querySelectorAll('[data-mcv-pass]').forEach(b => b.onclick = () => {
+            const id = Number(b.getAttribute('data-mcv-pass')) || b.getAttribute('data-mcv-pass');
+            mcvOpenOrderPanel(id);
+            const pf = document.querySelector(`#${MCV_ORDER_PANEL_ID} [data-mo-passfix]`);
+            if (pf) pf.click(); else showToast('↩ No pass-through found on the current order (already fixed?).', '#9ad', 3000);
+        });
         // v2.47: per-macro show/hide + solo + All/None
         el.querySelectorAll('input[data-mcv-vis]').forEach(cb => cb.onchange = () => {
             const id = Number(cb.getAttribute('data-mcv-vis')) || cb.getAttribute('data-mcv-vis');
@@ -13132,7 +13236,14 @@
                         curDistM: distM, reDistM: distM ? distM * navRatio : null,
                     };
                 }
-                audits.set(mc.mission.id, { cur, re: re.sim, reRows: re.rows, unknown, budget, calib });
+                let pass = null;
+                try {
+                    const padOf = mcvPadOfFor(mc);
+                    const built = pw.built;
+                    const hits = mbPassThroughScan(mc.pads.map(a => a.id), padOf, built);
+                    if (hits.length) { const fx = mbPassThroughFix(mc.pads.map(a => a.id), padOf, built); pass = { hits, fixedOrder: fx.order, moves: fx.moves, left: fx.hits.length }; }
+                } catch (e) { console.warn(`${TAG} [mcv] pass-through scan failed for "${mc.mission.name}"`, e); }
+                audits.set(mc.mission.id, { cur, re: re.sim, reRows: re.rows, unknown, budget, calib, pass });
             } catch (e) {
                 console.warn(`${TAG} [mcv] audit failed for "${mc.mission.name}"`, e);
                 audits.set(mc.mission.id, null);
@@ -15190,6 +15301,28 @@
             });
             const changed = removedL.length > 0 || moState.added.size > 0 || moState.paused.length > 0 || moState.resumed.size > 0 || order.map(a => a.id).join(',') !== mc.pads.map(a => a.id).join(',');
             const flagged = order.filter(a => !moState.resumed.has(a.id) && nfzOf(a.id, moState.added.has(a.id) ? addedBody(moState.added.get(a.id)) : null).length);
+            // v3.125 ↩ pass-through check on the STAGED order; leg paths cached across renders (drag stays smooth)
+            let passHits = [];
+            moState.passFix = null;
+            try {
+                const built = mcvRouteBuilt();
+                if (!moState.legCache) moState.legCache = new Map();
+                const padOfBase = mcvPadOfFor(mc);
+                const padOf = (id) => {
+                    const a = order.find(p => p.id === id); if (!a) return null;
+                    const info = moState.added.get(id);
+                    if (info) return { ring: a.ring, navs: addedBody(info).filter(st => st && st.type === 1 && st.location && typeof st.location.lat === 'number').map(st => st.location) };
+                    return padOfBase(id) || { ring: a.ring, navs: [] };
+                };
+                passHits = mbPassThroughScan(order.map(a => a.id), padOf, built, moState.legCache);
+                if (passHits.length) moState.passFix = () => {
+                    const fx = mbPassThroughFix(order.map(a => a.id), padOf, built, moState.legCache);
+                    const byId = new Map(order.map(a => [a.id, a]));
+                    moState.order = fx.order.map(id => byId.get(id)).filter(Boolean);
+                    console.log(`${TAG} [⇅] ↩ pick-up staged: ${fx.moves.map(m => `"${(byId.get(m.id) || {}).name}" #${m.fromSlot}→#${m.toSlot}`).join(', ')}${fx.hits.length ? ` · ${fx.hits.length} leg(s) still cross a later pad` : ''}`);
+                    render();
+                };
+            } catch (e) { console.warn(`${TAG} [⇅] pass-through check failed`, e); }
             const rows = order.map((a, i) => {
                 const addedInfo = moState.added.get(a.id);
                 const v = addedInfo ? 0 : visitsOf(a.id);
@@ -15242,12 +15375,20 @@
                     </div>
                     <div style="color:#caa;font-size:10px;margin-top:2px;">The drone stops there ("Failed to navigate to destination") and the mission cannot continue past it.</div>
                 </div>` : '';
+            const passBanner = passHits.length ? `<div style="margin:4px 0 6px;padding:4px 6px;background:rgba(255,183,77,0.12);border:1px solid rgba(255,183,77,0.5);border-radius:5px;">
+                    <div style="display:flex;align-items:center;gap:8px;">
+                        <span style="color:#ffb74d;font-weight:800;flex:1;">↩ ${passHits.length} leg${passHits.length === 1 ? ' flies' : 's fly'} through a pad that is only shot later</span>
+                        <button data-mo-passfix title="Move each flown-through pad to right after the leg that crosses it (review the new order, then Apply)" style="padding:1px 8px;background:rgba(255,183,77,0.16);border:1px solid rgba(255,183,77,0.6);color:#ffb74d;border-radius:4px;cursor:pointer;font-size:10px;font-weight:700;white-space:nowrap;">↩ Pick up en route</button>
+                    </div>
+                    <div style="color:#caa;font-size:10px;margin-top:2px;white-space:pre-line;">${escapeHtml(mcvPassLabel(passHits, id => { const a = order.find(p => p.id === id); return a ? (a.name || String(id)) : String(id); }))}</div>
+                </div>` : '';
             el.innerHTML = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;">
                     <b style="color:#7adfe6;">⇅ Pad order — ${escapeHtml(String(mc.mission.name || ''))}</b>
                     <span data-mo-x style="margin-left:auto;cursor:pointer;color:#888;font-weight:800;">✕</span>
                 </div>
                 <div style="color:#789;font-size:10px;margin-bottom:4px;">The order actually FLOWN — the map badges renumber LIVE as you move rows. Drag rows, ▲▼, or <b style="color:#9ad;">M2 a glowing badge on the map</b> to type its new number. ✕ on a row (or Ctrl+M2 a badge) DELETES that pad; M2 a grey ✕ badge restores it; M2 an OUTSIDE pad on the map ADDS it (steps from its micro, green ＋ badge). Apply saves — each pad's steps move as one intact group.${leadN ? ` ${leadN} pre-pad step(s) stay first.` : ''} <b style="color:#ff8a8a;">Red row</b> = a step inside an NFZ; <b style="color:#ffb74d;">⏸</b> pauses that pad (out of the saved macro, remembered with its slot for everyone), <b style="color:#5fff5f;">▶</b> brings it back.</div>
                 ${banner}
+                ${passBanner}
                 ${rows}
                 ${removedL.length ? `<div style="color:#ff5252;font-weight:700;margin-top:5px;">Deleting ${removedL.length} pad(s):</div>${removedRows}` : ''}
                 <div style="display:flex;align-items:center;gap:6px;margin-top:6px;font-size:10px;"><b style="color:#ffb74d;">⏸ Paused</b> ${storeNote}</div>
@@ -15257,6 +15398,7 @@
                     <button data-mo-apply ${changed ? '' : 'disabled'} style="margin-left:auto;padding:4px 12px;background:${changed ? '#5fff5f' : '#2a3340'};border:none;color:${changed ? '#04220a' : '#567'};border-radius:5px;cursor:pointer;font-weight:800;">💾 Apply order</button>
                 </div>`;
             el.querySelector('[data-mo-x]').onclick = mcvCloseOrderPanel;
+            const pfBtn = el.querySelector('[data-mo-passfix]'); if (pfBtn) pfBtn.onclick = () => { if (moState && moState.passFix) moState.passFix(); };
             el.querySelector('[data-mo-reset]').onclick = () => {
                 moState.resumed.forEach((e, pid) => { moState.added.delete(pid); moDropTempBadge(pid); });
                 moState.resumed = new Map(); moState.paused = []; moState.pauseNotes = new Map();
