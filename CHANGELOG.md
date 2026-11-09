@@ -1,4 +1,6 @@
-## 2026-11-04 — 🧩 Mission Bank Tools latest v3.112 → v3.129 (latest only)
+## 2026-11-04 — 🧩 Mission Bank Tools latest v3.112 → v3.130 (latest only)
+
+- **v3.130** — 🧩/⇅ pad badges: Percepto's marker declutter also hides the badge's inner element (probe: wrapper visible, number hidden on 4 of 13) — the force-visible rule now covers the badge subtree.
 
 - **v3.129** — 🧩 open speed: the ↩ pass-through scan now reads each leg's route out of the pairwise engine's existing Dijkstra runs instead of re-routing every leg (was 19 s of a 39 s open on 1637, with a "page unresponsive" prompt); scan + fix share one leg cache; audit log line now breaks down pairwise / order / scan time.
 
