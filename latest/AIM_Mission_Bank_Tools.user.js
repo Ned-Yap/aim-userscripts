@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.120
+// @version      3.121
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.120';
+    const SCRIPT_VERSION = '3.121';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -14594,25 +14594,134 @@
     const MCV_RESUME_PANEL_ID = 'aim-mb-mcv-resume';
     let mcvResumeBusy = false;
     function mcvResumeName(mc) { return String(mc.mission.name || '') + 'A'; }
-    function mcvResumePlan(mc, nfzPads) {
+    // v3.121 (Ⓐ v2): the cut is the REAL progress, not the NFZ pad's slot. Live
+    // 2026-11-09 (EL - P2_2): the pilot stopped on the 5→6 leg because it crossed
+    // the rig pad (#11 in flight order) — v3.120 cut at #11 and built an A with
+    // pads 12–13 only, leaving 6–10 unflown. Now: the Incomplete Missions entry
+    // (GET /mission_group/<site>/2, frozen plan + last executed step) says where
+    // the drone really stopped; A = from the LAST COMPLETED NAV's set onward (at
+    // most one nav-set redone — a full pad can be 10–20 sets), minus every NFZ
+    // pad. No entry (trashed / in flight) → manual "resume after pad #" picker,
+    // defaulting to the NFZ pad's slot. Order is kept as flown (no reorder).
+    const MCV_GROUP_TIMEOUT_MS = 55000;
+    const mcvGroupCache = new Map();   // site → { at, groups, err, loading }
+    function mcvGroupsGet(sid) { return mcvGroupCache.get(String(sid)) || null; }
+    function mcvGroupsFetch(sid, force) {
+        const key = String(sid);
+        const cur = mcvGroupCache.get(key);
+        if (cur && cur.loading) return cur.loading;
+        if (cur && !force && cur.groups && (Date.now() - cur.at) < 120000) return Promise.resolve(cur.groups);
+        const ctrl = (typeof AbortController === 'function') ? new AbortController() : null;
+        const timer = ctrl ? setTimeout(() => { try { ctrl.abort(); } catch (e) {} }, MCV_GROUP_TIMEOUT_MS) : null;
+        const t0 = Date.now();
+        const p = fetch(`/mission_group/${encodeURIComponent(sid)}/2`, { credentials: 'include', signal: ctrl ? ctrl.signal : undefined })
+            .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+            .then(arr => {
+                const groups = Array.isArray(arr) ? arr : (arr && Array.isArray(arr.results) ? arr.results : []);
+                mcvGroupCache.set(key, { at: Date.now(), groups, err: null, loading: null });
+                console.log(`${TAG} [Ⓐ] incomplete list: ${groups.length} group(s) in ${((Date.now() - t0) / 1000).toFixed(1)} s${groups.length ? ' — ' + groups.map(g => `"${g.app_name}" @${g.last_app_instruction_index_executed}${g.in_progress ? ' (in flight)' : ''}`).join(' · ') : ''}`);
+                return groups;
+            })
+            .catch(e => {
+                const msg = (e && e.name === 'AbortError') ? `timed out after ${Math.round(MCV_GROUP_TIMEOUT_MS / 1000)} s` : (e && e.message ? e.message : String(e));
+                console.warn(`${TAG} [Ⓐ] incomplete list fetch failed — ${msg}`);
+                mcvGroupCache.set(key, { at: Date.now(), groups: (cur && cur.groups) || null, err: msg, loading: null });
+                return (cur && cur.groups) || null;
+            })
+            .finally(() => { if (timer) clearTimeout(timer); });
+        mcvGroupCache.set(key, { at: cur ? cur.at : 0, groups: cur ? cur.groups : null, err: null, loading: p });
+        return p;
+    }
+    // the most recent incomplete entry for a macro, by name
+    function mcvGroupFor(groups, mc) {
+        const name = String(mc.mission.name || '');
+        const hits = (groups || []).filter(g => g && (String(g.app_name || '') === name || (g.app && String(g.app.name || '') === name)));
+        if (!hits.length) return null;
+        hits.sort((a, b) => String(b.last_action_timestamp || '').localeCompare(String(a.last_action_timestamp || '')) || ((b.id | 0) - (a.id | 0)));
+        return hits[0];
+    }
+    function mcvResumeIsNav(i) { return !!i && (i.type === 1 || i.type_name === 'navigate'); }
+    // Plan from the FROZEN flown plan + real progress.
+    function mcvResumePlanProgress(mc, g, ent) {
+        const raw = (g && g.app && Array.isArray(g.app.instructions)) ? g.app.instructions.filter(i => i) : [];
+        if (!raw.length) return null;
+        const ins = raw.slice();
+        if (ins.every(i => typeof i.index_in_app === 'number')) ins.sort((a, b) => a.index_in_app - b.index_in_app);
+        let last = -1;
+        const lid = g.last_app_instruction_executed;
+        const lidVal = (lid && typeof lid === 'object') ? lid.id : lid;
+        if (lidVal != null) last = ins.findIndex(i => i.id === lidVal || String(i.id) === String(lidVal));
+        const k = g.last_app_instruction_index_executed;
+        if (last < 0 && typeof k === 'number') {
+            last = ins.findIndex(i => i.index_in_app === k);
+            if (last < 0 && k >= 0 && k < ins.length) last = k;
+        }
+        if (last < 0) return null;
+        // resume point: next step if it opens a nav-set; else rewind to the last nav
+        let start = last + 1;
+        if (!(start < ins.length && mcvResumeIsNav(ins[start]))) {
+            let j = last; while (j >= 0 && !mcvResumeIsNav(ins[j])) j--;
+            start = j >= 0 ? j : last + 1;
+        }
+        const redo = Math.max(0, last + 1 - start);
+        // pad attribution of the frozen plan (same hit-test as 🧩)
+        const d2 = mcvDetect(ent, [{ id: 'frozen-' + g.id, name: String(g.app_name || mc.mission.name || ''), instructions: ins }]);
+        const fm = d2.macros[0] || null;
+        const body = ins.filter(i => i.type !== 0 && i.type !== 99);
+        const att = [];
+        if (fm) fm.blocks.forEach(b => b.steps.forEach(() => att.push(b.aId)));
+        if (att.length !== body.length) { att.length = 0; body.forEach(() => att.push(d2.solos[0] ? d2.solos[0].pad.id : null)); }
+        const padOf = new Map((fm ? fm.pads : (d2.solos[0] ? [d2.solos[0].pad] : [])).map(a => [a.id, a]));
+        const padName = id => { const a = padOf.get(id) || mc.pads.find(p => p.id === id); return a ? (a.name || String(id)) : String(id); };
+        const padOrder = fm ? fm.pads.map(a => a.id) : Array.from(padOf.keys());
+        // NFZ pads in the frozen plan
+        const byPad = new Map();
+        body.forEach((st, bi) => { const id = att[bi]; if (id == null) return; if (!byPad.has(id)) byPad.set(id, []); byPad.get(id).push(st); });
+        const nfzPads = [];
+        byPad.forEach((steps, id) => { const fl = moNfzFlags(steps, ent); if (fl.length) nfzPads.push({ id, name: padName(id), n: fl.length, nfz: moNfzNames(fl) }); });
+        const nfzIds = new Set(nfzPads.map(p => p.id));
+        let startBody = 0; for (let i = 0; i < start && i < ins.length; i++) if (ins[i].type !== 0 && ins[i].type !== 99) startBody++;
+        const keptSteps = [], keepIds = [], skippedNfz = [];
+        body.forEach((st, bi) => {
+            if (bi < startBody) return;
+            const id = att[bi];
+            if (id != null && nfzIds.has(id)) { if (!skippedNfz.includes(id)) skippedNfz.push(id); return; }
+            keptSteps.push(pcmNormStep(st));
+            if (id != null && !keepIds.includes(id)) keepIds.push(id);
+        });
+        const flownIds = []; body.forEach((st, bi) => { if (bi < startBody) { const id = att[bi]; if (id != null && !flownIds.includes(id) && !keepIds.includes(id)) flownIds.push(id); } });
+        const to = pcmNormStep(ins.find(i => i.type === 0) || mbMakeStep(0, 20));
+        const rh = pcmNormStep(Array.from(ins).reverse().find(i => i.type === 99) || mbMakeStep(99));
+        const lastStep = ins[last];
+        const lastPadId = (() => { let bi = -1; for (let i = 0; i <= last; i++) if (ins[i].type !== 0 && ins[i].type !== 99) bi++; return bi >= 0 ? att[bi] : null; })();
+        return {
+            mode: 'progress', group: g, total: ins.length, last, lastLabel: stepCountKey(lastStep), lastPadId, lastPadName: lastPadId != null ? padName(lastPadId) : null,
+            lastPadSlot: lastPadId != null ? padOrder.indexOf(lastPadId) + 1 : 0, start, redo,
+            nfzPads, skippedNfz, keep: keepIds, flown: flownIds, padName, padCount: padOrder.length,
+            instructions: [to].concat(keptSteps, [rh]), stepCount: keptSteps.length,
+            when: g.last_action_timestamp || null, inProgress: !!g.in_progress,
+        };
+    }
+    // Plan from the LIVE macro by pad slot: everything after pad #afterIdx (0-based),
+    // minus every NFZ pad. afterIdx = the NFZ pad's slot reproduces v3.120.
+    function mcvResumePlanPads(mc, nfzPads, afterIdx) {
         const order = mc.pads.map(a => a.id);
         const nfzIds = new Set((nfzPads || []).map(p => p.id));
-        const firstIdx = order.findIndex(id => nfzIds.has(id));
-        if (firstIdx < 0) return null;
-        const after = order.slice(firstIdx + 1);
+        const cut = (typeof afterIdx === 'number' && afterIdx >= -1) ? afterIdx : order.findIndex(id => nfzIds.has(id));
+        const after = order.slice(cut + 1);
         const keep = after.filter(id => !nfzIds.has(id));
-        const laterNfz = after.filter(id => nfzIds.has(id));
+        const skippedNfz = after.filter(id => nfzIds.has(id));
         const byPad = new Map();
         mc.blocks.forEach(b => { if (b.aId == null) return; if (!byPad.has(b.aId)) byPad.set(b.aId, []); b.steps.forEach(st => byPad.get(b.aId).push(st)); });
-        const lead = (mc.blocks[0] && mc.blocks[0].aId == null) ? mc.blocks[0].steps : [];
+        const lead = (cut < 0 && mc.blocks[0] && mc.blocks[0].aId == null) ? mc.blocks[0].steps : [];
         const ins = mc.mission.instructions || [];
         const to = pcmNormStep(ins.find(i => i && i.type === 0) || mbMakeStep(0, 20));
         const rh = pcmNormStep(Array.from(ins).reverse().find(i => i && i.type === 99) || mbMakeStep(99));
         const body = [];
         keep.forEach(id => (byPad.get(id) || []).forEach(st => body.push(pcmNormStep(st))));
         const padName = id => { const a = mc.pads.find(p => p.id === id); return a ? (a.name || String(id)) : String(id); };
-        return { firstIdx, firstPad: order[firstIdx], skipped: order.slice(0, firstIdx + 1), keep, laterNfz, lead: lead.length,
-            instructions: [to].concat(lead.map(pcmNormStep), body, [rh]), stepCount: body.length, padName };
+        return { mode: 'pads', cut, keep, skippedNfz, flown: order.slice(0, cut + 1).filter(id => !nfzIds.has(id)), nfzPads: nfzPads || [], padName, padCount: order.length,
+            instructions: [to].concat(lead.map(pcmNormStep), body, [rh]), stepCount: body.length, redo: 0 };
     }
     function mcvResumeSameBody(aM, plan) {
         try {
@@ -14622,19 +14731,26 @@
         } catch (e) { return false; }
     }
     function mcvResumeClose() { const old = document.getElementById(MCV_RESUME_PANEL_ID); if (old) old.remove(); }
+    const mcvResumeChoice = new Map();   // macro id → 'auto' | 'after:<idx>'
     function mcvResumeOpen() {
         const old = document.getElementById(MCV_RESUME_PANEL_ID);
         if (old) { old.remove(); return; }
         const data = mcv.data;
         if (!data || !data.det) { showToast('Open 🧩 first — Ⓐ works from its scan.', '#ff9800', 3500); return; }
+        const sid = getCurrentSiteID();
         const el = document.createElement('div');
         el.id = MCV_RESUME_PANEL_ID;
-        el.style.cssText = 'position:fixed;right:16px;top:70px;width:440px;max-height:78vh;overflow:auto;z-index:2147483601;'
+        el.style.cssText = 'position:fixed;right:16px;top:70px;width:470px;max-height:78vh;overflow:auto;z-index:2147483601;'
             + 'background:rgba(16,19,26,0.97);border:1px solid #ff8a8a;border-radius:8px;padding:10px 12px;color:#e6e6e6;'
             + 'font:11px "Lato","Segoe UI",sans-serif;box-shadow:0 8px 28px rgba(0,0,0,0.7);';
+        const fmtWhen = iso => { try { const d = new Date(iso); return isNaN(d) ? String(iso || '') : d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); } catch (e) { return String(iso || ''); } };
         const render = () => {
+            if (!document.getElementById(MCV_RESUME_PANEL_ID)) return;
             const det = data.det, ent = data.ent;
             const nfzBy = mcvNfzByMacro(det, ent);
+            const gc = sid ? mcvGroupsGet(sid) : null;
+            const groups = gc && gc.groups ? gc.groups : null;
+            const loading = !!(gc && gc.loading);
             const byName = new Map((data.missions || []).map(m => [String(m.name || ''), m]));
             const macroNames = new Set(det.macros.map(mc => String(mc.mission.name || '')));
             const rows = [];
@@ -14645,8 +14761,22 @@
                 const aName = mcvResumeName(mc);
                 const aM = byName.get(aName) || null;
                 const nz = nfzBy.get(mc.mission.id) || null;
-                if (!nz && !aM) return;
-                rows.push({ mc, nz, aM, aName, plan: nz ? mcvResumePlan(mc, nz) : null });
+                const g = groups ? mcvGroupFor(groups, mc) : null;
+                let prog = null;
+                if (g) { try { prog = mcvResumePlanProgress(mc, g, ent); } catch (e) { console.warn(`${TAG} [Ⓐ] progress plan failed for "${name}"`, e); } }
+                // blocked = live macro has an NFZ pad, OR its incomplete entry's frozen plan does (pad already ⏸ paused out)
+                const blocked = !!nz || !!(prog && prog.nfzPads.length);
+                if (!blocked && !aM) return;
+                const nzAll = nz || (prog ? prog.nfzPads : []);
+                let choice = mcvResumeChoice.get(mc.mission.id) || 'auto';
+                const autoOk = !!(prog && !prog.inProgress);
+                if (choice === 'auto' && !autoOk) choice = 'after:' + (nz ? mc.pads.findIndex(a => nzAll.some(z => z.id === a.id)) : -1);
+                let plan = null;
+                if (blocked) {
+                    if (choice === 'auto') plan = prog;
+                    else { const idx = Number(choice.split(':')[1]); plan = mcvResumePlanPads(mc, nzAll, isNaN(idx) ? undefined : idx); }
+                }
+                rows.push({ mc, nz: blocked ? nzAll : null, aM, aName, plan, prog, g, choice, autoOk });
             });
             rows.sort((x, y) => (x.nz ? 0 : 1) - (y.nz ? 0 : 1) || String(x.mc.mission.name).localeCompare(String(y.mc.mission.name)));
             const btn = (attr, label, color, title) => `<button ${attr} title="${escapeHtml(title || '')}" style="padding:2px 9px;background:${color}22;border:1px solid ${color}99;color:${color};border-radius:5px;cursor:pointer;font-size:11px;font-weight:700;white-space:nowrap;" ${mcvResumeBusy ? 'disabled' : ''}>${label}</button>`;
@@ -14654,20 +14784,36 @@
                 const mc = r.mc, nm = escapeHtml(String(mc.mission.name || ''));
                 if (r.nz) {
                     const p = r.plan;
-                    const nfzList = r.nz.map(z => `#${mc.pads.findIndex(a => a.id === z.id) + 1} ${escapeHtml(z.name)} <span style="color:#caa;">(${z.n} step${z.n === 1 ? '' : 's'} · ${escapeHtml(z.nfz.join(', '))})</span>`).join(' · ');
+                    const nfzList = r.nz.map(z => { const slot = mc.pads.findIndex(a => a.id === z.id); return `${slot >= 0 ? '#' + (slot + 1) + ' ' : ''}${escapeHtml(z.name)} <span style="color:#caa;">(${z.n} step${z.n === 1 ? '' : 's'} · ${escapeHtml(z.nfz.join(', '))})</span>`; }).join(' · ');
                     const upToDate = r.aM && p && mcvResumeSameBody(r.aM, p);
-                    let action, note = '';
-                    if (!p || !p.keep.length) { action = `<span style="color:#ffb74d;">nothing after the NFZ pad — no A mission needed</span>`; }
-                    else if (!r.aM) action = btn(`data-rs-build="${i}"`, `Ⓐ Build "${escapeHtml(r.aName)}"`, '#5fff5f', `Create "${r.aName}" with pads ${p.firstIdx + 2}–${mc.pads.length} (${p.keep.length} pads, ${p.stepCount} steps). Create-only; the macro is untouched.`);
+                    let action;
+                    if (!p || !p.keep.length) action = `<span style="color:#ffb74d;">nothing left to fly — no A mission needed</span>`;
+                    else if (!r.aM) action = btn(`data-rs-build="${i}"`, `Ⓐ Build "${escapeHtml(r.aName)}"`, '#5fff5f', `Create "${r.aName}": ${p.keep.length} pads, ${p.stepCount} steps. Create-only; the macro is untouched.`);
                     else if (upToDate) action = `<span style="color:#5fff5f;font-weight:700;">✓ "${escapeHtml(r.aName)}" exists and matches</span> ${btn(`data-rs-del="${i}"`, '🗑', '#ff8a8a', `Delete "${r.aName}" (the NFZ is still there — only if you no longer want it)`)}`;
-                    else action = btn(`data-rs-build="${i}"`, `🔁 Update "${escapeHtml(r.aName)}"`, '#ffb74d', `"${r.aName}" exists but its steps differ from what this macro + NFZ now call for — rewrite it in place (backup first).`) + ' ' + btn(`data-rs-del="${i}"`, '🗑', '#ff8a8a', `Delete "${r.aName}"`);
-                    if (p && p.laterNfz.length) note = `<div style="color:#ff8a8a;margin-top:2px;">also leaving out ${p.laterNfz.length} later NFZ pad(s): ${escapeHtml(p.laterNfz.map(p.padName).join(', '))}</div>`;
-                    const keepNames = p && p.keep.length ? p.keep.map(p.padName) : [];
+                    else action = btn(`data-rs-build="${i}"`, `🔁 Update "${escapeHtml(r.aName)}"`, '#ffb74d', `"${r.aName}" exists but its steps differ from this cut — rewrite it in place (backup first).`) + ' ' + btn(`data-rs-del="${i}"`, '🗑', '#ff8a8a', `Delete "${r.aName}"`);
+                    // progress line
+                    let progLine;
+                    if (loading && !r.prog) progLine = `<span style="color:#9ab;">⏳ reading the Incomplete Missions list (slow — up to a minute)…</span>`;
+                    else if (r.prog && r.prog.inProgress) progLine = `<span style="color:#ffb74d;">🛸 an incomplete entry is IN FLIGHT right now (${fmtWhen(r.prog.when)}) — wait for it to land, or cut by pad below</span>`;
+                    else if (r.prog) progLine = `<span style="color:#5fff5f;">▶ Incomplete entry ${fmtWhen(r.prog.when)}: stopped after step ${r.prog.last + 1}/${r.prog.total} (${escapeHtml(r.prog.lastLabel)})${r.prog.lastPadName ? ` on pad #${r.prog.lastPadSlot} ${escapeHtml(r.prog.lastPadName)}` : ''}${r.prog.redo ? ` · redoes ${r.prog.redo} step(s) from the last nav` : ' · next step is a nav, nothing redone'}</span>`;
+                    else if (gc && gc.err) progLine = `<span style="color:#ff8a8a;">⚠ Incomplete list unavailable (${escapeHtml(gc.err)}) — cut by pad below</span>`;
+                    else progLine = `<span style="color:#ffb74d;">no incomplete entry for this macro (trashed, or never stopped) — cut by pad below</span>`;
+                    // cut picker
+                    const opts = [`<option value="auto" ${r.choice === 'auto' ? 'selected' : ''} ${r.autoOk ? '' : 'disabled'}>auto — from the incomplete entry's last nav</option>`]
+                        .concat([`<option value="after:-1" ${r.choice === 'after:-1' ? 'selected' : ''}>whole macro minus NFZ pads (nothing flown)</option>`])
+                        .concat(mc.pads.map((a, k) => `<option value="after:${k}" ${r.choice === 'after:' + k ? 'selected' : ''}>resume after #${k + 1} ${escapeHtml(a.name || String(a.id))}${r.nz.some(z => z.id === a.id) ? ' ⛔' : ''}</option>`));
+                    const cutSel = `<select data-rs-cut="${i}" style="max-width:100%;background:#0f1420;color:#dde;border:1px solid #345;border-radius:4px;font-size:10.5px;padding:1px 3px;" ${mcvResumeBusy ? 'disabled' : ''}>${opts.join('')}</select>`;
+                    let planLine = '';
+                    if (p && p.keep.length) {
+                        const keepNames = p.keep.map(p.padName);
+                        planLine = `<div style="color:#9ad;margin-top:3px;" title="${escapeHtml(keepNames.join('\n'))}">Ⓐ = <b>${p.keep.length} pad${p.keep.length === 1 ? '' : 's'}</b> (${escapeHtml(keepNames.slice(0, 4).join(', '))}${keepNames.length > 4 ? ', …' : ''}), ${p.stepCount} steps${p.flown.length ? ` · ${p.flown.length} flown pad(s) skipped` : ''}${p.skippedNfz.length ? ` · <span style="color:#ff8a8a;">${p.skippedNfz.length} NFZ pad(s) left out: ${escapeHtml(p.skippedNfz.map(p.padName).join(', '))}</span>` : ''}</div>`;
+                    }
                     return `<div style="padding:7px 8px;margin:5px 0;background:rgba(255,82,82,0.08);border:1px solid rgba(255,82,82,0.4);border-radius:6px;">
                         <div style="display:flex;align-items:center;gap:8px;"><b style="color:#ff8a8a;">⛔ ${nm}</b><span style="color:#789;">${mc.pads.length} pads</span><span style="margin-left:auto;">${action}</span></div>
                         <div style="color:#caa;margin-top:3px;">NFZ pad${r.nz.length === 1 ? '' : 's'}: ${nfzList}</div>
-                        ${p ? `<div style="color:#9ad;margin-top:3px;" title="${escapeHtml(keepNames.join('\n'))}">Ⓐ = skip #1–#${p.firstIdx + 1} (through the NFZ pad) → fly #${p.firstIdx + 2}–#${mc.pads.length}: <b>${p.keep.length} pad${p.keep.length === 1 ? '' : 's'}</b>, ${p.stepCount} steps${p.lead ? ` + ${p.lead} pre-pad step(s)` : ''}</div>` : ''}
-                        ${note}
+                        <div style="margin-top:3px;">${progLine}</div>
+                        <div style="margin-top:3px;display:flex;align-items:center;gap:6px;"><span style="color:#789;white-space:nowrap;">cut:</span>${cutSel}</div>
+                        ${planLine}
                     </div>`;
                 }
                 // NFZ gone (or never) but an A exists → cleanup
@@ -14680,12 +14826,15 @@
             el.innerHTML = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
                     <b style="color:#ff8a8a;font-size:12px;">Ⓐ NFZ resume missions</b>
                     <span style="color:#789;">${rows.filter(r => r.nz).length} blocked · ${rows.filter(r => !r.nz).length} to clean up</span>
-                    <span data-rs-x style="margin-left:auto;cursor:pointer;color:#888;font-weight:800;">✕</span>
+                    <button data-rs-refetch title="Re-read the Incomplete Missions list (slow)" style="margin-left:auto;padding:1px 7px;background:#1a2230;border:1px solid #345;color:#9ad;border-radius:4px;cursor:pointer;font-size:11px;" ${loading ? 'disabled' : ''}>${loading ? '⏳' : '↻'} incomplete list</button>
+                    <span data-rs-x style="cursor:pointer;color:#888;font-weight:800;">✕</span>
                 </div>
-                <div style="color:#9ab;font-size:10px;margin-bottom:6px;">A macro is <b style="color:#ff8a8a;">blocked</b> when a pad has a step inside an NFZ — the drone stops there ("Failed to navigate to destination"). <b>Ⓐ Build</b> creates "&lt;macro&gt;A": the same mission from the pad AFTER the NFZ pad to the end. The pilot launches it from the Planned tab and trashes the dead incomplete entry. When the NFZ is gone the row turns green — 🗑 the A. Stop-gap until Percepto's fix ships.</div>
+                <div style="color:#9ab;font-size:10px;margin-bottom:6px;">A macro is <b style="color:#ff8a8a;">blocked</b> when a pad has a step inside an NFZ — the drone stops there ("Failed to navigate to destination"). <b>Ⓐ Build</b> creates "&lt;macro&gt;A" from where the incomplete entry really stopped (last completed nav's set onward), minus every NFZ pad, order kept. The pilot launches it from the Planned tab and trashes the dead incomplete entry. When the NFZ is gone the row turns green — 🗑 the A.</div>
                 ${html || '<div style="color:#5fff5f;padding:6px 0;">✓ No macro is blocked by an NFZ, and no leftover A missions.</div>'}
                 <div data-rs-status style="color:#9ad;margin-top:6px;min-height:14px;"></div>`;
             el.querySelector('[data-rs-x]').onclick = mcvResumeClose;
+            el.querySelector('[data-rs-refetch]').onclick = () => { if (!sid) return; mcvGroupsFetch(sid, true).then(render); render(); };
+            el.querySelectorAll('[data-rs-cut]').forEach(s => s.onchange = () => { const r = rows[Number(s.getAttribute('data-rs-cut'))]; if (!r) return; mcvResumeChoice.set(r.mc.mission.id, s.value); render(); });
             const status = (t, c) => { const st = el.querySelector('[data-rs-status]'); if (st) { st.textContent = t; st.style.color = c || '#9ad'; } };
             const refresh = async () => {
                 const after = await mbFetchMissionsFull(getCurrentSiteID());
@@ -14701,7 +14850,10 @@
                 if (!ctx || typeof ctx.saveApp !== 'function') { showToast('Ⓐ Mission context not found — be on the Mission Bank page.', '#ff5252', 4500); return; }
                 const p = r.plan, mc = r.mc;
                 const verb = r.aM ? 'UPDATE' : 'CREATE';
-                if (!window.confirm(`Ⓐ ${verb} "${r.aName}"?\n\nFrom "${mc.mission.name}": skip pads #1–#${p.firstIdx + 1} (through NFZ pad "${p.padName(p.firstPad)}"), keep #${p.firstIdx + 2}–#${mc.pads.length} = ${p.keep.length} pad(s), ${p.stepCount} steps${p.laterNfz.length ? `\nAlso left out (later NFZ pads): ${p.laterNfz.map(p.padName).join(', ')}` : ''}\n\nThe macro "${mc.mission.name}" is untouched. ${r.aM ? 'A JSON backup of the current "' + r.aName + '" downloads first.' : 'Create-only.'}`)) return;
+                const cutTxt = p.mode === 'progress'
+                    ? `Cut = incomplete entry (${fmtWhen(p.when)}): stopped after step ${p.last + 1}/${p.total}${p.lastPadName ? ` on pad "${p.lastPadName}"` : ''}; resumes at step ${p.start + 1}${p.redo ? ` (${p.redo} step(s) from the last nav redone)` : ''}.`
+                    : (p.cut < 0 ? 'Cut = whole macro (nothing counted as flown).' : `Cut = after pad #${p.cut + 1} "${p.padName(mc.pads[p.cut].id)}" (manual).`);
+                if (!window.confirm(`Ⓐ ${verb} "${r.aName}"?\n\nFrom "${mc.mission.name}": ${cutTxt}\nKeeps ${p.keep.length} pad(s), ${p.stepCount} steps: ${p.keep.map(p.padName).join(', ')}${p.skippedNfz.length ? `\nLeft out (NFZ pads): ${p.skippedNfz.map(p.padName).join(', ')}` : ''}\n\nThe macro "${mc.mission.name}" is untouched. ${r.aM ? 'A JSON backup of the current "' + r.aName + '" downloads first.' : 'Create-only.'}`)) return;
                 mcvResumeBusy = true; render(); status(`${verb === 'CREATE' ? 'Creating' : 'Updating'} "${r.aName}"…`);
                 try {
                     if (r.aM) {
@@ -14719,7 +14871,7 @@
                     const gotSteps = got ? mbMissionBody(got).length : -1;
                     const want = p.instructions.filter(i => i && i.type !== 0 && i.type !== 99).length;
                     const good = !!got && gotSteps === want;
-                    console.log(`${TAG} [Ⓐ] ${verb} "${r.aName}" → ${got ? 'id ' + got.id : 'NOT FOUND'} · ${gotSteps}/${want} steps · ${good ? 'verified' : 'MISMATCH'}`);
+                    console.log(`${TAG} [Ⓐ] ${verb} "${r.aName}" (${p.mode === 'progress' ? `progress cut: last step ${p.last + 1}/${p.total}, resume at ${p.start + 1}, redo ${p.redo}` : `pad cut after #${p.cut + 1}`}; keep ${p.keep.length} pads, NFZ out ${p.skippedNfz.length}) → ${got ? 'id ' + got.id : 'NOT FOUND'} · ${gotSteps}/${want} steps · ${good ? 'verified' : 'MISMATCH'}`);
                     showToast(good ? `Ⓐ "${r.aName}" ${verb === 'CREATE' ? 'created' : 'updated'} ✓ verified — ${p.keep.length} pad(s), ${want} steps. Pilot: launch it from the Planned tab, trash the dead incomplete entry.`
                         : `⚠ "${r.aName}" saved but verify ${got ? `found ${gotSteps} steps, expected ${want}` : 'could not find it by name'} — check the Mission Bank.`, good ? '#5fff5f' : '#ff9800', 10000);
                     mcvResumeBusy = false; mcvResumeClose(); mcvResumeOpen();
@@ -14752,6 +14904,7 @@
         };
         render();
         document.body.appendChild(el);
+        if (sid) mcvGroupsFetch(sid, false).then(() => render());
     }
     // ── ⏸ PAUSED PADS (feature #327, v3.112) ──────────────────────────────
     // Percepto has no "skip this pad" — a paused pad is REMOVED from the saved
