@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.119
+// @version      3.120
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.119';
+    const SCRIPT_VERSION = '3.120';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -12016,6 +12016,7 @@
         try { const rm = document.getElementById('aim-mb-mcv-remerge'); if (rm) rm.remove(); } catch (e) {}
         try { const rma = document.getElementById('aim-mb-mcv-remerge-all'); if (rma) rma.remove(); } catch (e) {}
         if (mcv.legendEl) { try { mcv.legendEl.remove(); } catch (e) {} mcv.legendEl = null; }
+        try { mcvResumeClose(); } catch (e) {}
     }
     // Badge inner HTML (shared by mcvDraw + the ⇅ live preview). Edit mode
     // (⇅ panel open for this macro) arms the badge as a live M2 target:
@@ -12317,7 +12318,7 @@
         const COLORS2 = ['#7adfe6', '#ffd54f', '#ff8ad2', '#9dff8a', '#c39dff', '#ffab73', '#8ab6ff', '#f3ff7a', '#ff9e9e', '#7affc9'];
         const forcedSet = mcvForceMacros();
         const nfzBy = mcvNfzByMacro(det, mcv.data && mcv.data.ent);   // v3.118 ⛔ chips
-        el.innerHTML = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;"><b style="color:#7adfe6;">🧩 Macro coverage</b><button data-mcv-report title="Copy the coverage report (Name / Classification / Captured / Battery / Section / Mission / Order) — colored cells, paste into Google Sheets" style="padding:1px 7px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">📋 Report</button><button data-mcv-vis-all title="Show every macro on the map" style="padding:1px 6px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">All</button><button data-mcv-vis-none title="Hide every macro — then re-check just the ones you want" style="padding:1px 6px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">None</button><button data-mcv-split-all title="✂ Split EVERY macro into per-pad micro missions in ONE combined review — pads with existing micros, name collisions, or a better copy in another macro default-skipped. Create-only." style="padding:1px 6px;background:rgba(255,138,210,0.12);border:1px solid rgba(255,138,210,0.45);color:#ff8ad2;border-radius:4px;cursor:pointer;font-size:10px;">✂ All</button><button data-mcv-sto-all title="🪄 Run the Step Optimizer analysis on EVERY macro — one ranked report: route savings, far-first fixes, wrap scrambles, duplicates, standoff violations, nav consolidations. Open any row to review + apply." style="padding:1px 6px;background:rgba(195,157,255,0.12);border:1px solid rgba(195,157,255,0.45);color:#c39dff;border-radius:4px;cursor:pointer;font-size:10px;">🪄 All</button><button data-mcv-remerge-all title="⟳ Re-merge EVERY macro from its pads' current micro missions in one review — only pads whose micro changed are pulled; pad orders, names and ids unchanged. One combined backup, sequential apply with per-macro verify." style="padding:1px 6px;background:rgba(255,213,79,0.12);border:1px solid rgba(255,213,79,0.45);color:#ffd54f;border-radius:4px;cursor:pointer;font-size:10px;">⟳ All</button><span data-mcv-x style="margin-left:auto;cursor:pointer;color:#888;font-weight:800;">✕</span></div>`
+        el.innerHTML = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;"><b style="color:#7adfe6;">🧩 Macro coverage</b><button data-mcv-report title="Copy the coverage report (Name / Classification / Captured / Battery / Section / Mission / Order) — colored cells, paste into Google Sheets" style="padding:1px 7px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">📋 Report</button><button data-mcv-vis-all title="Show every macro on the map" style="padding:1px 6px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">All</button><button data-mcv-vis-none title="Hide every macro — then re-check just the ones you want" style="padding:1px 6px;background:rgba(122,223,230,0.14);border:1px solid rgba(122,223,230,0.5);color:#7adfe6;border-radius:4px;cursor:pointer;font-size:10px;">None</button><button data-mcv-split-all title="✂ Split EVERY macro into per-pad micro missions in ONE combined review — pads with existing micros, name collisions, or a better copy in another macro default-skipped. Create-only." style="padding:1px 6px;background:rgba(255,138,210,0.12);border:1px solid rgba(255,138,210,0.45);color:#ff8ad2;border-radius:4px;cursor:pointer;font-size:10px;">✂ All</button><button data-mcv-sto-all title="🪄 Run the Step Optimizer analysis on EVERY macro — one ranked report: route savings, far-first fixes, wrap scrambles, duplicates, standoff violations, nav consolidations. Open any row to review + apply." style="padding:1px 6px;background:rgba(195,157,255,0.12);border:1px solid rgba(195,157,255,0.45);color:#c39dff;border-radius:4px;cursor:pointer;font-size:10px;">🪄 All</button><button data-mcv-remerge-all title="⟳ Re-merge EVERY macro from its pads' current micro missions in one review — only pads whose micro changed are pulled; pad orders, names and ids unchanged. One combined backup, sequential apply with per-macro verify." style="padding:1px 6px;background:rgba(255,213,79,0.12);border:1px solid rgba(255,213,79,0.45);color:#ffd54f;border-radius:4px;cursor:pointer;font-size:10px;">⟳ All</button><button data-mcv-resume title="Ⓐ NFZ resume missions — for every macro blocked by an NFZ pad, build '<macro>A' (same mission from the pad after the NFZ pad); delete the A once the NFZ is gone" style="padding:1px 6px;background:rgba(255,138,138,${nfzBy.size ? '0.22' : '0.1'});border:1px solid rgba(255,138,138,${nfzBy.size ? '0.7' : '0.4'});color:#ff8a8a;border-radius:4px;cursor:pointer;font-size:10px;font-weight:${nfzBy.size ? '800' : '400'};">Ⓐ${nfzBy.size ? ' ' + nfzBy.size : ''}</button><span data-mcv-x style="margin-left:auto;cursor:pointer;color:#888;font-weight:800;">✕</span></div>`
             + `<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;"><input data-mcv-search type="search" placeholder="search missions…" style="flex:1;min-width:120px;background:#0e1218;color:#e6e6e6;border:1px solid #2a3340;border-radius:3px;font-size:10px;padding:2px 5px;"><span data-mcv-count style="color:#789;font-size:10px;white-space:nowrap;">${det.macros.length} macros</span></div>`
             + `<div data-mcv-body style="overflow:auto;flex:1;min-height:0;">`
             + (det.macros.length
@@ -12366,13 +12367,13 @@
                     const stoBtn = `<button data-mcv-sto="${mc.mission.id}" data-mcv-sto-col="${COLORS2[i % COLORS2.length]}" title="🪄 Step Optimizer — reorder the navs/steps INSIDE this macro for the shortest legal route (intertwined pads interleave), flag snapshot standoff (info-only — pairings are pilot-tuned, moves are strictly opt-in), rebuild scrambled wraps, drop stacked duplicates. Preview first; Apply saves in place with backup + verify." style="padding:0 5px;background:rgba(195,157,255,0.12);border:1px solid rgba(195,157,255,0.45);color:#c39dff;border-radius:4px;cursor:pointer;font-size:10px;">🪄</button>`;
                     const nmBtn = `<button data-mcv-notmacro="${mc.mission.id}" title="🚫 Not a macro — this is ONE pad's mission that merely brushes a neighbouring pad's 150-ft halo. Hides it from this list and counts it as that pad's micro (per site, this install; undo at the bottom)." style="padding:0 5px;background:rgba(255,95,95,0.1);border:1px solid rgba(255,95,95,0.4);color:#ff8a8a;border-radius:4px;cursor:pointer;font-size:10px;">🚫</button>`;
                     const nz = nfzBy.get(mc.mission.id);
-                    const nfzChip = nz ? `<span data-mcv-order="${mc.mission.id}" title="⛔ ${nz.length} pad${nz.length === 1 ? '' : 's'} with a step inside an NFZ — the drone stops there. Click → ⇅ and ⏸ it.\n${escapeHtml(nz.map(p => `${p.name} (${p.n} step${p.n === 1 ? '' : 's'} · ${p.nfz.join(', ')})`).join('\n'))}" style="padding:0 5px;background:rgba(255,82,82,0.18);border:1px solid rgba(255,82,82,0.6);color:#ff8a8a;border-radius:4px;cursor:pointer;font-size:10px;font-weight:800;">⛔${nz.length}</span>` : '';
+                    const nfzChip = nz ? `<span data-mcv-resume-open title="⛔ ${nz.length} pad${nz.length === 1 ? '' : 's'} with a step inside an NFZ — the drone stops there. Click → Ⓐ resume builder (or ⇅ to ⏸ the pad).\n${escapeHtml(nz.map(p => `${p.name} (${p.n} step${p.n === 1 ? '' : 's'} · ${p.nfz.join(', ')})`).join('\n'))}" style="padding:0 5px;background:rgba(255,82,82,0.18);border:1px solid rgba(255,82,82,0.6);color:#ff8a8a;border-radius:4px;cursor:pointer;font-size:10px;font-weight:800;">⛔${nz.length}</span>` : '';
                     const pauseChip = `<span data-mcv-pchip="${mc.mission.id}"></span>`;
                     return `<div data-mcv-row="${mc.mission.id}" data-mcv-name="${escapeHtml(String(mc.mission.name || '').toLowerCase())}" style="display:flex;align-items:center;gap:6px;margin:2px 0;opacity:${vis ? 1 : 0.38};${nz ? 'background:rgba(255,82,82,0.08);border-radius:4px;' : ''}"><input type="checkbox" data-mcv-vis="${mc.mission.id}" ${vis ? 'checked' : ''} title="Show/hide this macro on the map" style="margin:0;cursor:pointer;accent-color:${COLORS2[i % COLORS2.length]};"><span data-mcv-solo="${mc.mission.id}" title="Solo — show ONLY this macro (click again to show all)" style="width:10px;height:10px;border-radius:2px;background:${COLORS2[i % COLORS2.length]};flex:none;cursor:pointer;"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:170px;">${escapeHtml(String(mc.mission.name || ''))}</span>${forcedSet.has(String(mc.mission.id)) ? '<span title="📌 forced macro (rules skipped) — undo at the bottom">📌</span>' : ''}${nfzChip}${pauseChip}${reBtn}${orderBtn}${remergeBtn}${stoBtn}${splitBtn}${nmBtn}<b style="margin-left:auto;padding-left:8px;">${mc.pads.length}</b></div>${auditLine ? auditLine.replace('style="', `style="opacity:${vis ? 1 : 0.38};`) : ''}`;
                 }).join('')
                 : '<div style="color:#888;">No macro missions yet (≥2 pads in one mission).</div>')
             + '<div data-mcv-others></div>'
-            + (nfzBy.size ? `<div style="color:#ff8a8a;margin-top:5px;font-weight:700;">⛔ ${nfzBy.size} macro${nfzBy.size === 1 ? '' : 's'} with a pad inside an NFZ — click the ⛔ chip → ⇅ → ⏸</div>` : '')
+            + (nfzBy.size ? `<div style="display:flex;align-items:center;gap:8px;color:#ff8a8a;margin-top:5px;font-weight:700;">⛔ ${nfzBy.size} macro${nfzBy.size === 1 ? '' : 's'} blocked by an NFZ pad <button data-mcv-resume-open style="padding:1px 8px;background:rgba(255,138,138,0.2);border:1px solid rgba(255,138,138,0.7);color:#ff8a8a;border-radius:4px;cursor:pointer;font-size:10px;font-weight:800;">Ⓐ Build resume missions</button></div>` : '')
             + `<div data-mcv-paused-sum></div>`
             + `<div style="color:#ffb74d;margin-top:5px;">⬜ ${det.todo.length} pad(s) with missions, not in any macro</div>`
             + (() => { const t = mcvTimeCfg(); const perDay = mcvDays(1).perDay; return `<div style="display:flex;gap:5px;align-items:center;margin-top:5px;font-size:10px;color:#9ad;flex-wrap:wrap;">`
@@ -12473,6 +12474,8 @@
         el.querySelector('[data-mcv-split-all]').onclick = () => mcvOpenSplitAll();
         el.querySelector('[data-mcv-sto-all]').onclick = () => stoSweep();
         el.querySelector('[data-mcv-remerge-all]').onclick = () => mcvOpenRemergeAll();
+        el.querySelector('[data-mcv-resume]').onclick = () => mcvResumeOpen();
+        el.querySelectorAll('[data-mcv-resume-open]').forEach(b => b.onclick = () => mcvResumeOpen());
         // v2.47: per-macro show/hide + solo + All/None
         el.querySelectorAll('input[data-mcv-vis]').forEach(cb => cb.onchange = () => {
             const id = Number(cb.getAttribute('data-mcv-vis')) || cb.getAttribute('data-mcv-vis');
@@ -14576,6 +14579,179 @@
         inp.onkeydown = (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); go(); } else if (ev.key === 'Escape') moCloseBadgeRenumber(); };
         el.querySelector('[data-mo-renum-x]').onclick = moCloseBadgeRenumber;
         try { inp.focus(); inp.select(); } catch (e) {}
+    }
+    // ── Ⓐ NFZ RESUME BUILDER (feature #327 part 3, v3.120) ─────────────────
+    // Agreed with Remote Ops 2026-11-09 (stop-gap until Percepto's next sprint lets a
+    // mission save/fly with NFZ steps): a rig/crane → user draws the NFZ → opens 🧩 → Ⓐ.
+    // For every macro with a pad inside an NFZ, ONE click creates "<macro>A": the SAME
+    // mission minus everything up to AND INCLUDING the first NFZ pad (the pilot already
+    // flew the pads before it and cannot pass it); any later NFZ pad is left out too.
+    // The pilot launches "<macro>A" from the Planned tab and trashes the dead incomplete
+    // entry. Next week the regular macro flies again; if the rig is still there, land and
+    // launch A again. When the NFZ is gone the same panel offers 🗑 Delete "<macro>A".
+    // "<macro>A" that already exists is UPDATED in place (a second create would be
+    // renamed "<macro>A-<timestamp>" by Percepto).
+    const MCV_RESUME_PANEL_ID = 'aim-mb-mcv-resume';
+    let mcvResumeBusy = false;
+    function mcvResumeName(mc) { return String(mc.mission.name || '') + 'A'; }
+    function mcvResumePlan(mc, nfzPads) {
+        const order = mc.pads.map(a => a.id);
+        const nfzIds = new Set((nfzPads || []).map(p => p.id));
+        const firstIdx = order.findIndex(id => nfzIds.has(id));
+        if (firstIdx < 0) return null;
+        const after = order.slice(firstIdx + 1);
+        const keep = after.filter(id => !nfzIds.has(id));
+        const laterNfz = after.filter(id => nfzIds.has(id));
+        const byPad = new Map();
+        mc.blocks.forEach(b => { if (b.aId == null) return; if (!byPad.has(b.aId)) byPad.set(b.aId, []); b.steps.forEach(st => byPad.get(b.aId).push(st)); });
+        const lead = (mc.blocks[0] && mc.blocks[0].aId == null) ? mc.blocks[0].steps : [];
+        const ins = mc.mission.instructions || [];
+        const to = pcmNormStep(ins.find(i => i && i.type === 0) || mbMakeStep(0, 20));
+        const rh = pcmNormStep(Array.from(ins).reverse().find(i => i && i.type === 99) || mbMakeStep(99));
+        const body = [];
+        keep.forEach(id => (byPad.get(id) || []).forEach(st => body.push(pcmNormStep(st))));
+        const padName = id => { const a = mc.pads.find(p => p.id === id); return a ? (a.name || String(id)) : String(id); };
+        return { firstIdx, firstPad: order[firstIdx], skipped: order.slice(0, firstIdx + 1), keep, laterNfz, lead: lead.length,
+            instructions: [to].concat(lead.map(pcmNormStep), body, [rh]), stepCount: body.length, padName };
+    }
+    function mcvResumeSameBody(aM, plan) {
+        try {
+            const cur = mbMissionBody(aM).map(mcvStepSig).join('\u0001');
+            const want = plan.instructions.filter(i => i && i.type !== 0 && i.type !== 99).map(mcvStepSig).join('\u0001');
+            return cur === want;
+        } catch (e) { return false; }
+    }
+    function mcvResumeClose() { const old = document.getElementById(MCV_RESUME_PANEL_ID); if (old) old.remove(); }
+    function mcvResumeOpen() {
+        const old = document.getElementById(MCV_RESUME_PANEL_ID);
+        if (old) { old.remove(); return; }
+        const data = mcv.data;
+        if (!data || !data.det) { showToast('Open 🧩 first — Ⓐ works from its scan.', '#ff9800', 3500); return; }
+        const el = document.createElement('div');
+        el.id = MCV_RESUME_PANEL_ID;
+        el.style.cssText = 'position:fixed;right:16px;top:70px;width:440px;max-height:78vh;overflow:auto;z-index:2147483601;'
+            + 'background:rgba(16,19,26,0.97);border:1px solid #ff8a8a;border-radius:8px;padding:10px 12px;color:#e6e6e6;'
+            + 'font:11px "Lato","Segoe UI",sans-serif;box-shadow:0 8px 28px rgba(0,0,0,0.7);';
+        const render = () => {
+            const det = data.det, ent = data.ent;
+            const nfzBy = mcvNfzByMacro(det, ent);
+            const byName = new Map((data.missions || []).map(m => [String(m.name || ''), m]));
+            const macroNames = new Set(det.macros.map(mc => String(mc.mission.name || '')));
+            const rows = [];
+            det.macros.forEach(mc => {
+                const name = String(mc.mission.name || '');
+                // an "A" we built is itself a macro — never build an "AA" off it
+                if (/A$/.test(name) && macroNames.has(name.slice(0, -1))) return;
+                const aName = mcvResumeName(mc);
+                const aM = byName.get(aName) || null;
+                const nz = nfzBy.get(mc.mission.id) || null;
+                if (!nz && !aM) return;
+                rows.push({ mc, nz, aM, aName, plan: nz ? mcvResumePlan(mc, nz) : null });
+            });
+            rows.sort((x, y) => (x.nz ? 0 : 1) - (y.nz ? 0 : 1) || String(x.mc.mission.name).localeCompare(String(y.mc.mission.name)));
+            const btn = (attr, label, color, title) => `<button ${attr} title="${escapeHtml(title || '')}" style="padding:2px 9px;background:${color}22;border:1px solid ${color}99;color:${color};border-radius:5px;cursor:pointer;font-size:11px;font-weight:700;white-space:nowrap;" ${mcvResumeBusy ? 'disabled' : ''}>${label}</button>`;
+            const html = rows.map((r, i) => {
+                const mc = r.mc, nm = escapeHtml(String(mc.mission.name || ''));
+                if (r.nz) {
+                    const p = r.plan;
+                    const nfzList = r.nz.map(z => `#${mc.pads.findIndex(a => a.id === z.id) + 1} ${escapeHtml(z.name)} <span style="color:#caa;">(${z.n} step${z.n === 1 ? '' : 's'} · ${escapeHtml(z.nfz.join(', '))})</span>`).join(' · ');
+                    const upToDate = r.aM && p && mcvResumeSameBody(r.aM, p);
+                    let action, note = '';
+                    if (!p || !p.keep.length) { action = `<span style="color:#ffb74d;">nothing after the NFZ pad — no A mission needed</span>`; }
+                    else if (!r.aM) action = btn(`data-rs-build="${i}"`, `Ⓐ Build "${escapeHtml(r.aName)}"`, '#5fff5f', `Create "${r.aName}" with pads ${p.firstIdx + 2}–${mc.pads.length} (${p.keep.length} pads, ${p.stepCount} steps). Create-only; the macro is untouched.`);
+                    else if (upToDate) action = `<span style="color:#5fff5f;font-weight:700;">✓ "${escapeHtml(r.aName)}" exists and matches</span> ${btn(`data-rs-del="${i}"`, '🗑', '#ff8a8a', `Delete "${r.aName}" (the NFZ is still there — only if you no longer want it)`)}`;
+                    else action = btn(`data-rs-build="${i}"`, `🔁 Update "${escapeHtml(r.aName)}"`, '#ffb74d', `"${r.aName}" exists but its steps differ from what this macro + NFZ now call for — rewrite it in place (backup first).`) + ' ' + btn(`data-rs-del="${i}"`, '🗑', '#ff8a8a', `Delete "${r.aName}"`);
+                    if (p && p.laterNfz.length) note = `<div style="color:#ff8a8a;margin-top:2px;">also leaving out ${p.laterNfz.length} later NFZ pad(s): ${escapeHtml(p.laterNfz.map(p.padName).join(', '))}</div>`;
+                    const keepNames = p && p.keep.length ? p.keep.map(p.padName) : [];
+                    return `<div style="padding:7px 8px;margin:5px 0;background:rgba(255,82,82,0.08);border:1px solid rgba(255,82,82,0.4);border-radius:6px;">
+                        <div style="display:flex;align-items:center;gap:8px;"><b style="color:#ff8a8a;">⛔ ${nm}</b><span style="color:#789;">${mc.pads.length} pads</span><span style="margin-left:auto;">${action}</span></div>
+                        <div style="color:#caa;margin-top:3px;">NFZ pad${r.nz.length === 1 ? '' : 's'}: ${nfzList}</div>
+                        ${p ? `<div style="color:#9ad;margin-top:3px;" title="${escapeHtml(keepNames.join('\n'))}">Ⓐ = skip #1–#${p.firstIdx + 1} (through the NFZ pad) → fly #${p.firstIdx + 2}–#${mc.pads.length}: <b>${p.keep.length} pad${p.keep.length === 1 ? '' : 's'}</b>, ${p.stepCount} steps${p.lead ? ` + ${p.lead} pre-pad step(s)` : ''}</div>` : ''}
+                        ${note}
+                    </div>`;
+                }
+                // NFZ gone (or never) but an A exists → cleanup
+                const aPads = (() => { try { const d2 = mcvDetect(ent, [r.aM]); return d2.macros[0] ? d2.macros[0].pads.length : (d2.solos[0] ? 1 : 0); } catch (e) { return '?'; } })();
+                return `<div style="padding:7px 8px;margin:5px 0;background:rgba(95,255,95,0.07);border:1px solid rgba(95,255,95,0.35);border-radius:6px;">
+                    <div style="display:flex;align-items:center;gap:8px;"><b style="color:#5fff5f;">✅ ${nm}</b><span style="color:#789;">no NFZ pad any more</span><span style="margin-left:auto;">${btn(`data-rs-del="${i}"`, `🗑 Delete "${escapeHtml(r.aName)}"`, '#ff8a8a', `The NFZ is gone — "${r.aName}" (${aPads} pads, ${mbMissionBody(r.aM).length} steps) is no longer needed. Delete Guard banks a copy.`)}</span></div>
+                    <div style="color:#9ad;margin-top:3px;">"${escapeHtml(r.aName)}" still exists · ${aPads} pads · ${mbMissionBody(r.aM).length} steps — fly the regular macro again.</div>
+                </div>`;
+            }).join('');
+            el.innerHTML = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+                    <b style="color:#ff8a8a;font-size:12px;">Ⓐ NFZ resume missions</b>
+                    <span style="color:#789;">${rows.filter(r => r.nz).length} blocked · ${rows.filter(r => !r.nz).length} to clean up</span>
+                    <span data-rs-x style="margin-left:auto;cursor:pointer;color:#888;font-weight:800;">✕</span>
+                </div>
+                <div style="color:#9ab;font-size:10px;margin-bottom:6px;">A macro is <b style="color:#ff8a8a;">blocked</b> when a pad has a step inside an NFZ — the drone stops there ("Failed to navigate to destination"). <b>Ⓐ Build</b> creates "&lt;macro&gt;A": the same mission from the pad AFTER the NFZ pad to the end. The pilot launches it from the Planned tab and trashes the dead incomplete entry. When the NFZ is gone the row turns green — 🗑 the A. Stop-gap until Percepto's fix ships.</div>
+                ${html || '<div style="color:#5fff5f;padding:6px 0;">✓ No macro is blocked by an NFZ, and no leftover A missions.</div>'}
+                <div data-rs-status style="color:#9ad;margin-top:6px;min-height:14px;"></div>`;
+            el.querySelector('[data-rs-x]').onclick = mcvResumeClose;
+            const status = (t, c) => { const st = el.querySelector('[data-rs-status]'); if (st) { st.textContent = t; st.style.color = c || '#9ad'; } };
+            const refresh = async () => {
+                const after = await mbFetchMissionsFull(getCurrentSiteID());
+                data.missions = after;
+                data.det = mcvDetect(data.ent, after);
+                try { data.audits = mcvAudit(data.det, data.ent); } catch (e) { console.warn(`${TAG} [Ⓐ] audit refresh failed`, e); }
+                mcvClear(); mcvDraw(data.det); mcv.on = true;
+                return after;
+            };
+            el.querySelectorAll('[data-rs-build]').forEach(b => b.onclick = async () => {
+                const r = rows[Number(b.getAttribute('data-rs-build'))]; if (!r || !r.plan || mcvResumeBusy) return;
+                const ctx = findMissionAppCtx();
+                if (!ctx || typeof ctx.saveApp !== 'function') { showToast('Ⓐ Mission context not found — be on the Mission Bank page.', '#ff5252', 4500); return; }
+                const p = r.plan, mc = r.mc;
+                const verb = r.aM ? 'UPDATE' : 'CREATE';
+                if (!window.confirm(`Ⓐ ${verb} "${r.aName}"?\n\nFrom "${mc.mission.name}": skip pads #1–#${p.firstIdx + 1} (through NFZ pad "${p.padName(p.firstPad)}"), keep #${p.firstIdx + 2}–#${mc.pads.length} = ${p.keep.length} pad(s), ${p.stepCount} steps${p.laterNfz.length ? `\nAlso left out (later NFZ pads): ${p.laterNfz.map(p.padName).join(', ')}` : ''}\n\nThe macro "${mc.mission.name}" is untouched. ${r.aM ? 'A JSON backup of the current "' + r.aName + '" downloads first.' : 'Create-only.'}`)) return;
+                mcvResumeBusy = true; render(); status(`${verb === 'CREATE' ? 'Creating' : 'Updating'} "${r.aName}"…`);
+                try {
+                    if (r.aM) {
+                        try {
+                            const blob = new Blob([JSON.stringify({ site: getCurrentSiteID(), savedAt: new Date().toISOString(), reason: 'pre-resume-update', mission: r.aM })], { type: 'application/json' });
+                            const u = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = u; a.download = `mission${r.aM.id}_preresume_backup.json`; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(u), 5000);
+                        } catch (e) { console.warn(`${TAG} [Ⓐ] backup download failed`, e); if (!window.confirm('Backup download FAILED — continue WITHOUT a backup?')) { mcvResumeBusy = false; render(); return; } }
+                        await ctx.saveApp(Object.assign({}, r.aM, { instructions: p.instructions }), r.aName);
+                    } else {
+                        await ctx.saveApp({ id: null, type: 1, instructions: p.instructions, data_report_object_arr: [] }, r.aName);
+                    }
+                    await new Promise(res => setTimeout(res, 1200));
+                    const after = await refresh();
+                    const got = after.find(m => m.name === r.aName);
+                    const gotSteps = got ? mbMissionBody(got).length : -1;
+                    const want = p.instructions.filter(i => i && i.type !== 0 && i.type !== 99).length;
+                    const good = !!got && gotSteps === want;
+                    console.log(`${TAG} [Ⓐ] ${verb} "${r.aName}" → ${got ? 'id ' + got.id : 'NOT FOUND'} · ${gotSteps}/${want} steps · ${good ? 'verified' : 'MISMATCH'}`);
+                    showToast(good ? `Ⓐ "${r.aName}" ${verb === 'CREATE' ? 'created' : 'updated'} ✓ verified — ${p.keep.length} pad(s), ${want} steps. Pilot: launch it from the Planned tab, trash the dead incomplete entry.`
+                        : `⚠ "${r.aName}" saved but verify ${got ? `found ${gotSteps} steps, expected ${want}` : 'could not find it by name'} — check the Mission Bank.`, good ? '#5fff5f' : '#ff9800', 10000);
+                    mcvResumeBusy = false; mcvResumeClose(); mcvResumeOpen();
+                } catch (e) {
+                    console.warn(`${TAG} [Ⓐ] ${verb} failed`, e);
+                    showToast(`Ⓐ ${verb} "${r.aName}" FAILED — ${e && e.message ? e.message : e}`, '#ff5252', 8000);
+                    mcvResumeBusy = false; render();
+                }
+            });
+            el.querySelectorAll('[data-rs-del]').forEach(b => b.onclick = async () => {
+                const r = rows[Number(b.getAttribute('data-rs-del'))]; if (!r || !r.aM || mcvResumeBusy) return;
+                const ctx = findMissionAppCtx();
+                if (!ctx || typeof ctx.deleteApp !== 'function') { showToast('Ⓐ Mission context not found — be on the Mission Bank page.', '#ff5252', 4500); return; }
+                if (!window.confirm(`🗑 Delete "${r.aName}" (id ${r.aM.id}, ${mbMissionBody(r.aM).length} steps)?\n\n${r.nz ? 'The NFZ is STILL there — the pilot loses the resume mission.' : 'The NFZ is gone; the regular macro flies again.'}\nDelete Guard banks a copy (↩ Restore brings it back for 72 h).`)) return;
+                mcvResumeBusy = true; render(); status(`Deleting "${r.aName}"…`);
+                try {
+                    await ctx.deleteApp(r.aM.id);
+                    await new Promise(res => setTimeout(res, 1200));
+                    const after = await refresh();
+                    const still = after.find(m => m.id === r.aM.id || m.name === r.aName);
+                    console.log(`${TAG} [Ⓐ] DELETE "${r.aName}" id ${r.aM.id} → ${still ? 'STILL PRESENT' : 'gone'}`);
+                    showToast(still ? `⚠ "${r.aName}" still present after delete — check the Mission Bank.` : `🗑 "${r.aName}" deleted ✓ — fly the regular macro.`, still ? '#ff9800' : '#5fff5f', 7000);
+                    mcvResumeBusy = false; mcvResumeClose(); mcvResumeOpen();
+                } catch (e) {
+                    console.warn(`${TAG} [Ⓐ] delete failed`, e);
+                    showToast(`🗑 Delete "${r.aName}" FAILED — ${e && e.message ? e.message : e}`, '#ff5252', 8000);
+                    mcvResumeBusy = false; render();
+                }
+            });
+        };
+        render();
+        document.body.appendChild(el);
     }
     // ── ⏸ PAUSED PADS (feature #327, v3.112) ──────────────────────────────
     // Percepto has no "skip this pad" — a paused pad is REMOVED from the saved
