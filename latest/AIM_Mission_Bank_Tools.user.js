@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.123
+// @version      3.124
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.123';
+    const SCRIPT_VERSION = '3.124';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -11013,12 +11013,7 @@
         // Belt-and-braces: the marker ELEMENT itself must never take events
         // (divIcon default styling varies) — M2 on a pad under a battery icon
         // has to reach the pad.
-        if (!document.getElementById('aim-mb-rng-style')) {
-            const st = document.createElement('style');
-            st.id = 'aim-mb-rng-style';
-            st.textContent = '.aim-mb-rng-chip, .aim-mb-rng-chip * { pointer-events: none !important; }';
-            document.head.appendChild(st);
-        }
+        mbEnsureChipStyle();
         const cfg = agCfg();
         // Within this many ft below a class cutoff → red-outlined battery +
         // "close to cutoff" in the tooltip (13.5–14k / 17.5–18k at defaults).
@@ -11865,6 +11860,19 @@
     // layers are currently switched off in the legend; resets to all-visible
     // every fresh 🧩 toggle-on. macroLayers groups layers per mission id so a
     // single macro can be hidden/shown without a full redraw.
+    // Shared stylesheet for every MBT map chip (🧩 badges, 🔋 range chips, ⇅ temp
+    // badges). pointer-events: none so M2 reaches the pad under a chip.
+    // v3.124: visibility: visible !important — Percepto's bundle runs a marker
+    // declutter pass that sets inline visibility:hidden on OVERLAPPING
+    // .leaflet-marker-icon elements in the marker pane, ours included (live on
+    // 1637: 🧩 badges 5/7/8/13 built and positioned but hidden; which ones
+    // changes with zoom). A stylesheet !important beats the inline style.
+    function mbEnsureChipStyle() {
+        const CSS = '.aim-mb-rng-chip, .aim-mb-rng-chip * { pointer-events: none !important; } .leaflet-marker-icon.aim-mb-rng-chip { visibility: visible !important; }';
+        let st = document.getElementById('aim-mb-rng-style');
+        if (!st) { st = document.createElement('style'); st.id = 'aim-mb-rng-style'; document.head.appendChild(st); }
+        if (st.textContent !== CSS) st.textContent = CSS;
+    }
     const mcv = { on: false, busy: false, layers: [], legendEl: null, hidden: new Set(), macroLayers: new Map(), badgeReg: new Map() };
     // v3.37: lightweight floating-panel helper — drag by a handle, native
     // resize (CSS resize:both), geometry persisted under a GM key and clamped
@@ -12262,6 +12270,7 @@
         return { macros, solos, covered, todo, touched, assets: pads, padCount: pads.length, why, rules, missionPads };
     }
     function mcvDraw(det) {
+        mbEnsureChipStyle();
         const L = composerGetL(), map = getLeafletMap();
         if (!L || !map) { showToast('Macros: map not found.', '#ff9800', 3000); return; }
         const COLORS = ['#7adfe6', '#ffd54f', '#ff8ad2', '#9dff8a', '#c39dff', '#ffab73', '#8ab6ff', '#f3ff7a', '#ff9e9e', '#7affc9'];
