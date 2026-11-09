@@ -1,4 +1,6 @@
-## 2026-11-04 — 🧩 Mission Bank Tools latest v3.112 → v3.130 (latest only)
+## 2026-11-04 — 🧩 Mission Bank Tools latest v3.112 → v3.131 (latest only)
+
+- **v3.131** — ⇅ Apply now refuses to save while a red (NFZ) row is still in the order and names the pads to ⏸ first — Percepto rejects the whole save otherwise ("One of app points is within a no-fly zone"). The failure toast now shows Percepto's reason instead of "see console".
 
 - **v3.130** — 🧩/⇅ pad badges: Percepto's marker declutter also hides the badge's inner element (probe: wrapper visible, number hidden on 4 of 13) — the force-visible rule now covers the badge subtree.
 

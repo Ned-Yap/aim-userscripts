@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.130
+// @version      3.131
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.130';
+    const SCRIPT_VERSION = '3.131';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -13484,7 +13484,8 @@
             mcv.on = true;
         } catch (e) {
             console.warn(`${TAG} [mcv] reorder failed`, e);
-            showToast('♻ Reorder FAILED — nothing verified, backup downloaded (see console).', '#ff5252', 6000);
+            const why = e && e.message ? String(e.message).replace(/^Could not create\/edit app:\s*/i, '').slice(0, 160) : '';
+            showToast(`♻ Reorder FAILED — nothing verified, backup downloaded.${why ? ` Percepto: ${why}` : ' (see console)'}`, '#ff5252', 8000);
         }
         mcvReorderBusy = false;
         return saved;
@@ -15522,6 +15523,15 @@
             };
             el.querySelector('[data-mo-apply]').onclick = async () => {
                 if (!order.length) { showToast('⇅ Cannot delete EVERY pad — at least one must remain.', '#ff9800', 4000); return; }
+                // v3.131: Percepto refuses the WHOLE save when any step sits inside an NFZ
+                // ("Instruction #371: One of app points is within a no-fly zone" — live 2026-11-09,
+                // the ↩ pick-up had moved the rig pad to slot 6). Red rows must be ⏸ paused first.
+                const stillFlagged = flagged.filter(a => !moState.paused.some(p => p.id === a.id));
+                if (stillFlagged.length) {
+                    showToast(`⇅ Percepto will refuse this save — ${stillFlagged.length} pad(s) have a step inside an NFZ: ${stillFlagged.map(a => a.name || a.id).join(', ')}. ⏸ pause them first (⏸ Pause all flagged).`, '#ff5252', 8000);
+                    console.warn(`${TAG} [⇅] apply blocked — step inside an NFZ on: ${stillFlagged.map(a => a.name || a.id).join(', ')}`);
+                    return;
+                }
                 const ids = order.map(a => a.id);
                 const pausedL = moState.paused.slice();
                 const removedIds = new Set(removedL.map(a => a.id).concat(pausedL.map(a => a.id)));
