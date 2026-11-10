@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Defaults
 // @namespace    http://tampermonkey.net/
-// @version      1.2
+// @version      1.3
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Defaults.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Defaults.user.js
 // @description  Streamline the constant Percepto chores. Smart site navigation (land on your default section, keep your section when switching sites) + map-layer defaults (auto-off layers + Feeder Line bring-to-top) on every new site. Configurable in the AIM Control Panel.
@@ -94,7 +94,7 @@
     // ---------------------------------------------------------------------------
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SCRIPT_ID = 'aim-defaults';
-    const SCRIPT_VERSION = '1.2';
+    const SCRIPT_VERSION = '1.3';
     let controlChannel = null;
 
     function setupControlPanel() {
@@ -266,13 +266,14 @@
 
     // Redirect loop guard: Percepto occasionally rewrites the hash on arrival;
     // if we ever end up ping-ponging, trip the breaker for this page instead
-    // of spinning. 3 redirects inside 10 s is never legitimate use.
+    // of spinning. 5 redirects inside 3 s is never legitimate use (a dropdown
+    // site switch takes >1 s to load; a replace() loop fires many per second).
     const redirectTimes = [];
     let navTripped = false;
     function redirectAllowed() {
         const now = Date.now();
-        while (redirectTimes.length && now - redirectTimes[0] > 10000) redirectTimes.shift();
-        if (redirectTimes.length >= 3) {
+        while (redirectTimes.length && now - redirectTimes[0] > 3000) redirectTimes.shift();
+        if (redirectTimes.length >= 5) {
             if (!navTripped) err('redirect loop detected — navigation disarmed for this page load. Reload to re-arm.');
             navTripped = true;
             return false;
