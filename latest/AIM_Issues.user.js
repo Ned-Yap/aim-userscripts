@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.45
+// @version      1.46
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -56,6 +56,12 @@
 // site's file (commitFleetSite). TOP-frame gates are now topDefers() — TOP
 // only stays passive while a site (and therefore the iframe) is loaded.
 //
+// v1.46 (#330 Mission Playback context): an issue filed on the Mission
+// Playback page (/#/site/<sid>/control-panel/past-mission/<mid>) auto-captures
+// the flight on screen (linked), the player clock at that moment, and who
+// flew it — stored once as issue.mission. Every issue also shows its GPS
+// point (click = copy) with a link that opens Site Setup focused on it.
+//
 // Log tag: [AIM ISSUES]
 //
 // Map-tools placement: PLE's ⚡ asserts itself as LAST child via its own
@@ -68,7 +74,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.45';
+    const SCRIPT_VERSION = '1.46';
 
     // Server model (v1.36): prod and QA are separate databases — the same
     // numeric site ID is two different sites. QA issues live in their own
@@ -1018,6 +1024,17 @@
             `>${note}`,
             `_${slackEsc(issue.shape || 'shape')} · filed by ${creator}${assignedSuffix}_`,
         ];
+        // v1.46: Mission Playback context — linked flight + clock + pilot.
+        if (issue.mission && issue.mission.id) {
+            const mi = issue.mission;
+            const mCtx = sidOverride ? null : ctxForIssue(issue.id);
+            const mSid = sidOverride || (mCtx && mCtx.sid) || siteID;
+            const mText = slackEsc(missionLabel(mi)).replace(/\|/g, '/');
+            const bits = [`🎞 Mission <${missionDeepLink(mSid, mi, issue.id)}|${mText}>`];
+            if (missionClock(mi)) bits.push(`⏱ ${slackEsc(missionClock(mi))}`);
+            if (mi.rpic) bits.push(`RPIC ${slackEsc(mi.rpic)}`);
+            lines.splice(2, 0, bits.join(' · '));
+        }
         const mentions = (issue.slackNotify || []).map(slackMention).filter(Boolean).join(' ');
         if (mentions) lines.push(`cc ${mentions}`);
         return lines.join('\n');
@@ -3221,9 +3238,327 @@
         drawToolbarEl = tb;
     }
 
+    // ------- v1.46 (#330): Mission Playback context -------
+    // issue.mission = { id, name, groupId, shown, shownDur, videoSec, videoDur,
+    //                   rpic, drone, when, at }
+    //   shown / shownDur = Percepto's player clock as displayed ("1:34" / "28:28")
+    //   videoSec         = <video>.currentTime at capture (the seek target — the
+    //                      player clock and the raw video time are NOT the same)
+    //   at               = wall-clock ISO of that video moment (when the video
+    //                      record carries drone_record_start_time)
+    // Written once at creation and never mutated, so both sides of a merge
+    // hold the same value (the {...a, ...b} spread in mergeIssueObjects keeps it).
+    const PLAYBACK_ROUTE_RX = /#\/site\/(\d+)\/control-panel\/past-mission\/(\d+)/;
+    const CLOCK_PAIR_RX = /^\s*(\d{1,3}:\d\d(?::\d\d)?)\s*\/\s*(\d{1,3}:\d\d(?::\d\d)?)\s*$/;
+
+    function topHash() {
+        let hash = '';
+        try { hash = (window.top && window.top.location && window.top.location.hash) || ''; }
+        catch (e) { hash = ''; }   // cross-origin top — fall back to our own hash
+        return hash || location.hash || '';
+    }
+    function readPlaybackRoute() {
+        const m = topHash().match(PLAYBACK_ROUTE_RX);
+        return m ? { sid: m[1], mid: m[2] } : null;
+    }
+    function playbackDocs() {
+        const docs = [document];
+        try { if (window.top && window.top.document && window.top.document !== document) docs.push(window.top.document); }
+        catch (e) { /* cross-origin top — own document only */ }
+        return docs;
+    }
+    function playbackVideoEl() {
+        for (const d of playbackDocs()) {
+            const v = d.querySelector('video');
+            if (v) return v;
+        }
+        return null;
+    }
+    function fmtClock(sec) {
+        if (sec == null || !isFinite(sec) || sec < 0) return '';
+        const s = Math.round(sec);
+        const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
+        const two = (n) => String(n).padStart(2, '0');
+        return h ? `${h}:${two(m)}:${two(r)}` : `${m}:${two(r)}`;
+    }
+    // "1:34" / "1:02:03" / "94" → seconds, or null when it isn't a time.
+    function parseClock(txt) {
+        const t = String(txt == null ? '' : txt).trim();
+        if (!/^\d{1,3}(:\d\d){0,2}$/.test(t)) return null;
+        return t.split(':').reduce((acc, p) => acc * 60 + Number(p), 0);
+    }
+    // One pass over the page's text nodes (playback page, note-modal open
+    // only): Percepto's player clock ("1:34 / 28:28") and the Mission Data
+    // "Created by" value. Text-matched on purpose — no Percepto class names
+    // to drift. Anything of ours (aim-* id/class) is skipped so Video
+    // Validation's own time bar can't be mistaken for the player clock.
+    function scrapePlaybackDom() {
+        const out = { shown: '', shownDur: '', createdBy: '' };
+        const ours = (el) => !!(el && el.closest && el.closest('[id^="aim-"], [class*="aim-"]'));
+        for (const doc of playbackDocs()) {
+            let walker;
+            try { walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT); }
+            catch (e) { console.warn(`${TAG} playback scrape: no tree walker:`, e); continue; }
+            let node;
+            while ((node = walker.nextNode())) {
+                const txt = node.nodeValue;
+                if (!txt || txt.length > 40) continue;
+                const el = node.parentElement;
+                if (!el) continue;
+                if (!out.shown && /\d:\d\d/.test(txt)) {
+                    // whole clock in one node, or split across sibling spans
+                    const m = txt.match(CLOCK_PAIR_RX)
+                        || ((el.textContent || '').length <= 40 && (el.textContent || '').match(CLOCK_PAIR_RX))
+                        || (el.parentElement && (el.parentElement.textContent || '').length <= 40 && (el.parentElement.textContent || '').match(CLOCK_PAIR_RX));
+                    if (m && !ours(el)) { out.shown = m[1]; out.shownDur = m[2]; }
+                }
+                if (!out.createdBy && /^\s*created by\s*:?\s*$/i.test(txt) && !ours(el)) {
+                    const sib = el.nextElementSibling;
+                    const val = sib ? (sib.textContent || '').trim() : '';
+                    if (val && val.length <= 80) out.createdBy = val;
+                }
+            }
+            if (out.shown && out.createdBy) break;
+        }
+        return out;
+    }
+    function userLabel(v) {
+        if (!v) return '';
+        if (typeof v === 'string') return v.trim();
+        if (typeof v === 'object') return String(v.username || v.email || v.name || '').trim();
+        return '';
+    }
+    // GET /missions/<mid>/ (+ /videos/<mid>/ for the recording start). Cached
+    // per mission id for the page's life; a failed read is NOT cached.
+    const missionMetaCache = new Map();
+    function fetchMissionMeta(mid) {
+        const key = String(mid);
+        if (missionMetaCache.has(key)) return missionMetaCache.get(key);
+        const getJson = (u) => fetch(u, { credentials: 'include' }).then(r => {
+            if (!r.ok) throw new Error(`HTTP ${r.status} ${u}`);
+            return r.json();
+        });
+        const p = Promise.all([
+            getJson(`/missions/${encodeURIComponent(key)}/`),
+            getJson(`/videos/${encodeURIComponent(key)}/`).catch(e => {
+                console.warn(`${TAG} mission ${key}: video record unavailable (no wall-clock time):`, e.message);
+                return null;
+            }),
+        ]).then(([m, vids]) => {
+            const vid = (Array.isArray(vids) ? vids[0] : vids) || {};
+            const t0 = vid.drone_record_start_time ? new Date(vid.drone_record_start_time).getTime() : NaN;
+            const meta = {
+                name: String(m.name || m.app_name || (m.app && m.app.name) || '').trim(),
+                groupId: m.mission_group_id != null ? String(m.mission_group_id) : '',
+                rpic: userLabel(m.created_by_username) || userLabel(m.created_by) || userLabel(m.pilot) || userLabel(m.user),
+                drone: String(m.drone_name || '').trim(),
+                when: m.when ? String(m.when) : '',
+                t0: isFinite(t0) ? t0 : null,
+            };
+            if (!meta.rpic) console.warn(`${TAG} mission ${key}: no pilot field on the record (keys: ${Object.keys(m).join(', ')}) — using the on-screen "Created by" value`);
+            return meta;
+        }).catch(e => {
+            console.warn(`${TAG} mission ${key}: record read failed — issue keeps the on-screen values only:`, e);
+            missionMetaCache.delete(key);
+            return null;
+        });
+        missionMetaCache.set(key, p);
+        return p;
+    }
+    // Snapshot taken the moment the note modal opens. null off the playback page.
+    function capturePlaybackContext() {
+        const route = readPlaybackRoute();
+        if (!route || String(route.sid) !== String(siteID)) return null;
+        const v = playbackVideoEl();
+        const dom = scrapePlaybackDom();
+        const ctx = {
+            id: route.mid,
+            videoSec: (v && isFinite(v.currentTime)) ? Math.round(v.currentTime) : null,
+            videoDur: (v && isFinite(v.duration)) ? Math.round(v.duration) : null,
+            shown: dom.shown, shownDur: dom.shownDur, domRpic: dom.createdBy,
+            metaPromise: fetchMissionMeta(route.mid),
+        };
+        console.log(`${TAG} playback context: mission ${ctx.id} · clock ${ctx.shown || '(not found on screen)'} · video ${ctx.videoSec == null ? '(no <video>)' : fmtClock(ctx.videoSec)}`);
+        return ctx;
+    }
+    // Final issue.mission record. `timeText` is the (editable) time field from
+    // the note modal; an edit shifts the seek target by the same amount.
+    function buildMissionRecord(ctx, timeText) {
+        const timeout = new Promise(resolve => setTimeout(() => resolve(null), 4000));
+        return Promise.race([ctx.metaPromise, timeout]).then(meta => {
+            meta = meta || {};
+            const baseShown = ctx.shown || (ctx.videoSec != null ? fmtClock(ctx.videoSec) : '');
+            const typed = String(timeText == null ? '' : timeText).trim();
+            const typedSec = parseClock(typed);
+            let shown = baseShown, videoSec = ctx.videoSec;
+            if (typed && typed !== baseShown && typedSec != null) {
+                const baseSec = parseClock(baseShown);
+                videoSec = (videoSec != null && baseSec != null) ? Math.max(0, videoSec + (typedSec - baseSec)) : null;
+                shown = fmtClock(typedSec);
+            }
+            const rec = { id: String(ctx.id) };
+            if (meta.name) rec.name = meta.name;
+            if (meta.groupId) rec.groupId = meta.groupId;
+            if (shown) rec.shown = shown;
+            if (ctx.shownDur) rec.shownDur = ctx.shownDur;
+            if (videoSec != null) rec.videoSec = videoSec;
+            if (ctx.videoDur != null) rec.videoDur = ctx.videoDur;
+            const rpic = meta.rpic || ctx.domRpic || '';
+            if (rpic) rec.rpic = rpic;
+            if (meta.drone) rec.drone = meta.drone;
+            if (meta.when) rec.when = meta.when;
+            if (meta.t0 != null && videoSec != null) rec.at = new Date(meta.t0 + videoSec * 1000).toISOString();
+            return rec;
+        });
+    }
+    function missionClock(mi) {
+        if (!mi) return '';
+        return mi.shown || (mi.videoSec != null ? fmtClock(mi.videoSec) : '');
+    }
+    function missionLabel(mi) {
+        return mi ? `${mi.id}${mi.name ? ' · ' + mi.name : ''}` : '';
+    }
+    // "🎞 Mission 245103 @ 1:34" — compact one-liner for tooltip / panel rows.
+    function missionChipText(mi) {
+        if (!mi || !mi.id) return '';
+        const c = missionClock(mi);
+        return `🎞 Mission ${mi.id}${c ? ' @ ' + c : ''}`;
+    }
+    // Playback deep link. ?aim_issue=<id> (before the hash, like the Slack
+    // site links) makes AIM Issues in the target tab open the issue AND seek
+    // the video to the captured moment.
+    function missionDeepLink(sid, mi, issueId) {
+        const q = issueId ? `?aim_issue=${encodeURIComponent(issueId)}` : '';
+        return `${location.origin}/${q}#/site/${encodeURIComponent(String(sid))}/control-panel/past-mission/${encodeURIComponent(String(mi.id))}`;
+    }
+    function isOnMissionPlayback(sid, mi) {
+        const r = readPlaybackRoute();
+        return !!(r && mi && String(r.mid) === String(mi.id) && String(r.sid) === String(sid));
+    }
+    // Seek the playback video to the issue's captured moment. Retries while
+    // the player is still loading (deep-link arrival); toasts either way.
+    function seekPlaybackToMission(mi, triesLeft) {
+        const target = (mi && mi.videoSec != null) ? mi.videoSec : parseClock(mi && mi.shown);
+        if (target == null) { showToast('This issue has no video time to jump to.', 3000); return; }
+        const v = playbackVideoEl();
+        if (v && v.readyState >= 1 && isFinite(v.duration)) {
+            try {
+                v.currentTime = Math.max(0, Math.min(v.duration, target));
+                showToast(`⏱ Video moved to ${missionClock(mi) || fmtClock(target)}`, 2000);
+                console.log(`${TAG} playback seek → ${fmtClock(target)} (mission ${mi.id})`);
+            } catch (e) {
+                console.warn(`${TAG} playback seek failed:`, e);
+                showToast('Could not move the video — see console.', 3500);
+            }
+            return;
+        }
+        if (triesLeft > 0) { setTimeout(() => seekPlaybackToMission(mi, triesLeft - 1), 500); return; }
+        console.warn(`${TAG} playback seek gave up — video never became ready (mission ${mi.id})`);
+        showToast(`Video not ready — scrub to ${missionClock(mi) || fmtClock(target)} manually.`, 4500);
+    }
+    // The issue's GPS point: custom icon spot when set, else the same interior
+    // point the marker uses. → [lat, lng] or null.
+    function issueLatLng(issue) {
+        if (!issue) return null;
+        const ok = (p) => Array.isArray(p) && isFinite(p[0]) && isFinite(p[1]);
+        if (ok(issue.markerPos)) return issue.markerPos;
+        let p = null;
+        try { p = bestInteriorPoint(issue.polygon); }
+        catch (e) { console.warn(`${TAG} issueLatLng: interior point failed:`, e); }
+        return ok(p) ? p : null;
+    }
+    function issueLatLngText(issue) {
+        const p = issueLatLng(issue);
+        return p ? `${Number(p[0]).toFixed(6)}, ${Number(p[1]).toFixed(6)}` : '';
+    }
+    function openHrefInTab(href, okMsg, what) {
+        let opened = false;
+        if (typeof GM_openInTab === 'function') {
+            try { GM_openInTab(href, { active: true, insert: true, setParent: true }); opened = true; }
+            catch (e) { console.warn(`${TAG} GM_openInTab failed, trying window.open:`, e); }
+        }
+        if (!opened) {
+            try { opened = !!(window.top || window).open(href, '_blank'); }
+            catch (e) { console.warn(`${TAG} window.open failed:`, e); }
+        }
+        if (opened) showToast(okMsg, 1500);
+        else copyTextToClipboard(href).then(() => showToast(`${what} link copied — paste it in your browser.`, 3500))
+                                      .catch(() => showToast(`Could not open the ${what.toLowerCase()} link.`, 3000));
+    }
+    // Status-modal context box: mission line (playback issues) + GPS line.
+    // Buttons carry data-aim-ctx; wired in the modal's wireHandlers.
+    function issueContextHtml(issue, sid) {
+        const mi = (issue.mission && issue.mission.id) ? issue.mission : null;
+        const btn = 'padding:2px 9px;background:#13294a;color:#5fb3ff;border:1px solid #5fb3ff;border-radius:4px;cursor:pointer;font:inherit;font-size:11px;font-weight:700';
+        const dim = 'color:#888';
+        const rows = [];
+        if (mi) {
+            const here = isOnMissionPlayback(sid, mi);
+            const clock = missionClock(mi);
+            const idHtml = here
+                ? `<b style="color:#e6e6e6">${escHtml(missionLabel(mi))}</b>`
+                : `<button type="button" data-aim-ctx="mission" title="Open this flight's Mission Playback in a new tab, at this moment" style="${btn}">${escHtml(missionLabel(mi))} ↗</button>`;
+            const clockHtml = clock
+                ? `<span><span style="${dim}">⏱</span> <b style="color:#ffd54f">${escHtml(clock)}</b>${mi.shownDur ? `<span style="${dim}"> / ${escHtml(mi.shownDur)}</span>` : ''}</span>`
+                : '';
+            const jumpHtml = (here && clock)
+                ? `<button type="button" data-aim-ctx="seek" title="Move the video to this moment" style="${btn}">▶ Jump to ${escHtml(clock)}</button>`
+                : '';
+            rows.push(`<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><span style="${dim}">🎞 Mission</span>${idHtml}${clockHtml}${jumpHtml}</div>`);
+            const bits = [];
+            if (mi.rpic) bits.push(`<span style="${dim}">RPIC</span> ${escHtml(mi.rpic)}`);
+            if (mi.drone) bits.push(`<span style="${dim}">Drone</span> ${escHtml(mi.drone)}`);
+            if (mi.when) bits.push(`<span style="${dim}">Flown</span> ${escHtml(fmtDateTime(mi.when))}`);
+            if (mi.at) bits.push(`<span style="${dim}">Moment</span> ${escHtml(fmtDateTime(mi.at))}`);
+            if (mi.groupId) bits.push(`<span style="${dim}">Group</span> ${escHtml(mi.groupId)}`);
+            if (bits.length) rows.push(`<div style="margin-top:5px;display:flex;gap:4px 12px;flex-wrap:wrap">${bits.map(b => `<span>${b}</span>`).join('')}</div>`);
+        }
+        const ll = issueLatLngText(issue);
+        if (ll) {
+            const onSetup = topHash().indexOf(`#/site/${sid}/control-panel/site-setup`) === 0;
+            const setupHtml = onSetup ? ''
+                : `<button type="button" data-aim-ctx="setup" title="Open Site Setup in a new tab, zoomed to this issue" style="${btn}">↗ Site Setup</button>`;
+            rows.push(`<div style="${rows.length ? 'margin-top:6px;' : ''}display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+                <span style="${dim}">📍</span>
+                <span data-aim-ctx="coords" title="Click to copy the coordinates" style="cursor:pointer;font-family:monospace;color:#c8cdd4;border-bottom:1px dotted #666">${escHtml(ll)}</span>
+                ${setupHtml}
+            </div>`);
+        }
+        if (!rows.length) return '';
+        return `<div id="aim-issues-modal-context" style="margin-bottom:12px;padding:8px 10px;background:#14171b;border:1px solid rgba(95,179,255,0.30);border-radius:6px;font-size:11px;color:#c8cdd4;line-height:1.4">${rows.join('')}</div>`;
+    }
+    function handleIssueContextAction(kind, issue, sid) {
+        const mi = issue.mission;
+        if (kind === 'mission' && mi) openHrefInTab(missionDeepLink(sid, mi, issue.id), 'Opening Mission Playback…', 'Mission');
+        else if (kind === 'seek' && mi) seekPlaybackToMission(mi, 0);
+        else if (kind === 'setup') openIssueInSite(sid, issue.id);
+        else if (kind === 'coords') {
+            const ll = issueLatLngText(issue);
+            copyTextToClipboard(ll).then(() => showToast(`Copied ${ll}`, 1800))
+                .catch(e => { console.warn(`${TAG} copy coords failed:`, e); showToast('Could not copy the coordinates.', 3000); });
+        }
+    }
+
     // ------- Note modal -------
     function openNoteModal(shape, latlngsObjs) {
         closeNoteModal();
+        // v1.46: on the Mission Playback page, snapshot the flight + player
+        // clock NOW (the video may keep playing while the note is typed).
+        let pbCtx = null;
+        try { pbCtx = capturePlaybackContext(); }
+        catch (e) { console.warn(`${TAG} playback context capture threw — issue will carry no mission info:`, e); }
+        const pbChip = 'display:inline-flex;align-items:center;gap:5px;padding:3px 9px;background:#14171b;border:1px solid rgba(95,179,255,0.45);border-radius:5px;color:#c8cdd4';
+        const pbTime0 = pbCtx ? (pbCtx.shown || (pbCtx.videoSec != null ? fmtClock(pbCtx.videoSec) : '')) : '';
+        const missionRowHtml = pbCtx ? `
+            <div id="aim-issues-mission-row" title="Captured automatically from Mission Playback — saved with the issue"
+                 style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:2px 0 8px 0;font-size:11px">
+                <span style="${pbChip}">🎞 Mission <b style="color:#5fb3ff">${escHtml(pbCtx.id)}</b><span id="aim-issues-mission-name" style="color:#888"></span></span>
+                <label style="${pbChip}" title="Player time when you opened this box — edit if it is off">⏱
+                    <input id="aim-issues-mission-time" value="${escHtml(pbTime0)}" placeholder="m:ss" autocomplete="off"
+                        style="width:54px;background:#0e1115;color:#ffd54f;border:1px solid rgba(255,255,255,0.15);border-radius:3px;padding:1px 5px;font:inherit;font-weight:700;text-align:center">
+                </label>
+                <span style="${pbChip}">RPIC <b id="aim-issues-mission-rpic" style="color:#e6e6e6">${escHtml(pbCtx.domRpic || 'loading…')}</b></span>
+            </div>` : '';
         const overlay = document.createElement('div');
         overlay.id = 'aim-issues-note-modal-overlay';
         overlay.style.cssText = `
@@ -3304,6 +3639,7 @@
                        border:1px solid rgba(255,255,255,0.15);border-radius:6px;
                        padding:8px 10px;font:inherit;font-size:13px;resize:vertical;box-sizing:border-box"></textarea>
             <div id="aim-issues-note-err" style="color:#ff8585;font-size:12px;margin-top:6px;min-height:16px"></div>
+            ${missionRowHtml}
             <div style="font-size:12px;color:#aaa;margin-top:6px;margin-bottom:6px">
                 Priority (optional)
             </div>
@@ -3337,6 +3673,16 @@
         const cancel = card.querySelector('#aim-issues-note-cancel');
         const save = card.querySelector('#aim-issues-note-save');
         setTimeout(() => { try { input.focus(); } catch (e) {} }, 30);
+        // v1.46: fill the mission name + RPIC once the mission record lands.
+        if (pbCtx) {
+            pbCtx.metaPromise.then(meta => {
+                if (noteModalEl !== overlay) return;   // modal already closed
+                const nameEl = card.querySelector('#aim-issues-mission-name');
+                const rpicEl = card.querySelector('#aim-issues-mission-rpic');
+                if (nameEl && meta && meta.name) nameEl.textContent = ` · ${meta.name}`;
+                if (rpicEl) rpicEl.textContent = (meta && meta.rpic) || pbCtx.domRpic || 'unknown';
+            });
+        }
         // v0.28: priority chip selection — null by default. Filled bg = selected.
         let selectedPriority = null;
         const chips = card.querySelectorAll('.aim-issues-pri-chip');
@@ -3440,13 +3786,25 @@
             save.textContent = 'Creating…';
             save.style.opacity = '0.7';
             save.style.cursor = 'not-allowed';
+            // v1.46: read the (editable) mission time BEFORE the modal is torn down.
+            const timeEl = card.querySelector('#aim-issues-mission-time');
+            const timeText = timeEl ? timeEl.value : '';
             closeNoteModal();
-            try {
-                createIssue({ shape, latlngsObjs, note, priority: selectedPriority, notify: Array.from(notifySelected), category: selectedCategory });
-            } catch (e) {
-                console.error(`${TAG} createIssue threw:`, e);
-                showToast('Issue created — render failed, refresh to recover. See console.', 5000);
-            }
+            const fire = (mission) => {
+                try {
+                    createIssue({ shape, latlngsObjs, note, priority: selectedPriority, notify: Array.from(notifySelected), category: selectedCategory, mission });
+                } catch (e) {
+                    console.error(`${TAG} createIssue threw:`, e);
+                    showToast('Issue created — render failed, refresh to recover. See console.', 5000);
+                }
+            };
+            if (!pbCtx) { fire(null); return; }
+            // The mission read started when the modal opened, so this is
+            // normally instant; capped at 4 s inside buildMissionRecord.
+            buildMissionRecord(pbCtx, timeText).then(fire).catch(e => {
+                console.warn(`${TAG} mission record build failed — creating the issue with the mission id only:`, e);
+                fire({ id: String(pbCtx.id) });
+            });
         };
         // Esc to cancel, Ctrl/Cmd+Enter to save
         const keyH = (e) => {
@@ -3461,7 +3819,7 @@
         noteModalEl = null;
     }
 
-    function createIssue({ shape, latlngsObjs, note, priority, notify, category }) {
+    function createIssue({ shape, latlngsObjs, note, priority, notify, category, mission }) {
         if (!siteID) { showToast('No site loaded — issue discarded.', 4000); return; }
         const nowIso = new Date().toISOString();
         const id = `iss_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -3489,6 +3847,8 @@
         // v1.31: category. Only stamped when non-default so normal issues
         // keep their pre-v1.31 record shape byte-for-byte.
         if (category && CATEGORY_META[category]) issue.category = category;
+        // v1.46: Mission Playback context — only stamped when filed there.
+        if (mission && mission.id) issue.mission = mission;
         currentSiteIssues.push(issue);
         saveIssuesToStorage(siteID, currentSiteIssues);
         renderOneIssue(issue);
@@ -4142,6 +4502,7 @@
             'Last Event', 'Last Event When', 'Last Event By',
             'Comments #', 'Affects #', 'Affected Entities', 'Full History',
             'Issue ID', 'Site ID', 'Site Name',
+            'Mission ID', 'Video Time', 'RPIC', 'Lat, Lng',   // v1.46
         ];
         const out = [];
         out.push('<table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:12px">');
@@ -4216,6 +4577,15 @@
                 ? `<a href="${siteUrl}" style="color:#1a73e8;text-decoration:underline">${escHtml(rowSiteName)}</a>`
                 : escHtml(rowSiteName || '');
             out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top">${siteNameCell}</td>`);
+            // v1.46: mission (linked to its playback), player clock, pilot, GPS point
+            const mi = (issue.mission && issue.mission.id) ? issue.mission : null;
+            const missionCell = !mi ? ''
+                : rowSid ? `<a href="${escHtml(missionDeepLink(rowSid, mi, issue.id))}" style="color:#1a73e8;text-decoration:underline">${escHtml(String(mi.id))}</a>`
+                : escHtml(String(mi.id));
+            out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top">${missionCell}</td>`);
+            out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top">${escHtml(missionClock(mi))}</td>`);
+            out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top">${escHtml(mi ? (mi.rpic || '') : '')}</td>`);
+            out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top;white-space:nowrap">${escHtml(issueLatLngText(issue))}</td>`);
             out.push('</tr>');
         });
         out.push('</tbody></table>');
@@ -4228,6 +4598,7 @@
             'Last Event', 'Last Event When', 'Last Event By',
             'Comments #', 'Affects #', 'Affected Entities', 'Full History',
             'Issue ID', 'Site ID', 'Site Name',
+            'Mission ID', 'Video Time', 'RPIC', 'Lat, Lng',   // v1.46
         ];
         const lines = [headers.join('\t')];
         const safe = (s) => String(s == null ? '' : s).replace(/[\t\r\n]+/g, ' ');
@@ -4276,6 +4647,10 @@
                 issue.id,
                 siteOf ? ((siteOf(issue) || {}).sid || '') : siteId,
                 siteOf ? ((siteOf(issue) || {}).name || '') : (siteName_ || ''),
+                issue.mission && issue.mission.id ? String(issue.mission.id) : '',
+                missionClock(issue.mission),
+                issue.mission ? (issue.mission.rpic || '') : '',
+                issueLatLngText(issue),
             ].map(safe).join('\t'));
         });
         return lines.join('\n');
@@ -4779,6 +5154,7 @@
                 <div style="font-weight:700;color:${headerColor};font-size:13px;margin-bottom:6px">${headerLabel} &middot; ${age}${catHtml}${priHtml}</div>
                 <div style="color:#ffffff;font-size:13px;font-weight:600;margin-bottom:6px">${safeNote}</div>
                 <div style="color:#a8c4ff;font-size:11px;font-weight:600">@${safeBy}</div>
+                ${issue.mission && issue.mission.id ? `<div style="color:#5fb3ff;font-size:11px;margin-top:3px">${escHtml(missionChipText(issue.mission))}${issue.mission.rpic ? ` <span style="color:#888">· ${escHtml(issue.mission.rpic)}</span>` : ''}</div>` : ''}
                 ${affectsHtml}
                 ${unseenHtml}
                 <div style="color:#888;font-size:10px;margin-top:6px;font-style:italic">${hideHint}</div>
@@ -5761,6 +6137,7 @@
                 <div id="aim-issues-modal-body"
                      style="padding:14px 18px;overflow:auto;flex:1;min-height:0">
                     <div style="color:#e6e6e6;font-size:13px;margin-bottom:12px;line-height:1.4">${safeNote}</div>
+                    ${issueContextHtml(liveIssue, modalCtx.sid)}
                     ${entitiesSectionHtml}
                     ${actionSectionHtml}
                     <div id="aim-issues-modal-historyheader"
@@ -6162,6 +6539,20 @@
             if (openSiteBtn) {
                 openSiteBtn.onclick = () => openIssueInSite(modalCtx.sid, liveIssue.id);
             }
+            // v1.46: mission link / ▶ jump / copy coords / ↗ Site Setup.
+            // pointerdown + click with a debounce — Leaflet can swallow click.
+            card.querySelectorAll('[data-aim-ctx]').forEach(el => {
+                let lastFire = 0;
+                const h = (e) => {
+                    e.preventDefault(); e.stopPropagation();
+                    const now = Date.now();
+                    if (now - lastFire < 400) return;   // ignore the paired event
+                    lastFire = now;
+                    handleIssueContextAction(el.dataset.aimCtx, liveIssue, modalCtx.sid);
+                };
+                el.addEventListener('pointerdown', h, true);
+                el.addEventListener('click', h, true);
+            });
         }
 
         // v0.30: drag/resize for the modal. Closure-scoped so it sees `card`,
@@ -6625,6 +7016,7 @@
         const q = fleetSearch.trim().toLowerCase();
         if (!q) return true;
         if ((issue.note || '').toLowerCase().includes(q)) return true;
+        if (issue.mission && `${issue.mission.id} ${issue.mission.name || ''} ${issue.mission.rpic || ''}`.toLowerCase().includes(q)) return true;
         if ((issue.createdBy || '').toLowerCase().includes(q)) return true;
         if ((issue.assignee || '').toLowerCase().includes(q)) return true;
         if ((ctx.name || '').toLowerCase().includes(q) || String(ctx.sid) === q) return true;
@@ -7574,6 +7966,8 @@
         const note = (issue.note || '').toLowerCase();
         const by = (issue.createdBy || '').toLowerCase();
         if (note.includes(q) || by.includes(q)) return true;
+        // v1.46: mission id / name / pilot
+        if (issue.mission && `${issue.mission.id} ${issue.mission.name || ''} ${issue.mission.rpic || ''}`.toLowerCase().includes(q)) return true;
         // also match against any history note
         return (issue.history || []).some(h => (h.note || '').toLowerCase().includes(q));
     }
@@ -7906,6 +8300,7 @@
                                     ${issue.deleted ? 'text-decoration:line-through;color:#999;' : ''}
                                     overflow:hidden;text-overflow:ellipsis;display:-webkit-box;
                                     -webkit-line-clamp:2;-webkit-box-orient:vertical">${safeNote}</div>
+                        ${issue.mission && issue.mission.id ? `<div style="color:#5fb3ff;font-size:10px;margin-top:2px">${escHtml(missionChipText(issue.mission))}</div>` : ''}
                         ${affectsHtml}
                     </div>
                     <div style="color:#a8c4ff;font-size:11px;text-align:right">
@@ -8244,6 +8639,9 @@
             zoomToIssue(issue);
             openStatusModal(issue);
             console.log(`${TAG} deep-link focus → issue ${id}`);
+            // v1.46: arrived on the issue's own Mission Playback → seek the
+            // video to the captured moment (waits up to ~30 s for the player).
+            if (issue.mission && isOnMissionPlayback(siteID, issue.mission)) seekPlaybackToMission(issue.mission, 60);
         } catch (e) { console.warn(`${TAG} deep-link focus threw:`, e); }
     }
 

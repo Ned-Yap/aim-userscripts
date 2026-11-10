@@ -1,3 +1,10 @@
+## 2026-11-10 — 🚩 AIM Issues latest v1.46 (latest only) — Mission Playback context on issues (feature #330)
+
+- **Issues filed on the Mission Playback page now carry the flight automatically.** The "New issue" box shows a row with the Mission ID, the player time at that moment (editable if it is off) and the RPIC; all three are saved with the issue along with the mission name, drone, flight date and group.
+- **Issue box shows it back, with links.** Mission ID opens that flight's Mission Playback in a new tab and moves the video to the saved moment; when you are already on that flight, a **▶ Jump to 1:34** button moves the video instead.
+- **GPS point on every issue.** 📍 lat, lng (click to copy) plus **↗ Site Setup**, which opens Site Setup zoomed to the issue.
+- Also shown in the map tooltip, the panel row, the Slack post (linked mission · time · RPIC), panel search (mission id / name / pilot) and Copy → Sheets (4 new columns at the END: Mission ID, Video Time, RPIC, Lat/Lng).
+
 ## 2026-11-10 — 🛰️ AIM Defaults v1.2 → v1.3 (prod + latest) — Smart site nav now honours its toggle
 
 - **Turning "Smart site navigation" (or the AIM Defaults master) OFF now actually turns it off.** The script runs at document-start and made its first redirect before the Control Panel (document-end) could hand it the saved toggle values, so every page load ran on the built-in defaults: nav stayed ON regardless of the panel, and a site switch bounced you to the previously remembered section. Settings now persist in the script's own storage and are read before the first nav decision. First load after this update still uses defaults once (nothing saved yet); from then on the saved values apply from the first instant.
