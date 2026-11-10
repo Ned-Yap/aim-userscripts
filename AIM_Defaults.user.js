@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Defaults
 // @namespace    http://tampermonkey.net/
-// @version      1.1
+// @version      1.2
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Defaults.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Defaults.user.js
 // @description  Streamline the constant Percepto chores. Smart site navigation (land on your default section, keep your section when switching sites) + map-layer defaults (auto-off layers + Feeder Line bring-to-top) on every new site. Configurable in the AIM Control Panel.
@@ -10,7 +10,8 @@
 // @match        *://qa.percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
 // @match        https://qa.percepto.app/static/dist/react-pages/*
-// @grant        none
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @run-at       document-start
 // ==/UserScript==
 //
@@ -26,7 +27,10 @@
 //     - On each new site, opens the layer menu and applies your defaults:
 //       auto-off chosen layers, and Feeder Line off→on to force it on top.
 //
-// Config: AIM Control Panel → "AIM Defaults" section.
+// Config: AIM Control Panel → "AIM Defaults" section. Settings persist in
+//   this script's own GM storage so the very first nav decision on a page
+//   load already honours them (the Control Panel only echoes saved values
+//   AFTER it loads at document-end — too late for a document-start redirect).
 // Log tag: [AIM DEFAULTS]
 
 (function() {
@@ -90,7 +94,7 @@
     // ---------------------------------------------------------------------------
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SCRIPT_ID = 'aim-defaults';
-    const SCRIPT_VERSION = '1.1';
+    const SCRIPT_VERSION = '1.2';
     let controlChannel = null;
 
     function setupControlPanel() {
@@ -106,8 +110,44 @@
                 if (S[id] === val) return;           // idempotent — CP runs in both frames
                 S[id] = val;
                 log('setting', id, '=', val);
+                if (IS_TOP) saveSettings();          // one writer — both frames get the same echo
+                if (IS_TOP && (id === 'master' || id === 'nav-enabled')) onNavEnabledChange();
             }
         };
+    }
+
+    // ---- Settings persistence (GM storage, per-script, survives reloads) -----
+    // Why: this script runs at document-start and must decide the first redirect
+    // synchronously, before the Control Panel (document-end) can echo the user's
+    // saved values. Without our own copy, every page load ran on the hardcoded
+    // defaults — "Smart site nav" stayed ON no matter what the panel said, and
+    // a site switch bounced to the previously remembered section (bug 2026-11-10).
+    const SETTINGS_KEY = 'aim-defaults-settings';
+    const hasGM = typeof GM_getValue === 'function' && typeof GM_setValue === 'function';
+    function loadSettings() {
+        if (!hasGM) { warn('GM storage unavailable — settings reset to defaults on every load'); return; }
+        try {
+            const raw = GM_getValue(SETTINGS_KEY, null);
+            if (raw == null || raw === '') return;
+            const saved = typeof raw === 'string' ? JSON.parse(raw) : raw;
+            if (!saved || typeof saved !== 'object') { warn('ignoring malformed saved settings', raw); return; }
+            let n = 0;
+            for (const k of Object.keys(saved)) {
+                if (k in S && saved[k] !== undefined) { S[k] = saved[k]; n++; }
+            }
+            log('settings restored from storage —', n, 'keys');
+        } catch (e) {
+            err('loadSettings failed — using built-in defaults', e);
+        }
+    }
+    let saveTimer = null;
+    function saveSettings() {
+        if (!hasGM) return;
+        clearTimeout(saveTimer);                 // the REGISTER echo is a burst of N SET_TOGGLEs — write once
+        saveTimer = setTimeout(() => {
+            try { GM_setValue(SETTINGS_KEY, JSON.stringify(S)); }
+            catch (e) { err('saveSettings failed', e); }
+        }, 150);
     }
 
     function registerWithControlPanel() {
@@ -205,9 +245,45 @@
         document.addEventListener('input', handler, true);
     }
 
+    const navEnabled = () => !!S.master && !!S['nav-enabled'];
+
+    // Runtime flip of the nav toggle (Control Panel). OFF → drop the one-shot
+    // landing flag so it can't fire when re-enabled later. ON → seed the state
+    // from where the user IS right now, so the first switch after re-enabling
+    // doesn't bounce to a section remembered from before it was turned off.
+    function onNavEnabledChange() {
+        try {
+            if (!navEnabled()) {
+                ssDel(SS_FROM_LANDING);
+                log('navigation DISABLED — no redirects until re-enabled');
+                return;
+            }
+            const cur = parseSite(location.hash);
+            if (cur) recordState(cur.id, cur.rest);
+            log('navigation ENABLED — seeded from current page', cur ? `${cur.id}/${cur.rest}` : '(no site)');
+        } catch (e) { err('onNavEnabledChange failed', e); }
+    }
+
+    // Redirect loop guard: Percepto occasionally rewrites the hash on arrival;
+    // if we ever end up ping-ponging, trip the breaker for this page instead
+    // of spinning. 3 redirects inside 10 s is never legitimate use.
+    const redirectTimes = [];
+    let navTripped = false;
+    function redirectAllowed() {
+        const now = Date.now();
+        while (redirectTimes.length && now - redirectTimes[0] > 10000) redirectTimes.shift();
+        if (redirectTimes.length >= 3) {
+            if (!navTripped) err('redirect loop detected — navigation disarmed for this page load. Reload to re-arm.');
+            navTripped = true;
+            return false;
+        }
+        redirectTimes.push(now);
+        return true;
+    }
+
     function evaluateNav(reason) {
         try {
-            if (!S.master || !S['nav-enabled']) return;
+            if (!navEnabled() || navTripped) return;
             const cur = parseSite(location.hash);
             if (!cur) return;                      // non-site hash (incl. boot transients) — do NOT clear state
 
@@ -239,6 +315,7 @@
             ssDel(SS_FROM_LANDING);                // consume the one-shot landing flag
 
             if (target && norm(cur.rest) !== norm(target)) {
+                if (!redirectAllowed()) { recordState(cur.id, cur.rest); return; }
                 // Record the intended target FIRST so the post-redirect evaluation
                 // sees "same site" and doesn't loop.
                 recordState(cur.id, target);
@@ -372,14 +449,19 @@
     // Init
     // ---------------------------------------------------------------------------
     function init() {
+        loadSettings();                          // BEFORE any nav decision — see "Settings persistence"
         setupControlPanel();
         registerWithControlPanel();
 
         if (IS_TOP) {
             armLandingOnInteraction();
             window.addEventListener('hashchange', () => evaluateNav('hashchange'));
-            evaluateNav('load');                 // act on the initial (possibly full-reload) entry
-            log('navigation armed — default:', S['default-section'], '| session memory:', S['session-memory']);
+            if (navEnabled()) {
+                evaluateNav('load');             // act on the initial (possibly full-reload) entry
+                log('navigation armed — default:', S['default-section'], '| session memory:', S['session-memory']);
+            } else {
+                log('navigation DISABLED (Control Panel) — no redirects');
+            }
         } else {
             startLayerWatcher();
             log('layer watcher armed');

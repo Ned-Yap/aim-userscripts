@@ -1,3 +1,9 @@
+## 2026-11-10 — 🛰️ AIM Defaults v1.2 (prod + latest) — Smart site nav now honours its toggle
+
+- **Turning "Smart site navigation" (or the AIM Defaults master) OFF now actually turns it off.** The script runs at document-start and made its first redirect before the Control Panel (document-end) could hand it the saved toggle values, so every page load ran on the built-in defaults: nav stayed ON regardless of the panel, and a site switch bounced you to the previously remembered section. Settings now persist in the script's own storage and are read before the first nav decision. First load after this update still uses defaults once (nothing saved yet); from then on the saved values apply from the first instant.
+- Flipping the toggle at runtime takes effect immediately: OFF drops the pending "from landing" flag; ON re-seeds from the page you are on, so the first switch after re-enabling never jumps to a stale section.
+- Redirect loop breaker: 3 redirects within 10 s disarms navigation for that page load and logs an error instead of ping-ponging.
+
 ## 2026-11-09 — 🚩 FP ⨯ FP crossing check + SOP Sweep (#329) — Site Setup Tools latest v4.498 · Fleet Tools latest v0.79 · Control Panel latest v1.49 (latest only)
 
 - **Site Setup Tools v4.498 — new SOP check "FP ⨯ FP crossing".** Flags any two flight-path segments that cross, T into, or lie on top of each other WITHOUT a shared vertex — same FP or different FPs, altitude ignored. Junctions that share a waypoint (branches, a real cross with a vertex in the middle) are fine and never flag. Why: it is legal for Percepto, but the drone's constant nearest-safe-zone recalculation thrashes at the crossing and floods notifications (agreed with Chris: never build it that way). Runs with 🚩 Draw issues like every other check; the pin sits at the exact crossing. Also: `?aim-goto=lat,lng,z&aim-site=<id>` on a Site Setup URL pans + zooms + pulses the map at that spot once it loads (the Fleet SOP Sweep links use it).
