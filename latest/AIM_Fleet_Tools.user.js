@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.78
+// @version      0.79
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
-// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.78 (#318): 🖼 Map Export — renders what the landing map shows (KML layers, cross-ref bands, site setups, site names) on its own canvas at print size with basemap tiles, legend, scale bar, north arrow, title and a dead-space trim (transparent outside the content); preview modal with toggles; ⬇ PNG poster or 🌐 self-contained interactive HTML (small, zooms forever). v0.77: Site setups scope — draw the FFZs / flight paths / assets of ONLY the sites matching a names box or the 📦 Fleet Data pick (independent of the label filter, "= labels" copies it) so another client's setup never shows on a shared map. v0.76: site labels "Only matching / picked" mode (names box or the 📦 Fleet Data pick keep their label, every other site name hidden), 🗺 on-map legend (cross-ref bands + numbers, shown KML layers, site-setup colours) and 📷 Client view (names hidden, legend on, panel + button tucked away for a screenshot; ↩ Exit restores). v0.75: 📊 Fleet Metrics follows the 📦 Fleet Data pick ("picked only" checkbox, on by default; nothing picked → every site) — table, totals, Sheets / CSV and 🛂 Approval FPs. v0.67 (#285): 📡 Coverage — radius circles on the landing map (any Ø, drag centre / edge, live count of sites inside under a fully-inside / centre-inside rule, KML export), footprint of the picked sites (span, convex hull, smallest enclosing circle, site extents + FFZ acreage), 🧠 Best spot (centre covering the MOST sites at a Ø — exact candidate search) + 🗂 Plan all (greedy: how many circles cover every site), 📏 two-click ruler. v0.57 (#274): data check shows whether the skipped no-duration rows carry images / videos (+ first video object), and 🔎 probes one /missions/ page without the field filter to list every server field (hunting an abort / end-reason field). v0.56 (#274): 📋 Copy check button on the data check. v0.55 (#276): Utilization lenses — 🧑‍✈️ Pilots / 🛸 Drones / 📍 Sites / 🏢 Clients (sites + clients: flights, drone-hrs, air, flyable drone-hrs, util %, coverage, sites never flown, incomplete, capture %, gaps); Drones gain flyable hrs + util %. v0.54 (#274): Incomplete flights + Capture % from planned-vs-actual image counts (Pilots / Pilot-days / Flights), raw state codes + mission_data_reports sample in the data check. v0.53 (#274): ⚙ Site rules is a real button. v0.52 (#274): Pilot Utilization hides all-zero / blank columns (panel + Sheets + CSV) with a 'hidden:' note and a checkbox to show them. v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
+// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.79 (#329): 🚩 SOP Sweep — run Site-Setup SOP checks across the picked sites (or every site) from LIVE /map_objects/; first check = FP ⨯ FP crossing (segments that cross / T / overlap with no shared vertex); per-site rows, 🎯 fly-to on the landing map, ↗ opens the site in a NEW tab and jumps to the spot (?aim-goto deep link, Site Setup Tools v4.498+), Copy → Sheets / CSV. v0.78 (#318): 🖼 Map Export — renders what the landing map shows (KML layers, cross-ref bands, site setups, site names) on its own canvas at print size with basemap tiles, legend, scale bar, north arrow, title and a dead-space trim (transparent outside the content); preview modal with toggles; ⬇ PNG poster or 🌐 self-contained interactive HTML (small, zooms forever). v0.77: Site setups scope — draw the FFZs / flight paths / assets of ONLY the sites matching a names box or the 📦 Fleet Data pick (independent of the label filter, "= labels" copies it) so another client's setup never shows on a shared map. v0.76: site labels "Only matching / picked" mode (names box or the 📦 Fleet Data pick keep their label, every other site name hidden), 🗺 on-map legend (cross-ref bands + numbers, shown KML layers, site-setup colours) and 📷 Client view (names hidden, legend on, panel + button tucked away for a screenshot; ↩ Exit restores). v0.75: 📊 Fleet Metrics follows the 📦 Fleet Data pick ("picked only" checkbox, on by default; nothing picked → every site) — table, totals, Sheets / CSV and 🛂 Approval FPs. v0.67 (#285): 📡 Coverage — radius circles on the landing map (any Ø, drag centre / edge, live count of sites inside under a fully-inside / centre-inside rule, KML export), footprint of the picked sites (span, convex hull, smallest enclosing circle, site extents + FFZ acreage), 🧠 Best spot (centre covering the MOST sites at a Ø — exact candidate search) + 🗂 Plan all (greedy: how many circles cover every site), 📏 two-click ruler. v0.57 (#274): data check shows whether the skipped no-duration rows carry images / videos (+ first video object), and 🔎 probes one /missions/ page without the field filter to list every server field (hunting an abort / end-reason field). v0.56 (#274): 📋 Copy check button on the data check. v0.55 (#276): Utilization lenses — 🧑‍✈️ Pilots / 🛸 Drones / 📍 Sites / 🏢 Clients (sites + clients: flights, drone-hrs, air, flyable drone-hrs, util %, coverage, sites never flown, incomplete, capture %, gaps); Drones gain flyable hrs + util %. v0.54 (#274): Incomplete flights + Capture % from planned-vs-actual image counts (Pilots / Pilot-days / Flights), raw state codes + mission_data_reports sample in the data check. v0.53 (#274): ⚙ Site rules is a real button. v0.52 (#274): Pilot Utilization hides all-zero / blank columns (panel + Sheets + CSV) with a 'hidden:' note and a checkbox to show them. v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        *://qa.percepto.app/*
@@ -43,7 +43,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.78';
+    const SCRIPT_VERSION = '0.79';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -127,6 +127,8 @@
             view: { ffz: true, fp: true, asset: true },
             clientsOff: {},
             mtPicked: true,          // v0.75: 📊 Fleet Metrics scoped to the 📦 Fleet Data pick (nothing picked → every site)
+            // v0.79 (#329): 🚩 SOP Sweep scope + which checks run
+            sopPicked: true, sopProdOnly: true, sopChecks: {},
         };
     }
     function loadCfg() {
@@ -138,6 +140,9 @@
             if (typeof s.capPerPair === 'number') d.capPerPair = s.capPerPair;
             if (typeof s.onlyProduction === 'boolean') d.onlyProduction = s.onlyProduction;
             if (typeof s.mtPicked === 'boolean') d.mtPicked = s.mtPicked;
+            if (typeof s.sopPicked === 'boolean') d.sopPicked = s.sopPicked;
+            if (typeof s.sopProdOnly === 'boolean') d.sopProdOnly = s.sopProdOnly;
+            if (s.sopChecks && typeof s.sopChecks === 'object') d.sopChecks = s.sopChecks;
             if (typeof s.showOnMap === 'boolean') d.showOnMap = s.showOnMap;
             if (typeof s.drawSetups === 'boolean') d.drawSetups = s.drawSetups;
             if (typeof s.basemap === 'string') d.basemap = s.basemap;
@@ -4411,7 +4416,7 @@
     let buttonEl = null;
     let panelEl = null;
     // v0.31: every section starts COLLAPSED (user request) — open what you need.
-    let openSections = { issues: false, data: false, fc: false, pilots: false, sweep: false, map: false, cov: false, kml: false, xref: false, mx: false, metrics: false, surveys: false };
+    let openSections = { issues: false, data: false, fc: false, pilots: false, sweep: false, sop: false, map: false, cov: false, kml: false, xref: false, mx: false, metrics: false, surveys: false };
     // v0.25 (#257): 🚩 Fleet Issues front door. AIM Issues owns the engine +
     // panel (one copy of the merge/Slack/role rules); we ask it for a summary
     // and open it over tab-local DOM events on `document` (NOT the
@@ -7826,6 +7831,275 @@
         } catch (e) { body.innerHTML = `<div style="color:#ff7a7a">history unavailable — ${esc(e.message)}</div>`; }
     }
 
+    // ==================================================================
+    // FP ⨯ FP CROSSING CORE (#329, 2026-11-09) — "the streams have crossed".
+    // Two flight-path segments that intersect WITHOUT sharing a vertex
+    // (same FP or different FPs). Legal for Percepto, but the drone's
+    // constant nearest-safe-zone recalculation thrashes at the crossing
+    // and floods notifications — agreed with Chris: never build it that
+    // way. A junction that shares a vertex (branching, a real cross with
+    // a waypoint in the middle) is fine and is NOT flagged.
+    //   kind 'cross'   — interiors cross each other
+    //   kind 'tee'     — one segment's endpoint sits ON the other's interior
+    //                    (T-junction drawn without a shared waypoint)
+    //   kind 'overlap' — collinear segments lie on top of each other
+    // Input: arcs = [{ a:{lat,lng}, b:{lat,lng}, fp:<any id> }]
+    // Output: [{ i, j, lat, lng, kind, sameFp }] with i < j (indices into arcs)
+    // Math is done in a local tangent plane (metres); TOUCH_M is the
+    // "same point" tolerance so float noise at a real shared vertex never
+    // flags. Vendored verbatim in Site Setup Tools + Fleet Tools —
+    // standalone reference: ShortKeys/AIM_FP_Cross.js (sync after live test).
+    const FP_CROSS_TOUCH_M = 0.25;
+    function fpCrossFind(arcs) {
+        const out = [];
+        if (!Array.isArray(arcs) || arcs.length < 2) return out;
+        const ok = (p) => p && typeof p.lat === 'number' && typeof p.lng === 'number' && isFinite(p.lat) && isFinite(p.lng);
+        let lat0 = 0, n0 = 0;
+        arcs.forEach(s => { if (s && ok(s.a)) { lat0 += s.a.lat; n0++; } });
+        lat0 = n0 ? lat0 / n0 : 0;
+        const kx = 111320 * Math.cos(lat0 * Math.PI / 180) || 1e-6, ky = 111320;
+        const segs = arcs.map((s, idx) => {
+            if (!s || !ok(s.a) || !ok(s.b)) return null;
+            const ax = s.a.lng * kx, ay = s.a.lat * ky, bx = s.b.lng * kx, by = s.b.lat * ky;
+            const len = Math.hypot(bx - ax, by - ay);
+            if (len < FP_CROSS_TOUCH_M) return null;   // zero-length arc: the degenerate check owns it
+            return { idx, fp: s.fp, ax, ay, bx, by, len,
+                minX: Math.min(ax, bx) - FP_CROSS_TOUCH_M, maxX: Math.max(ax, bx) + FP_CROSS_TOUCH_M,
+                minY: Math.min(ay, by) - FP_CROSS_TOUCH_M, maxY: Math.max(ay, by) + FP_CROSS_TOUCH_M };
+        }).filter(Boolean);
+        const near = (x1, y1, x2, y2) => Math.hypot(x1 - x2, y1 - y2) <= FP_CROSS_TOUCH_M;
+        const toLL = (x, y) => ({ lat: y / ky, lng: x / kx });
+        // signed distance of point (px,py) from the infinite line of seg s
+        const lineDist = (s, px, py) => ((s.bx - s.ax) * (py - s.ay) - (s.by - s.ay) * (px - s.ax)) / s.len;
+        // parameter of the projection of (px,py) onto seg s (0 = a, 1 = b)
+        const param = (s, px, py) => ((px - s.ax) * (s.bx - s.ax) + (py - s.ay) * (s.by - s.ay)) / (s.len * s.len);
+        for (let i = 0; i < segs.length; i++) {
+            const P = segs[i];
+            for (let j = i + 1; j < segs.length; j++) {
+                const Q = segs[j];
+                if (P.maxX < Q.minX || Q.maxX < P.minX || P.maxY < Q.minY || Q.maxY < P.minY) continue;
+                const sharedPA = near(P.ax, P.ay, Q.ax, Q.ay) || near(P.ax, P.ay, Q.bx, Q.by);
+                const sharedPB = near(P.bx, P.by, Q.ax, Q.ay) || near(P.bx, P.by, Q.bx, Q.by);
+                const shared = sharedPA || sharedPB;
+                const dx1 = P.bx - P.ax, dy1 = P.by - P.ay, dx2 = Q.bx - Q.ax, dy2 = Q.by - Q.ay;
+                const denom = dx1 * dy2 - dy1 * dx2;
+                const sinAng = Math.abs(denom) / (P.len * Q.len);
+                if (sinAng < 1e-4) {
+                    // (near-)parallel. Collinear + overlapping along more than the
+                    // touch tolerance = the two arcs lie on top of each other.
+                    if (Math.abs(lineDist(P, Q.ax, Q.ay)) > FP_CROSS_TOUCH_M || Math.abs(lineDist(P, Q.bx, Q.by)) > FP_CROSS_TOUCH_M) continue;
+                    const t1 = param(P, Q.ax, Q.ay), t2 = param(P, Q.bx, Q.by);
+                    const lo = Math.max(0, Math.min(t1, t2)), hi = Math.min(1, Math.max(t1, t2));
+                    if ((hi - lo) * P.len <= FP_CROSS_TOUCH_M) continue;   // touch at a point only → shared vertex / tee handled as a non-issue
+                    const tm = (lo + hi) / 2;
+                    const ll = toLL(P.ax + dx1 * tm, P.ay + dy1 * tm);
+                    out.push({ i: P.idx, j: Q.idx, lat: ll.lat, lng: ll.lng, kind: 'overlap', sameFp: P.fp === Q.fp, overlapM: (hi - lo) * P.len });
+                    continue;
+                }
+                if (shared) continue;   // a real junction: both arcs meet at a waypoint
+                // proper intersection of the two infinite lines, then test both params
+                const t = ((Q.ax - P.ax) * dy2 - (Q.ay - P.ay) * dx2) / denom;
+                const u = ((Q.ax - P.ax) * dy1 - (Q.ay - P.ay) * dx1) / denom;
+                const eT = FP_CROSS_TOUCH_M / P.len, eU = FP_CROSS_TOUCH_M / Q.len;
+                if (t < -eT || t > 1 + eT || u < -eU || u > 1 + eU) continue;
+                const x = P.ax + dx1 * t, y = P.ay + dy1 * t;
+                const atPEnd = near(x, y, P.ax, P.ay) || near(x, y, P.bx, P.by);
+                const atQEnd = near(x, y, Q.ax, Q.ay) || near(x, y, Q.bx, Q.by);
+                if (atPEnd && atQEnd) continue;   // both endpoints at the point = shared vertex (caught above, belt and braces)
+                const ll = toLL(x, y);
+                out.push({ i: P.idx, j: Q.idx, lat: ll.lat, lng: ll.lng, kind: (atPEnd || atQEnd) ? 'tee' : 'cross', sameFp: P.fp === Q.fp });
+            }
+        }
+        return out;
+    }
+    // ==================================================================
+    // 🚩 SOP SWEEP (v0.79, #329) — run Site-Setup SOP checks across MANY sites
+    // from the landing page: the 📦 Fleet Data pick (or every site), live
+    // /map_objects/ reads (never snapshots — a fix made a minute ago must drop
+    // off), one row per finding with a 🎯 fly-to on the landing map and a ↗
+    // link that opens the site in a NEW tab and pans/zooms straight to the
+    // spot (Site Setup Tools v4.498 reads ?aim-goto=lat,lng,z&aim-site=<id>).
+    // Checks are a registry so the other SOP checks can be ported in later;
+    // today: FP ⨯ FP crossing (the "streams crossed" rule agreed with Chris).
+    // ==================================================================
+    const SOP_SWEEP_CHECKS = [
+        { key: 'fpCross', label: 'FP ⨯ FP crossing (no shared vertex)', title: 'Two flight-path segments that cross / T into / lie on each other WITHOUT a shared waypoint. Same FP or different FPs. Junctions that share a vertex are fine.',
+          run: (entities) => {
+              const fps = entities.filter(e => e && e.type === 15 && Array.isArray(e.arcs) && e.arcs.length);
+              const recs = [];
+              fps.forEach(fp => fp.arcs.forEach((arc, i) => {
+                  if (arc && arc.point_a && arc.point_b && typeof arc.point_a.lat === 'number' && typeof arc.point_b.lat === 'number')
+                      recs.push({ a: arc.point_a, b: arc.point_b, fp: fp.id != null ? fp.id : fp.name, fpName: fp.name || `#${fp.id}`, segNum: i + 1, segId: arc.id != null ? arc.id : '?' });
+              }));
+              const kindWord = { cross: 'crosses', tee: 'T-joins mid-segment into', overlap: 'lies on top of' };
+              return fpCrossFind(recs).map(x => {
+                  const A = recs[x.i], B = recs[x.j];
+                  return { check: 'fpCross', kind: x.kind, lat: x.lat, lng: x.lng, sameFp: x.sameFp,
+                      a: `${A.fpName} seg #${A.segNum}`, b: `${B.fpName} seg #${B.segNum}`,
+                      note: `FP "${A.fpName}" seg #${A.segNum} (id ${A.segId}) ${kindWord[x.kind] || 'crosses'} FP "${B.fpName}" seg #${B.segNum} (id ${B.segId})${x.kind === 'overlap' && isFinite(x.overlapM) ? ` for ${Math.round(x.overlapM * 3.28084)} ft` : ''} — no shared vertex${x.sameFp ? ' (same flight path)' : ''}` };
+              });
+          } },
+    ];
+    const SOP_SWEEP_CONCURRENCY = 3;
+    let sopSweep = null;      // { at, running, seq, scope, sites: { sid: { name, client, status, findings:[], err, ms } }, order:[sid…], done, total, aborted }
+    let sopSweepSeq = 0;
+    let sopOpenSite = null;   // sid whose rows are expanded (null = all collapsed → one summary row per site)
+
+    function sopEnabledChecks() { return SOP_SWEEP_CHECKS.filter(c => ftCfg.sopChecks[c.key] !== false); }
+    function sopScopeIds() {
+        const all = rawSites ? Object.keys(rawSites) : [];
+        let ids = (ftCfg.sopPicked && fdSelected.size) ? all.filter(id => fdSelected.has(String(id))) : all.slice();
+        if (ftCfg.sopProdOnly) ids = ids.filter(id => { const st = siteStatus(id); return !st || st === 'Production'; });
+        return ids;
+    }
+    function sopGotoUrl(sid, lat, lng) {
+        return `${location.origin}/?aim-goto=${lat.toFixed(7)},${lng.toFixed(7)},19&aim-site=${encodeURIComponent(sid)}#/site/${sid}/control-panel/site-setup`;
+    }
+    async function sopRunSweep() {
+        if (sopSweep && sopSweep.running) return;
+        const checks = sopEnabledChecks();
+        if (!checks.length) { setStatus('SOP sweep: no check enabled'); return; }
+        try { await fetchRawSites(false); } catch (e) { console.warn(`${TAG} SOP sweep: /sites/ failed:`, e); setStatus(`SOP sweep: /sites/ failed — ${e.message}`); return; }
+        const ids = sopScopeIds();
+        if (!ids.length) { setStatus('SOP sweep: no sites in scope (pick sites in 📦 Fleet Data or untick "picked only")'); return; }
+        const seq = ++sopSweepSeq;
+        sopSweep = { at: Date.now(), running: true, seq, scope: (ftCfg.sopPicked && fdSelected.size) ? `picked (${ids.length})` : `all (${ids.length})`,
+            checks: checks.map(c => c.key), sites: {}, order: ids.slice(), done: 0, total: ids.length, aborted: false };
+        sopOpenSite = null;
+        renderPanel();
+        console.log(`${TAG} SOP sweep ${seq}: ${ids.length} site(s), checks ${checks.map(c => c.key).join(',')}`);
+        let cursor = 0;
+        const worker = async () => {
+            while (cursor < ids.length) {
+                if (sopSweepSeq !== seq || sopSweep.aborted) return;
+                const sid = ids[cursor++];
+                const t0 = Date.now();
+                const rec = { name: siteName(sid), client: clientOf(siteName(sid)), status: siteStatus(sid), findings: [], err: null, ms: 0, arcs: 0 };
+                try {
+                    const live = await fdFetchSetup(sid, true);
+                    const ents = Array.isArray(live.entities) ? live.entities : [];
+                    rec.arcs = ents.reduce((n, e) => n + ((e && e.type === 15 && Array.isArray(e.arcs)) ? e.arcs.length : 0), 0);
+                    checks.forEach(c => {
+                        try { rec.findings.push(...c.run(ents)); }
+                        catch (e) { console.warn(`${TAG} SOP sweep: check ${c.key} threw on site ${sid}:`, e); rec.err = (rec.err ? rec.err + '; ' : '') + `${c.key}: ${e.message}`; }
+                    });
+                } catch (e) {
+                    rec.err = e.message || String(e);
+                    console.warn(`${TAG} SOP sweep: site ${sid} failed:`, e);
+                }
+                rec.ms = Date.now() - t0;
+                if (sopSweepSeq !== seq) return;
+                sopSweep.sites[sid] = rec;
+                sopSweep.done++;
+                setStatus(`SOP sweep… ${sopSweep.done}/${sopSweep.total} · ${rec.name}${rec.findings.length ? ` → ${rec.findings.length}` : ''}`);
+                if (sopSweep.done % 3 === 0 || sopSweep.done === sopSweep.total) fdRenderKeepScroll();
+            }
+        };
+        await Promise.all(Array.from({ length: Math.min(SOP_SWEEP_CONCURRENCY, ids.length) }, worker));
+        if (sopSweepSeq !== seq) return;
+        sopSweep.running = false;
+        const tot = sopTotals();
+        setStatus(`SOP sweep done — ${tot.findings} finding(s) on ${tot.sitesHit} of ${sopSweep.done} site(s)${tot.failed ? ` · ${tot.failed} failed` : ''}${sopSweep.aborted ? ' · ABORTED' : ''}`);
+        console.log(`${TAG} SOP sweep ${seq}: done — ${tot.findings} finding(s), ${tot.sitesHit} site(s) hit, ${tot.failed} failed`);
+        renderPanel();
+    }
+    function sopTotals() {
+        const t = { findings: 0, sitesHit: 0, failed: 0 };
+        if (!sopSweep) return t;
+        Object.values(sopSweep.sites).forEach(r => { t.findings += r.findings.length; if (r.findings.length) t.sitesHit++; if (r.err) t.failed++; });
+        return t;
+    }
+    function sopRows() {
+        // flat finding rows, sites with the most findings first, then by name
+        if (!sopSweep) return [];
+        const sids = Object.keys(sopSweep.sites).sort((a, b) => (sopSweep.sites[b].findings.length - sopSweep.sites[a].findings.length) || sopSweep.sites[a].name.localeCompare(sopSweep.sites[b].name));
+        const out = [];
+        sids.forEach(sid => { const r = sopSweep.sites[sid]; r.findings.forEach((f, i) => out.push({ sid, idx: i, site: r.name, client: r.client, status: r.status, f })); });
+        return out;
+    }
+    function sopFly(sid, idx) {
+        const r = sopSweep && sopSweep.sites[sid]; const f = r && r.findings[idx];
+        const map = getLandingMap();
+        if (!f || !map) { setStatus('fly-to: map or finding not available'); return; }
+        try { map.setView([f.lat, f.lng], Math.max(map.getZoom ? map.getZoom() : 4, 16)); setStatus(`🎯 ${r.name} — ${f.a} ⨯ ${f.b}`); }
+        catch (e) { console.warn(`${TAG} SOP fly-to failed:`, e); }
+    }
+    function sopExportRows() {
+        const cols = ['Site ID', 'Site', 'Client', 'Status', 'Check', 'Kind', 'Segment A', 'Segment B', 'Same FP', 'Lat', 'Lng', 'Open', 'Detail'];
+        const rows = sopRows().map(x => [x.sid, x.site, x.client, x.status, x.f.check, x.f.kind, x.f.a, x.f.b, x.f.sameFp ? 'yes' : 'no', x.f.lat.toFixed(7), x.f.lng.toFixed(7), sopGotoUrl(x.sid, x.f.lat, x.f.lng), x.f.note]);
+        return { cols, rows };
+    }
+    function sopCopySheets() {
+        const { cols, rows } = sopExportRows();
+        if (!rows.length) { setStatus('SOP sweep: nothing to copy'); return; }
+        const esc = (v) => escapeHtml(String(v == null ? '' : v));
+        const html = `<p><b>AIM SOP Sweep</b> — ${esc(new Date(sopSweep.at).toLocaleString())} — ${esc(sopSweep.scope)} — ${rows.length} finding(s)</p>`
+            + `<table border="1" style="border-collapse:collapse"><tr>${cols.map(c => `<th style="background:#1a2029;color:#7adfe6">${esc(c)}</th>`).join('')}</tr>`
+            + rows.map(r => `<tr>${r.map((v, i) => i === 11 ? `<td><a href="${esc(v)}">open</a></td>` : `<td>${esc(v)}</td>`).join('')}</tr>`).join('') + '</table>';
+        const text = [cols.join('\t')].concat(rows.map(r => r.join('\t'))).join('\n');
+        copyHtmlToClipboard(html, text, `SOP sweep copied — ${rows.length} row(s) for Sheets`);
+    }
+    function sopDownloadCsv() {
+        const { cols, rows } = sopExportRows();
+        if (!rows.length) { setStatus('SOP sweep: nothing to export'); return; }
+        const q = (v) => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`;
+        const csv = [cols.map(q).join(',')].concat(rows.map(r => r.map(q).join(','))).join('\r\n');
+        fdDownload(new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' }), `AIM_SOP_Sweep_${new Date(sopSweep.at).toISOString().slice(0, 10)}.csv`);
+        setStatus(`SOP sweep CSV — ${rows.length} row(s)`);
+    }
+    function renderSopSection() {
+        if (!openSections.sop) return '';
+        const h = [];
+        const running = !!(sopSweep && sopSweep.running);
+        const ids = rawSites ? sopScopeIds() : [];
+        h.push('<div style="padding:6px 10px;display:flex;gap:12px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;">'
+            + `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;" title="Only the sites ticked in 📦 Fleet Data. Nothing picked → every site."><input type="checkbox" data-ft-flag="sopPicked" ${ftCfg.sopPicked ? 'checked' : ''} ${running ? 'disabled' : ''}> picked only <span style="color:${fdSelected.size ? '#5fff5f' : '#888'}">(${fdSelected.size})</span></label>`
+            + `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;" title="Skip sites whose /sites/ status is not Production (duplicates, OFFLINE copies)"><input type="checkbox" data-ft-flag="sopProdOnly" ${ftCfg.sopProdOnly ? 'checked' : ''} ${running ? 'disabled' : ''}> Production only</label>`
+            + `<span style="color:#888">scope: ${rawSites ? `${ids.length} site(s)` : 'roster not loaded yet'}</span>`
+            + '</div>');
+        h.push('<div style="padding:4px 10px;display:flex;gap:12px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;"><span style="color:#7adfe6">Checks:</span>'
+            + SOP_SWEEP_CHECKS.map(c => `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;" title="${escapeHtml(c.title)}"><input type="checkbox" data-sop-check="${c.key}" ${ftCfg.sopChecks[c.key] !== false ? 'checked' : ''} ${running ? 'disabled' : ''}> ${escapeHtml(c.label)}</label>`).join('')
+            + '<span style="color:#666">(more SOP checks port here next)</span></div>');
+        h.push('<div style="padding:6px 10px;display:flex;gap:14px;flex-wrap:wrap;border-bottom:1px solid #222834;">'
+            + (running
+                ? `<span data-ft="sop-abort" style="cursor:pointer;color:#ff5252;font-weight:bold">■ Abort (${sopSweep.done}/${sopSweep.total})</span>`
+                : '<span data-ft="sop-run" style="cursor:pointer;color:#5fff5f;font-weight:bold">▶ Run SOP sweep</span>')
+            + '<span data-ft="sop-sheets" style="cursor:pointer;color:#7adfe6" title="Rich table on the clipboard — paste into Google Sheets / Excel; the Open column is a clickable deep link">📋 Copy → Sheets</span>'
+            + '<span data-ft="sop-csv" style="cursor:pointer;color:#7adfe6">⬇ CSV</span>'
+            + (sopSweep && !running ? '<span data-ft="sop-clear" style="cursor:pointer;color:#888">✕ Clear</span>' : '')
+            + '</div>');
+        if (!sopSweep) { h.push('<div style="padding:8px 10px;color:#888">No SOP sweep run yet on this browser. Live /map_objects/ read per site — ~1 s each.</div>'); return h.join(''); }
+        const tot = sopTotals();
+        h.push(`<div style="padding:4px 10px;color:#aaa;border-bottom:1px solid #222834;">${running ? `Running… ${sopSweep.done}/${sopSweep.total}` : `Ran ${new Date(sopSweep.at).toLocaleString()} · ${sopSweep.scope}${sopSweep.aborted ? ' · <span style="color:#ff5252">ABORTED</span>' : ''}`}`
+            + ` → <span style="color:${tot.findings ? '#ff3d00' : '#5fff5f'};font-weight:bold">${tot.findings} finding(s)</span> on ${tot.sitesHit} site(s)`
+            + (tot.failed ? ` · <span style="color:#ffa030">${tot.failed} site(s) failed</span>` : '') + '</div>');
+        const sids = Object.keys(sopSweep.sites).sort((a, b) => (sopSweep.sites[b].findings.length - sopSweep.sites[a].findings.length) || sopSweep.sites[a].name.localeCompare(sopSweep.sites[b].name));
+        const hit = sids.filter(sid => sopSweep.sites[sid].findings.length || sopSweep.sites[sid].err);
+        if (!hit.length) { h.push(`<div style="padding:8px 10px;color:#5fff5f">${sopSweep.done ? 'No findings on any swept site ✓' : 'waiting for the first site…'}</div>`); return h.join(''); }
+        h.push('<div style="max-height:360px;overflow:auto">');
+        hit.forEach(sid => {
+            const r = sopSweep.sites[sid];
+            const open = sopOpenSite === sid;
+            h.push(`<div data-sop-site="${escapeHtml(sid)}" style="padding:4px 10px;cursor:pointer;border-top:1px solid #1e2430;display:flex;gap:8px;align-items:center;${r.err ? 'color:#ffa030' : ''}">`
+                + `<span style="width:12px;color:#888">${open ? '▾' : '▸'}</span>`
+                + `<span style="flex:1"><b>${escapeHtml(r.name)}</b> <span style="color:#888">· ${escapeHtml(r.client)}${r.status && r.status !== 'Production' ? ` · ${escapeHtml(r.status)}` : ''}</span></span>`
+                + (r.err ? `<span title="${escapeHtml(r.err)}">⚠ failed</span>` : `<span style="color:#ff3d00;font-weight:bold">${r.findings.length}</span>`)
+                + `<a href="${sopGotoUrl(sid, r.findings[0] ? r.findings[0].lat : 0, r.findings[0] ? r.findings[0].lng : 0)}" target="_blank" rel="noopener" title="Open the site in a new tab (jumps to the first finding)" style="color:#7adfe6;text-decoration:none">↗</a>`
+                + '</div>');
+            if (!open) return;
+            r.findings.forEach((f, i) => {
+                h.push(`<div style="padding:3px 10px 3px 30px;display:flex;gap:8px;align-items:center;border-top:1px dashed #1e2430;font-size:11px">`
+                    + `<span style="color:${f.kind === 'overlap' ? '#ffa030' : f.kind === 'tee' ? '#ffd27a' : '#ff7a7a'};width:52px">${escapeHtml(f.kind)}</span>`
+                    + `<span style="flex:1" title="${escapeHtml(f.note)}">${escapeHtml(f.a)} <span style="color:#888">⨯</span> ${escapeHtml(f.b)}${f.sameFp ? ' <span style="color:#888">(same FP)</span>' : ''}</span>`
+                    + `<span data-sop-fly="${escapeHtml(sid)}:${i}" title="Fly the landing map here" style="cursor:pointer;color:#7adfe6">🎯</span>`
+                    + `<a href="${sopGotoUrl(sid, f.lat, f.lng)}" target="_blank" rel="noopener" title="Open the site in a new tab and jump to this crossing" style="color:#7adfe6;text-decoration:none">↗ open</a>`
+                    + '</div>');
+            });
+        });
+        h.push('</div>');
+        return h.join('');
+    }
+
     function renderPanel() {
         if (!panelEl) return;
         const body = panelEl.querySelector('#aim-ft-body');
@@ -7843,6 +8117,8 @@
             + renderPilotSection()
             + sectionHeader('sweep', '⚠', 'Overlap Sweep', `${ENV_LABEL} · thr ${ftCfg.thresholdFt} ft`)
             + renderSweepSection()
+            + sectionHeader('sop', '🚩', 'SOP Sweep', sopSweep ? `${sopTotals().findings} finding(s) on ${sopTotals().sitesHit} site(s)${sopSweep.running ? ` · running ${sopSweep.done}/${sopSweep.total}` : ''}` : 'Site-Setup SOP checks across sites — FP ⨯ FP crossings')
+            + renderSopSection()
             + sectionHeader('map', '🗺', 'Map', 'basemap + airspace chart')
             + renderMapSection()
             + sectionHeader('cov', '📡', 'Coverage', `${covState.circles.length} circle(s) · Ø ${covState.opts.diaMi} mi · footprint of the picked sites`)
@@ -7888,7 +8164,7 @@
 
             // Delegated — the body is rebuilt on every render, the root never is
             panelEl.addEventListener('click', (ev) => {
-                if (ev.target.closest('input[data-ft-class],input[data-ft-flag],input[data-ft-view],input[data-kml-show],input[data-kml-fill],input[data-kml-color],input[data-fd-site],input[data-fd-clientsel],select[data-fd-pick],input[data-fd-dataset],select[data-fd-range],input[data-fd-date],input[data-kx-inc],select[data-kx-mode],input[data-kx-pad],input[data-fx-inc],input[data-fx-opt],input[data-fc-thr],input[data-pu-opt],input[data-pu-chk],select[data-pu-tz],select[data-pu-end],select[data-pu-rule],input[data-pu-rule],select[data-pu-bulk],#aim-ft-xr-picked')) return;   // checkbox/color/select → change handler
+                if (ev.target.closest('input[data-ft-class],input[data-ft-flag],input[data-sop-check],input[data-ft-view],input[data-kml-show],input[data-kml-fill],input[data-kml-color],input[data-fd-site],input[data-fd-clientsel],select[data-fd-pick],input[data-fd-dataset],select[data-fd-range],input[data-fd-date],input[data-kx-inc],select[data-kx-mode],input[data-kx-pad],input[data-fx-inc],input[data-fx-opt],input[data-fc-thr],input[data-pu-opt],input[data-pu-chk],select[data-pu-tz],select[data-pu-end],select[data-pu-rule],input[data-pu-rule],select[data-pu-bulk],#aim-ft-xr-picked')) return;   // checkbox/color/select → change handler
                 const clAll = ev.target.closest('[data-ft-clients]');
                 if (clAll) {
                     if (clAll.getAttribute('data-ft-clients') === 'all') {
@@ -7926,10 +8202,19 @@
                 if (fcRow && !ev.target.closest('a')) { const mid = Number(fcRow.getAttribute('data-fc-flight')); fcOpenFlight = fcOpenFlight === mid ? null : mid; fdRenderKeepScroll(); return; }
                 const covAct = ev.target.closest('[data-cov]');
                 if (covAct) { covCommand(covAct.getAttribute('data-cov')); return; }
+                const sopFlyEl = ev.target.closest('[data-sop-fly]');
+                if (sopFlyEl) { const [fsid, fidx] = sopFlyEl.getAttribute('data-sop-fly').split(':'); sopFly(fsid, Number(fidx)); return; }
+                const sopSiteEl = ev.target.closest('[data-sop-site]');
+                if (sopSiteEl && !ev.target.closest('a')) { const ssid = sopSiteEl.getAttribute('data-sop-site'); sopOpenSite = sopOpenSite === ssid ? null : ssid; fdRenderKeepScroll(); return; }
                 const act = ev.target.closest('[data-ft]');
                 if (act) {
                     const cmd = act.getAttribute('data-ft');
                     if (cmd === 'close') panelEl.style.display = 'none';
+                    else if (cmd === 'sop-run') sopRunSweep().catch(e => { console.warn(`${TAG} SOP sweep threw:`, e); setStatus(`SOP sweep failed — ${e.message}`); if (sopSweep) sopSweep.running = false; renderPanel(); });
+                    else if (cmd === 'sop-abort') { if (sopSweep) sopSweep.aborted = true; setStatus('SOP sweep aborting after the in-flight sites…'); }
+                    else if (cmd === 'sop-sheets') sopCopySheets();
+                    else if (cmd === 'sop-csv') sopDownloadCsv();
+                    else if (cmd === 'sop-clear') { sopSweepSeq++; sopSweep = null; sopOpenSite = null; renderPanel(); }
                     else if (cmd === 'issues-open') openFleetIssues();
                     else if (cmd === 'issues-refresh') { requestIssuesSummary(); renderPanel(); }
                     else if (cmd === 'kml-upload') { const fi = panelEl.querySelector('#aim-ft-kml-file'); if (fi) fi.click(); }
@@ -8307,6 +8592,8 @@
                     }
                     return;
                 }
+                const sopChk = ev.target.closest('input[data-sop-check]');
+                if (sopChk) { ftCfg.sopChecks[sopChk.getAttribute('data-sop-check')] = !!sopChk.checked; saveCfg(); renderPanel(); return; }
                 const flag = ev.target.closest('input[data-ft-flag]');
                 if (flag) {
                     const prop = flag.getAttribute('data-ft-flag');
@@ -8347,7 +8634,7 @@
                             return;
                         }
                         setStatus(`${prop === 'onlyProduction' ? '"Production only"' : prop} ${flag.checked ? 'ON' : 'OFF'} — takes effect on the next sweep`);
-                        if (prop === 'onlyProduction') renderPanel();
+                        if (prop === 'onlyProduction' || prop === 'sopPicked' || prop === 'sopProdOnly') renderPanel();
                     }
                     return;
                 }

@@ -2,10 +2,10 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.497
+// @version      4.498
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
-// @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
+// @description  v4.498 (#329): SOP check 'FP ⨯ FP crossing' — two flight-path segments that intersect / T / overlap WITHOUT a shared vertex (same or different FPs; the drone's safe-zone recalc thrashes at the crossing); Control Panel ☑ All / ☐ None / ◎ solo on the SOP checks; ?aim-goto=lat,lng,z URL param pans + pulses the Site Setup map on load (Fleet Tools SOP Sweep links). Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        *://qa.percepto.app/*
@@ -92,7 +92,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.497';
+    const SCRIPT_VERSION = '4.498';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -152,6 +152,7 @@
         fpOverlap: true, aglFloor: true, nfzSize: true, nfzProx: true,
         bandHeight: true, altInverted: true, fpDegenerate: true, gmTower: true,
         fpFfzAngle: true,
+        fpCross: true,        // #329 FP ⨯ FP crossing without a shared vertex
         gmTowerRings: true,   // ⭕ live standoff circles on Tower GMs (radius = gmTowerFt)
         hazard: true, hazardFfz: true,   // 🚧 FP (+ FFZ) vs the Map Styler hazard layer (#288)
     };
@@ -1516,6 +1517,87 @@
     function vkey(p) {
         return `${p.lat.toFixed(6)},${p.lng.toFixed(6)}`;
     }
+    // ==================================================================
+    // FP ⨯ FP CROSSING CORE (#329, 2026-11-09) — "the streams have crossed".
+    // Two flight-path segments that intersect WITHOUT sharing a vertex
+    // (same FP or different FPs). Legal for Percepto, but the drone's
+    // constant nearest-safe-zone recalculation thrashes at the crossing
+    // and floods notifications — agreed with Chris: never build it that
+    // way. A junction that shares a vertex (branching, a real cross with
+    // a waypoint in the middle) is fine and is NOT flagged.
+    //   kind 'cross'   — interiors cross each other
+    //   kind 'tee'     — one segment's endpoint sits ON the other's interior
+    //                    (T-junction drawn without a shared waypoint)
+    //   kind 'overlap' — collinear segments lie on top of each other
+    // Input: arcs = [{ a:{lat,lng}, b:{lat,lng}, fp:<any id> }]
+    // Output: [{ i, j, lat, lng, kind, sameFp }] with i < j (indices into arcs)
+    // Math is done in a local tangent plane (metres); TOUCH_M is the
+    // "same point" tolerance so float noise at a real shared vertex never
+    // flags. Vendored verbatim in Site Setup Tools + Fleet Tools —
+    // standalone reference: ShortKeys/AIM_FP_Cross.js (sync after live test).
+    const FP_CROSS_TOUCH_M = 0.25;
+    function fpCrossFind(arcs) {
+        const out = [];
+        if (!Array.isArray(arcs) || arcs.length < 2) return out;
+        const ok = (p) => p && typeof p.lat === 'number' && typeof p.lng === 'number' && isFinite(p.lat) && isFinite(p.lng);
+        let lat0 = 0, n0 = 0;
+        arcs.forEach(s => { if (s && ok(s.a)) { lat0 += s.a.lat; n0++; } });
+        lat0 = n0 ? lat0 / n0 : 0;
+        const kx = 111320 * Math.cos(lat0 * Math.PI / 180) || 1e-6, ky = 111320;
+        const segs = arcs.map((s, idx) => {
+            if (!s || !ok(s.a) || !ok(s.b)) return null;
+            const ax = s.a.lng * kx, ay = s.a.lat * ky, bx = s.b.lng * kx, by = s.b.lat * ky;
+            const len = Math.hypot(bx - ax, by - ay);
+            if (len < FP_CROSS_TOUCH_M) return null;   // zero-length arc: the degenerate check owns it
+            return { idx, fp: s.fp, ax, ay, bx, by, len,
+                minX: Math.min(ax, bx) - FP_CROSS_TOUCH_M, maxX: Math.max(ax, bx) + FP_CROSS_TOUCH_M,
+                minY: Math.min(ay, by) - FP_CROSS_TOUCH_M, maxY: Math.max(ay, by) + FP_CROSS_TOUCH_M };
+        }).filter(Boolean);
+        const near = (x1, y1, x2, y2) => Math.hypot(x1 - x2, y1 - y2) <= FP_CROSS_TOUCH_M;
+        const toLL = (x, y) => ({ lat: y / ky, lng: x / kx });
+        // signed distance of point (px,py) from the infinite line of seg s
+        const lineDist = (s, px, py) => ((s.bx - s.ax) * (py - s.ay) - (s.by - s.ay) * (px - s.ax)) / s.len;
+        // parameter of the projection of (px,py) onto seg s (0 = a, 1 = b)
+        const param = (s, px, py) => ((px - s.ax) * (s.bx - s.ax) + (py - s.ay) * (s.by - s.ay)) / (s.len * s.len);
+        for (let i = 0; i < segs.length; i++) {
+            const P = segs[i];
+            for (let j = i + 1; j < segs.length; j++) {
+                const Q = segs[j];
+                if (P.maxX < Q.minX || Q.maxX < P.minX || P.maxY < Q.minY || Q.maxY < P.minY) continue;
+                const sharedPA = near(P.ax, P.ay, Q.ax, Q.ay) || near(P.ax, P.ay, Q.bx, Q.by);
+                const sharedPB = near(P.bx, P.by, Q.ax, Q.ay) || near(P.bx, P.by, Q.bx, Q.by);
+                const shared = sharedPA || sharedPB;
+                const dx1 = P.bx - P.ax, dy1 = P.by - P.ay, dx2 = Q.bx - Q.ax, dy2 = Q.by - Q.ay;
+                const denom = dx1 * dy2 - dy1 * dx2;
+                const sinAng = Math.abs(denom) / (P.len * Q.len);
+                if (sinAng < 1e-4) {
+                    // (near-)parallel. Collinear + overlapping along more than the
+                    // touch tolerance = the two arcs lie on top of each other.
+                    if (Math.abs(lineDist(P, Q.ax, Q.ay)) > FP_CROSS_TOUCH_M || Math.abs(lineDist(P, Q.bx, Q.by)) > FP_CROSS_TOUCH_M) continue;
+                    const t1 = param(P, Q.ax, Q.ay), t2 = param(P, Q.bx, Q.by);
+                    const lo = Math.max(0, Math.min(t1, t2)), hi = Math.min(1, Math.max(t1, t2));
+                    if ((hi - lo) * P.len <= FP_CROSS_TOUCH_M) continue;   // touch at a point only → shared vertex / tee handled as a non-issue
+                    const tm = (lo + hi) / 2;
+                    const ll = toLL(P.ax + dx1 * tm, P.ay + dy1 * tm);
+                    out.push({ i: P.idx, j: Q.idx, lat: ll.lat, lng: ll.lng, kind: 'overlap', sameFp: P.fp === Q.fp, overlapM: (hi - lo) * P.len });
+                    continue;
+                }
+                if (shared) continue;   // a real junction: both arcs meet at a waypoint
+                // proper intersection of the two infinite lines, then test both params
+                const t = ((Q.ax - P.ax) * dy2 - (Q.ay - P.ay) * dx2) / denom;
+                const u = ((Q.ax - P.ax) * dy1 - (Q.ay - P.ay) * dx1) / denom;
+                const eT = FP_CROSS_TOUCH_M / P.len, eU = FP_CROSS_TOUCH_M / Q.len;
+                if (t < -eT || t > 1 + eT || u < -eU || u > 1 + eU) continue;
+                const x = P.ax + dx1 * t, y = P.ay + dy1 * t;
+                const atPEnd = near(x, y, P.ax, P.ay) || near(x, y, P.bx, P.by);
+                const atQEnd = near(x, y, Q.ax, Q.ay) || near(x, y, Q.bx, Q.by);
+                if (atPEnd && atQEnd) continue;   // both endpoints at the point = shared vertex (caught above, belt and braces)
+                const ll = toLL(x, y);
+                out.push({ i: P.idx, j: Q.idx, lat: ll.lat, lng: ll.lng, kind: (atPEnd || atQEnd) ? 'tee' : 'cross', sameFp: P.fp === Q.fp });
+            }
+        }
+        return out;
+    }
     // Build the undirected flight-path graph for a site's entities.
     // Returns { adj: Map<vkey,[{to,w}]>, verts: Map<vkey,{lat,lng}> }.
     function buildFlightPathGraph(entities) {
@@ -2217,6 +2299,24 @@
                         polygon: boxAt(m.lat, m.lng) });
                 } else seenArc.add(pk);
             });
+        }
+
+        // 10b. FP ⨯ FP crossing (#329) — two segments that intersect, T into, or
+        //      lie on top of each other WITHOUT a shared vertex. Legal for
+        //      Percepto, but the drone's constant nearest-safe-zone recalc
+        //      thrashes at the crossing and floods notifications. Same-FP
+        //      loops count too. Junctions that share a waypoint are fine.
+        if (sopEnabled.fpCross && allArcs.length > 1) {
+            const xs = fpCrossFind(allArcs.map(rec => ({ a: rec.arc.point_a, b: rec.arc.point_b, fp: rec.fp })));
+            const kindWord = { cross: 'crosses', tee: 'T-joins mid-segment into', overlap: 'lies on top of' };
+            xs.forEach(x => {
+                const A = allArcs[x.i], B = allArcs[x.j];
+                const extra = x.kind === 'overlap' && isFinite(x.overlapM) ? ` for ${Math.round(x.overlapM * M_TO_FT)} ft` : '';
+                out.push({ check: 'FP ⨯ FP crossing', severity: 'high', distFt: 0, threshFt: 0,
+                    note: `violation: ${segRef(A)} ${kindWord[x.kind] || 'crosses'} ${segRef(B)}${extra} with NO shared vertex${x.sameFp ? ' (same flight path)' : ''} — streams crossed: add a waypoint at the junction or reroute one path`,
+                    polygon: boxAt(x.lat, x.lng), lat: x.lat, lng: x.lng });
+            });
+            if (xs.length) console.log(`${TAG} SOP fpCross: ${xs.length} crossing(s) on ${allArcs.length} arcs`);
         }
 
         // 11. GM "Tower" standoff — general-markers of type 'tower' must stay
@@ -13292,32 +13392,34 @@
             version: SCRIPT_VERSION, group: 'SOP Validators', scope: 'site-setup', priority: 10,
             toggles: [
                 { id: 'sop-master', label: 'Enable SOP validators', type: 'boolean', default: true, master: true },
-                { id: 'ffzAsset', label: 'Check · FFZ → Asset standoff', type: 'boolean', default: SOP_ENABLE_DEFAULTS.ffzAsset },
+                { type: 'header', label: 'Checks', soloGroup: 'checks' },   // CP v1.49: ☑ All / ☐ None over every soloGroup:'checks' toggle
+                { id: 'ffzAsset', label: 'Check · FFZ → Asset standoff', type: 'boolean', default: SOP_ENABLE_DEFAULTS.ffzAsset, soloGroup: 'checks' },
                 { id: 'ffzAssetFt', label: 'FFZ → Asset min', type: 'number', min: 0, max: 200, step: 1, default: SOP_THRESH_DEFAULTS.ffzAssetFt, unit: 'ft' },
-                { id: 'fpAsset', label: 'Check · FP → Asset standoff', type: 'boolean', default: SOP_ENABLE_DEFAULTS.fpAsset },
+                { id: 'fpAsset', label: 'Check · FP → Asset standoff', type: 'boolean', default: SOP_ENABLE_DEFAULTS.fpAsset, soloGroup: 'checks' },
                 { id: 'fpAssetFt', label: 'FP → Asset min', type: 'number', min: 0, max: 200, step: 1, default: SOP_THRESH_DEFAULTS.fpAssetFt, unit: 'ft' },
-                { id: 'ffzFfz', label: 'Check · FFZ ↔ FFZ overlap', type: 'boolean', default: SOP_ENABLE_DEFAULTS.ffzFfz },
+                { id: 'ffzFfz', label: 'Check · FFZ ↔ FFZ overlap', type: 'boolean', default: SOP_ENABLE_DEFAULTS.ffzFfz, soloGroup: 'checks' },
                 { id: 'ffzFfzFt', label: 'FFZ ↔ FFZ min separation (0 = overlap only)', type: 'number', min: 0, max: 500, step: 1, default: SOP_THRESH_DEFAULTS.ffzFfzFt, unit: 'ft' },
-                { id: 'fpOverlap', label: 'Check · FP alt-band overlap (FP↔FP, FP↔FFZ)', type: 'boolean', default: SOP_ENABLE_DEFAULTS.fpOverlap },
+                { id: 'fpOverlap', label: 'Check · FP alt-band overlap (FP↔FP, FP↔FFZ)', type: 'boolean', default: SOP_ENABLE_DEFAULTS.fpOverlap, soloGroup: 'checks' },
                 { id: 'fpOverlapFt', label: 'FP min shared alt overlap', type: 'number', min: 0, max: 50, step: 0.1, default: SOP_THRESH_DEFAULTS.fpOverlapFt, unit: 'ft' },
-                { id: 'aglFloor', label: 'Check · AGL floor band (FP + FFZ)', type: 'boolean', default: SOP_ENABLE_DEFAULTS.aglFloor },
+                { id: 'aglFloor', label: 'Check · AGL floor band (FP + FFZ)', type: 'boolean', default: SOP_ENABLE_DEFAULTS.aglFloor, soloGroup: 'checks' },
                 { id: 'aglFloorMinFt', label: 'AGL floor min (🔴 below)', type: 'number', min: 0, max: 500, step: 1, default: SOP_THRESH_DEFAULTS.aglFloorMinFt, unit: 'ft' },
                 { id: 'aglFloorMaxFt', label: 'AGL floor max (🔵 above)', type: 'number', min: 0, max: 1000, step: 1, default: SOP_THRESH_DEFAULTS.aglFloorMaxFt, unit: 'ft' },
-                { id: 'bandHeight', label: 'Check · Alt-band height (FP + FFZ)', type: 'boolean', default: SOP_ENABLE_DEFAULTS.bandHeight },
+                { id: 'bandHeight', label: 'Check · Alt-band height (FP + FFZ)', type: 'boolean', default: SOP_ENABLE_DEFAULTS.bandHeight, soloGroup: 'checks' },
                 { id: 'bandSoftFt', label: 'Band height soft max (⚠ warn)', type: 'number', min: 0, max: 500, step: 1, default: SOP_THRESH_DEFAULTS.bandSoftFt, unit: 'ft' },
                 { id: 'bandHardFt', label: 'Band height hard max (flag)', type: 'number', min: 0, max: 1000, step: 1, default: SOP_THRESH_DEFAULTS.bandHardFt, unit: 'ft' },
-                { id: 'nfzSize', label: 'Check · NFZ minimum size', type: 'boolean', default: SOP_ENABLE_DEFAULTS.nfzSize },
+                { id: 'nfzSize', label: 'Check · NFZ minimum size', type: 'boolean', default: SOP_ENABLE_DEFAULTS.nfzSize, soloGroup: 'checks' },
                 { id: 'nfzMinFt', label: 'NFZ min side', type: 'number', min: 0, max: 200, step: 1, default: SOP_THRESH_DEFAULTS.nfzMinFt, unit: 'ft' },
-                { id: 'nfzProx', label: 'Check · NFZ proximity (NFZ + FFZ)', type: 'boolean', default: SOP_ENABLE_DEFAULTS.nfzProx },
+                { id: 'nfzProx', label: 'Check · NFZ proximity (NFZ + FFZ)', type: 'boolean', default: SOP_ENABLE_DEFAULTS.nfzProx, soloGroup: 'checks' },
                 { id: 'nfzSepFt', label: 'NFZ min separation', type: 'number', min: 0, max: 200, step: 1, default: SOP_THRESH_DEFAULTS.nfzSepFt, unit: 'ft' },
-                { id: 'altInverted', label: 'Check · Inverted / zero alt band', type: 'boolean', default: SOP_ENABLE_DEFAULTS.altInverted },
-                { id: 'fpDegenerate', label: 'Check · Zero-length / duplicate FP arc', type: 'boolean', default: SOP_ENABLE_DEFAULTS.fpDegenerate },
-                { id: 'gmTower', label: 'Check · Tower GM standoff (FFZ + FP)', type: 'boolean', default: SOP_ENABLE_DEFAULTS.gmTower },
+                { id: 'altInverted', label: 'Check · Inverted / zero alt band', type: 'boolean', default: SOP_ENABLE_DEFAULTS.altInverted, soloGroup: 'checks' },
+                { id: 'fpDegenerate', label: 'Check · Zero-length / duplicate FP arc', type: 'boolean', default: SOP_ENABLE_DEFAULTS.fpDegenerate, soloGroup: 'checks' },
+                { id: 'fpCross', label: 'Check · FP ⨯ FP crossing (no shared vertex)', type: 'boolean', default: SOP_ENABLE_DEFAULTS.fpCross, soloGroup: 'checks' },
+                { id: 'gmTower', label: 'Check · Tower GM standoff (FFZ + FP)', type: 'boolean', default: SOP_ENABLE_DEFAULTS.gmTower, soloGroup: 'checks' },
                 { id: 'gmTowerFt', label: 'Tower GM min standoff', type: 'number', min: 0, max: 500, step: 1, default: SOP_THRESH_DEFAULTS.gmTowerFt, unit: 'ft' },
                 { id: 'gmTowerRings', label: '⭕ Tower GM standoff rings on map', type: 'boolean', default: SOP_ENABLE_DEFAULTS.gmTowerRings },
-                { id: 'fpFfzAngle', label: 'Check · FP→FFZ connection angle', type: 'boolean', default: SOP_ENABLE_DEFAULTS.fpFfzAngle },
+                { id: 'fpFfzAngle', label: 'Check · FP→FFZ connection angle', type: 'boolean', default: SOP_ENABLE_DEFAULTS.fpFfzAngle, soloGroup: 'checks' },
                 { id: 'fpFfzAngleDeg', label: 'FP→FFZ min angle to the edge (ideal 45°)', type: 'number', min: 0, max: 90, step: 1, default: SOP_THRESH_DEFAULTS.fpFfzAngleDeg, unit: '°' },
-                { id: 'hazard', label: 'Check · 🚧 Hazard layer — FP vs 3rd-party pads / upcoming work / buildings', type: 'boolean', default: SOP_ENABLE_DEFAULTS.hazard },
+                { id: 'hazard', label: 'Check · 🚧 Hazard layer — FP vs 3rd-party pads / upcoming work / buildings', type: 'boolean', default: SOP_ENABLE_DEFAULTS.hazard, soloGroup: 'checks' },
                 { id: 'hazardFfz', label: 'Hazard · also check FFZ rings', type: 'boolean', default: SOP_ENABLE_DEFAULTS.hazardFfz },
                 { id: 'hazardFt', label: 'Hazard standoff (0 = per-feature value from the file)', type: 'number', min: 0, max: 500, step: 5, default: SOP_THRESH_DEFAULTS.hazardFt, unit: 'ft' },
                 { id: 'sop-draw', label: '🚩 Draw issues (run validators)', type: 'button', action: 'sop-draw' },
@@ -42212,6 +42314,86 @@
     });
 
     if (CONTEXT === 'TOP') setTimeout(() => { try { impStorageWatchdog(); } catch (e) { console.warn(`${TAG} storage watchdog threw:`, e); } }, 4000);
+
+    // ==================================================================
+    // ?aim-goto=lat,lng[,zoom]&aim-site=<id> (#329, v4.498) — deep link INTO a
+    // spot on the Site Setup map. Fleet Tools' 🚩 SOP Sweep opens
+    //   ${origin}/?aim-goto=31.9,-102.1,19&aim-site=1637#/site/1637/control-panel/site-setup
+    // in a new tab; once the map is up we pan/zoom there, pulse the spot, and
+    // strip the param from the URL so a reload / back doesn't re-fire it.
+    // Lives in the IFRAME context (that's where the Leaflet map is); the
+    // params are read off window.top (same-origin). Also accepts the param
+    // inside the hash (…site-setup?aim-goto=…) in case a link is hand-edited.
+    // ==================================================================
+    function aimGotoParse() {
+        try {
+            const top = window.top.location;
+            const srcs = [top.search || '', (top.hash || '').replace(/^[^?]*\??/, '')];
+            for (const src of srcs) {
+                if (!src || src.indexOf('aim-goto') < 0) continue;
+                const q = new URLSearchParams(src.replace(/^\?/, ''));
+                const g = q.get('aim-goto');
+                if (!g) continue;
+                const parts = g.split(',').map(Number);
+                if (!isFinite(parts[0]) || !isFinite(parts[1])) { console.warn(`${TAG} aim-goto: unparseable "${g}"`); return null; }
+                return { lat: parts[0], lng: parts[1], zoom: isFinite(parts[2]) ? parts[2] : 19, site: q.get('aim-site') || null };
+            }
+        } catch (e) { console.warn(`${TAG} aim-goto: cannot read top location:`, e); }
+        return null;
+    }
+    function aimGotoStrip() {
+        try {
+            const top = window.top;
+            const u = new URL(top.location.href);
+            u.searchParams.delete('aim-goto'); u.searchParams.delete('aim-site');
+            if (u.hash.indexOf('aim-goto') >= 0) {
+                const i = u.hash.indexOf('?');
+                if (i >= 0) {
+                    const hq = new URLSearchParams(u.hash.slice(i + 1));
+                    hq.delete('aim-goto'); hq.delete('aim-site');
+                    const rest = hq.toString();
+                    u.hash = u.hash.slice(0, i) + (rest ? '?' + rest : '');
+                }
+            }
+            top.history.replaceState(top.history.state, '', u.toString());
+        } catch (e) { console.warn(`${TAG} aim-goto: could not strip the param:`, e); }
+    }
+    let aimGotoDone = false;
+    function aimGotoRun() {
+        if (aimGotoDone || CONTEXT !== 'IFRAME') return;
+        const g = aimGotoParse();
+        if (!g) return;
+        aimGotoDone = true;
+        console.log(`${TAG} aim-goto: ${g.lat},${g.lng} z${g.zoom}${g.site ? ` (site ${g.site})` : ''} — waiting for the map`);
+        const t0 = Date.now();
+        const iv = setInterval(() => {
+            const sid = getCurrentSiteID();
+            const map = getLeafletMap();
+            const siteOk = !g.site || (sid && String(sid) === String(g.site));
+            if (map && siteOk && isSiteSetupRoute()) {
+                clearInterval(iv);
+                // one extra beat so Percepto's own fitBounds-on-load doesn't undo us
+                setTimeout(() => {
+                    try { map.setView([g.lat, g.lng], g.zoom, { animate: false }); }
+                    catch (e) { console.warn(`${TAG} aim-goto: setView threw:`, e); }
+                    try { airPulseAt(g.lat, g.lng); setTimeout(() => airPulseAt(g.lat, g.lng), 1700); } catch (e) {}
+                    showToast('📍 Jumped to the flagged spot');
+                    aimGotoStrip();
+                    console.log(`${TAG} aim-goto: done`);
+                }, 900);
+                return;
+            }
+            if (Date.now() - t0 > 45000) {
+                clearInterval(iv);
+                console.warn(`${TAG} aim-goto: gave up after 45 s (map ${map ? 'ok' : 'missing'}, site ${sid} vs ${g.site}, site-setup route ${isSiteSetupRoute()})`);
+                aimGotoStrip();
+            }
+        }, 500);
+    }
+    if (CONTEXT === 'IFRAME') {
+        setTimeout(() => { try { aimGotoRun(); } catch (e) { console.warn(`${TAG} aim-goto threw:`, e); } }, 1500);
+        window.addEventListener('hashchange', () => { try { aimGotoRun(); } catch (e) { console.warn(`${TAG} aim-goto (hashchange) threw:`, e); } });
+    }
 
     console.log(`${TAG} v${SCRIPT_VERSION} ready`);
 })();

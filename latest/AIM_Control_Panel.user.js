@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.48
+// @version      1.49
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
-// @description  Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
+// @description  v1.49 (#329): check groups — a header toggle with soloGroup renders ☑ All / ☐ None over every boolean toggle sharing that soloGroup, and each such toggle gets a ◎ solo button (only this one on). Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        *://qa.percepto.app/*
@@ -58,7 +58,7 @@
     // ============================================================
     // 1. CONSTANTS
     // ============================================================
-    const VERSION = '1.48';
+    const VERSION = '1.49';
     const IS_TOP = window === window.top;
     const TAG = `[AIM CONTROL ${IS_TOP ? 'TOP' : 'IF'}]`;
     const CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -1302,6 +1302,19 @@
                 renderPanel();
                 return;
             }
+            const soloBtn = t.closest && t.closest('[data-solo],[data-solo-all],[data-solo-none]');
+            if (soloBtn) {
+                const now = Date.now();
+                if (now - lastHandled < 250) return;
+                lastHandled = now;
+                e.stopPropagation(); e.preventDefault();   // it sits inside a <label> — don't flip the checkbox too
+                const sid = soloBtn.dataset.script;
+                if (soloBtn.hasAttribute('data-solo-all')) applySoloGroup(sid, soloBtn.getAttribute('data-solo-all'), 'all');
+                else if (soloBtn.hasAttribute('data-solo-none')) applySoloGroup(sid, soloBtn.getAttribute('data-solo-none'), 'none');
+                else applySoloGroup(sid, soloBtn.getAttribute('data-solo'), 'solo', soloBtn.dataset.toggle);
+                renderPanel();
+                return;
+            }
             const resetBtn = t.closest && t.closest('[data-reset]');
             if (resetBtn) {
                 const now = Date.now();
@@ -1691,9 +1704,16 @@
             // blocks"). Children are NOT nested — they're peer siblings in
             // the toggles list; the header just labels everything that
             // follows it until the next header.
+            // v1.49 (#329): a header with soloGroup gets ☑ All / ☐ None that act on
+            // every boolean toggle of this script sharing that soloGroup (SOP checks).
+            const grpBtns = t.soloGroup ? `
+                    <span style="float:right;text-transform:none;letter-spacing:0;font-weight:normal">
+                        <button data-solo-all="${escapeAttr(t.soloGroup)}" data-script="${escapeAttr(scriptId)}" title="Turn every check in this group on" style="background:rgba(20,210,220,0.12);border:1px solid rgba(20,210,220,0.35);color:#7adfe6;border-radius:3px;padding:0 6px;cursor:pointer;font:inherit;font-size:10px">☑ All</button>
+                        <button data-solo-none="${escapeAttr(t.soloGroup)}" data-script="${escapeAttr(scriptId)}" title="Turn every check in this group off — then ◎ the one you want" style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.18);color:#ccc;border-radius:3px;padding:0 6px;cursor:pointer;font:inherit;font-size:10px;margin-left:4px">☐ None</button>
+                    </span>` : '';
             return `
                 <div style="padding:6px 10px 3px 10px;color:#7adfe6;font-size:10px;font-weight:600;letter-spacing:0.5px;text-transform:uppercase;border-top:1px solid rgba(255,255,255,0.08);margin-top:2px;background:rgba(20,210,220,0.04)">
-                    ${escapeHtml(t.label || '')}
+                    ${escapeHtml(t.label || '')}${grpBtns}
                 </div>
             `;
         }
@@ -1813,9 +1833,30 @@
                        data-toggle="${escapeAttr(t.id)}"
                        style="cursor:pointer;accent-color:rgb(20,210,220)" />
                 <span style="flex:1">${escapeHtml(t.label || t.id)}</span>
+                ${t.soloGroup ? `<button data-solo="${escapeAttr(t.soloGroup)}" data-script="${escapeAttr(scriptId)}" data-toggle="${escapeAttr(t.id)}" title="Solo — only this check on, every other check in the group off" style="background:transparent;border:1px solid rgba(255,255,255,0.18);color:#bbb;border-radius:3px;padding:0 4px;cursor:pointer;font:inherit;font-size:10px;line-height:14px">◎</button>` : ''}
                 ${resetIconHtml(scriptId, t, value)}
             </label>
         `;
+    }
+
+    // v1.49 (#329): group ops over every boolean toggle of a script that shares
+    // a soloGroup. mode 'all' | 'none' | 'solo' (soloId = the one left on).
+    // Broadcasts one SET_TOGGLE per toggle (the owning script's handler is
+    // idempotent, so TOP+IFRAME duplicates are harmless).
+    function applySoloGroup(scriptId, group, mode, soloId) {
+        const script = state.registry.get(scriptId);
+        if (!script) { console.warn(`${TAG} solo-group: unknown script ${scriptId}`); return; }
+        const members = flattenToggles(script.toggles).filter(x => x && x.soloGroup === group && (x.type || 'boolean') === 'boolean');
+        if (!members.length) { console.warn(`${TAG} solo-group: no members for ${scriptId}/${group}`); return; }
+        let changed = 0;
+        members.forEach(x => {
+            const want = mode === 'all' ? true : mode === 'none' ? false : x.id === soloId;
+            const cur = !!getToggle(scriptId, x.id, x.default);
+            if (cur === want) return;
+            broadcastToggle(scriptId, x.id, want);
+            changed++;
+        });
+        console.log(`${TAG} solo-group ${scriptId}/${group}: ${mode}${soloId ? ' ' + soloId : ''} — ${changed} toggle(s) changed of ${members.length}`);
     }
 
     // v1.24 — coalesce burst renderPanel() calls. When the panel opens we
