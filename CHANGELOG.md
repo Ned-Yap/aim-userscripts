@@ -1,3 +1,9 @@
+## 2026-11-11 — 🎞 AIM Video Validation ⭐PROD v0.61 (was v0.58)
+
+- **Shot card keeps a fixed height** — a long pad list no longer wraps the first line, so the video and the `10s ›` button stop moving between shots (hover the line for the full asset list).
+- **Picture ↔ step matching is stricter** (v0.59) — a picture is only matched to a step whose nav is within 150 m of where the drone actually was, so same-facing equipment on another pad can't be picked by mistake.
+- **Apply keeps the mission's drone types** (v0.60) — fixes from the 2026-11-09 live Apply on site 1637.
+
 ## 2026-11-11 — 🎞 AIM Video Validation latest v0.61 (latest only) — shot card no longer resizes the video
 
 - **Shot card keeps a fixed height.** A long pad list used to wrap the card's first line onto two lines, which shrank the video and moved the time bar (the `10s ›` button slid out from under the cursor). The first line now stays on one line and trims with "…" (hover it for the full asset list), and the card holds the same height for every shot.
