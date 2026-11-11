@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.81
+// @version      0.82
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
-// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.79 (#329): 🚩 SOP Sweep — run Site-Setup SOP checks across the picked sites (or every site) from LIVE /map_objects/; first check = FP ⨯ FP crossing (segments that cross / T / overlap with no shared vertex); per-site rows, 🎯 fly-to on the landing map, ↗ opens the site in a NEW tab and jumps to the spot (?aim-goto deep link, Site Setup Tools v4.498+), Copy → Sheets / CSV. v0.78 (#318): 🖼 Map Export — renders what the landing map shows (KML layers, cross-ref bands, site setups, site names) on its own canvas at print size with basemap tiles, legend, scale bar, north arrow, title and a dead-space trim (transparent outside the content); preview modal with toggles; ⬇ PNG poster or 🌐 self-contained interactive HTML (small, zooms forever). v0.77: Site setups scope — draw the FFZs / flight paths / assets of ONLY the sites matching a names box or the 📦 Fleet Data pick (independent of the label filter, "= labels" copies it) so another client's setup never shows on a shared map. v0.76: site labels "Only matching / picked" mode (names box or the 📦 Fleet Data pick keep their label, every other site name hidden), 🗺 on-map legend (cross-ref bands + numbers, shown KML layers, site-setup colours) and 📷 Client view (names hidden, legend on, panel + button tucked away for a screenshot; ↩ Exit restores). v0.75: 📊 Fleet Metrics follows the 📦 Fleet Data pick ("picked only" checkbox, on by default; nothing picked → every site) — table, totals, Sheets / CSV and 🛂 Approval FPs. v0.67 (#285): 📡 Coverage — radius circles on the landing map (any Ø, drag centre / edge, live count of sites inside under a fully-inside / centre-inside rule, KML export), footprint of the picked sites (span, convex hull, smallest enclosing circle, site extents + FFZ acreage), 🧠 Best spot (centre covering the MOST sites at a Ø — exact candidate search) + 🗂 Plan all (greedy: how many circles cover every site), 📏 two-click ruler. v0.57 (#274): data check shows whether the skipped no-duration rows carry images / videos (+ first video object), and 🔎 probes one /missions/ page without the field filter to list every server field (hunting an abort / end-reason field). v0.56 (#274): 📋 Copy check button on the data check. v0.55 (#276): Utilization lenses — 🧑‍✈️ Pilots / 🛸 Drones / 📍 Sites / 🏢 Clients (sites + clients: flights, drone-hrs, air, flyable drone-hrs, util %, coverage, sites never flown, incomplete, capture %, gaps); Drones gain flyable hrs + util %. v0.54 (#274): Incomplete flights + Capture % from planned-vs-actual image counts (Pilots / Pilot-days / Flights), raw state codes + mission_data_reports sample in the data check. v0.53 (#274): ⚙ Site rules is a real button. v0.52 (#274): Pilot Utilization hides all-zero / blank columns (panel + Sheets + CSV) with a 'hidden:' note and a checkbox to show them. v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
+// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.82 (#331): 🎬 Mission Review — sweep the mission log of the picked sites (or every site) for flagged flights; checks are a registry (first: flew but NO video; also no images / fewer images than planned / landing failed); per-site counts, every flight a link to its Mission Playback, Copy → Sheets / CSV. v0.79 (#329): 🚩 SOP Sweep — run Site-Setup SOP checks across the picked sites (or every site) from LIVE /map_objects/; first check = FP ⨯ FP crossing (segments that cross / T / overlap with no shared vertex); per-site rows, 🎯 fly-to on the landing map, ↗ opens the site in a NEW tab and jumps to the spot (?aim-goto deep link, Site Setup Tools v4.498+), Copy → Sheets / CSV. v0.78 (#318): 🖼 Map Export — renders what the landing map shows (KML layers, cross-ref bands, site setups, site names) on its own canvas at print size with basemap tiles, legend, scale bar, north arrow, title and a dead-space trim (transparent outside the content); preview modal with toggles; ⬇ PNG poster or 🌐 self-contained interactive HTML (small, zooms forever). v0.77: Site setups scope — draw the FFZs / flight paths / assets of ONLY the sites matching a names box or the 📦 Fleet Data pick (independent of the label filter, "= labels" copies it) so another client's setup never shows on a shared map. v0.76: site labels "Only matching / picked" mode (names box or the 📦 Fleet Data pick keep their label, every other site name hidden), 🗺 on-map legend (cross-ref bands + numbers, shown KML layers, site-setup colours) and 📷 Client view (names hidden, legend on, panel + button tucked away for a screenshot; ↩ Exit restores). v0.75: 📊 Fleet Metrics follows the 📦 Fleet Data pick ("picked only" checkbox, on by default; nothing picked → every site) — table, totals, Sheets / CSV and 🛂 Approval FPs. v0.67 (#285): 📡 Coverage — radius circles on the landing map (any Ø, drag centre / edge, live count of sites inside under a fully-inside / centre-inside rule, KML export), footprint of the picked sites (span, convex hull, smallest enclosing circle, site extents + FFZ acreage), 🧠 Best spot (centre covering the MOST sites at a Ø — exact candidate search) + 🗂 Plan all (greedy: how many circles cover every site), 📏 two-click ruler. v0.57 (#274): data check shows whether the skipped no-duration rows carry images / videos (+ first video object), and 🔎 probes one /missions/ page without the field filter to list every server field (hunting an abort / end-reason field). v0.56 (#274): 📋 Copy check button on the data check. v0.55 (#276): Utilization lenses — 🧑‍✈️ Pilots / 🛸 Drones / 📍 Sites / 🏢 Clients (sites + clients: flights, drone-hrs, air, flyable drone-hrs, util %, coverage, sites never flown, incomplete, capture %, gaps); Drones gain flyable hrs + util %. v0.54 (#274): Incomplete flights + Capture % from planned-vs-actual image counts (Pilots / Pilot-days / Flights), raw state codes + mission_data_reports sample in the data check. v0.53 (#274): ⚙ Site rules is a real button. v0.52 (#274): Pilot Utilization hides all-zero / blank columns (panel + Sheets + CSV) with a 'hidden:' note and a checkbox to show them. v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        *://qa.percepto.app/*
@@ -43,7 +43,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.81';
+    const SCRIPT_VERSION = '0.82';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -129,6 +129,8 @@
             mtPicked: true,          // v0.75: 📊 Fleet Metrics scoped to the 📦 Fleet Data pick (nothing picked → every site)
             // v0.79 (#329): 🚩 SOP Sweep scope + which checks run
             sopPicked: true, sopProdOnly: true, sopChecks: {},
+            // v0.82 (#331): 🎬 Mission Review scope + window (days back) + min flight length (minutes, display filter) + which checks show
+            nvPicked: true, nvProdOnly: true, nvDays: 30, nvMinMin: 0, nvChecks: {},
         };
     }
     function loadCfg() {
@@ -142,6 +144,11 @@
             if (typeof s.mtPicked === 'boolean') d.mtPicked = s.mtPicked;
             if (typeof s.sopPicked === 'boolean') d.sopPicked = s.sopPicked;
             if (typeof s.sopProdOnly === 'boolean') d.sopProdOnly = s.sopProdOnly;
+            if (typeof s.nvPicked === 'boolean') d.nvPicked = s.nvPicked;
+            if (typeof s.nvProdOnly === 'boolean') d.nvProdOnly = s.nvProdOnly;
+            if (typeof s.nvDays === 'number' && s.nvDays > 0) d.nvDays = s.nvDays;
+            if (typeof s.nvMinMin === 'number' && s.nvMinMin >= 0) d.nvMinMin = s.nvMinMin;
+            if (s.nvChecks && typeof s.nvChecks === 'object') d.nvChecks = s.nvChecks;
             if (s.sopChecks && typeof s.sopChecks === 'object') d.sopChecks = s.sopChecks;
             if (typeof s.showOnMap === 'boolean') d.showOnMap = s.showOnMap;
             if (typeof s.drawSetups === 'boolean') d.drawSetups = s.drawSetups;
@@ -4416,7 +4423,7 @@
     let buttonEl = null;
     let panelEl = null;
     // v0.31: every section starts COLLAPSED (user request) — open what you need.
-    let openSections = { issues: false, data: false, fc: false, pilots: false, sweep: false, sop: false, map: false, cov: false, kml: false, xref: false, mx: false, metrics: false, surveys: false };
+    let openSections = { issues: false, data: false, fc: false, pilots: false, sweep: false, sop: false, nv: false, map: false, cov: false, kml: false, xref: false, mx: false, metrics: false, surveys: false };
     // v0.25 (#257): 🚩 Fleet Issues front door. AIM Issues owns the engine +
     // panel (one copy of the merge/Slack/role rules); we ask it for a summary
     // and open it over tab-local DOM events on `document` (NOT the
@@ -8114,6 +8121,268 @@
         return h.join('');
     }
 
+    // ==================================================================
+    // 🎬 MISSION REVIEW (v0.82, #331) — fleet sweep of the mission log for
+    // flagged FLOWN flights (duration > 0). Checks are a registry (NV_CHECKS)
+    // so new flags are one entry each; the first is "no video" (the Mission
+    // Log table's VIDEO = "No"). Source = GET /missions/ per site (same pager
+    // as 📦 Fleet Data, lean `only=`), read-only. EVERY check is evaluated at
+    // sweep time and stored on the flight; which checks SHOW (and the
+    // min-length filter) apply at render, so toggling never needs a re-run.
+    // A row whose `videos` field is missing is counted as UNKNOWN for the
+    // video check (fail loud, not wrong); a flight that ended < NV_FRESH_MIN
+    // ago is skipped as "fresh" (its uploads may still be in flight).
+    // A new check that needs another log field must add it to NV_ONLY.
+    // ==================================================================
+    const NV_ONLY = 'id,mission_group_id,drone_name,when,image_count,uploader_planned_images_count,created_by_username,app_name,state,videos,landed,landing_is_failed,duration';
+    // test(m) → falsy = fine · true or a short detail string = flagged · null = cannot judge (counted as unknown)
+    const NV_CHECKS = [
+        { key: 'noVideo', label: 'No video', chip: 'no video', color: '#ff7a7a', def: true, title: 'The flight has a duration but no video (Mission Log VIDEO = "No").',
+          test: m => !Array.isArray(m.videos) ? null : !m.videos.length },
+        { key: 'noImages', label: 'No images', chip: 'no images', color: '#ffa030', def: false, title: 'The flight has a duration but zero images.',
+          test: m => typeof m.image_count !== 'number' ? null : m.image_count === 0 },
+        { key: 'imagesShort', label: 'Fewer images than planned', chip: 'images', color: '#ffd27a', def: false, title: 'Image count is below the planned image count of the flight.',
+          test: m => { const pl = Number(m.uploader_planned_images_count); if (!(pl > 0) || typeof m.image_count !== 'number') return false; return m.image_count < pl ? `${m.image_count}/${pl}` : false; } },
+        { key: 'landingFailed', label: 'Landing failed', chip: 'landing failed', color: '#c58bff', def: false, title: 'The log row is marked landing_is_failed.',
+          test: m => !!m.landing_is_failed },
+    ];
+    function nvCheckOn(c) { const v = ftCfg.nvChecks[c.key]; return typeof v === 'boolean' ? v : c.def; }
+    function nvOnChecks() { return NV_CHECKS.filter(nvCheckOn); }
+    const NV_DAY_OPTS = [[7, 'last 7 days'], [30, 'last 30 days'], [90, 'last 90 days'], [180, 'last 6 months'], [365, 'last 12 months']];
+    const NV_CONCURRENCY = 3;
+    const NV_FRESH_MIN = 60;
+    const NV_PAGE_CAP = 400;   // ~8000 flights per site safety cap (flagged as partial when hit)
+    let nvSweep = null;        // { at, running, seq, scope, days, start, end, sites: { sid: rec }, done, total, aborted }
+    let nvSweepSeq = 0;
+    let nvOpenSite = null;
+
+    function nvScopeIds() {
+        const all = rawSites ? Object.keys(rawSites) : [];
+        let ids = (ftCfg.nvPicked && fdSelected.size) ? all.filter(id => fdSelected.has(String(id))) : all.slice();
+        if (ftCfg.nvProdOnly) ids = ids.filter(id => { const st = siteStatus(id); return !st || st === 'Production'; });
+        return ids;
+    }
+    function nvPlaybackUrl(sid, mid) { return `${location.origin}/#/site/${encodeURIComponent(sid)}/control-panel/past-mission/${encodeURIComponent(mid)}`; }
+    async function nvFetchSite(sid, start, end, isDead) {
+        const rows = []; let total = null; let lastId = -1; let pages = 0; let partial = false;
+        for (;;) {
+            if (isDead()) throw new Error('aborted');
+            if (++pages > NV_PAGE_CAP) { partial = true; break; }
+            const params = { site_id: Number(sid), drones: [], missionTypes: [], missionId: [], users: [], state: null, takeoffCompleted: false, start: fdYmd(start), end: fdYmd(end), last_mission_id: lastId };
+            const url = `/missions/?site_id=${encodeURIComponent(sid)}&params=${encodeURIComponent(JSON.stringify(params))}&only=${encodeURIComponent(NV_ONLY)}`;
+            let j;
+            try { j = await fdGetJson(url, 40000); }
+            catch (e) {
+                if (/401\/403|login page/.test(String(e && e.message))) throw e;
+                console.warn(`${TAG} mission review: site ${sid} page ${pages} failed (${e && e.message || e}) — retrying once`);
+                j = await fdGetJson(url, 90000);
+            }
+            if (!j || !Array.isArray(j.past_missions)) throw new Error('unexpected /missions/ response shape (no past_missions list)');
+            const past = j.past_missions;
+            if (total == null && typeof j.total_mission_count === 'number') total = j.total_mission_count;
+            rows.push(...past);
+            const lastMid = past.length ? past[past.length - 1].id : null;
+            const more = past.length > 0 && (total == null || rows.length < total) && lastMid != null && lastMid !== lastId;
+            if (!more) break;
+            lastId = lastMid;
+        }
+        return { rows, partial };
+    }
+    function nvClassify(rows) {
+        // → { flownDurs:[ms…], hits:[…], unknown, fresh }
+        const out = { flownDurs: [], hits: [], unknown: 0, fresh: 0, logRows: rows.length };
+        const now = Date.now();
+        const seen = new Set();
+        rows.forEach(m => {
+            if (!m || m.id == null || seen.has(m.id)) return;
+            seen.add(m.id);
+            const dur = Number(m.duration);
+            if (!(dur > 0)) return;                                   // never flew / no duration → not this check
+            const t0 = Date.parse(m.when);
+            if (isFinite(t0) && now - (t0 + dur) < NV_FRESH_MIN * 60000) { out.fresh++; return; }
+            out.flownDurs.push(dur);
+            const flags = {}; let any = false;
+            NV_CHECKS.forEach(c => {
+                let v;
+                try { v = c.test(m); } catch (e) { v = null; console.warn(`${TAG} mission review: check ${c.key} threw on flight ${m.id}:`, e); }
+                if (v === null) { out.unknown++; return; }   // field missing → cannot judge
+                if (v) { flags[c.key] = v; any = true; }
+            });
+            if (!any) return;
+            out.hits.push({ flags, id: m.id, group: (m.mission_group_id != null && m.mission_group_id !== -1) ? m.mission_group_id : '', name: m.app_name || '', when: m.when || '', dur,
+                drone: m.drone_name || '', pilot: m.created_by_username || '', state: m.state != null ? (FD_STATE[m.state] || `State ${m.state}`) : '', images: m.image_count != null ? m.image_count : '' });
+        });
+        out.hits.sort((a, b) => (Date.parse(b.when) || 0) - (Date.parse(a.when) || 0));
+        return out;
+    }
+    async function nvRunSweep() {
+        if (nvSweep && nvSweep.running) return;
+        try { await fetchRawSites(false); } catch (e) { console.warn(`${TAG} mission review: /sites/ failed:`, e); setStatus(`Mission review: /sites/ failed — ${e.message}`); return; }
+        const ids = nvScopeIds();
+        if (!ids.length) { setStatus('Mission review: no sites in scope (pick sites in 📦 Fleet Data or untick "picked only")'); return; }
+        const days = Number(ftCfg.nvDays) > 0 ? Number(ftCfg.nvDays) : 30;
+        const end = new Date(); const start = new Date(); start.setDate(start.getDate() - days);
+        const seq = ++nvSweepSeq;
+        nvSweep = { at: Date.now(), running: true, seq, scope: (ftCfg.nvPicked && fdSelected.size) ? `picked (${ids.length})` : `all (${ids.length})`, days, start: fdYmd(start), end: fdYmd(end), sites: {}, done: 0, total: ids.length, aborted: false };
+        nvOpenSite = null;
+        renderPanel();
+        console.log(`${TAG} mission review ${seq}: ${ids.length} site(s), ${nvSweep.start} → ${nvSweep.end}`);
+        let cursor = 0;
+        const isDead = () => nvSweepSeq !== seq || nvSweep.aborted;
+        const worker = async () => {
+            while (cursor < ids.length) {
+                if (isDead()) return;
+                const sid = ids[cursor++];
+                const rec = { name: siteName(sid), client: clientOf(siteName(sid)), status: siteStatus(sid), flownDurs: [], hits: [], unknown: 0, fresh: 0, logRows: 0, partial: false, err: null };
+                try {
+                    const got = await nvFetchSite(sid, start, end, isDead);
+                    Object.assign(rec, nvClassify(got.rows));
+                    rec.partial = got.partial;
+                } catch (e) {
+                    if (nvSweepSeq !== seq) return;
+                    if (e && e.message === 'aborted') return;
+                    rec.err = (e && e.message) || String(e);
+                    console.warn(`${TAG} mission review: site ${sid} failed:`, e);
+                }
+                if (nvSweepSeq !== seq) return;
+                nvSweep.sites[sid] = rec;
+                nvSweep.done++;
+                setStatus(`Mission review… ${nvSweep.done}/${nvSweep.total} · ${rec.name}${nvSiteView(rec).hits.length ? ` → ${nvSiteView(rec).hits.length}` : ''}`);
+                if (nvSweep.done % 3 === 0 || nvSweep.done === nvSweep.total) fdRenderKeepScroll();
+            }
+        };
+        await Promise.all(Array.from({ length: Math.min(NV_CONCURRENCY, ids.length) }, worker));
+        if (nvSweepSeq !== seq) return;
+        nvSweep.running = false;
+        const t = nvTotals();
+        setStatus(`Mission review done — ${t.hits} of ${t.flown} flown flight(s) flagged (${nvByText(t)}), on ${t.sitesHit} of ${nvSweep.done} site(s)${t.failed ? ` · ${t.failed} FAILED` : ''}${nvSweep.aborted ? ' · ABORTED' : ''}`);
+        console.log(`${TAG} mission review ${seq}: done — ${t.hits}/${t.flown} flagged (${nvByText(t)}), ${t.sitesHit} site(s) hit, ${t.failed} failed, ${t.unknown} unknown, ${t.fresh} fresh`);
+        renderPanel();
+    }
+    // min-length filter (minutes) applied at read time
+    function nvMinMs() { const v = Number(ftCfg.nvMinMin); return isFinite(v) && v > 0 ? v * 60000 : 0; }
+    function nvSiteView(rec) {
+        const min = nvMinMs();
+        const on = nvOnChecks();
+        const hits = rec.hits.filter(h => (!min || h.dur >= min) && on.some(c => h.flags[c.key]));
+        const flown = min ? rec.flownDurs.filter(d => d >= min).length : rec.flownDurs.length;
+        return { hits, flown };
+    }
+    function nvTotals() {
+        const t = { hits: 0, flown: 0, sitesHit: 0, failed: 0, unknown: 0, fresh: 0, partial: 0, newest: 0, by: {} };
+        if (!nvSweep) return t;
+        Object.values(nvSweep.sites).forEach(r => {
+            const v = nvSiteView(r);
+            t.hits += v.hits.length; t.flown += v.flown; if (v.hits.length) t.sitesHit++;
+            v.hits.forEach(h => Object.keys(h.flags).forEach(k => { t.by[k] = (t.by[k] || 0) + 1; }));
+            if (r.err) t.failed++; if (r.partial) t.partial++;
+            t.unknown += r.unknown; t.fresh += r.fresh;
+            if (v.hits.length) { const w = Date.parse(v.hits[0].when) || 0; if (w > t.newest) t.newest = w; }
+        });
+        return t;
+    }
+    function nvSortedSids() {
+        return Object.keys(nvSweep.sites).sort((a, b) => (nvSiteView(nvSweep.sites[b]).hits.length - nvSiteView(nvSweep.sites[a]).hits.length) || nvSweep.sites[a].name.localeCompare(nvSweep.sites[b].name));
+    }
+    const nvFlagText = (h) => nvOnChecks().filter(c => h.flags[c.key]).map(c => h.flags[c.key] === true ? c.chip : `${c.chip} ${h.flags[c.key]}`).join(', ');
+    const nvByText = (t) => nvOnChecks().map(c => `${t.by[c.key] || 0} ${c.chip}`).join(' · ');
+    const nvPct = (n, d) => d ? `${(100 * n / d).toFixed(n && n / d < 0.1 ? 1 : 0)}%` : '—';
+    function nvExportRows() {
+        const cols = ['Site ID', 'Site', 'Client', 'Mission ID', 'Mission Group', 'Name', 'When (UTC)', 'When (CT)', 'Duration', 'Duration s', 'Drone', 'Operator', 'State', 'Images', 'Flags', 'Mission Playback'];
+        const rows = [];
+        if (nvSweep) nvSortedSids().forEach(sid => {
+            const r = nvSweep.sites[sid];
+            nvSiteView(r).hits.forEach(h => rows.push([sid, r.name, r.client, h.id, h.group, h.name, h.when, fdWhenCT(h.when), fdDur(h.dur), Math.round(h.dur / 1000), h.drone, h.pilot, h.state, h.images, nvFlagText(h), nvPlaybackUrl(sid, h.id)]));
+        });
+        return { cols, rows };
+    }
+    function nvCopySheets() {
+        const { cols, rows } = nvExportRows();
+        if (!rows.length) { setStatus('Mission review: nothing to copy'); return; }
+        const esc = (v) => escapeHtml(String(v == null ? '' : v));
+        const t = nvTotals();
+        const sum = nvSortedSids().map(sid => ({ sid, r: nvSweep.sites[sid], v: nvSiteView(nvSweep.sites[sid]) })).filter(x => x.v.hits.length);
+        const th = (c) => `<th style="background:#1a2029;color:#7adfe6">${esc(c)}</th>`;
+        const html = `<p><b>AIM Mission Review</b> — ${esc(nvSweep.start)} → ${esc(nvSweep.end)} — ${esc(nvSweep.scope)} — ${t.hits} of ${t.flown} flown flight(s) flagged (${nvPct(t.hits, t.flown)}) on ${t.sitesHit} site(s) — ${esc(nvByText(t))}${nvMinMs() ? ` — flights ≥ ${esc(ftCfg.nvMinMin)} min` : ''}</p>`
+            + `<table border="1" style="border-collapse:collapse"><tr>${['Site ID', 'Site', 'Client', 'Flagged', 'Flown', '% flagged', 'Newest (CT)'].map(th).join('')}</tr>`
+            + sum.map(x => `<tr><td>${esc(x.sid)}</td><td>${esc(x.r.name)}</td><td>${esc(x.r.client)}</td><td>${x.v.hits.length}</td><td>${x.v.flown}</td><td>${nvPct(x.v.hits.length, x.v.flown)}</td><td>${esc(fdWhenCT(x.v.hits[0].when))}</td></tr>`).join('') + '</table><br>'
+            + `<table border="1" style="border-collapse:collapse"><tr>${cols.map(th).join('')}</tr>`
+            + rows.map(r => `<tr>${r.map((v, i) => (i === 3 || i === 15) ? `<td><a href="${esc(r[15])}">${i === 3 ? esc(v) : 'open'}</a></td>` : `<td>${esc(v)}</td>`).join('')}</tr>`).join('') + '</table>';
+        const text = [cols.join('\t')].concat(rows.map(r => r.join('\t'))).join('\n');
+        copyHtmlToClipboard(html, text, `Mission review copied — ${rows.length} row(s) for Sheets`);
+    }
+    function nvDownloadCsv() {
+        const { cols, rows } = nvExportRows();
+        if (!rows.length) { setStatus('Mission review: nothing to export'); return; }
+        const q = (v) => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`;
+        const csv = [cols.map(q).join(',')].concat(rows.map(r => r.map(q).join(','))).join('\r\n');
+        fdDownload(new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' }), `AIM_Mission_Review_${nvSweep.start}_to_${nvSweep.end}.csv`);
+        setStatus(`Mission review CSV — ${rows.length} row(s)`);
+    }
+    function renderNvSection() {
+        if (!openSections.nv) return '';
+        const h = [];
+        const running = !!(nvSweep && nvSweep.running);
+        const ids = rawSites ? nvScopeIds() : [];
+        const selCss = 'background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;font:inherit;padding:1px 3px;';
+        h.push('<div style="padding:6px 10px;display:flex;gap:12px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;">'
+            + `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;" title="Only the sites ticked in 📦 Fleet Data. Nothing picked → every site."><input type="checkbox" data-ft-flag="nvPicked" ${ftCfg.nvPicked ? 'checked' : ''} ${running ? 'disabled' : ''}> picked only <span style="color:${fdSelected.size ? '#5fff5f' : '#888'}">(${fdSelected.size})</span></label>`
+            + `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;" title="Skip sites whose /sites/ status is not Production (duplicates, OFFLINE copies)"><input type="checkbox" data-ft-flag="nvProdOnly" ${ftCfg.nvProdOnly ? 'checked' : ''} ${running ? 'disabled' : ''}> Production only</label>`
+            + `<select data-nv-days ${running ? 'disabled' : ''} title="How far back to read each site's mission log (takes effect on the next run)" style="${selCss}">${NV_DAY_OPTS.map(o => `<option value="${o[0]}" ${Number(ftCfg.nvDays) === o[0] ? 'selected' : ''}>${o[1]}</option>`).join('')}</select>`
+            + `<label style="display:inline-flex;align-items:center;gap:3px;" title="Ignore flights shorter than this many minutes (0 = any flight with a duration). Applies instantly — no re-run.">min length <input type="number" data-nv-min min="0" step="1" value="${escapeHtml(String(ftCfg.nvMinMin))}" style="${selCss}width:44px"> min</label>`
+            + `<span style="color:#888">scope: ${rawSites ? `${ids.length} site(s)` : 'roster not loaded yet'}</span>`
+            + '</div>');
+        h.push('<div style="padding:4px 10px;display:flex;gap:12px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;"><span style="color:#7adfe6">Flag:</span>'
+            + NV_CHECKS.map(c => `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;color:${c.color}" title="${escapeHtml(c.title)} Applies instantly — no re-run."><input type="checkbox" data-nv-check="${c.key}" ${nvCheckOn(c) ? 'checked' : ''}> ${escapeHtml(c.label)}</label>`).join('')
+            + '</div>');
+        h.push('<div style="padding:6px 10px;display:flex;gap:14px;flex-wrap:wrap;border-bottom:1px solid #222834;">'
+            + (running
+                ? `<span data-ft="nv-abort" style="cursor:pointer;color:#ff5252;font-weight:bold">■ Abort (${nvSweep.done}/${nvSweep.total})</span>`
+                : '<span data-ft="nv-run" style="cursor:pointer;color:#5fff5f;font-weight:bold">▶ Run mission review</span>')
+            + '<span data-ft="nv-sheets" style="cursor:pointer;color:#7adfe6" title="Per-site summary + every flight on the clipboard — paste into Google Sheets / Excel; Mission ID and the last column link to Mission Playback; only the ticked flags are exported">📋 Copy → Sheets</span>'
+            + '<span data-ft="nv-csv" style="cursor:pointer;color:#7adfe6">⬇ CSV</span>'
+            + (nvSweep && !running ? '<span data-ft="nv-clear" style="cursor:pointer;color:#888">✕ Clear</span>' : '')
+            + '</div>');
+        if (!nvSweep) { h.push('<div style="padding:8px 10px;color:#888">No review run yet. Reads each site\'s mission log and lists every flown flight that trips a ticked flag. Read-only.</div>'); return h.join(''); }
+        const t = nvTotals();
+        h.push(`<div style="padding:4px 10px;color:#aaa;border-bottom:1px solid #222834;">${running ? `Running… ${nvSweep.done}/${nvSweep.total}` : `Ran ${new Date(nvSweep.at).toLocaleString()} · ${nvSweep.scope}${nvSweep.aborted ? ' · <span style="color:#ff5252">ABORTED</span>' : ''}`} · ${escapeHtml(nvSweep.start)} → ${escapeHtml(nvSweep.end)}`
+            + ` → <span style="color:${t.hits ? '#ff3d00' : '#5fff5f'};font-weight:bold">${t.hits} flagged</span> of ${t.flown} flown (${nvPct(t.hits, t.flown)}) on ${t.sitesHit} site(s) · ${escapeHtml(nvByText(t))}`
+            + (t.newest ? ` · newest ${escapeHtml(fdWhenCT(new Date(t.newest).toISOString()))} CT` : '')
+            + (t.failed ? ` · <span style="color:#ffa030">${t.failed} site(s) FAILED — not counted</span>` : '')
+            + (t.partial ? ` · <span style="color:#ffa030">${t.partial} site(s) hit the page cap — partial</span>` : '')
+            + (t.unknown ? ` · <span style="color:#ffa030" title="a check could not judge the row (field missing from the log) — not flagged">${t.unknown} unknown</span>` : '')
+            + (t.fresh ? ` · <span style="color:#888" title="ended less than ${NV_FRESH_MIN} min ago — uploads may still be in flight, not flagged">${t.fresh} too fresh</span>` : '')
+            + '</div>');
+        const shown = nvSortedSids().filter(sid => nvSiteView(nvSweep.sites[sid]).hits.length || nvSweep.sites[sid].err || nvSweep.sites[sid].partial);
+        if (!shown.length) { h.push(`<div style="padding:8px 10px;color:#5fff5f">${nvSweep.done ? 'No flown flight on the swept sites trips a ticked flag ✓' : 'waiting for the first site…'}</div>`); return h.join(''); }
+        h.push('<div style="max-height:420px;overflow:auto">');
+        shown.forEach(sid => {
+            const r = nvSweep.sites[sid]; const v = nvSiteView(r);
+            const open = nvOpenSite === sid;
+            h.push(`<div data-nv-site="${escapeHtml(sid)}" style="padding:4px 10px;cursor:pointer;border-top:1px solid #1e2430;display:flex;gap:8px;align-items:center;${r.err ? 'color:#ffa030' : ''}">`
+                + `<span style="width:12px;color:#888">${open ? '▾' : '▸'}</span>`
+                + `<span style="flex:1"><b>${escapeHtml(r.name)}</b> <span style="color:#888">· ${escapeHtml(r.client)}${r.status && r.status !== 'Production' ? ` · ${escapeHtml(r.status)}` : ''}${v.hits.length ? ` · newest ${escapeHtml(fdWhenCT(v.hits[0].when))}` : ''}</span></span>`
+                + (r.partial ? '<span style="color:#ffa030" title="page cap hit — older flights in the window were not read">partial</span>' : '')
+                + (r.err ? `<span title="${escapeHtml(r.err)}">⚠ failed</span>` : `<span><span style="color:#ff3d00;font-weight:bold">${v.hits.length}</span> <span style="color:#888">/ ${v.flown} · ${nvPct(v.hits.length, v.flown)}</span></span>`)
+                + '</div>');
+            if (!open) return;
+            if (r.err) { h.push(`<div style="padding:3px 10px 3px 30px;color:#ffa030;font-size:11px">${escapeHtml(r.err)}</div>`); return; }
+            v.hits.forEach(x => {
+                h.push('<div style="padding:3px 10px 3px 30px;display:flex;gap:8px;align-items:center;border-top:1px dashed #1e2430;font-size:11px">'
+                    + `<a href="${nvPlaybackUrl(sid, x.id)}" target="_blank" rel="noopener" title="Open Mission Playback in a new tab" style="color:#7adfe6;text-decoration:none;width:64px">${escapeHtml(String(x.id))} ↗</a>`
+                    + `<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(x.name)}${x.group !== '' ? ` · group ${escapeHtml(String(x.group))}` : ''}">${escapeHtml(x.name || '(no name)')}</span>`
+                    + nvOnChecks().filter(c => x.flags[c.key]).map(c => `<span style="color:${c.color};border:1px solid ${c.color};border-radius:3px;padding:0 3px;white-space:nowrap" title="${escapeHtml(c.title)}">${escapeHtml(x.flags[c.key] === true ? c.chip : `${c.chip} ${x.flags[c.key]}`)}</span>`).join('')
+                    + `<span style="color:#aaa;white-space:nowrap">${escapeHtml(fdWhenCT(x.when))}</span>`
+                    + `<span style="width:44px;text-align:right">${fdDur(x.dur)}</span>`
+                    + `<span style="color:#888;width:70px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(x.drone)}">${escapeHtml(x.drone)}</span>`
+                    + `<span style="color:#888;width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(x.pilot)} · ${escapeHtml(x.state)}">${escapeHtml(x.pilot)}</span>`
+                    + '</div>');
+            });
+        });
+        h.push('</div>');
+        return h.join('');
+    }
+
     function renderPanel() {
         if (!panelEl) return;
         const body = panelEl.querySelector('#aim-ft-body');
@@ -8133,6 +8402,8 @@
             + renderSweepSection()
             + sectionHeader('sop', '🚩', 'SOP Sweep', sopSweep ? `${sopTotals().findings} finding(s) on ${sopTotals().sitesHit} site(s)${sopSweep.running ? ` · running ${sopSweep.done}/${sopSweep.total}` : ''}` : 'Site-Setup SOP checks across sites — FP ⨯ FP crossings')
             + renderSopSection()
+            + sectionHeader('nv', '🎬', 'Mission Review', nvSweep ? `${nvTotals().hits} of ${nvTotals().flown} flown flight(s) flagged${nvSweep.running ? ` · running ${nvSweep.done}/${nvSweep.total}` : ''}` : 'flag flown flights across sites — no video, images, landing — links to Mission Playback')
+            + renderNvSection()
             + sectionHeader('map', '🗺', 'Map', 'basemap + airspace chart')
             + renderMapSection()
             + sectionHeader('cov', '📡', 'Coverage', `${covState.circles.length} circle(s) · Ø ${covState.opts.diaMi} mi · footprint of the picked sites`)
@@ -8178,7 +8449,7 @@
 
             // Delegated — the body is rebuilt on every render, the root never is
             panelEl.addEventListener('click', (ev) => {
-                if (ev.target.closest('input[data-ft-class],input[data-ft-flag],input[data-sop-check],input[data-ft-view],input[data-kml-show],input[data-kml-fill],input[data-kml-color],input[data-fd-site],input[data-fd-clientsel],select[data-fd-pick],input[data-fd-dataset],select[data-fd-range],input[data-fd-date],input[data-kx-inc],select[data-kx-mode],input[data-kx-pad],input[data-fx-inc],input[data-fx-opt],input[data-fc-thr],input[data-pu-opt],input[data-pu-chk],select[data-pu-tz],select[data-pu-end],select[data-pu-rule],input[data-pu-rule],select[data-pu-bulk],#aim-ft-xr-picked')) return;   // checkbox/color/select → change handler
+                if (ev.target.closest('input[data-ft-class],input[data-ft-flag],input[data-sop-check],select[data-nv-days],input[data-nv-min],input[data-nv-check],input[data-ft-view],input[data-kml-show],input[data-kml-fill],input[data-kml-color],input[data-fd-site],input[data-fd-clientsel],select[data-fd-pick],input[data-fd-dataset],select[data-fd-range],input[data-fd-date],input[data-kx-inc],select[data-kx-mode],input[data-kx-pad],input[data-fx-inc],input[data-fx-opt],input[data-fc-thr],input[data-pu-opt],input[data-pu-chk],select[data-pu-tz],select[data-pu-end],select[data-pu-rule],input[data-pu-rule],select[data-pu-bulk],#aim-ft-xr-picked')) return;   // checkbox/color/select → change handler
                 const clAll = ev.target.closest('[data-ft-clients]');
                 if (clAll) {
                     if (clAll.getAttribute('data-ft-clients') === 'all') {
@@ -8220,6 +8491,8 @@
                 if (sopFlyEl) { const [fsid, fidx] = sopFlyEl.getAttribute('data-sop-fly').split(':'); sopFly(fsid, Number(fidx)); return; }
                 const sopSiteEl = ev.target.closest('[data-sop-site]');
                 if (sopSiteEl && !ev.target.closest('a')) { const ssid = sopSiteEl.getAttribute('data-sop-site'); sopOpenSite = sopOpenSite === ssid ? null : ssid; fdRenderKeepScroll(); return; }
+                const nvSiteEl = ev.target.closest('[data-nv-site]');
+                if (nvSiteEl && !ev.target.closest('a')) { const nsid = nvSiteEl.getAttribute('data-nv-site'); nvOpenSite = nvOpenSite === nsid ? null : nsid; fdRenderKeepScroll(); return; }
                 const act = ev.target.closest('[data-ft]');
                 if (act) {
                     const cmd = act.getAttribute('data-ft');
@@ -8229,6 +8502,11 @@
                     else if (cmd === 'sop-sheets') sopCopySheets();
                     else if (cmd === 'sop-csv') sopDownloadCsv();
                     else if (cmd === 'sop-clear') { sopSweepSeq++; sopSweep = null; sopOpenSite = null; renderPanel(); }
+                    else if (cmd === 'nv-run') nvRunSweep().catch(e => { console.warn(`${TAG} mission review threw:`, e); setStatus(`Mission review failed — ${e.message}`); if (nvSweep) nvSweep.running = false; renderPanel(); });
+                    else if (cmd === 'nv-abort') { if (nvSweep) nvSweep.aborted = true; setStatus('Mission review aborting after the in-flight sites…'); }
+                    else if (cmd === 'nv-sheets') nvCopySheets();
+                    else if (cmd === 'nv-csv') nvDownloadCsv();
+                    else if (cmd === 'nv-clear') { nvSweepSeq++; nvSweep = null; nvOpenSite = null; renderPanel(); }
                     else if (cmd === 'issues-open') openFleetIssues();
                     else if (cmd === 'issues-refresh') { requestIssuesSummary(); renderPanel(); }
                     else if (cmd === 'kml-upload') { const fi = panelEl.querySelector('#aim-ft-kml-file'); if (fi) fi.click(); }
@@ -8464,6 +8742,9 @@
             panelEl.addEventListener('change', (ev) => {
                 const t = ev.target;
                 if (t.hasAttribute && t.hasAttribute('data-cov-in')) { covInput(t); return; }
+                if (t.hasAttribute && t.hasAttribute('data-nv-check')) { const k = t.getAttribute('data-nv-check'); if (NV_CHECKS.some(c => c.key === k)) { ftCfg.nvChecks[k] = !!t.checked; saveCfg(); fdRenderKeepScroll(); } return; }
+                if (t.hasAttribute && t.hasAttribute('data-nv-days')) { const v = Number(t.value); if (NV_DAY_OPTS.some(o => o[0] === v)) { ftCfg.nvDays = v; saveCfg(); setStatus(`Mission review window: ${v} days — takes effect on the next run`); } return; }
+                if (t.hasAttribute && t.hasAttribute('data-nv-min')) { const v = Number(t.value); if (isFinite(v) && v >= 0) { ftCfg.nvMinMin = v; saveCfg(); renderPanel(); } else setStatus('min length: enter 0 or a positive number of minutes'); return; }
                 if (t.hasAttribute && t.hasAttribute('data-fd-pick')) { const v = String(t.value || ''); const i = v.indexOf(':'); if (i > 0) fdApplyPick(v.slice(0, i), Number(v.slice(i + 1))); return; }
                 if (t.hasAttribute && t.hasAttribute('data-fd-site')) { const id = t.getAttribute('data-fd-site'); if (t.checked) fdSelected.add(id); else fdSelected.delete(id); onPickChanged(); fdRenderKeepScroll(); return; }
                 // 6. client select-all acts on the SHOWN rows of that client (what the header count shows)
@@ -8648,7 +8929,7 @@
                             return;
                         }
                         setStatus(`${prop === 'onlyProduction' ? '"Production only"' : prop} ${flag.checked ? 'ON' : 'OFF'} — takes effect on the next sweep`);
-                        if (prop === 'onlyProduction' || prop === 'sopPicked' || prop === 'sopProdOnly') renderPanel();
+                        if (prop === 'onlyProduction' || prop === 'sopPicked' || prop === 'sopProdOnly' || prop === 'nvPicked' || prop === 'nvProdOnly') renderPanel();
                     }
                     return;
                 }

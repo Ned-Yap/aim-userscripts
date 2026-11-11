@@ -1,3 +1,12 @@
+## 2026-11-11 — 🌐 AIM Fleet Tools latest v0.82 (latest only) — 🎬 Mission Review sweep (feature #331)
+
+- **New section "🎬 Mission Review"** on the landing-page Fleet Tools panel. Reads the mission log of the sites picked in 📦 Fleet Data (or every site) and lists every flown flight that trips a flag.
+- **Flags (tick the ones you want — applies instantly, no re-run):** **No video** (flight has a duration but the Mission Log VIDEO = "No"; on by default) · No images · Fewer images than planned · Landing failed. More flags can be added here.
+- **Counts + links.** Header shows how many of the flown flights are flagged (and the %), per flag, per site and fleet-wide, with the newest occurrence so you can see whether it is still happening. Open a site to see each flight: the Mission ID opens its **Mission Playback** in a new tab.
+- **Window + filter.** Last 7 / 30 / 90 days, 6 or 12 months. "min length" hides short flights instantly.
+- **Copy → Sheets / CSV.** Per-site summary table plus one row per flight with its flags and a clickable Mission Playback link.
+- Read-only. Flights that ended under an hour ago are skipped (uploads may still be in flight); a site that fails to load is shown as FAILED, never counted as clean.
+
 ## 2026-11-10 — 🌐 AIM Fleet Tools latest v0.81 (latest only) — 6-month export window
 
 - **Fleet Data export: new "last 6 months" option** in the mission-log range picker, between 90 days and 12 months.
