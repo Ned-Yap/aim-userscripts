@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.59
+// @version      0.61
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -33,7 +33,7 @@
 
     const SCRIPT_ID = 'aim-video-validation';
     const IS_DEV = (function() { try { return /^Latest - /.test((GM_info && GM_info.script && GM_info.script.name) || ''); } catch (e) { return false; } })();
-    const SCRIPT_VERSION = '0.59';
+    const SCRIPT_VERSION = '0.61';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -484,6 +484,11 @@
             .aim-vv-card { margin: 6px 0 4px; padding: 6px 8px; border: 1px solid rgba(95,227,255,.35); border-radius: 4px;
                 background: rgba(10,14,18,.85); color: #e6e6e6; font: 11px/1.4 monospace; }
             .aim-vv-card b { color: #5fe3ff; }
+            /* Fixed card height (v0.61): the card sits under the video, so any change in its height resizes the video and
+               moves the time bar under the cursor. One-line head / footer (ellipsis, full text on hover) + a floor that
+               fits the tallest layout (head + 7 table rows + footer). */
+            .aim-vv-card:not(.aim-vv-edit) { box-sizing: content-box; min-height: 144px; }
+            .aim-vv-card .aim-vv-head, .aim-vv-card .aim-vv-foot { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
             .aim-vv-card table { border-collapse: collapse; }
             .aim-vv-card td { padding: 0 10px 0 0; white-space: nowrap; }
             .aim-vv-card .ok { color: #5fff5f; } .aim-vv-card .warn { color: #ffb347; } .aim-vv-card .bad { color: #ff5f5f; }
@@ -1030,7 +1035,7 @@
                 + '<tr><td>drone alt</td><td>' + fmtAlt(pose.alt) + '</td><td>' + fmtAlt(rec.alt) + '</td><td class="' + cls(d.alt != null ? d.alt * (settings.units === 'm' ? 1 : M_TO_FT) : null, 10, 25) + '">' + (d.alt != null ? signed(d.alt * (settings.units === 'm' ? 1 : M_TO_FT), settings.units === 'm' ? ' m' : ' ft') : '–') + '</td></tr>'
                 + '<tr><td>drone vs nav</td><td colspan="2" class="dim">' + (pose.nav ? esc((model.numbering[pose.nav.id] || {}).n || 'nav #' + pose.nav.index_in_app) : '–') + (d.pos != null && d.pos * M_TO_FT >= 10 ? ' — drone stood ' + esc(d.posDir) + ' of it' : '') + '</td><td class="' + cls(d.pos != null ? d.pos * M_TO_FT : null, 10, 30) + '">' + fmtDist(d.pos) + (d.posDir ? ' ' + esc(d.posDir) : '') + '</td></tr>'
                 + (pose.type === 'gps' ? '<tr><td>aim point</td><td colspan="3" class="dim">GPS snapshot · target alt ' + fmtAlt(pose.aimAlt) + ' · range ' + fmtDist(pose.range) + '</td></tr>' : '<tr><td>type</td><td colspan="3" class="dim">in-place snapshot (heading + camera angle at the nav)</td></tr>')
-                + (fx ? '<tr><td class="dim">flown fix</td><td colspan="3" class="dim">' + (fx.velocity != null ? (fx.velocity / 1000 * 2.23694).toFixed(0) + ' mph · ' : '') + 'battery ' + fx.battery + '% · ' + Math.abs(fx._t - rec.shutter) + ' ms from shutter</td></tr>' : '')
+                + '<tr><td class="dim">flown fix</td><td colspan="3" class="dim">' + (fx ? (fx.velocity != null ? (fx.velocity / 1000 * 2.23694).toFixed(0) + ' mph · ' : '') + 'battery ' + fx.battery + '% · ' + Math.abs(fx._t - rec.shutter) + ' ms from shutter' : '–') + '</td></tr>'
                 + '</table>';
         } else if (d.notSnap) {
             rows = '<div class="warn">Active step at shutter was <b>' + esc(d.stepType) + '</b>, not a snapshot — likely a pilot manual shot.</div>'
@@ -1042,7 +1047,10 @@
         const adjust = '<span class="aim-vv-adjust-wrap">' + (settings.edit ? '<button type="button" class="aim-vv-adjust" data-aim-vv-ed-toggle="1" title="Open the Adjust panel for this step">✎ Adjust' + (ed.work && edDiff().length ? ' (' + edDiff().length + ')' : '') + '</button>' : '')
             + '<button type="button" class="aim-vv-adjust" data-aim-vv-tool="check" title="Check every shot of this flight against the plan (re-takes, deviations, missing shots)">🔎 Check flight</button>'
             + '<button type="button" class="aim-vv-adjust" data-aim-vv-tool="session" title="Before / after of everything applied on this page, copy for JIRA">📋 Changes' + (sessionReports.filter(r => String(r.mid) === String(model.mid)).length ? ' (' + sessionReports.filter(r => String(r.mid) === String(model.mid)).length + ')' : '') + '</button></span>';
-        el.innerHTML = adjust + head + rows + '<div style="margin-top:3px;">' + prev + ' · <span class="dim">[ / ] prev / next shot</span></div>';
+        // Head + footer stay on ONE line (ellipsis); the full asset list is in the head's hover title.
+        const headTitle = assets.length ? assets.join(', ') : '';
+        el.innerHTML = adjust + '<div class="aim-vv-head" title="' + esc(headTitle) + '">' + head + '</div>' + rows
+            + '<div class="aim-vv-foot" style="margin-top:3px;">' + prev + ' · <span class="dim">[ / ] prev / next shot</span></div>';
         if (ed.open) renderEdit();
     }
 
@@ -1904,8 +1912,12 @@
         if (!eqLL(a.location, b.location)) out.push({ field: 'position', before: a.location ? a.location.lat.toFixed(6) + ', ' + a.location.lng.toFixed(6) : '–', after: b.location ? b.location.lat.toFixed(6) + ', ' + b.location.lng.toFixed(6) : '–', note: (a.location && b.location) ? fmtDist(distM(a.location, b.location)) + ' ' + compass16(bearingDeg(a.location, b.location)) : '' });
         if (F(a.value1) !== F(b.value1)) out.push({ field: a.type_name === 'navigate' ? 'drone alt' : (isGps(b) ? 'target alt' : 'value1'), before: fmtAlt(a.value1), after: fmtAlt(b.value1) });
         const ea = a.extra_options || {}, eb = b.extra_options || {};
+        // navigate steps carry heading as an OBJECT ({mode:0}) — compare by canonical JSON, never by identity
+        // (v0.59 compared object refs → every untouched nav read back as "heading: [object Object]° vs [object Object]°").
+        const same = (x, y) => (typeof x === 'object' || typeof y === 'object') ? JSON.stringify(canon(x)) === JSON.stringify(canon(y)) : F(x) === F(y);
+        const fmtHdg = (v) => v == null ? '–' : (typeof v === 'number' ? v + '°' : JSON.stringify(v));
         ['heading', 'pitch', 'abs_alt'].forEach(k => {
-            if (F(ea[k]) !== F(eb[k])) out.push({ field: k === 'pitch' ? 'camera angle' : (k === 'abs_alt' ? 'abs alt' : k), before: k === 'pitch' ? (gimbalToDeg(ea[k]) != null ? gimbalToDeg(ea[k]).toFixed(0) + '°' : '–') : (k === 'abs_alt' ? fmtAlt(ea[k]) : (ea[k] != null ? ea[k] + '°' : '–')), after: k === 'pitch' ? gimbalToDeg(eb[k]).toFixed(0) + '°' : (k === 'abs_alt' ? fmtAlt(eb[k]) : eb[k] + '°') });
+            if (!same(ea[k], eb[k])) out.push({ field: k === 'pitch' ? 'camera angle' : (k === 'abs_alt' ? 'abs alt' : k), before: k === 'pitch' ? (gimbalToDeg(ea[k]) != null ? gimbalToDeg(ea[k]).toFixed(0) + '°' : '–') : (k === 'abs_alt' ? fmtAlt(ea[k]) : fmtHdg(ea[k])), after: k === 'pitch' ? (gimbalToDeg(eb[k]) != null ? gimbalToDeg(eb[k]).toFixed(0) + '°' : '–') : (k === 'abs_alt' ? fmtAlt(eb[k]) : fmtHdg(eb[k])) });
         });
         return out;
     }
@@ -2242,7 +2254,7 @@
         el.innerHTML = '<div class="aim-vv-review__box"><div><b>Review changes to mission "' + esc(model.mission.name || model.mission.app_name) + '"</b> <span class="dim">(app ' + esc(model.mission.app && model.mission.app.id) + (grp != null && grp >= 0 ? ' · affects every future flight of group ' + esc(grp) : ' · not part of a mission group') + ')</span></div>' + actions
             + '<table><tr class="dim"><td>step</td><td>change</td><td>before</td><td>after</td><td></td></tr>' + rows + '</table>'
             + shapeNote + '<div class="dim" style="margin:6px 0">Rails: the plan is re-read and compared first · a full JSON backup is saved (script storage + download) · ONE save · re-read and verified · a before/after report is saved + downloaded.</div>'
-            + (function() { try { const app = model.liveApp || model.mission.app; const r = resolveSelectedRobot(app); if (!r.value) blockers.push('Cannot resolve selected_robot: ' + r.from); const rep = Array.isArray(app.data_report_object_arr) ? app.data_report_object_arr.map(x => x && (x.name || x.id)).join(', ') : 'none'; return '<div class="dim">will send: name "' + esc(app.name) + '" · type ' + esc(app.type) + ' · site_id ' + esc(app.site) + ' · app_id <b>' + esc(app.id) + '</b>' + (app.__aimVvHow ? ' <span class="dim">(live app, ' + esc(app.__aimVvHow) + ')</span>' : '') + ' · selected_robot <b>' + esc(r.value || '?') + '</b> <span class="dim">(' + esc(r.from) + ')</span> · reports: ' + esc(rep) + ' · ' + edEnsureWork().length + ' instructions</div>'; } catch (e) { blockers.push('preflight failed: ' + e.message); return ''; } })()
+            + (function() { try { const app = model.liveApp || model.mission.app; const r = resolveSelectedRobot(app, loadShape()); if (!r.value) blockers.push('Cannot resolve selected_robot: ' + r.from); const rep = Array.isArray(app.data_report_object_arr) ? app.data_report_object_arr.map(x => x && (x.name || x.id)).join(', ') : 'none'; return '<div class="dim">will send: name "' + esc(app.name) + '" · type ' + esc(app.type) + ' · site_id ' + esc(app.site) + ' · app_id <b>' + esc(app.id) + '</b>' + (app.__aimVvHow ? ' <span class="dim">(live app, ' + esc(app.__aimVvHow) + ')</span>' : '') + ' · selected_robot <b>' + esc(r.value || '?') + '</b> <span class="dim">(' + esc(r.from) + ')</span> · reports: ' + esc(rep) + ' · ' + edEnsureWork().length + ' instructions</div>'; } catch (e) { blockers.push('preflight failed: ' + e.message); return ''; } })()
             + (blockers.length ? '<div class="warn">' + blockers.map(esc).join('<br>') + '</div>' : '')
             + '<div class="aim-vv-edit__row"><button type="button" data-aim-vv-rv="apply" ' + (blockers.length ? 'disabled' : '') + '>Apply ' + diff.length + ' change' + (diff.length === 1 ? '' : 's') + '</button><button type="button" data-aim-vv-rv="cancel">Cancel</button><span class="aim-vv-review__status dim"></span></div></div>';
         document.body.appendChild(el); ed.reviewEl = el;
@@ -2266,13 +2278,22 @@
     // Build the save body from the learned shape: scalars from the sample, overridden by this app's own values
     // where the field names match, name/type/site_id/app_id set explicitly, instructions minimal.
     // Percepto's save body carries `selected_robot` (an uppercase drone-type enum such as SPARROW / AIRMAX_POWERTRAIN).
-    // Resolve it from THIS mission: the app's robot type names first, then the drone that flew it. Null = cannot write.
-    function resolveSelectedRobot(app) {
+    // Percepto's OWN editor sends the CONSTANT `SPARROW` on every save (saveApp → selected_robot: Jd.SPARROW) and the
+    // app keeps its full robot list. Sending a specific type is NOT neutral: on 2026-11-09 (site 1637, app 188619)
+    // selected_robot = AIRMAX_POWERTRAIN (the drone that flew it) stripped the app's 4 robot types down to that one.
+    // So, in order: whatever Percepto's editor itself sent in its last real save (learned shape sample) if the app lists it;
+    // SPARROW if listed; else the app's first listed type; the flown drone only when the app lists nothing. No drone type is
+    // special-cased beyond following Percepto — if Percepto changes its constant, the learned sample follows automatically.
+    function resolveSelectedRobot(app, shape) {
         const enumLike = (v) => typeof v === 'string' && /^[A-Z][A-Z0-9_]+$/.test(v) ? v : null;
         const names = Array.isArray(app.robot_type_names) ? app.robot_type_names.map(enumLike).filter(Boolean) : [];
         const flew = model && model.mission.drone && enumLike(model.mission.drone.robot_type_name);
-        if (flew && (names.includes(flew) || !names.length)) return { value: flew, from: 'drone that flew it' + (names.length > 1 ? ' (app lists ' + names.join('/') + ')' : '') };
-        if (names.length) return { value: names[0], from: 'app.robot_type_names' + (names.length > 1 ? ' (' + names.join('/') + ')' : '') + (flew ? ' — flown by ' + flew + ' which the app does not list' : '') };
+        const listed = names.length > 1 ? ' (app lists ' + names.join('/') + ' — kept)' : '';
+        const uiConst = shape && shape.sample && !shape.builtin ? enumLike(shape.sample.selected_robot) : null;
+        if (uiConst && names.includes(uiConst)) return { value: uiConst, from: 'what Percepto\'s editor sent in its last save' + listed };
+        if (names.includes('SPARROW')) return { value: 'SPARROW', from: 'Percepto\'s default save constant' + listed };
+        if (names.length) return { value: names[0], from: 'app.robot_type_names[0]' + listed + (flew && !names.includes(flew) ? ' — flown by ' + flew + ' which the app does not list' : '') };
+        if (flew) return { value: flew, from: 'drone that flew it (app lists no robot types)' };
         const fromRt = Array.isArray(app.robot_type) ? app.robot_type.map(x => enumLike(x && (x.name || x.robot_type_name || x))).find(Boolean) : null;
         if (fromRt) return { value: fromRt, from: 'app.robot_type' };
         const fromDrone = model && model.mission.drone && enumLike(model.mission.drone.robot_type_name);
@@ -2285,7 +2306,7 @@
         const used = [];
         Object.keys(src).forEach(k => { if (k in b && src[k] !== undefined) { b[k] = src[k]; used.push(k); } });
         b.name = app.name; b.type = app.type != null ? app.type : 1; b.site_id = Number(app.site); b.app_id = app.id;
-        if ('selected_robot' in b) { const r = resolveSelectedRobot(app); if (!r.value) throw new Error('cannot resolve selected_robot — ' + r.from); b.selected_robot = r.value; used.push('selected_robot'); }
+        if ('selected_robot' in b) { const r = resolveSelectedRobot(app, shape); if (!r.value) throw new Error('cannot resolve selected_robot — ' + r.from); b.selected_robot = r.value; used.push('selected_robot'); }
         if ('dataReportObjectArr' in b) {
             const banked = Array.isArray(app.data_report_object_arr) ? app.data_report_object_arr : [];
             const learned = Array.isArray(b.dataReportObjectArr) ? b.dataReportObjectArr : [];
@@ -2328,7 +2349,7 @@
             const afterIns = (afterApp.instructions || []).slice().sort((a, b2) => a.index_in_app - b2.index_in_app);
             const mism = [];
             const rtBefore = JSON.stringify(fresh.app.robot_type_names || []), rtAfter = JSON.stringify(after.app.robot_type_names || []);
-            if (rtBefore !== rtAfter) mism.push('ROBOT TYPES CHANGED: ' + rtBefore + ' → ' + rtAfter + ' (selected_robot semantics — restore the backup)');
+            if (rtBefore !== rtAfter) mism.push('ROBOT TYPES CHANGED: ' + rtBefore + ' → ' + rtAfter + ' — the server rewrote the app\'s robot list from selected_robot. Backups/restore here carry STEPS only: re-tick the missing robot types in Percepto\'s Mission Bank editor and save there.');
             const repB = JSON.stringify((fresh.app.data_report_object_arr || []).map(x => x && x.id)), repA = JSON.stringify((after.app.data_report_object_arr || []).map(x => x && x.id));
             if (repB !== repA) mism.push('data reports changed: ' + repB + ' → ' + repA);
             if (afterIns.length !== ed.work.length) mism.push('step count ' + afterIns.length + ' ≠ expected ' + ed.work.length);

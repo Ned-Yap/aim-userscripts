@@ -1,3 +1,7 @@
+## 2026-11-11 — 🎞 AIM Video Validation latest v0.61 (latest only) — shot card no longer resizes the video
+
+- **Shot card keeps a fixed height.** A long pad list used to wrap the card's first line onto two lines, which shrank the video and moved the time bar (the `10s ›` button slid out from under the cursor). The first line now stays on one line and trims with "…" (hover it for the full asset list), and the card holds the same height for every shot.
+
 ## 2026-11-11 — 🌐 AIM Fleet Tools latest v0.83 (latest only) — Mission Review: custom date range
 
 - **Mission Review: "custom dates…"** in the window picker shows a start and end date (blank end = today), so a sweep can match any period exactly. Also added last 24 h / 14 days / 60 days.
@@ -32,6 +36,12 @@
 - **Turning "Smart site navigation" (or the AIM Defaults master) OFF now actually turns it off.** The script runs at document-start and made its first redirect before the Control Panel (document-end) could hand it the saved toggle values, so every page load ran on the built-in defaults: nav stayed ON regardless of the panel, and a site switch bounced you to the previously remembered section. Settings now persist in the script's own storage and are read before the first nav decision. First load after this update still uses defaults once (nothing saved yet); from then on the saved values apply from the first instant.
 - Flipping the toggle at runtime takes effect immediately: OFF drops the pending "from landing" flag; ON re-seeds from the page you are on, so the first switch after re-enabling never jumps to a stale section.
 - Redirect loop breaker (v1.3: 5 redirects within 3 s, so fast dropdown site-hopping never trips it) disarms navigation for that page load and logs an error instead of ping-ponging.
+
+## 2026-11-10 — 🎞 Video Validation latest v0.60 (latest only — fixes from the 2026-11-09 live Apply on site 1637)
+
+- **selected_robot now mirrors Percepto's own save constant.** Percepto's editor sends `selected_robot: "SPARROW"` on every save and the app keeps its full robot list. v0.59 sent the drone that flew the mission (AIRMAX_POWERTRAIN) and the server rewrote the app's robot list down to that one type (4 → 1 on app 188619). v0.60 follows Percepto: the value its editor sent in its last real save (learned shape) when the app lists it → SPARROW if listed → the app's first listed type → the flown drone only when the app lists nothing. No drone type is special-cased; if Percepto changes its constant, the learned sample follows. The Review preflight line shows which rule picked the value.
+- **Verify no longer false-flags untouched navigate steps.** Navigate steps store `heading` as an object (`{mode:0}`); the verify compared object identity, so every nav outside the edited slice read back as "heading: [object Object]° vs [object Object]°" (44 phantom mismatches). Headings now compare by canonical JSON.
+- **Honest guidance when robot types change.** The mismatch text said "restore the backup", but backups/restore carry steps only — it now says to re-tick the robot types in Percepto's Mission Bank editor.
 
 ## 2026-11-09 — 🚩 FP ⨯ FP crossing check + SOP Sweep (#329) — Site Setup Tools latest v4.498 · Fleet Tools latest v0.79 · Control Panel latest v1.49 (latest only)
 
