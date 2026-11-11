@@ -1,3 +1,7 @@
+## 2026-11-10 — 🌐 AIM Fleet Tools latest v0.81 (latest only) — 6-month export window
+
+- **Fleet Data export: new "last 6 months" option** in the mission-log range picker, between 90 days and 12 months.
+
 ## 2026-11-10 — 🌐 AIM Fleet Tools latest v0.80 (latest only) — Fleet Data export no longer drops big mission banks
 
 - **Sites with a large mission bank (FPL Ranch, Deltrail, Homeland) were missing from `ALL-missions.csv`.** The missions request was cut off at 30 s; it now waits 2 min and retries once.
