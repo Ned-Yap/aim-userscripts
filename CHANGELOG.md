@@ -1,3 +1,8 @@
+## 2026-11-10 — 🌐 AIM Fleet Tools latest v0.80 (latest only) — Fleet Data export no longer drops big mission banks
+
+- **Sites with a large mission bank (FPL Ranch, Deltrail, Homeland) were missing from `ALL-missions.csv`.** The missions request was cut off at 30 s; it now waits 2 min and retries once.
+- **A failed fetch is now impossible to miss.** The ZIP name says `N FAILED`, a `!FAILED - READ ME.txt` sits at the top of the ZIP listing what is missing, and the status line names the sites.
+
 ## 2026-11-10 — 🚩 AIM Issues latest v1.46 (latest only) — Mission Playback context on issues (feature #330)
 
 - **Issues filed on the Mission Playback page now carry the flight automatically.** The "New issue" box shows a row with the Mission ID, the player time at that moment (editable if it is off) and the RPIC; all three are saved with the issue along with the mission name, drone, flight date and group.

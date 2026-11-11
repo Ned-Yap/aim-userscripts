@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.79
+// @version      0.80
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.79 (#329): 🚩 SOP Sweep — run Site-Setup SOP checks across the picked sites (or every site) from LIVE /map_objects/; first check = FP ⨯ FP crossing (segments that cross / T / overlap with no shared vertex); per-site rows, 🎯 fly-to on the landing map, ↗ opens the site in a NEW tab and jumps to the spot (?aim-goto deep link, Site Setup Tools v4.498+), Copy → Sheets / CSV. v0.78 (#318): 🖼 Map Export — renders what the landing map shows (KML layers, cross-ref bands, site setups, site names) on its own canvas at print size with basemap tiles, legend, scale bar, north arrow, title and a dead-space trim (transparent outside the content); preview modal with toggles; ⬇ PNG poster or 🌐 self-contained interactive HTML (small, zooms forever). v0.77: Site setups scope — draw the FFZs / flight paths / assets of ONLY the sites matching a names box or the 📦 Fleet Data pick (independent of the label filter, "= labels" copies it) so another client's setup never shows on a shared map. v0.76: site labels "Only matching / picked" mode (names box or the 📦 Fleet Data pick keep their label, every other site name hidden), 🗺 on-map legend (cross-ref bands + numbers, shown KML layers, site-setup colours) and 📷 Client view (names hidden, legend on, panel + button tucked away for a screenshot; ↩ Exit restores). v0.75: 📊 Fleet Metrics follows the 📦 Fleet Data pick ("picked only" checkbox, on by default; nothing picked → every site) — table, totals, Sheets / CSV and 🛂 Approval FPs. v0.67 (#285): 📡 Coverage — radius circles on the landing map (any Ø, drag centre / edge, live count of sites inside under a fully-inside / centre-inside rule, KML export), footprint of the picked sites (span, convex hull, smallest enclosing circle, site extents + FFZ acreage), 🧠 Best spot (centre covering the MOST sites at a Ø — exact candidate search) + 🗂 Plan all (greedy: how many circles cover every site), 📏 two-click ruler. v0.57 (#274): data check shows whether the skipped no-duration rows carry images / videos (+ first video object), and 🔎 probes one /missions/ page without the field filter to list every server field (hunting an abort / end-reason field). v0.56 (#274): 📋 Copy check button on the data check. v0.55 (#276): Utilization lenses — 🧑‍✈️ Pilots / 🛸 Drones / 📍 Sites / 🏢 Clients (sites + clients: flights, drone-hrs, air, flyable drone-hrs, util %, coverage, sites never flown, incomplete, capture %, gaps); Drones gain flyable hrs + util %. v0.54 (#274): Incomplete flights + Capture % from planned-vs-actual image counts (Pilots / Pilot-days / Flights), raw state codes + mission_data_reports sample in the data check. v0.53 (#274): ⚙ Site rules is a real button. v0.52 (#274): Pilot Utilization hides all-zero / blank columns (panel + Sheets + CSV) with a 'hidden:' note and a checkbox to show them. v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
@@ -43,7 +43,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.79';
+    const SCRIPT_VERSION = '0.80';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -6194,7 +6194,9 @@
         return `${fdYmd(r.start)} → ${fdYmd(r.end)}`;
     }
     async function fdGetJson(url, ms) {
-        const resp = await fetchWithTimeout(url, { credentials: 'same-origin', headers: { 'Accept': 'application/json' } }, ms || 30000);
+        let resp;
+        try { resp = await fetchWithTimeout(url, { credentials: 'same-origin', headers: { 'Accept': 'application/json' } }, ms || 30000); }
+        catch (e) { if (e && e.name === 'AbortError') throw new Error(`timed out after ${Math.round((ms || 30000) / 1000)} s`); throw e; }
         if (resp.status === 401 || resp.status === 403) throw new Error('not logged in (401/403)');
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const ct = resp.headers.get('content-type') || '';
@@ -6214,8 +6216,18 @@
     async function fdFetchMissions(sid, force) {
         const c = fdCache.missions[sid];
         if (c && !force && Date.now() - c.at < FD_CACHE_MS) return c;
-        const raw = await fdGetJson(`/available_app/?site_id=${encodeURIComponent(sid)}&type=1`);
-        const list = extractList(raw);
+        // Big mission banks (FPL Ranch) take well over 30 s to serialise — the old
+        // 30 s default aborted them and the site silently dropped out of the export.
+        const url = `/available_app/?site_id=${encodeURIComponent(sid)}&type=1`;
+        let raw;
+        try { raw = await fdGetJson(url, 120000); }
+        catch (e) {
+            if (/401\/403|login page/.test(String(e && e.message))) throw e;
+            console.warn(`${TAG} missions fetch for site ${sid} failed (${e && e.message || e}) — retrying once`);
+            raw = await fdGetJson(url, 180000);
+        }
+        if (!Array.isArray(raw)) throw new Error('unexpected /available_app/ response shape (not a list)');
+        const list = raw;
         const out = { at: Date.now(), list, raw };
         fdCache.missions[sid] = out;
         return out;
@@ -6394,9 +6406,10 @@
                 failures.length ? `\nFAILED:\n${failures.map(f => '  - ' + f).join('\n')}` : '\nNo failures.',
                 '\nPer-site folders hold the raw JSON (setup = /map_objects/, missions = /available_app/, mission-log = /missions/). ALL-*.csv combine every picked site.',
             ].join('\n') });
+            if (failures.length) files.unshift({ name: '!FAILED - READ ME.txt', text: `${failures.length} fetch(es) FAILED — these sites/datasets are MISSING from this export (not empty on Percepto). Re-run the export for them.\n\n${failures.map(f => '  - ' + f).join('\n')}\n` });
             const blob = fdZip(files);
-            fdDownload(blob, `AIM-fleet-data ${stamp} (${sids.length} sites).zip`);
-            setStatus(`export ready — ${files.length} file(s), ${(blob.size / 1048576).toFixed(1)} MB${failures.length ? ` · ${failures.length} failure(s) (see README.txt / console)` : ''}${fdRun.abort ? ' · ABORTED (partial)' : ''}`);
+            fdDownload(blob, `AIM-fleet-data ${stamp} (${sids.length} sites${failures.length ? `, ${failures.length} FAILED` : ''}).zip`);
+            setStatus(`export ready — ${files.length} file(s), ${(blob.size / 1048576).toFixed(1)} MB${failures.length ? ` · ⚠ ${failures.length} FAILED — data missing: ${failures.slice(0, 4).join(' | ')}${failures.length > 4 ? ' …' : ''} (full list in "!FAILED - READ ME.txt")` : ''}${fdRun.abort ? ' · ABORTED (partial)' : ''}`);
             if (failures.length) console.warn(`${TAG} fleet data export failures:`, failures);
         } catch (e) {
             console.error(`${TAG} fleet data export failed:`, e);
