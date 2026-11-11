@@ -1,3 +1,7 @@
+## 2026-11-11 — 🌐 AIM Fleet Tools latest v0.83 (latest only) — Mission Review: custom date range
+
+- **Mission Review: "custom dates…"** in the window picker shows a start and end date (blank end = today), so a sweep can match any period exactly. Also added last 24 h / 14 days / 60 days.
+
 ## 2026-11-11 — 🌐 AIM Fleet Tools latest v0.82 (latest only) — 🎬 Mission Review sweep (feature #331)
 
 - **New section "🎬 Mission Review"** on the landing-page Fleet Tools panel. Reads the mission log of the sites picked in 📦 Fleet Data (or every site) and lists every flown flight that trips a flag.
