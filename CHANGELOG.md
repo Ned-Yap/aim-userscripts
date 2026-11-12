@@ -1,3 +1,13 @@
+## 2026-11-12 — 🎞 AIM Video Validation latest v0.64 (latest only) — Adjust is now a flight deck
+
+- **Two dials instead of rows of buttons.** DRONE (blue): up / down = closer to or farther from what the camera sees, left / right = slide sideways, ALT ▲▼ = drone altitude. CAMERA (pink): up / down = tilt, left / right = turn, ALT ▲▼ = target altitude.
+- **Click the icon in the middle of a dial, then the map,** to place the drone or the camera target there.
+- **Viewfinder preview.** The shot's picture slides and zooms as you adjust, so you can see roughly what the camera would see. Striped area = outside the original picture. It is an approximation.
+- **Side profile view.** Switch the preview to a side-on drawing: ground, drone height, line of sight, edge of the picture and the target.
+- **Hold a button to repeat it** (Shift = ×5 still works). The numbers under each dial show the value now and the change in green, and can still be dragged.
+- Setting a target altitude or placing the camera target on an in-place shot converts it to a GPS aim point at the spot it was already looking at.
+- Adopt actual shot, duplicate / delete, typed coordinates and restore moved under **More**.
+
 ## 2026-11-12 — 🎞 AIM Video Validation latest v0.63 (latest only) — corrections now reach the micro missions
 
 - **Cleaner Review window** (v0.63) — repeated nudges are grouped (`down 1° ×19`), the technical save lines are folded under "save details", and the linked-missions list is one short line per mission, including how many steps an out-of-date micro differs by.
