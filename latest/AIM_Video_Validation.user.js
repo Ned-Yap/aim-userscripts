@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.64
+// @version      0.65
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -33,7 +33,7 @@
 
     const SCRIPT_ID = 'aim-video-validation';
     const IS_DEV = (function() { try { return /^Latest - /.test((GM_info && GM_info.script && GM_info.script.name) || ''); } catch (e) { return false; } })();
-    const SCRIPT_VERSION = '0.64';
+    const SCRIPT_VERSION = '0.65';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -2185,7 +2185,7 @@
                     + '<label class="dim" title="When the drone moves, every in-place snapshot on it re-aims (heading + camera angle) at the ground point it was looking at"><input type="checkbox" data-aim-vv-ed-check="nav-keep-aim" ' + (settings.navKeepAim ? 'checked' : '') + '> camera stays on its target when the drone moves</label>' : '')
                 + '</div><div class="aim-vv-dk-more"><span class="dim">Restore</span><select class="aim-vv-restore-pick" data-aim-vv-restore-pick="1">' + restoreOptions() + '</select>'
                 + dk('restore', 'Load', 'Load the chosen state into the working copy — then Review & Apply saves it')
-                + dk('restore-file', 'From backup file…', 'Load a vv-backup-*.json you downloaded earlier') + '<input type="file" accept=".json,application/json" class="aim-vv-restore-file" data-aim-vv-restore-file="1" style="display:none"></div>';
+                + dk('restore-file', 'From backup file…', 'Load a vv-*.json file this tool downloaded on an earlier Apply') + '<input type="file" accept=".json,application/json" class="aim-vv-restore-file" data-aim-vv-restore-file="1" style="display:none"></div>';
         }
         html += '</div>';
         setPanelHtml(el, html);
@@ -2625,7 +2625,7 @@
     }
     const syWait = (ms) => new Promise(r => setTimeout(r, ms));
     // Save every ticked target. Never throws: each target reports ok / error.
-    async function sySaveTargets(plan, ticks, sid, shape, csrf, stamp) {
+    async function sySaveTargets(plan, ticks, sid, shape, csrf, backupInto) {
         const results = [];
         const want = Object.keys(ticks);
         const picked = [];
@@ -2637,7 +2637,7 @@
         });
         if (!picked.length) return results;
         status('backing up ' + picked.length + ' linked mission' + (picked.length === 1 ? '' : 's') + '…');
-        download('vv-sync-backup-' + sid + '-' + stamp + '.json', { site: sid, savedAt: new Date().toISOString(), reason: 'vv-sync', missions: picked.map(t => t.app) });
+        picked.forEach(t => backupInto.push(t.app));   // their pre-edit copies ride in the one Apply file
         for (const t of picked) {
             const res = { id: t.id, name: t.name, kind: t.kind, ok: false, steps: t.newIns.length, what: syRowText(t) };
             results.push(res);
@@ -2701,7 +2701,7 @@
         const grp = model.mission.mission_group_id;
         el.innerHTML = '<div class="aim-vv-review__box"><div style="font-size:14px"><b>Review changes — ' + esc(model.mission.name || model.mission.app_name) + '</b></div><div class="dim">' + (grp != null && grp >= 0 ? 'Affects every future flight of this mission.' : 'Not part of a mission group.') + '</div>' + actions
             + '<table><tr class="dim"><td>step</td><td>change</td><td>before</td><td>after</td><td></td></tr>' + rows + '</table>'
-            + '<details style="margin:4px 0"><summary class="dim" style="cursor:pointer">save details</summary><div class="dim">app ' + esc(model.mission.app && model.mission.app.id) + (grp != null && grp >= 0 ? ' · group ' + esc(grp) : '') + '</div>' + shapeNote + '<div class="dim" style="margin:6px 0;white-space:normal">Rails: the plan is re-read and compared first · a full JSON backup is saved (script storage + download) · ONE save · re-read and verified · a before/after report is saved + downloaded.</div>'
+            + '<details style="margin:4px 0"><summary class="dim" style="cursor:pointer">save details</summary><div class="dim">app ' + esc(model.mission.app && model.mission.app.id) + (grp != null && grp >= 0 ? ' · group ' + esc(grp) : '') + '</div>' + shapeNote + '<div class="dim" style="margin:6px 0;white-space:normal">Rails: the plan is re-read and compared first · a full backup is kept in script storage · ONE save · re-read and verified · ONE file downloads at the end (backup + linked-mission backups + before/after report).</div>'
             + (function() { try { const app = model.liveApp || model.mission.app; const r = resolveSelectedRobot(app, loadShape()); if (!r.value) blockers.push('Cannot resolve selected_robot: ' + r.from); const rep = Array.isArray(app.data_report_object_arr) ? app.data_report_object_arr.map(x => x && (x.name || x.id)).join(', ') : 'none'; return '<div class="dim" style="white-space:normal">will send: name "' + esc(app.name) + '" · type ' + esc(app.type) + ' · site_id ' + esc(app.site) + ' · app_id <b>' + esc(app.id) + '</b>' + (app.__aimVvHow ? ' <span class="dim">(live app, ' + esc(app.__aimVvHow) + ')</span>' : '') + ' · selected_robot <b>' + esc(r.value || '?') + '</b> <span class="dim">(' + esc(r.from) + ')</span> · reports: ' + esc(rep) + ' · ' + edEnsureWork().length + ' instructions</div>'; } catch (e) { blockers.push('preflight failed: ' + e.message); return ''; } })() + '</details>'
             + '<div data-aim-vv-syncbox><div class="dim" style="margin:8px 0 2px">Checking which micros / other macros share these pads…</div></div>'
             + (blockers.length ? '<div class="warn">' + blockers.map(esc).join('<br>') + '</div>' : '')
@@ -2772,6 +2772,7 @@
         if (ed.busy) return; ed.busy = true;
         const diff = edDiff(); const mid = model.mid, sid = model.sid;
         const syTicks = syReadTicks(ed.reviewEl);
+        let bundle = null, wrote = false;   // ONE download per Apply: pre-edit mission + pre-edit linked missions + the report
         try {
             const shape = loadShape(), csrf = getCsrf();
             if (isLite() || !shape || !shape.sample || !csrf || !diff.length) throw new Error('blocked (lite / shape / csrf / empty)');
@@ -2786,7 +2787,9 @@
             const at = new Date().toISOString(), stamp = at.replace(/[:.]/g, '-');
             status('backing up…');
             const backup = { at, mid, sid, appId: freshApp.id, name: freshApp.name, app: freshApp };
-            gmPush(BACKUPS_KEY, backup, 20); download('vv-backup-' + mid + '-' + stamp + '.json', backup);
+            gmPush(BACKUPS_KEY, backup, 20);
+            // Shape read by BOTH restore paths: this script's "From backup file" (app.instructions) and the Mission Bank's ↩ Restore (missions[]).
+            bundle = { name: 'vv-' + mid + '-' + stamp + '.json', data: Object.assign({}, backup, { site: sid, savedAt: at, reason: 'vv-apply', missions: [freshApp], report: null }) };
             const fresh = { app: freshApp };
             // Linked missions: plan from the SAME fresh read the macro was just checked against (before anything is written).
             let syPlan = null, syNote = '';
@@ -2801,6 +2804,7 @@
             const r = await fetch('/available_app/', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrf }, body: JSON.stringify(built.body) });
             const txt = await r.text().catch(() => '');
             if (!r.ok) { warn('save failed HTTP ' + r.status + ': ' + txt.slice(0, 500)); warn('failing body:', built.body); throw new Error('save HTTP ' + r.status); }
+            wrote = true;
             status('verifying (live mission)…');
             const afterApp = await fetchLiveApp(sid, appId, freshApp.name, model.plan);
             const after = { app: afterApp };
@@ -2815,15 +2819,16 @@
             let syResults = [];
             if (syPlan) {
                 if (afterIns.length !== ed.work.length) syNote = 'This mission read back with a different step count, so the linked missions were NOT updated. Sort this one out first.';
-                else { try { syResults = await sySaveTargets(syPlan, syTicks, sid, shape, csrf, stamp); } catch (e) { warn('sync failed:', e); syNote = 'Updating the linked missions stopped early (' + e.message + ') — check each one in the Mission Bank.'; } }
+                else { try { syResults = await sySaveTargets(syPlan, syTicks, sid, shape, csrf, bundle.data.missions); } catch (e) { warn('sync failed:', e); syNote = 'Updating the linked missions stopped early (' + e.message + ') — check each one in the Mission Bank.'; } }
             }
             const syBad = syResults.filter(x => !x.ok).length;
             const report = { at, mid, sid, appId: fresh.app.id, name: fresh.app.name, group: model.mission.mission_group_id, actions: ed.log.map(a => ({ at: new Date(a.at).toISOString(), what: a.what, step: a.step })), changes: diff, verify: { ok: !mism.length, mismatches: mism }, httpStatus: r.status, sync: { asked: Object.keys(syTicks).length, note: syNote, results: syResults.map(x => ({ name: x.name, kind: x.kind, ok: x.ok, error: x.error || null, what: x.what || null, oldId: x.id, newId: x.newId || null })) } };
-            gmPush(REPORTS_KEY, report, 200); download('vv-correction-' + mid + '-' + stamp + '.json', report);
+            gmPush(REPORTS_KEY, report, 200);
+            bundle.data.report = report; download(bundle.name, bundle.data); bundle = null;
             sessionReports.push(report);
             if (mism.length) { warn('verify mismatches:', mism); toast('Saved, but ' + mism.length + ' field(s) read back differently — see console + report', true); }
             else if (syBad || syNote) toast('Saved this mission, but ' + (syBad ? syBad + ' linked mission' + (syBad === 1 ? '' : 's') + ' FAILED to update' : 'the linked missions were not updated') + ' — see the list', true);
-            else toast('✅ Saved ' + diff.length + ' change' + (diff.length === 1 ? '' : 's') + ' · verified' + (syResults.length ? ' · ' + syResults.length + ' linked mission' + (syResults.length === 1 ? '' : 's') + ' updated' : '') + ' · backup + report downloaded', false);
+            else toast('✅ Saved ' + diff.length + ' change' + (diff.length === 1 ? '' : 's') + ' · verified' + (syResults.length ? ' · ' + syResults.length + ' linked mission' + (syResults.length === 1 ? '' : 's') + ' updated' : '') + ' · backup + report downloaded as one file', false);
             status(mism.length ? 'saved with ' + mism.length + ' mismatch(es)' : 'saved + verified');
             if (ed.reviewEl) { ed.reviewEl.remove(); ed.reviewEl = null; }
             if (syResults.length || syNote) syShowResults(fresh.app.name, syResults, syNote);
@@ -2831,7 +2836,10 @@
             reloadModel('after save');
             return;
         } catch (e) {
-            warn('apply failed:', e); toast('🛑 Not applied: ' + e.message, true); status('failed: ' + e.message);
+            warn('apply failed:', e);
+            if (wrote && bundle) { download(bundle.name, bundle.data); toast('🛑 Saved, but a later step failed: ' + e.message + ' — the backup file was downloaded', true); }
+            else toast('🛑 Not applied: ' + e.message, true);
+            status('failed: ' + e.message);
             const b = ed.reviewEl && ed.reviewEl.querySelector('[data-aim-vv-rv="apply"]'); if (b) b.disabled = false;
         }
         ed.busy = false;
