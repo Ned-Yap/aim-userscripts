@@ -1,5 +1,6 @@
-## 2026-11-12 — 🎞 AIM Video Validation latest v0.65 (latest only) — Adjust is now a flight deck
+## 2026-11-12 — 🎞 AIM Video Validation latest v0.66 (latest only) — Adjust is now a flight deck
 
+- **Review window in plain language** (v0.66) — one line per shot saying what the camera and the drone will do differently (for example `Camera heading 111° → 115°, angle -30° → -48°`), a short "Also update" list for the micro missions, and one Save button. The field-by-field table and save information are under Details.
 - **One download per Apply** (v0.65) — the backup, the backups of any linked missions and the before/after report now arrive as a single `vv-<mission>-<time>.json`. Both restore paths read it: Adjust → More → From backup file, and Mission Bank ↩ Restore.
 - **Two dials instead of rows of buttons.** DRONE (blue): up / down = closer to or farther from what the camera sees, left / right = slide sideways, ALT ▲▼ = drone altitude. CAMERA (pink): up / down = tilt, left / right = turn, ALT ▲▼ = target altitude.
 - **Click the icon in the middle of a dial, then the map,** to place the drone or the camera target there.
