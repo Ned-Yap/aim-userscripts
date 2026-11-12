@@ -4,6 +4,13 @@
 - **Picture ↔ step matching is stricter** (v0.59) — a picture is only matched to a step whose nav is within 150 m of where the drone actually was, so same-facing equipment on another pad can't be picked by mistake.
 - **Apply keeps the mission's drone types** (v0.60) — fixes from the 2026-11-09 live Apply on site 1637.
 
+## 2026-11-12 — 🔎 AIM Mission Logs latest v0.9 (latest only) — ⚙ Motors / ESC card
+
+- **New card: was the ESC alert a false positive?** Mission Logs now reads the ESC telemetry log and the main drone log from the same archive. If the drone raised a `critical_current_rpm_ratio` alert, the card says whether the motor-controller readings were arriving too slowly at that moment (false positive) or at a normal rate (treat as real).
+- **Interactive charts per ESC** — ratio (or rpm, current, throttle, voltage, temperatures) on top, readings per second and `msg_in_sec` below. Drag to zoom every chart together, double-click to reset, hover for exact values, click a table row to jump to that stretch.
+- **Thresholds are editable** (ratio above 1.0, sampling below 3/s) and the verdict updates as you change them. 📋 Sheets copies the stretch table and per-ESC stats.
+- Ported from the Support team's standalone ESC review page; works on any mission straight from the dashboard, no download needed. Simple and Advanced views both covered.
+
 ## 2026-11-11 — 🎞 AIM Video Validation latest v0.61 (latest only) — shot card no longer resizes the video
 
 - **Shot card keeps a fixed height.** A long pad list used to wrap the card's first line onto two lines, which shrank the video and moved the time bar (the `10s ›` button slid out from under the cursor). The first line now stays on one line and trims with "…" (hover it for the full asset list), and the card holds the same height for every shot.

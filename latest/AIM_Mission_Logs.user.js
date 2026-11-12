@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Logs
 // @namespace    http://tampermonkey.net/
-// @version      0.8
+// @version      0.9
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Logs.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Logs.user.js
 // @description  v0.8: Signal KML points, pins and track sit at the drone's flown altitude (absolute MSL, extruded to the ground) instead of clamped to the ground. v0.7: names the CARRIER from the LTE bands the modem camped on (B13 = Verizon-only spectrum, B14/B17/B29/B30 = AT&T, B71/B41/B25/B26 = T-Mobile; shared bands prove nothing); every outage, handover and the worst-signal sample now carries the drone's position at that moment (click 📍 to copy lat,lng — paste into Map Nav 🧭); 📍 Signal KML button exports the flown track with each signal sample colored Good/Fair/Weak/Edge plus outage and handover pins (open in Google Earth or Fleet Tools → KML Layers) to see WHERE the link was bad. v0.6: outage detection now also uses 100%-loss ping runs, IP-lease loss (udhcpc deconfigured→bound) and LTE-manager restarts — a reconnect the TCP checks never saw (238589) was reported as 'dropped 0 times' in red; outages are tagged before takeoff / in flight / after landing and the Simple card downgrades a drop that happened on the base to amber. v0.5: Simple / Advanced view toggle (remembered) — Simple is plain English for pilots and customers: one bold bottom line per card + bullets (signal as bars, response time, packet loss, blips, tower hopping, what to do) with the full technical card under 'Technical details ▸'. v0.4: reads the older EM7565 modem's status fields (RSRP_(dBm) / PCC_RxM_RSSI / Tx_Power) — v0.3 saw no RSRP and flagged a false 33-min outage; a sample is lost only with no band / stuck handover / no cell+no RSRP; isolated 10 s TCP blips = amber POOR link (loss %, avg/worst rtt) not red; unknown formats raise a ⚠ with lte.rawSample; mission duration is ms. v0.3: LTE card gains an Outages line (each loss window with start → recovery and duration, from no-cell / stuck-handover samples and failing TCP checks) and a Coverage line (median RSRP, % weak / very weak / no cell); dropped verdict names the outages. v0.2: row 🔎 anchors on the dashboard's own Get App Logs control (not table structure); prefill from the FILTER box or the single visible row only; server reply shown when a mission has no archive. Pull a mission's log archives straight from the Mission Dashboard (no download → unzip → hunt) and extract what matters: LTE link health (modem registration, TCP/ping checks, signal, cell handovers, RTK-stream gaps), mission event timeline (stages, aborts, go-to-base), DAA aircraft with closest approach to the drone, warnings/errors by process. v0.1 (#286): POC on percepto.app/dashboard — 🔎 per mission row + floating launcher; engine (fetch → gunzip → untar → extractors) is self-contained for the later Fleet Tools site/date sweep.
@@ -17,7 +17,8 @@
 
 // AIM Mission Logs — reads a mission's app-log + DAA archives in memory and
 // turns them into answers ("did LTE drop?", "why did it abort?", "what was
-// the aircraft?") without the download → unzip → grep loop.
+// the aircraft?", "was the ESC alert a false positive?") without the
+// download → unzip → grep loop.
 // Pages: the Mission Dashboard (/dashboard/#/, All Missions table).
 // Endpoints (probed 2026-10-05, see memory reference_mission_log_endpoints):
 //   GET /missions/<id>/logs/new_app_log/  → {download_link: CloudFront signed .tar.gz}
@@ -35,7 +36,7 @@
     if (window !== window.top) return;
 
     const SCRIPT_ID = 'aim-mission-logs';
-    const SCRIPT_VERSION = '0.8';
+    const SCRIPT_VERSION = '0.9';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const IS_QA = location.hostname === 'qa.percepto.app' || location.hostname.endsWith('.qa.percepto.app');
 
@@ -532,6 +533,187 @@
         return Array.from(byProc.values()).sort((a, b) => b.n - a.n);
     }
 
+    // ---- ESC telemetry (motor controllers) — v0.9 ---------------------------
+    // Port of Support's ESC-alert review (Niv, 2026-11). The drone raises
+    // "escN critical_current_rpm_ratio alert (value = … > 1)" and returns home. When the
+    // ESC agent was logging only a few readings per second at that moment, the alert is
+    // judged a likely FALSE POSITIVE; with normal sampling it is treated as real.
+    // Inputs: *esc_telemetry*.log (per-ESC samples + the agent's "IPC publishing" summaries
+    // carrying msg_in_sec) and the date-named main drone log(s) (the alert + action lines).
+    const ML_ESC_RATIO_THR = 1.0;     // ratio above this = an above-threshold stretch
+    const ML_ESC_SAMP_THR = 3;        // fewer readings per second than this = low sampling
+    const ML_ESC_ALERT_LOOKBACK_S = 60;   // the drone alerts late (it only sees published values) — judge stretches this close before the alert
+    const ML_ESC_FIELDS = ['throttle_in', 'throttle_out', 'rpm', 'voltage', 'current', 'mosfet_temp', 'capacitor_temp', 'status_code', 'critical_current_rpm_ratio'];
+    const ML_DRONE_LOG_RE = /^\d{4}_\d\d_\d\d__\d\d_\d\d_\d\d\.log$/;
+
+    // "2026-10-01 18:59:49,263" at offset i → epoch ms (null when the text there is not a stamp).
+    // The on-board log clock is UTC — the same clock as syslog and the mission start_time.
+    function mlLogTs(s, i) {
+        if (s.length < i + 23 || s[i + 4] !== '-' || s[i + 10] !== ' ' || s[i + 19] !== ',') return null;
+        const n = (a, b) => +s.slice(i + a, i + b);
+        const t = Date.UTC(n(0, 4), n(5, 7) - 1, n(8, 10), n(11, 13), n(14, 16), n(17, 19), n(20, 23));
+        return isFinite(t) ? t : null;
+    }
+    const mlHmsMs = (ms) => { const d = new Date(ms); return `${mlHms(d)}.${String(d.getUTCMilliseconds()).padStart(3, '0')}`; };
+    function mlLowerBound(arr, v) { let lo = 0, hi = arr.length; while (lo < hi) { const mid = (lo + hi) >> 1; if (arr[mid] < v) lo = mid + 1; else hi = mid; } return lo; }
+
+    function mlParseEscLog(text) {
+        const series = {}, pubs = {}, pubTimes = [];
+        let powerTrain = null, enumerated = null, t0 = null, t1 = null, samples = 0;
+        const kvRe = /'(\w+)': (-?\d[\d.]*(?:[eE][-+]?\d+)?)/g;
+        const pubRe = /'(esc\d+)': \{([^}]*)\}/g;
+        let pos = 0;
+        while (pos < text.length) {
+            let nl = text.indexOf('\n', pos); if (nl < 0) nl = text.length;
+            const line = text.slice(pos, nl); pos = nl + 1;
+            const t = mlLogTs(line, 0); if (t == null) continue;
+            const rest = line.slice(24);
+            if (t0 == null || t < t0) t0 = t;
+            if (t1 == null || t > t1) t1 = t;
+            if (/^esc\d+:\{/.test(rest)) {
+                const name = rest.slice(0, rest.indexOf(':'));
+                let s = series[name];
+                if (!s) { s = series[name] = { t: [] }; for (const f of ML_ESC_FIELDS) s[f] = []; }
+                const row = {}; let m; kvRe.lastIndex = 0;
+                while ((m = kvRe.exec(rest))) row[m[1]] = +m[2];
+                s.t.push(t);
+                for (const f of ML_ESC_FIELDS) s[f].push(row[f] != null ? row[f] : NaN);
+                samples++;
+            } else if (rest.startsWith('IPC publishing')) {
+                let m, any = false; pubRe.lastIndex = 0;
+                while ((m = pubRe.exec(rest))) {
+                    const mm = /'msg_in_sec': (-?[\d.]+)/.exec(m[2]); if (!mm) continue;
+                    const p = pubs[m[1]] || (pubs[m[1]] = { t: [], v: [] });
+                    p.t.push(t); p.v.push(+mm[1]); any = true;
+                }
+                if (any) pubTimes.push(t);
+            } else {
+                const pt = /configured power train is (\S+)/.exec(rest); if (pt) powerTrain = pt[1];
+                const en = /Enumerated ESCs: \[(.*)\]/.exec(rest); if (en) enumerated = en[1];
+            }
+        }
+        return { series, pubs, pubTimes, powerTrain, enumerated, t0, t1, samples };
+    }
+
+    // Alert + action lines from the main drone log(s). Each alert: {t, esc, value, limit, line, file}.
+    function mlFindEscAlerts(files) {
+        const logs = files.filter(f => ML_DRONE_LOG_RE.test(f.base));
+        const alerts = [], actions = [], seen = new Set();
+        const hitRe = /critical_current_rpm_ratio alert|Motor Malfunction Detected/gi;
+        const alertRe = /(esc\d+)\W{0,12}critical_current_rpm_ratio alert[^\n(]*\(\s*value\s*=\s*([-\d.eE+]+)\s*>\s*([-\d.eE+]+)/i;
+        for (const f of logs) {
+            const text = mlText(f.bytes);
+            let m; hitRe.lastIndex = 0;
+            while ((m = hitRe.exec(text))) {
+                const a = text.lastIndexOf('\n', m.index) + 1; let b = text.indexOf('\n', m.index); if (b < 0) b = text.length;
+                const line = text.slice(a, b).replace(/\r$/, ''); hitRe.lastIndex = b;
+                const t = mlLogTs(line, 0), key = `${t}|${line.slice(24)}`;
+                if (seen.has(key)) continue; seen.add(key);
+                if (/Motor Malfunction Detected/i.test(m[0])) { const i = line.search(/ESC and\/or Motor|Motor Malfunction/i); actions.push({ t, text: line.slice(i).trim().slice(0, 200), file: f.base }); continue; }
+                const am = alertRe.exec(line);
+                alerts.push({ t, esc: am ? am[1].toLowerCase() : null, value: am ? +am[2] : null, limit: am ? +am[3] : null, line: line.slice(0, 300), file: f.base });
+            }
+        }
+        alerts.sort((x, y) => (x.t || 0) - (y.t || 0)); actions.sort((x, y) => (x.t || 0) - (y.t || 0));
+        return { alerts, actions, mainLogs: logs.map(f => f.base) };
+    }
+
+    function mlExtractEsc(files, roles) {
+        const found = mlFindEscAlerts(files);
+        const main = files.filter(f => ML_DRONE_LOG_RE.test(f.base)).sort((a, b) => b.bytes.length - a.bytes.length)[0];
+        if (main) roles.droneLog = main;
+        const escFiles = files.filter(f => /esc_telemetry.*\.log$/i.test(f.base)).sort((a, b) => b.bytes.length - a.bytes.length);
+        if (!escFiles.length) return Object.assign({ present: false, note: 'no *esc_telemetry*.log in this archive' }, found);
+        roles.esc = escFiles[0];
+        const p = mlParseEscLog(mlText(escFiles[0].bytes));
+        const names = Object.keys(p.series).sort((a, b) => (parseInt(a.slice(3), 10) || 0) - (parseInt(b.slice(3), 10) || 0));
+        if (!names.length) return Object.assign({ present: false, note: `${escFiles[0].base} has no ESC telemetry lines` }, found);
+        // dense per-clock-second sample counts per ESC (a second with no reading counts as 0)
+        const perSec = {};
+        let runFrom = null, runTo = null;
+        for (const n of names) {
+            const s = p.series[n], T = s.t, s0 = Math.floor(T[0] / 1000);
+            const counts = new Array(Math.floor(T[T.length - 1] / 1000) - s0 + 1).fill(0);
+            for (let i = 0; i < T.length; i++) {
+                counts[Math.floor(T[i] / 1000) - s0]++;
+                if (s.rpm[i] > 0) { if (runFrom == null || T[i] < runFrom) runFrom = T[i]; if (runTo == null || T[i] > runTo) runTo = T[i]; }
+            }
+            perSec[n] = { s0, counts };
+        }
+        const gaps = []; for (let i = 1; i < p.pubTimes.length; i++) gaps.push(p.pubTimes[i] - p.pubTimes[i - 1]);
+        gaps.sort((a, b) => a - b);
+        const pubInterval = gaps.length ? gaps[gaps.length >> 1] : 4000;
+        const unparsed = found.alerts.filter(a => !a.esc || a.t == null).length;
+        return Object.assign({ present: true, file: escFiles[0].base, otherFiles: escFiles.slice(1).map(f => f.base), names, perSec, pubInterval, run: runFrom != null ? { from: runFrom, to: runTo } : null,
+            formatWarning: unparsed ? `${unparsed} ESC alert line(s) in the drone log did not match the expected "escN critical_current_rpm_ratio alert (value = X > Y)" shape — verdict may be incomplete` : null }, p, found);
+    }
+
+    // Re-runnable with different thresholds (the card's controls) — no re-parse.
+    function mlEscAnalyze(e, ratioThr, sampThr) {
+        const stretches = [], stats = [];
+        for (const name of e.names) {
+            const s = e.series[name], T = s.t, Rr = s.critical_current_rpm_ratio, ps = e.perSec[name], pb = e.pubs[name];
+            let a = -1;
+            for (let i = 0; i <= T.length; i++) {
+                if (i < T.length && Rr[i] > ratioThr) { if (a < 0) a = i; continue; }
+                if (a < 0) continue;
+                const b = i - 1, from = T[a], to = T[b];
+                let peak = -Infinity, peakT = from;
+                for (let k = a; k <= b; k++) if (Rr[k] > peak) { peak = Rr[k]; peakT = T[k]; }
+                const k0 = Math.floor(from / 1000) - ps.s0, k1 = Math.floor(to / 1000) - ps.s0;
+                let minPerSec = Infinity, secsBelow = 0;
+                for (let k = k0; k <= k1; k++) { const c = ps.counts[k] || 0; if (c < minPerSec) minPerSec = c; if (c < sampThr) secsBelow++; }
+                // each publish describes the seconds just before it → include one publish interval past the end
+                let minMsg = null;
+                if (pb) for (let j = mlLowerBound(pb.t, from); j < pb.t.length && pb.t[j] <= to + e.pubInterval; j++) if (minMsg == null || pb.v[j] < minMsg) minMsg = pb.v[j];
+                stretches.push({ esc: name, from, to, s: (to - from) / 1000, samples: b - a + 1, peak, peakT, minPerSec, secsBelow, secsTotal: k1 - k0 + 1, minMsg, low: minPerSec < sampThr || (minMsg != null && minMsg < sampThr) });
+                a = -1;
+            }
+            // per-ESC stats while the motors were running
+            const st = { esc: name, n: 0, thrIn: 0, thrOut: 0, rpmAvg: 0, rpmMax: -Infinity, curAvg: 0, curMax: -Infinity, voltMin: Infinity, mosMax: -Infinity, capMax: -Infinity, ratioMax: -Infinity, over: 0, statusNonZero: 0 };
+            if (e.run) for (let i = mlLowerBound(T, e.run.from); i < T.length && T[i] <= e.run.to; i++) {
+                st.n++; st.thrIn += s.throttle_in[i] || 0; st.thrOut += s.throttle_out[i] || 0; st.rpmAvg += s.rpm[i] || 0; st.curAvg += s.current[i] || 0;
+                if (s.rpm[i] > st.rpmMax) st.rpmMax = s.rpm[i];
+                if (s.current[i] > st.curMax) st.curMax = s.current[i];
+                if (s.voltage[i] < st.voltMin) st.voltMin = s.voltage[i];
+                if (s.mosfet_temp[i] > st.mosMax) st.mosMax = s.mosfet_temp[i];
+                if (s.capacitor_temp[i] > st.capMax) st.capMax = s.capacitor_temp[i];
+                if (Rr[i] > st.ratioMax) st.ratioMax = Rr[i];
+                if (Rr[i] > ratioThr) st.over++;
+                if (s.status_code[i]) st.statusNonZero++;
+            }
+            if (st.n) { st.thrIn /= st.n; st.thrOut /= st.n; st.rpmAvg /= st.n; st.curAvg /= st.n; st.overPct = 100 * st.over / st.n; }
+            stats.push(st);
+        }
+        stretches.sort((x, y) => x.from - y.from);
+        const alertEscs = Array.from(new Set(e.alerts.map(x => x.esc).filter(Boolean)));
+        // Which stretches count: with an alert, the alerted ESC's stretches CLOSE to the alert. A healthy
+        // flight already crosses 1.0 for a few seconds at takeoff with normal sampling (237893: all four
+        // ESCs), so judging every stretch of the flight would turn each false positive into "real".
+        // No stretch near the alert → CHECK, never a guess from an unrelated stretch.
+        let judged = stretches;
+        if (alertEscs.length) {
+            const look = ML_ESC_ALERT_LOOKBACK_S * 1000;
+            judged = stretches.filter(x => e.alerts.some(al => al.esc === x.esc && al.t != null && x.from <= al.t + 2000 && x.to >= al.t - look));
+        }
+        for (const x of stretches) x.judged = judged.includes(x);
+        const scopeTxt = `in the ${ML_ESC_ALERT_LOOKBACK_S} s before the alert`;
+        const real = judged.filter(x => !x.low);
+        const span = (x) => `${x.esc} ${mlHms(new Date(x.from))}–${mlHms(new Date(x.to))} (peak ${x.peak.toFixed(3)})`;
+        const worst = stretches.reduce((m, x) => (!m || x.peak > m.peak ? x : m), null);
+        let verdict;
+        if (e.alerts.length) {
+            const who = alertEscs.join(', ') || 'an ESC';
+            if (!judged.length) verdict = { code: 'check', level: 'amber', text: `CHECK — the drone alerted on ${who}, but that ESC is not above ${ratioThr} ${scopeTxt} in this log; the log may not cover the alert time` };
+            else if (!real.length) verdict = { code: 'false', level: 'amber', text: `YES, false positive — every stretch above ${ratioThr} on ${who} ${scopeTxt} (${judged.length}) had low sampling (under ${sampThr}/s)` };
+            else verdict = { code: 'real', level: 'red', text: `NO, not a false positive — treat as real: ${span(real[0])} was above ${ratioThr} with normal sampling${real.length > 1 ? ` (+${real.length - 1} more)` : ''}, ${scopeTxt}` };
+        } else if (!stretches.length) verdict = { code: 'none', level: 'green', text: `No alert — no ESC went above ${ratioThr}` };
+        else if (e.mainLogs.length) verdict = { code: 'quiet', level: 'green', text: `No ESC alert in the drone log. The ratio did go above ${ratioThr} in ${stretches.length} stretch(es) (${stretches.length - stretches.filter(x => x.low).length} with normal sampling; peak ${worst.peak.toFixed(3)} on ${worst.esc}) without the drone alerting` };
+        else if (!real.length) verdict = { code: 'nolog-false', level: 'amber', text: `No drone log in the archive to confirm an alert. Every stretch above ${ratioThr} (${stretches.length}) had low sampling — an alert here would be a false positive` };
+        else verdict = { code: 'nolog-real', level: 'amber', text: `No drone log in the archive to confirm an alert. ${span(real[0])} was above ${ratioThr} with normal sampling — an alert here would be real` };
+        return { ratioThr, sampThr, stretches, judged, stats, alertEscs, verdict };
+    }
+
     // Top-level: everything about one mission from its archives (+ optional server JSON).
     async function mlAnalyze(files, extra) {
         const roles = mlClassify(files);
@@ -559,7 +741,12 @@
         for (const w of lte.outages) w.at = at(w.from);
         for (const h of lte.handovers) h.at = at(h.t);
         if (lte.worstRsrp) lte.worstRsrp.at = at(lte.worstRsrp.t);
-        return { roles, files, meta, events, lte, daa, droneTrack, warnings, abortEv, extra: extra || {}, syslogLineCount: syslogLines.length };
+        // v0.9 — ESC telemetry + the drone's ratio alert
+        let escData;
+        try { escData = mlExtractEsc(files, roles); }
+        catch (e) { escData = { present: false, error: true, note: 'ESC telemetry could not be parsed: ' + (e && e.message || e), alerts: [], actions: [], mainLogs: [] }; }
+        const escAnalysis = escData.present ? mlEscAnalyze(escData, ML_ESC_RATIO_THR, ML_ESC_SAMP_THR) : null;
+        return { roles, files, meta, events, lte, daa, droneTrack, warnings, abortEv, esc: escData, escAnalysis, extra: extra || {}, syslogLineCount: syslogLines.length };
     }
     // ===================== end [AIM_ML_ENGINE] =========================
 
@@ -631,6 +818,14 @@
             table.aim-ml th{text-align:left;color:#888;font-weight:600;padding:3px 6px;border-bottom:1px solid #222834}
             table.aim-ml td{padding:3px 6px;border-top:1px solid rgba(255,255,255,.05);vertical-align:top}
             .g{color:#5fff5f}.a{color:#ffb347}.r{color:#ff5f5f}.m{color:#888}.c{color:#7adfe6}
+            .aim-ml-tag{display:inline-block;padding:0 6px;border:1px solid currentColor;border-radius:9px;font-size:10.5px;font-weight:600;white-space:nowrap}
+            .aim-ml-esc-ctl{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center;margin:10px 0 4px;color:#888}
+            .aim-ml-esc-ctl input,.aim-ml-esc-ctl select{background:#0b0e12;color:#eee;border:1px solid #2a3240;border-radius:4px;padding:2px 5px;font:12px system-ui}
+            .aim-ml-esc-ctl input{width:62px}
+            .aim-ml-esc-ro{position:sticky;top:-10px;z-index:1;background:#11151b;padding:5px 0;min-height:34px;font-size:11.5px;line-height:1.5;border-bottom:1px solid #222834}
+            .aim-ml-esc-h{margin:8px 0 2px}
+            canvas[data-aim-ml-esc-cv]{display:block;width:100%;height:230px;cursor:crosshair;touch-action:none;user-select:none}
+            tr[data-aim-ml-esc-zoom]:hover td{background:rgba(122,223,230,.07)}
             .aim-ml-mono{font-family:ui-monospace,Consolas,monospace;font-size:11px;white-space:pre-wrap;word-break:break-all;color:#bbb}
         `;
         document.head.appendChild(st);
@@ -660,6 +855,10 @@
         p.querySelector('#aim-ml-daa').addEventListener('change', (e) => { wantDaa = !!e.target.checked; });
         p.querySelectorAll('#aim-ml-mode button').forEach(b => b.addEventListener('click', () => setViewMode(b.getAttribute('data-mode'))));
         setViewMode(viewMode);
+        // ESC charts size themselves from the canvas box — redraw when a <details> opens (toggle does not bubble → capture) or the window resizes
+        ui.body.addEventListener('toggle', () => escRedrawAll(), true);
+        let escResizeTimer = null;
+        window.addEventListener('resize', () => { clearTimeout(escResizeTimer); escResizeTimer = setTimeout(escRedrawAll, 150); });
         // drag
         const head = p.querySelector('#aim-ml-head');
         let drag = null;
@@ -729,6 +928,7 @@
             await new Promise(r => setTimeout(r, 0));
             const res = await mlAnalyze(files, extra);
             res.missionId = missionId;
+            escResetUi();
             render(res);
             const secs = ((performance.now() - t0) / 1000).toFixed(1);
             setStatus(`Mission ${missionId} · ${files.length} files · ${res.syslogLineCount.toLocaleString()} syslog lines · ${secs} s`, res.lte.verdict.level);
@@ -798,6 +998,8 @@
             ${events.aborts.length ? `<div class="aim-ml-verdict r" style="background:rgba(255,95,95,.08);border:1px solid #3a2222">${events.aborts.map(a => `${mlHms(a.t)} ${esc(a.type.replace('edge.notify.', '').replace(/_/g, ' '))}`).join(' · ')}</div>` : '<div class="aim-ml-verdict g" style="background:rgba(95,255,95,.05);border:1px solid #223a22">No abort / safety event</div>'}
             ${tbl(['UTC', 'Event', 'Detail'], tl.map(e => [`<span class="m">${mlHms(e.t)}</span>`, `<span class="${/droneErr|safetyInit|emergency|failsafe/i.test(e.type) ? 'r' : /warn/i.test(e.type) ? 'a' : /stageUpdate/.test(e.type) ? 'm' : 'c'}">${esc(e.type.replace(/^edge\.(notify\.)?/, ''))}</span>`, esc(e.label)]))}` : '<span class="m">no Amplitude mission events found in syslog</span>';
         addCard('events', card(`🧭 Mission events (${tl.length})`, evInner, copyBtn('events')));
+        // --- ESC ---
+        addCard('esc', escCardAdv(res));
         // --- DAA ---
         let daaInner;
         if (daa.aircraft.length) {
@@ -825,6 +1027,7 @@
         const dl = Object.entries(res.roles).filter(([k, f]) => f && !/ardupilot/.test(k)).map(([k, f]) => `<button class="aim-ml-btn" data-aim-ml-dl="${esc(f.name)}" title="${esc(f.name)}">⬇ ${esc(k)} <span class="m">${fmtMB(f.bytes.length)}</span></button>`).join(' ');
         addCard('files', card('🗂 Files', `<div style="display:flex;flex-wrap:wrap;gap:6px">${dl}</div><div class="m" style="margin-top:6px">Full result object: <code>window.__aimMissionLogs</code> in the console.</div>`));
         ui.body.innerHTML = viewMode === 'advanced' ? parts.join('') : renderSimple(res, adv);
+        try { escWire(res); } catch (e) { console.error(`${TAG} ESC card wiring failed:`, e); }
         ui.body.querySelectorAll('[data-aim-ml-dl]').forEach(b => b.addEventListener('click', () => {
             const f = res.files.find(x => x.name === b.getAttribute('data-aim-ml-dl')); if (!f) return;
             const blob = new Blob([f.bytes], { type: 'application/octet-stream' }); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = f.base; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
@@ -883,6 +1086,313 @@
         const blob = new Blob([kml], { type: 'application/vnd.google-earth.kml+xml' });
         const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `mission-${res.missionId}-lte-signal.kml`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
         setStatus(`Signal KML: ${placed} samples, ${lte.outages.filter(w => w.at).length} outage pin(s), ${lte.handovers.filter(h => h.at).length} tower switch pin(s)${placed < lte.gstatus.length ? ` · ${lte.gstatus.length - placed} sample(s) had no position (before takeoff / after landing)` : ''}`);
+    }
+
+    // ---------------- ⚙ Motors / ESC card (v0.9) ----------------
+    // Verdict + stretch table + interactive charts (vanilla canvas, no library). Both the
+    // Advanced card and the Simple card's "Technical details" hold the same markup; every
+    // region is addressed by data-aim-ml-esc* so a threshold change refreshes it in place.
+    const ESC_METRICS = [['critical_current_rpm_ratio', 'current / rpm ratio'], ['rpm', 'rpm'], ['current', 'current (A)'], ['throttle_in', 'throttle in'], ['throttle_out', 'throttle out'], ['voltage', 'voltage (V)'], ['mosfet_temp', 'MOSFET temp (°C)'], ['capacitor_temp', 'capacitor temp (°C)']];
+    const ESC_MAX_ROWS = 60;
+    const escUi = { ratioThr: ML_ESC_RATIO_THR, sampThr: ML_ESC_SAMP_THR, metric: 'critical_current_rpm_ratio', win: 'run', view: null, hoverT: null, sel: null, raf: 0 };
+    const escT = (ms) => ms == null ? '—' : mlHms(new Date(ms));
+    const escNum = (v, d) => v == null || !isFinite(v) ? '—' : Number(v).toFixed(d);
+    const escMetricLabel = () => (ESC_METRICS.find(m => m[0] === escUi.metric) || ESC_METRICS[0])[1];
+    const escTag = (text, cls) => `<span class="aim-ml-tag ${cls}">${esc(text)}</span>`;
+    function escResetUi() { escUi.ratioThr = ML_ESC_RATIO_THR; escUi.sampThr = ML_ESC_SAMP_THR; escUi.view = null; escUi.hoverT = null; escUi.sel = null; escUi.win = 'run'; }
+
+    function escVerdictHtml(res) {
+        const e = res.esc, an = res.escAnalysis, v = an.verdict;
+        const lines = e.alerts.map(a => `<div><span class="r">${escT(a.t)} UTC</span> ${a.esc ? `<b>${esc(a.esc)}</b> ratio alert, value ${esc(a.value)} &gt; ${esc(a.limit)}` : esc(a.line)} <span class="m">${esc(a.file)}</span></div>`)
+            .concat(e.actions.map(a => `<div><span class="a">${escT(a.t)} UTC</span> ${esc(a.text)}</div>`));
+        return `<div class="aim-ml-verdict ${lv(v.level)}" style="background:rgba(255,255,255,.03);border:1px solid #222834">${esc(v.text)}</div>
+            ${e.formatWarning ? `<div class="a" style="margin:-4px 0 8px">⚠ ${esc(e.formatWarning)}</div>` : ''}
+            ${lines.length ? `<div style="margin:-2px 0 8px">${lines.join('')}</div>` : (e.mainLogs.length ? '' : '<div class="a" style="margin:-4px 0 8px">⚠ No main drone log in the archive — cannot tell whether the drone alerted.</div>')}
+            <div class="m" style="margin-bottom:6px">Rule: a stretch above the ratio threshold counts as <b>low sampling</b> when that ESC logged fewer than ${esc(an.sampThr)} readings in any clock second of it, or the agent's own msg_in_sec fell below ${esc(an.sampThr)}. With a drone alert, only the alerted ESC's stretches in the ${ML_ESC_ALERT_LOOKBACK_S} s before the alert are judged: all low sampling = false positive, any normal = real.</div>`;
+    }
+
+    function escStretchesHtml(res) {
+        const an = res.escAnalysis, alerted = new Set(an.alertEscs);
+        if (!an.stretches.length) return `<span class="g">No ESC went above ${esc(an.ratioThr)}.</span>`;
+        const sorted = an.stretches.slice().sort((x, y) => (y.judged ? 1 : 0) - (x.judged ? 1 : 0) || x.from - y.from);
+        const rows = sorted.slice(0, ESC_MAX_ROWS).map(x => `<tr data-aim-ml-esc-zoom="${x.from},${x.to}" style="cursor:pointer" title="Click to zoom the charts to this stretch">
+            <td><b>${esc(x.esc)}</b>${alerted.has(x.esc) ? ' ' + escTag('alerted', 'r') : ''}${x.judged && alerted.size ? ' ' + escTag('judged', 'c') : ''}</td>
+            <td>${escT(x.from)}</td><td>${escT(x.to)}</td><td>${escNum(x.s, 1)} s</td>
+            <td>${escNum(x.peak, 3)} <span class="m">@ ${escT(x.peakT)}</span></td>
+            <td class="${x.minPerSec < an.sampThr ? 'a' : ''}">${esc(x.minPerSec)}</td>
+            <td>${x.secsBelow} of ${x.secsTotal}</td>
+            <td class="${x.minMsg != null && x.minMsg < an.sampThr ? 'a' : ''}">${escNum(x.minMsg, 2)}</td>
+            <td>${x.low ? escTag('Low sampling', 'a') : escTag('Normal sampling', 'g')}</td></tr>`).join('');
+        return `<table class="aim-ml"><tr>${['ESC', 'Start UTC', 'End', 'Duration', 'Peak ratio', 'Min samples/s', 'Seconds below', 'Min msg_in_sec', 'Sampling'].map(c => `<th>${c}</th>`).join('')}</tr>${rows}</table>
+            ${sorted.length > ESC_MAX_ROWS ? `<div class="m">+${sorted.length - ESC_MAX_ROWS} more stretch(es) — 📋 Sheets copies all of them.</div>` : ''}`;
+    }
+
+    function escStatsHtml(res) {
+        return tbl(['ESC', 'Throttle in / out (avg)', 'rpm avg / max', 'Current avg / max (A)', 'Min voltage', 'Max MOSFET °C', 'Max capacitor °C', 'Max ratio', '% of run above', 'Non-zero status'],
+            res.escAnalysis.stats.map(s => s.n ? [`<b>${esc(s.esc)}</b>`, `${escNum(s.thrIn, 0)} / ${escNum(s.thrOut, 0)}`, `${escNum(s.rpmAvg, 0)} / ${escNum(s.rpmMax, 0)}`, `${escNum(s.curAvg, 1)} / ${escNum(s.curMax, 1)}`, escNum(s.voltMin, 1), escNum(s.mosMax, 1), escNum(s.capMax, 1), `<span class="${s.ratioMax > res.escAnalysis.ratioThr ? 'a' : ''}">${escNum(s.ratioMax, 3)}</span>`, `${escNum(s.overPct, 2)}%`, `<span class="${s.statusNonZero ? 'a' : 'm'}">${s.statusNonZero}</span>`]
+                : [`<b>${esc(s.esc)}</b>`, '<span class="m">no samples while motors ran</span>', '', '', '', '', '', '', '', '']));
+    }
+
+    function escCardAdv(res) {
+        const e = res.esc;
+        if (!e || !e.present) return card('⚙ Motors / ESC telemetry', `<span class="${e && e.error ? 'r' : 'm'}">${esc(e ? e.note : 'not analyzed')}</span>${e && e.alerts && e.alerts.length ? `<div class="r" style="margin-top:6px">The drone log has ${e.alerts.length} ESC ratio alert(s): ${e.alerts.map(a => `${escT(a.t)} ${esc(a.esc || '?')}`).join(', ')} — but there is no ESC log to judge them.</div>` : ''}`);
+        return card(`⚙ Motors / ESC telemetry (${e.names.length} ESCs${e.powerTrain ? ' · ' + esc(e.powerTrain) : ''})`, `
+            <div data-aim-ml-esc="verdict"></div>
+            <div data-aim-ml-esc="stretches"></div>
+            <details style="margin-top:6px"><summary class="m" style="cursor:pointer">Per-ESC stats while motors running</summary><div data-aim-ml-esc="stats"></div></details>
+            <div class="aim-ml-esc-ctl">
+                <label>Ratio above <input type="number" step="0.05" min="0" data-aim-ml-esc-ctl="ratio"></label>
+                <label>Sampling below (/s) <input type="number" step="0.5" min="0" data-aim-ml-esc-ctl="samp"></label>
+                <label>Top chart <select data-aim-ml-esc-ctl="metric">${ESC_METRICS.map(([k, l]) => `<option value="${k}">${esc(l)}</option>`).join('')}</select></label>
+                <span class="aim-ml-seg"><button data-aim-ml-esc-win="run" title="Zoom to first → last sample with rpm above 0">Motor run</button><button data-aim-ml-esc-win="full">Full log</button></span>
+            </div>
+            <div data-aim-ml-esc="readout" class="aim-ml-esc-ro"></div>
+            ${e.names.map(n => `<div class="aim-ml-esc-h"><b>${esc(n)}</b> <span data-aim-ml-esc-tag="${esc(n)}"></span></div><canvas data-aim-ml-esc-cv="${esc(n)}"></canvas>`).join('')}
+            <div class="m" style="margin-top:6px">Top: one dot per reading (no connecting line, so gaps show) · red dots / red band = above the ratio threshold · grey band = motors running. Bottom: grey dots = readings counted per second · green line = msg_in_sec · dashed orange = sampling threshold. Red vertical line = the drone's alert (solid on the ESC that alerted). Times are the log's own clock (UTC). Source: ${esc(e.file)}${e.otherFiles.length ? ` <span class="a">(+${e.otherFiles.length} other ESC log(s) in the archive not shown: ${esc(e.otherFiles.join(', '))})</span>` : ''}.</div>`, copyBtn('esc'));
+    }
+
+    // Plain-English bottom line + bullets (Simple view).
+    function escSimpleInner(res) {
+        const e = res.esc, an = res.escAnalysis, v = an.verdict, a0 = e.alerts[0];
+        const when = a0 ? `at <b>${escT(a0.t)} UTC</b>` : '';
+        const home = e.actions.length ? ' and turned back for home' : '';
+        const who = an.alertEscs.join(', ') || 'a motor controller';
+        const bullets = [];
+        let bottom;
+        const rate = (x) => `${x.esc} was above the alarm level from ${escT(x.from)} to ${escT(x.to)} (${escNum(x.s, 1)} s, peak ${escNum(x.peak, 2)}); in its slowest second it logged <b>${x.minPerSec}</b> reading${x.minPerSec === 1 ? '' : 's'}${x.minMsg != null ? `, and the controller software reported ${escNum(x.minMsg, 1)} per second` : ''} (normal is ${an.sampThr} or more)`;
+        if (v.code === 'false') {
+            bottom = `The drone raised a <b>motor / ESC alarm</b> ${when}${home}, but the logs point to a <b>false alarm</b>. The motor-controller readings were arriving too slowly at that moment, and that throws off the number the alarm is based on.`;
+            for (const x of an.judged.slice(0, 3)) bullets.push(rate(x) + '.');
+            bullets.push(`<b>What to do:</b> no sign of a real motor problem in this log. If the same alarm repeats on this drone, send the mission ID to support. This check cannot say why the readings slowed down.`);
+        } else if (v.code === 'real') {
+            bottom = `The drone raised a <b>motor / ESC alarm</b> ${when}${home}, and the readings behind it look <b>genuine</b>. Treat it as a real motor or motor-controller problem on <b>${esc(who)}</b>.`;
+            for (const x of an.judged.filter(y => !y.low).slice(0, 3)) bullets.push(rate(x) + ' — a normal reading rate, so the number can be trusted.');
+            bullets.push(`<b>What to do:</b> have the drone inspected before it flies again, and send this mission ID to support.`);
+        } else if (v.code === 'check') {
+            bottom = `The drone raised a <b>motor / ESC alarm</b> ${when}${home}, but the motor-controller log does not show ${esc(who)} over the alarm level around that time. <b>Needs a manual look.</b>`;
+            bullets.push(`The log may have stopped before the alarm, or the alarm came from a value that was never written to this log.`);
+        } else if (v.code === 'none') {
+            bottom = `<b>No motor or ESC alarm</b> on this flight, and no motor controller reached the alarm level.`;
+        } else if (v.code === 'quiet') {
+            const longest = an.stretches.reduce((m, x) => (x.s > m.s ? x : m));
+            bottom = `<b>No motor or ESC alarm</b> on this flight.`;
+            bullets.push(`The motor load number briefly went over the alarm level ${an.stretches.length} time${an.stretches.length === 1 ? '' : 's'} (longest ${escNum(longest.s, 1)} s at ${escT(longest.from)}) without the drone raising an alarm. A few seconds of this at takeoff is normal.`);
+        } else {
+            bottom = `The motor-controller log shows the motor load number over the alarm level, but the main drone log is missing from this archive, so <b>it is unknown whether the drone raised an alarm</b>.`;
+            bullets.push(v.code === 'nolog-false' ? `Every time it was over the level, the readings were arriving too slowly to trust — an alarm here would be a false alarm.` : `At least once it was over the level with a normal reading rate — an alarm here would be genuine.`);
+        }
+        const st = an.stats.filter(s => s.n);
+        if (st.length) {
+            const hot = st.reduce((m, s) => (s.mosMax > m.mosMax ? s : m)), amp = st.reduce((m, s) => (s.curMax > m.curMax ? s : m)), vmin = Math.min(...st.map(s => s.voltMin));
+            bullets.push(`<b>In flight:</b> hottest motor controller ${esc(hot.esc)} at ${escNum(hot.mosMax, 0)} °C, highest current ${escNum(amp.curMax, 0)} A on ${esc(amp.esc)}, lowest battery voltage ${escNum(vmin, 1)} V.`);
+            const bad = st.filter(s => s.statusNonZero);
+            if (bad.length) bullets.push(`<b>Status codes:</b> ${bad.map(s => `${esc(s.esc)} reported a non-zero status ${s.statusNonZero} time${s.statusNonZero === 1 ? '' : 's'}`).join('; ')}.`);
+        }
+        if (e.formatWarning) bullets.push(`⚠ ${esc(e.formatWarning)}`);
+        return `<div class="aim-ml-bottom ${lv(v.level)}">${bottom}</div>${bullets.length ? `<ul class="aim-ml-plain">${bullets.map(b => `<li>${b}</li>`).join('')}</ul>` : ''}`;
+    }
+    function escCardSimple(res, adv) {
+        const e = res.esc;
+        if (!e || !e.present) return card('⚙ Motors (ESC)', `<div class="aim-ml-bottom ${e && (e.error || (e.alerts && e.alerts.length)) ? 'r' : 'm'}">${e && e.alerts && e.alerts.length ? `The drone raised a <b>motor / ESC alarm</b> at ${escT(e.alerts[0].t)} UTC, but the motor-controller log is not in this archive, so it cannot be checked here.` : `No motor-controller log to check for this flight (${esc(e ? e.note : 'not analyzed')}).`}</div>`);
+        return card('⚙ Motors (ESC)', `<div data-aim-ml-esc="simple"></div>${tech('esc', adv)}`, copyBtn('esc'));
+    }
+
+    function escView(res) {
+        if (escUi.view) return escUi.view;
+        const e = res.esc;
+        if (escUi.win === 'run' && e.run) { const pad = Math.max(2000, (e.run.to - e.run.from) * 0.02); return [e.run.from - pad, e.run.to + pad]; }
+        return [e.t0, Math.max(e.t1, e.t0 + 1000)];
+    }
+
+    // Render one ESC's two stacked plots into an offscreen bitmap (cv._aimBase); escPaint blits it + the hover/selection overlay.
+    function escDrawBase(cv, res) {
+        const name = cv.getAttribute('data-aim-ml-esc-cv');
+        const W = cv.clientWidth, H = cv.clientHeight;
+        const e = res.esc, an = res.escAnalysis, s = e.series[name];
+        if (!W || !H || !s) return false;            // hidden (inside a closed <details>) — drawn on toggle
+        const dpr = window.devicePixelRatio || 1;
+        const base = cv._aimBase || (cv._aimBase = document.createElement('canvas'));
+        base.width = cv.width = Math.round(W * dpr); base.height = cv.height = Math.round(H * dpr);
+        const g = base.getContext('2d');
+        g.setTransform(dpr, 0, 0, dpr, 0, 0);
+        g.clearRect(0, 0, W, H);
+        const [x0, x1] = escView(res);
+        const L = 48, R = 8, pw = Math.max(10, W - L - R);
+        const top = { y: 6, h: Math.round((H - 42) * 0.62) };
+        const bot = { y: top.y + top.h + 12, h: 0 }; bot.h = H - bot.y - 18;
+        const X = (t) => L + (t - x0) / (x1 - x0) * pw;
+        const plots = [top, bot];
+        g.font = '10px system-ui,sans-serif';
+        for (const p of plots) { g.fillStyle = '#0b0e12'; g.fillRect(L, p.y, pw, p.h); }
+        const band = (a, b, color) => { const xa = Math.max(L, X(a)), xb = Math.min(L + pw, Math.max(X(b), X(a) + 2)); if (xb <= L || xa >= L + pw) return; g.fillStyle = color; for (const p of plots) g.fillRect(xa, p.y, xb - xa, p.h); };
+        if (e.run) band(e.run.from, e.run.to, 'rgba(255,255,255,.05)');
+        for (const st of an.stretches) if (st.esc === name) band(st.from, st.to, 'rgba(255,95,95,.22)');
+        // x grid + labels
+        const spanS = (x1 - x0) / 1000;
+        const step = [0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600].find(v => spanS / v <= 7) || 7200;
+        g.textAlign = 'center'; g.textBaseline = 'middle';
+        for (let t = Math.ceil(x0 / (step * 1000)) * step * 1000; t <= x1; t += step * 1000) {
+            const x = X(t);
+            g.fillStyle = 'rgba(255,255,255,.06)'; for (const p of plots) g.fillRect(x, p.y, 1, p.h);
+            g.fillStyle = '#888'; g.fillText(step < 1 ? mlHmsMs(t).slice(0, 10) : escT(t), x, H - 8);
+        }
+        // ---- top: the chosen metric, dots only ----
+        const T = s.t, M = s[escUi.metric] || [], isRatio = escUi.metric === 'critical_current_rpm_ratio';
+        const i0 = mlLowerBound(T, x0), i1 = mlLowerBound(T, x1);
+        let lo = Infinity, hi = -Infinity;
+        for (let i = i0; i < i1; i++) { const v = M[i]; if (v === v) { if (v < lo) lo = v; if (v > hi) hi = v; } }
+        if (isRatio) { lo = Math.min(lo, 0); hi = Math.max(hi, an.ratioThr * 1.1); }
+        if (!isFinite(lo)) { lo = 0; hi = 1; }
+        if (hi - lo < 1e-9) hi = lo + 1;
+        const padY = (hi - lo) * 0.08; hi += padY; if (!isRatio) lo -= padY;
+        const Yt = (v) => top.y + top.h - (v - lo) / (hi - lo) * top.h;
+        g.save(); g.beginPath(); g.rect(L, top.y, pw, top.h); g.clip();
+        if (isRatio) { g.strokeStyle = '#ff5f5f'; g.lineWidth = 1; g.setLineDash([5, 4]); g.beginPath(); g.moveTo(L, Yt(an.ratioThr)); g.lineTo(L + pw, Yt(an.ratioThr)); g.stroke(); g.setLineDash([]); }
+        g.fillStyle = '#7adfe6';
+        for (let i = i0; i < i1; i++) { const v = M[i]; if (v !== v || (isRatio && v > an.ratioThr)) continue; g.fillRect(X(T[i]) - 1, Yt(v) - 1, 2, 2); }
+        if (isRatio) { g.fillStyle = '#ff5f5f'; for (let i = i0; i < i1; i++) { const v = M[i]; if (v > an.ratioThr) g.fillRect(X(T[i]) - 1.5, Yt(v) - 1.5, 3, 3); } }
+        g.restore();
+        // ---- bottom: samples per second (dots) + msg_in_sec (line) ----
+        const ps = e.perSec[name], pb = e.pubs[name] || { t: [], v: [] };
+        const k0 = Math.max(0, Math.floor(x0 / 1000) - ps.s0), k1 = Math.min(ps.counts.length - 1, Math.floor(x1 / 1000) - ps.s0);
+        const j0 = Math.max(0, mlLowerBound(pb.t, x0) - 1), j1 = Math.min(pb.t.length, mlLowerBound(pb.t, x1) + 1);
+        let bhi = an.sampThr;
+        for (let k = k0; k <= k1; k++) if (ps.counts[k] > bhi) bhi = ps.counts[k];
+        for (let j = j0; j < j1; j++) if (pb.v[j] > bhi) bhi = pb.v[j];
+        const bmax = bhi; bhi *= 1.15;
+        const Yb = (v) => bot.y + bot.h - v / bhi * bot.h;
+        g.save(); g.beginPath(); g.rect(L, bot.y, pw, bot.h); g.clip();
+        g.strokeStyle = '#ffb347'; g.lineWidth = 1; g.setLineDash([5, 4]); g.beginPath(); g.moveTo(L, Yb(an.sampThr)); g.lineTo(L + pw, Yb(an.sampThr)); g.stroke(); g.setLineDash([]);
+        g.fillStyle = '#8a93a0';
+        for (let k = k0; k <= k1; k++) g.fillRect(X((ps.s0 + k) * 1000 + 500) - 1, Yb(ps.counts[k]) - 1, 2, 2);
+        if (j1 - j0 > 0) { g.strokeStyle = '#5fff5f'; g.lineWidth = 1.3; g.beginPath(); for (let j = j0; j < j1; j++) { const x = X(pb.t[j]), y = Yb(pb.v[j]); if (j === j0) g.moveTo(x, y); else g.lineTo(x, y); } g.stroke(); }
+        g.restore();
+        // ---- the drone's alert time ----
+        for (const al of e.alerts) {
+            if (al.t == null || al.t < x0 || al.t > x1) continue;
+            g.strokeStyle = '#ff5f5f'; g.lineWidth = al.esc === name ? 2 : 1; g.setLineDash(al.esc === name ? [] : [2, 4]);
+            g.beginPath(); g.moveTo(X(al.t), top.y); g.lineTo(X(al.t), bot.y + bot.h); g.stroke(); g.setLineDash([]);
+        }
+        // ---- y labels + captions ----
+        const fmt = (v) => Math.abs(v) >= 100 ? v.toFixed(0) : Math.abs(v) >= 10 ? v.toFixed(1) : v.toFixed(2);
+        g.fillStyle = '#888'; g.textAlign = 'right';
+        g.fillText(fmt(hi), L - 4, top.y + 5); g.fillText(fmt((lo + hi) / 2), L - 4, top.y + top.h / 2); g.fillText(fmt(lo), L - 4, top.y + top.h - 5);
+        g.fillText(Number.isInteger(bmax) ? String(bmax) : fmt(bmax), L - 4, Yb(bmax)); g.fillText('0', L - 4, bot.y + bot.h - 5);
+        // captions sit on a dark chip in the top-right corner so they never hide the data underneath
+        g.textAlign = 'right';
+        for (const [txt, p] of [[escMetricLabel(), top], ['readings / s (dots) · msg_in_sec (line)', bot]]) {
+            const w = g.measureText(txt).width + 8;
+            g.fillStyle = 'rgba(11,14,18,.8)'; g.fillRect(L + pw - w - 2, p.y + 2, w, 13);
+            g.fillStyle = 'rgba(255,255,255,.55)'; g.fillText(txt, L + pw - 6, p.y + 9);
+        }
+        cv._aim = { x0, x1, L, pw, top, bot, W, H, dpr };
+        return true;
+    }
+
+    function escPaint(cv) {
+        const a = cv._aim, base = cv._aimBase;
+        if (!a || !base || !base.width) return;
+        const g = cv.getContext('2d');
+        g.setTransform(1, 0, 0, 1, 0, 0);
+        g.clearRect(0, 0, cv.width, cv.height);
+        g.drawImage(base, 0, 0);
+        g.setTransform(a.dpr, 0, 0, a.dpr, 0, 0);
+        const X = (t) => a.L + (t - a.x0) / (a.x1 - a.x0) * a.pw, y0 = a.top.y, y1 = a.bot.y + a.bot.h;
+        if (escUi.sel) { const xa = X(Math.min(escUi.sel.a, escUi.sel.b)), xb = X(Math.max(escUi.sel.a, escUi.sel.b)); g.fillStyle = 'rgba(122,223,230,.18)'; g.fillRect(xa, y0, xb - xa, y1 - y0); }
+        if (escUi.hoverT != null && escUi.hoverT >= a.x0 && escUi.hoverT <= a.x1) { g.fillStyle = 'rgba(255,255,255,.45)'; g.fillRect(X(escUi.hoverT), y0, 1, y1 - y0); }
+    }
+
+    const escCanvases = () => ui.body ? Array.from(ui.body.querySelectorAll('canvas[data-aim-ml-esc-cv]')) : [];
+    function escReadout(res) {
+        const els = ui.body.querySelectorAll('[data-aim-ml-esc="readout"]');
+        if (!els.length) return;
+        const t = escUi.hoverT, e = res.esc;
+        let html = '<span class="m">Move the cursor over a chart for exact values · drag across a chart to zoom all of them · double-click to reset</span>';
+        if (t != null) {
+            html = `<b>${mlHmsMs(t)} UTC</b> <span class="m">+${((t - e.t0) / 1000).toFixed(1)} s · ${esc(escMetricLabel())} · readings/s · msg_in_sec</span><br>` + e.names.map(n => {
+                const s = e.series[n], T = s.t;
+                let i = mlLowerBound(T, t); if (i >= T.length || (i > 0 && t - T[i - 1] < T[i] - t)) i--;
+                const v = i >= 0 && Math.abs(T[i] - t) <= 1500 ? s[escUi.metric][i] : null;
+                const ps = e.perSec[n], k = Math.floor(t / 1000) - ps.s0, c = k >= 0 && k < ps.counts.length ? ps.counts[k] : 0;
+                const pb = e.pubs[n]; let msg = null;
+                if (pb) { const j = mlLowerBound(pb.t, t); if (j < pb.t.length && pb.t[j] - t <= 2 * e.pubInterval) msg = pb.v[j]; }
+                return `<span class="c">${esc(n)}</span> <b>${escNum(v, 3)}</b> · ${c}/s · ${escNum(msg, 2)}`;
+            }).join(' &nbsp;│&nbsp; ');
+        }
+        els.forEach(el => { el.innerHTML = html; });
+    }
+    function escRedrawAll() {
+        const res = lastResult;
+        if (!res || !res.esc || !res.esc.present || !ui.body) return;
+        try { for (const cv of escCanvases()) if (escDrawBase(cv, res)) escPaint(cv); escReadout(res); }
+        catch (err) { console.error(`${TAG} ESC chart draw failed:`, err); }
+    }
+    function escSchedulePaint() {
+        if (escUi.raf) return;
+        escUi.raf = requestAnimationFrame(() => {
+            escUi.raf = 0;
+            try { for (const cv of escCanvases()) escPaint(cv); if (lastResult && lastResult.esc && lastResult.esc.present) escReadout(lastResult); }
+            catch (err) { console.error(`${TAG} ESC chart paint failed:`, err); }
+        });
+    }
+
+    // Re-run the verdict with the current thresholds and refresh every ESC region in place.
+    function escRefresh(res) {
+        try { res.escAnalysis = mlEscAnalyze(res.esc, escUi.ratioThr, escUi.sampThr); }
+        catch (err) { console.error(`${TAG} ESC analysis failed:`, err); setStatus('ESC analysis failed — see console', 'red'); return; }
+        const an = res.escAnalysis, root = ui.body;
+        const fill = (key, html) => root.querySelectorAll(`[data-aim-ml-esc="${key}"]`).forEach(el => { el.innerHTML = html; });
+        fill('verdict', escVerdictHtml(res)); fill('stretches', escStretchesHtml(res)); fill('stats', escStatsHtml(res)); fill('simple', escSimpleInner(res));
+        root.querySelectorAll('[data-aim-ml-esc-ctl]').forEach(el => { const k = el.getAttribute('data-aim-ml-esc-ctl'); el.value = k === 'ratio' ? escUi.ratioThr : k === 'samp' ? escUi.sampThr : escUi.metric; });
+        root.querySelectorAll('[data-aim-ml-esc-win]').forEach(b => b.classList.toggle('on', !escUi.view && b.getAttribute('data-aim-ml-esc-win') === escUi.win));
+        root.querySelectorAll('[data-aim-ml-esc-tag]').forEach(el => {
+            const n = el.getAttribute('data-aim-ml-esc-tag'), mine = an.stretches.filter(x => x.esc === n);
+            el.innerHTML = `${an.alertEscs.includes(n) ? escTag('alerted', 'r') + ' ' : ''}<span class="m">${mine.length ? `${mine.length} stretch${mine.length === 1 ? '' : 'es'} above ${esc(an.ratioThr)} · ${mine.filter(x => x.low).length} low sampling` : `never above ${esc(an.ratioThr)}`}</span>`;
+        });
+        escRedrawAll();
+    }
+
+    // Called by render() after the panel body is (re)built.
+    function escWire(res) {
+        if (!res.esc || !res.esc.present) return;
+        const root = ui.body;
+        escRefresh(res);
+        root.querySelectorAll('[data-aim-ml-esc-ctl]').forEach(el => el.addEventListener('change', () => {
+            const k = el.getAttribute('data-aim-ml-esc-ctl');
+            if (k === 'metric') escUi.metric = ESC_METRICS.some(m => m[0] === el.value) ? el.value : ESC_METRICS[0][0];
+            else {
+                const v = parseFloat(el.value);
+                if (!isFinite(v) || v <= 0) { console.warn(`${TAG} ESC threshold ignored (not a positive number):`, el.value); setStatus('Threshold must be a positive number — kept the previous value.', 'amber'); }
+                else if (k === 'ratio') escUi.ratioThr = v; else escUi.sampThr = v;
+            }
+            escRefresh(res);
+        }));
+        root.querySelectorAll('[data-aim-ml-esc-win]').forEach(b => b.addEventListener('click', () => { escUi.win = b.getAttribute('data-aim-ml-esc-win') === 'full' ? 'full' : 'run'; escUi.view = null; escRefresh(res); }));
+        root.querySelectorAll('[data-aim-ml-esc="stretches"]').forEach(el => el.addEventListener('click', (ev) => {
+            const row = ev.target.closest('[data-aim-ml-esc-zoom]'); if (!row) return;
+            const [a, b] = row.getAttribute('data-aim-ml-esc-zoom').split(',').map(Number);
+            const pad = Math.max(10000, (b - a) * 0.5);
+            escUi.view = [a - pad, b + pad]; escRefresh(res);
+            const cv = escCanvases().find(c => c.clientWidth); if (cv) cv.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        }));
+        const tAt = (cv, ev) => { const a = cv._aim; if (!a) return null; const r = cv.getBoundingClientRect(); const x = Math.min(a.L + a.pw, Math.max(a.L, ev.clientX - r.left)); return a.x0 + (x - a.L) / a.pw * (a.x1 - a.x0); };
+        for (const cv of escCanvases()) {
+            cv.addEventListener('pointerdown', (ev) => {
+                if (ev.button !== 0) return;
+                const t = tAt(cv, ev); if (t == null) return;
+                escUi.sel = { a: t, b: t, px: ev.clientX };
+                try { cv.setPointerCapture(ev.pointerId); } catch (err) { console.warn(`${TAG} pointer capture failed`, err); }
+            });
+            cv.addEventListener('pointermove', (ev) => { const t = tAt(cv, ev); if (t == null) return; escUi.hoverT = t; if (escUi.sel) escUi.sel.b = t; escSchedulePaint(); });
+            cv.addEventListener('pointerup', (ev) => {
+                const sel = escUi.sel; escUi.sel = null;
+                if (sel && Math.abs(ev.clientX - sel.px) > 6 && Math.abs(sel.b - sel.a) >= 300) { escUi.view = [Math.min(sel.a, sel.b), Math.max(sel.a, sel.b)]; escRefresh(res); }
+                else escSchedulePaint();
+            });
+            cv.addEventListener('pointercancel', () => { escUi.sel = null; escSchedulePaint(); });
+            cv.addEventListener('pointerleave', () => { if (escUi.sel) return; escUi.hoverT = null; escSchedulePaint(); });
+            cv.addEventListener('dblclick', () => { escUi.view = null; escRefresh(res); });
+        }
     }
 
     // ---------------- Simple mode: plain English for pilots / customers ----------------
@@ -976,6 +1486,9 @@
         if (warnEv.length) evBullets.push(`Other warnings from the drone: ${Array.from(new Set(warnEv.map(e => abortPlain(e.type)))).slice(0, 5).map(esc).join(', ')}.`);
         out.push(simpleCard('🧭 What happened', abort ? 'amber' : 'green', abort ? `The mission <b>did not finish</b>: ${abortPlain(abort.type)} at ${mlHms(abort.t)} UTC and the drone returned to base.` : `The mission <b>ran start to finish</b> with no safety events.`, evBullets, tech('events', adv), copyBtn('events')));
 
+        // --- ESC ---
+        out.push(escCardSimple(res, adv));
+
         // --- DAA ---
         let daaBottom, daaBullets = [], daaLevel = 'green';
         if (!res.roles.pingstation && !res.roles.radars) { daaBottom = extra.daaNote ? `Aircraft data was not available: ${esc(extra.daaNote)}.` : 'Aircraft data was not fetched (DAA box unticked).'; daaLevel = 'm'; }
@@ -1017,6 +1530,14 @@
             rows.unshift(['Verdict', res.lte.verdict.text], ...res.lte.outages.map(w => ['Outage', `${mlHms(w.from)} → ${mlHms(w.to)}`, `${w.s} s`, w.kind]), cov ? ['Coverage', `median RSRP ${cov.median} dBm`, `${cov.weakPct}% weak`, `${cov.veryWeakPct}% very weak`, `${cov.noCellPct}% no cell`] : [], []);
         } else if (key === 'events') rows = [['UTC', 'Event', 'Detail'], ...res.events.timeline.map(e => [mlHms(e.t), e.type, e.label])];
         else if (key === 'daa') rows = [['Callsign', 'ICAO', 'N-number', 'Type', 'Squawk', 'First UTC', 'Last UTC', 'Alt min ft', 'Alt max ft', 'Max kt', 'Closest m', 'Closest UTC', 'At abort m'], ...res.daa.aircraft.map(a => [a.callsign, a.icao, a.nNumber || '', a.emitter, a.squawks.join('/'), mlHms(new Date(a.first)), mlHms(new Date(a.last)), mlFt(a.altMinM), mlFt(a.altMaxM), a.spdMaxMs ? Math.round(a.spdMaxMs * 1.944) : '', a.closest ? Math.round(a.closest.dist) : '', a.closest ? mlHms(new Date(a.closest.t)) : '', a.atAbort ? Math.round(a.atAbort.dist) : ''])];
+        else if (key === 'esc' && res.esc && res.esc.present) {
+            const e = res.esc, an = res.escAnalysis;
+            rows = [['Verdict', an.verdict.text], ['Thresholds', `ratio above ${an.ratioThr}`, `sampling below ${an.sampThr}/s`], ...e.alerts.map(a => ['Drone alert', escT(a.t), a.esc || '', a.value, a.limit]), ...e.actions.map(a => ['Drone action', escT(a.t), a.text]), [],
+                ['ESC', 'Start UTC', 'End UTC', 'Duration s', 'Peak ratio', 'Peak UTC', 'Min samples/s', 'Seconds below', 'Seconds total', 'Min msg_in_sec', 'Sampling', 'Judged'],
+                ...an.stretches.map(x => [x.esc, mlHmsMs(x.from), mlHmsMs(x.to), x.s.toFixed(1), x.peak.toFixed(4), mlHmsMs(x.peakT), x.minPerSec, x.secsBelow, x.secsTotal, x.minMsg == null ? '' : x.minMsg, x.low ? 'Low' : 'Normal', x.judged ? 'yes' : '']), [],
+                ['ESC (motors running)', 'Throttle in avg', 'Throttle out avg', 'rpm avg', 'rpm max', 'Current avg A', 'Current max A', 'Min voltage', 'Max MOSFET C', 'Max capacitor C', 'Max ratio', '% of run above', 'Non-zero status samples'],
+                ...an.stats.filter(s => s.n).map(s => [s.esc, s.thrIn.toFixed(0), s.thrOut.toFixed(0), s.rpmAvg.toFixed(0), s.rpmMax.toFixed(0), s.curAvg.toFixed(1), s.curMax.toFixed(1), s.voltMin, s.mosMax, s.capMax, s.ratioMax.toFixed(4), s.overPct.toFixed(2), s.statusNonZero])];
+        }
         else if (key === 'warnings') rows = [['Process', 'Count', 'First UTC', 'Sample'], ...res.warnings.map(w => [w.proc, w.n, mlHms(w.first), w.samples.map(s => s.msg).join(' | ')])];
         const tsv = rows.map(r => r.map(c => String(c == null ? '' : c).replace(/\t|\n/g, ' ')).join('\t')).join('\n');
         const html = `<table>${rows.map((r, i) => `<tr>${r.map(c => `<t${i === 0 ? 'h' : 'd'}>${esc(c)}</t${i === 0 ? 'h' : 'd'}>`).join('')}</tr>`).join('')}</table>`;
