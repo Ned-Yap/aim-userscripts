@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.62
+// @version      0.63
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -33,7 +33,7 @@
 
     const SCRIPT_ID = 'aim-video-validation';
     const IS_DEV = (function() { try { return /^Latest - /.test((GM_info && GM_info.script && GM_info.script.name) || ''); } catch (e) { return false; } })();
-    const SCRIPT_VERSION = '0.62';
+    const SCRIPT_VERSION = '0.63';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -553,7 +553,7 @@
             .leaflet-container.aim-vv-placing, .leaflet-container.aim-vv-placing * { cursor: crosshair !important; }
             .aim-vv-edit__foot { border-top: 1px solid rgba(255,255,255,.12); padding-top: 4px; margin-top: 6px; }
             .aim-vv-review { position: fixed; inset: 0; z-index: 100000; background: rgba(0,0,0,.6); display: flex; align-items: center; justify-content: center; }
-            .aim-vv-review__box { max-width: 900px; max-height: 80vh; overflow: auto; background: #12151a; color: #e6e6e6; border: 1px solid rgba(95,227,255,.5); border-radius: 6px; padding: 12px 14px; font: 12px/1.45 monospace; }
+            .aim-vv-review__box { max-width: 760px; max-height: 80vh; overflow: auto; background: #12151a; color: #e6e6e6; border: 1px solid rgba(95,227,255,.5); border-radius: 6px; padding: 12px 14px; font: 12px/1.45 monospace; }
             .aim-vv-cardhost canvas { display: block; max-width: 100%; height: auto; border-radius: 6px; }
             .aim-vv-review table { border-collapse: collapse; margin: 6px 0; } .aim-vv-review td { padding: 2px 10px 2px 0; white-space: nowrap; border-bottom: 1px solid rgba(255,255,255,.06); }
             .aim-vv-review b { color: #5fe3ff; } .aim-vv-review .dim { color: #888; } .aim-vv-review .warn { color: #ffb347; }
@@ -2347,7 +2347,9 @@
             if (u.manual) manual.push(u.manual);
             if (!nb.contiguous) manual.push('its steps are no longer one run in the edited macro');
             if (!nb.steps.length) manual.push('every step of this pad was deleted in the macro');
-            const t = { id: u.o.app.id, name: u.o.app.name, app: u.o.app, ins: u.o.ins, kind: isPad ? 'micro' : 'macro', edited, reps: [{ pad: pads[key], ts: 0, te: u.o.body.length, exact: u.exact, full: u.full, hit: u.hit, of: u.of }], manual };
+            let drift = '';
+            if (!u.exact) { const os = oldBlock.map(sySig); drift = os.length === u.o.sig.length ? os.filter((g, i) => g !== u.o.sig[i]).length + ' of ' + os.length + ' steps differ' : u.o.sig.length + ' steps vs ' + os.length + ' in the macro'; }
+            const t = { id: u.o.app.id, name: u.o.app.name, app: u.o.app, ins: u.o.ins, kind: isPad ? 'micro' : 'macro', edited, drift, reps: [{ pad: pads[key], ts: 0, te: u.o.body.length, exact: u.exact, full: u.full, hit: u.hit, of: u.of }], manual };
             targets.push(t);
         });
         // 3) other missions that carry an EDITED pad (the Tattu / Tulip twin, a bigger macro, …)
@@ -2391,27 +2393,25 @@
     function syRowText(t) {
         return t.reps.map(r => {
             const whole = t.kind === 'micro' || (r.ts === 0 && r.te === syBody(t.ins).length);
-            return (whole ? 'whole mission' : 'pad "' + r.pad.label + '"') + ': ' + (r.te - r.ts) + ' → ' + r.pad.newBlock.length + ' steps (' + syCounts(r.pad.newBlock) + ')';
+            const was = r.te - r.ts, now = r.pad.newBlock.length;
+            return (whole ? 'all its steps' : 'pad "' + r.pad.label + '"') + ' (' + (was === now ? now + ' steps' : was + ' → ' + now + ' steps') + ')';
         }).join(' · ');
     }
     function syRenderBox(plan, err) {
-        if (err) return '<div class="warn">Could not check the micros / other macros (' + esc(err) + ') — Apply will update ONLY this mission.</div>';
+        if (err) return '<div class="warn" style="white-space:normal">Could not check the micros / other macros (' + esc(err) + ') — Apply will update ONLY this mission.</div>';
         const row = (t) => {
-            const notes = [];
-            if (t.manual.length) notes.push('🛑 not synced here — ' + t.manual.join('; ') + ' → fix it in the Mission Bank');
-            else if (t.loose) notes.push('⚠ it did not match this macro before this edit (' + t.reps.filter(r => !r.exact).map(r => r.hit + '/' + r.of + ' snapshots line up').join(', ') + ') — its version of the pad will be overwritten');
-            if (!t.edited) notes.push('not touched by this edit');
-            return '<tr><td>' + (t.manual.length ? '' : '<input type="checkbox" data-aim-vv-sync="' + esc(t.id) + '" data-aim-vv-synckey="' + esc(t.key) + '" ' + (t.defaultOn ? 'checked' : '') + '>') + '</td><td><b>' + esc(t.name) + '</b></td><td>' + (t.kind === 'micro' ? 'micro' : 'macro') + '</td><td>' + esc(t.manual.length ? '' : syRowText(t)) + '</td><td class="' + (notes.length ? 'warn' : 'dim') + '" style="white-space:normal;max-width:330px">' + esc(notes.join(' · ')) + '</td></tr>';
+            let note = '', cls = 'dim';
+            if (t.manual.length) { note = '🛑 Can\'t update from here: ' + t.manual.join('; ') + '. Fix it in the Mission Bank.'; cls = 'warn'; }
+            else if (t.loose) { note = '⚠ Already different from this macro' + (t.drift ? ' (' + t.drift + ')' : '') + '. Will be overwritten.'; cls = 'warn'; }
+            else note = 'Replaces ' + syRowText(t) + '.';
+            return '<tr><td style="vertical-align:top">' + (t.manual.length ? '' : '<input type="checkbox" data-aim-vv-sync="' + esc(t.id) + '" data-aim-vv-synckey="' + esc(t.key) + '" ' + (t.defaultOn ? 'checked' : '') + '>') + '</td><td style="white-space:normal"><b>' + esc(t.name) + '</b> <span class="dim">' + (t.kind === 'micro' ? 'micro' : 'macro') + '</span><div class="' + cls + '">' + esc(note) + '</div></td></tr>';
         };
         const mine = plan.targets.filter(t => t.edited), drift = plan.targets.filter(t => !t.edited);
-        let h = '<div style="margin:8px 0 2px"><b>Keep the other missions in step</b> <span class="dim">(checked ' + plan.missions + ' other missions on this site)</span></div>';
-        if (!mine.length) h += '<div class="dim">No micro or other macro shares the steps you edited — nothing else to update.</div>';
-        else {
-            h += '<div class="dim" style="white-space:normal;max-width:860px">The Mission Bank builds this macro from each pad\'s micro mission, and the same pad can also be in another macro (the Tattu / Tulip pair). Ticked missions get that pad\'s steps replaced with this macro\'s edited version — <b>this macro is the master copy</b>. Their own takeoff / return home, name and settings stay. Untick one to leave it as it is (the Mission Bank ⟳ will then show that pad as different).</div>'
-                + '<table><tr class="dim"><td></td><td>mission</td><td></td><td>what changes</td><td></td></tr>' + mine.map(row).join('') + '</table>';
-        }
-        if (plan.uncovered) h += '<div class="dim">' + plan.uncovered + ' edited step' + (plan.uncovered === 1 ? ' is' : 's are') + ' not part of any micro — nothing to sync for ' + (plan.uncovered === 1 ? 'it' : 'them') + '.</div>';
-        if (drift.length) h += '<details style="margin-top:4px"><summary class="dim" style="cursor:pointer">' + drift.length + ' micro' + (drift.length === 1 ? '' : 's') + ' already differ from this macro (not from this edit) — tick to overwrite with the macro\'s version</summary><table>' + drift.map(row).join('') + '</table></details>';
+        let h = '<div style="margin:10px 0 2px;padding-top:8px;border-top:1px solid rgba(95,227,255,.25)"><b>Also update</b> <span class="dim">— missions that share the pads you edited. This macro is the master copy.</span></div>';
+        if (!mine.length) h += '<div class="dim">Nothing else uses the steps you edited.</div>';
+        else h += '<table style="width:100%">' + mine.map(row).join('') + '</table>';
+        if (plan.uncovered) h += '<div class="dim">' + plan.uncovered + ' edited step' + (plan.uncovered === 1 ? ' is' : 's are') + ' not in any micro, so nothing to update for ' + (plan.uncovered === 1 ? 'it' : 'them') + '.</div>';
+        if (drift.length) h += '<details style="margin-top:4px"><summary class="dim" style="cursor:pointer">' + drift.length + ' other micro' + (drift.length === 1 ? '' : 's') + ' in this macro ' + (drift.length === 1 ? 'is' : 'are') + ' out of date (you didn\'t edit ' + (drift.length === 1 ? 'it' : 'them') + ' here)</summary><div class="dim">Tick to overwrite with this macro\'s version.</div><table style="width:100%">' + drift.map(row).join('') + '</table></details>';
         return h;
     }
     // Fill the review dialog's sync section; Apply stays disabled until the check has finished (or failed).
@@ -2505,12 +2505,13 @@
         const shapeNote = '<div class="dim" style="margin:4px 0;color:' + (shape && shape.builtin ? '#ffd45f' : 'inherit') + '">Save shape: ' + esc(shape ? shapeLabel(shape) : 'none') + '</div>';
         const rows = diff.map(d => '<tr><td>' + esc(d.label) + '</td><td>' + esc(d.kind) + (d.field ? ' · ' + esc(d.field) : '') + '</td><td>' + esc(d.before != null ? d.before : '') + '</td><td>' + esc(d.after != null ? d.after : '') + '</td><td class="dim">' + esc(d.note || '') + '</td></tr>').join('');
         const el = document.createElement('div'); el.className = 'aim-vv-review';
-        const actions = ed.log.length ? '<div class="dim" style="margin:4px 0">actions: ' + ed.log.map((a, i) => (i + 1) + '. ' + esc(a.what) + (a.step ? ' <b>' + esc(a.step) + '</b>' : '')).join(' · ') + '</div>' : '';
+        const runs = []; ed.log.forEach(a => { const last = runs[runs.length - 1]; if (last && last.what === a.what && last.step === a.step) last.n++; else runs.push({ what: a.what, step: a.step, n: 1 }); });
+        const actions = runs.length ? '<div class="dim" style="margin:4px 0;white-space:normal">You did: ' + runs.map(a => esc(a.what) + (a.n > 1 ? ' ×' + a.n : '') + (a.step ? ' <b>' + esc(a.step) + '</b>' : '')).join(' · ') + '</div>' : '';
         const grp = model.mission.mission_group_id;
-        el.innerHTML = '<div class="aim-vv-review__box"><div><b>Review changes to mission "' + esc(model.mission.name || model.mission.app_name) + '"</b> <span class="dim">(app ' + esc(model.mission.app && model.mission.app.id) + (grp != null && grp >= 0 ? ' · affects every future flight of group ' + esc(grp) : ' · not part of a mission group') + ')</span></div>' + actions
+        el.innerHTML = '<div class="aim-vv-review__box"><div style="font-size:14px"><b>Review changes — ' + esc(model.mission.name || model.mission.app_name) + '</b></div><div class="dim">' + (grp != null && grp >= 0 ? 'Affects every future flight of this mission.' : 'Not part of a mission group.') + '</div>' + actions
             + '<table><tr class="dim"><td>step</td><td>change</td><td>before</td><td>after</td><td></td></tr>' + rows + '</table>'
-            + shapeNote + '<div class="dim" style="margin:6px 0">Rails: the plan is re-read and compared first · a full JSON backup is saved (script storage + download) · ONE save · re-read and verified · a before/after report is saved + downloaded.</div>'
-            + (function() { try { const app = model.liveApp || model.mission.app; const r = resolveSelectedRobot(app, loadShape()); if (!r.value) blockers.push('Cannot resolve selected_robot: ' + r.from); const rep = Array.isArray(app.data_report_object_arr) ? app.data_report_object_arr.map(x => x && (x.name || x.id)).join(', ') : 'none'; return '<div class="dim">will send: name "' + esc(app.name) + '" · type ' + esc(app.type) + ' · site_id ' + esc(app.site) + ' · app_id <b>' + esc(app.id) + '</b>' + (app.__aimVvHow ? ' <span class="dim">(live app, ' + esc(app.__aimVvHow) + ')</span>' : '') + ' · selected_robot <b>' + esc(r.value || '?') + '</b> <span class="dim">(' + esc(r.from) + ')</span> · reports: ' + esc(rep) + ' · ' + edEnsureWork().length + ' instructions</div>'; } catch (e) { blockers.push('preflight failed: ' + e.message); return ''; } })()
+            + '<details style="margin:4px 0"><summary class="dim" style="cursor:pointer">save details</summary><div class="dim">app ' + esc(model.mission.app && model.mission.app.id) + (grp != null && grp >= 0 ? ' · group ' + esc(grp) : '') + '</div>' + shapeNote + '<div class="dim" style="margin:6px 0;white-space:normal">Rails: the plan is re-read and compared first · a full JSON backup is saved (script storage + download) · ONE save · re-read and verified · a before/after report is saved + downloaded.</div>'
+            + (function() { try { const app = model.liveApp || model.mission.app; const r = resolveSelectedRobot(app, loadShape()); if (!r.value) blockers.push('Cannot resolve selected_robot: ' + r.from); const rep = Array.isArray(app.data_report_object_arr) ? app.data_report_object_arr.map(x => x && (x.name || x.id)).join(', ') : 'none'; return '<div class="dim" style="white-space:normal">will send: name "' + esc(app.name) + '" · type ' + esc(app.type) + ' · site_id ' + esc(app.site) + ' · app_id <b>' + esc(app.id) + '</b>' + (app.__aimVvHow ? ' <span class="dim">(live app, ' + esc(app.__aimVvHow) + ')</span>' : '') + ' · selected_robot <b>' + esc(r.value || '?') + '</b> <span class="dim">(' + esc(r.from) + ')</span> · reports: ' + esc(rep) + ' · ' + edEnsureWork().length + ' instructions</div>'; } catch (e) { blockers.push('preflight failed: ' + e.message); return ''; } })() + '</details>'
             + '<div data-aim-vv-syncbox><div class="dim" style="margin:8px 0 2px">Checking which micros / other macros share these pads…</div></div>'
             + (blockers.length ? '<div class="warn">' + blockers.map(esc).join('<br>') + '</div>' : '')
             + '<div class="aim-vv-edit__row"><button type="button" data-aim-vv-rv="apply" disabled>Apply ' + diff.length + ' change' + (diff.length === 1 ? '' : 's') + '</button><button type="button" data-aim-vv-rv="cancel">Cancel</button><span class="aim-vv-review__status dim"></span></div></div>';

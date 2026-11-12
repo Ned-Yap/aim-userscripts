@@ -1,4 +1,6 @@
-## 2026-11-12 — 🎞 AIM Video Validation latest v0.62 (latest only) — corrections now reach the micro missions
+## 2026-11-12 — 🎞 AIM Video Validation latest v0.63 (latest only) — corrections now reach the micro missions
+
+- **Cleaner Review window** (v0.63) — repeated nudges are grouped (`down 1° ×19`), the technical save lines are folded under "save details", and the linked-missions list is one short line per mission, including how many steps an out-of-date micro differs by.
 
 - **Apply can update the micro too.** When you correct a macro mission from Mission Playback, the Review window now lists every mission that shares the pads you edited: the pad's micro mission and any other macro that carries the same pad (the Tattu / Tulip pair). They are ticked by default; Apply replaces that pad's steps in each one with the macro's corrected version. Each mission keeps its own takeoff, return home, name and settings.
 - **The macro is the master copy.** A micro that already differed from the macro before your edit is flagged in the list. Micros that differ but that you did not touch are listed separately and are not ticked.
