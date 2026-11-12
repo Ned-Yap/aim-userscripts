@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.61
+// @version      0.62
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -33,7 +33,7 @@
 
     const SCRIPT_ID = 'aim-video-validation';
     const IS_DEV = (function() { try { return /^Latest - /.test((GM_info && GM_info.script && GM_info.script.name) || ''); } catch (e) { return false; } })();
-    const SCRIPT_VERSION = '0.61';
+    const SCRIPT_VERSION = '0.62';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -245,6 +245,7 @@
     // Mission Bank edits has a different id (e.g. 183822) and is not in the site list under the frozen id. Resolve the
     // live app by name, disambiguating same-name missions by structure and geometry against the flown plan.
     // (GET /available_app/<id>/ is 404 and the list needs type=1 — without it the server answers 400.)
+    let lastType1 = null;   // { sid, at, list } — the site's type-1 mission list as last read by fetchLiveApp
     function fetchLiveApp(sid, appId, name, flownPlan) {
         const norm = (v) => String(v || '').trim().toLowerCase().replace(/\s+/g, ' ');
         const flown = flownPlan || [];
@@ -284,6 +285,7 @@
         };
         const listOf = (type) => getJSON('/available_app/?site_id=' + encodeURIComponent(sid) + '&type=' + type).then(arr => Array.isArray(arr) ? arr : (arr && (arr.results || arr.apps)) || []).catch(e => { log('mission list type=' + type + ': ' + e.message); return []; });
         return listOf(1).then(l1 => {
+            lastType1 = { sid: String(sid), at: Date.now(), list: l1 };
             const r1 = resolveIn(l1, 'type 1'); if (r1) return r1;
             // Other mission types (Percepto: 1 = patrol; others exist) — the flown mission may not be a patrol.
             return Promise.all([listOf(2), listOf(3), listOf(0)]).then(more => {
@@ -2235,6 +2237,260 @@
         toast('Nav ' + stepLabel(nav) + ' moved — review to apply', false);
     }
     function onPlaceKey(e) { if (e.key === 'Escape' && ed.placing) { setPlacing(null); renderEdit(); } }
+    // ===============================================================
+    // MICRO / SHARED-PAD SYNC (feature #333, v0.62)
+    // The Mission Bank builds a macro as takeoff + each pad's MICRO body + returnHome, and its ⟳ Re-merge treats the
+    // micro as the source of truth. Edits made HERE land in the macro, so without this the micro (and the other macro
+    // that carries the same pad — the Tattu / Tulip pair) keep the old steps and the next ⟳ would pull them back in.
+    // On Apply we therefore offer to push the edited pad into every mission that shares it. THE MACRO IS THE MASTER.
+    //   pad = a mission whose whole body sits inside this macro as one run (exact step match), or — when it had
+    //         already drifted — the run holding its SNAPSHOTS (snapshots decide which pad a step belongs to; the navs
+    //         before a snapshot travel with it). Never located by navs alone.
+    //   target = that mission (its body is replaced, its own takeoff / returnHome / name / settings stay) or any other
+    //         mission that contains the pad's old steps (only that run is replaced).
+    // Rails: plan is rebuilt from a fresh read at Apply · one backup JSON for every target (Mission Bank ↩ Restore
+    // reads it) · sequential saves · re-read + verify by NAME (every save mints a new id) · every failure is listed.
+    // ===============================================================
+    const SY_NAV = 1, SY_SNAP = 6;
+    function syIns(app) { return ((app && app.instructions) || []).filter(Boolean).slice().sort((a, b) => a.index_in_app - b.index_in_app); }
+    function syBody(ins) { return ins.filter(i => i.type !== 0 && i.type !== 99); }
+    // Tolerant step signature (Mission Bank's re-merge signature + snapshot heading): type, values, position to 6
+    // decimals and only the tuning-relevant extra_options — everything else is save-path churn that never converges.
+    function sySig(st) {
+        const f = (v) => typeof v === 'number' ? v.toFixed(2) : (v == null ? 'null' : String(v));
+        const loc = (st.location && typeof st.location.lat === 'number') ? st.location.lat.toFixed(6) + ',' + st.location.lng.toFixed(6) : '-';
+        const src = st.extra_options || {}; const keep = {};
+        if (st.type === SY_SNAP && src.pitch != null) keep.p = src.pitch;
+        if (st.type === SY_SNAP && typeof src.heading === 'number') keep.h = +src.heading.toFixed(1);
+        if (st.type === SY_NAV && src.shouldUseFreezoneMinAlt != null) keep.f = src.shouldUseFreezoneMinAlt;
+        return st.type + '|' + f(st.value1) + '|' + f(st.value2) + '|' + loc + '|' + JSON.stringify(keep);
+    }
+    function syFindRuns(hay, needle) {
+        const out = []; if (!needle.length || needle.length > hay.length) return out;
+        for (let i = 0; i + needle.length <= hay.length; i++) { let k = 0; while (k < needle.length && hay[i + k] === needle[k]) k++; if (k === needle.length) out.push(i); }
+        return out;
+    }
+    function sySnaps(body) {
+        const out = [];
+        body.forEach((st, i) => { if (st.type !== SY_SNAP) return; let nav = null; for (let k = i - 1; k >= 0; k--) if (body[k].type === SY_NAV) { nav = body[k]; break; } out.push({ i, st, gps: isGps(st), nav }); });
+        return out;
+    }
+    // Same snapshot? GPS snapshots by aim point (5 m). An in-place snapshot has no position of its own, so it is
+    // compared where it is taken from (5 m) + which way it faces (45°).
+    function sySnapNear(a, b) {
+        if (a.gps && b.gps) { const d = distM(a.st.location, b.st.location); return d != null && d <= 5; }
+        const na = a.nav && a.nav.location, nb = b.nav && b.nav.location; const d = (na && nb) ? distM(na, nb) : null;
+        if (d == null || d > 5) return false;
+        if (a.gps || b.gps) return true;
+        const dh = hdgDelta((a.st.extra_options || {}).heading, (b.st.extra_options || {}).heading);
+        return dh == null || Math.abs(dh) <= 45;
+    }
+    // Find the run of `hay` that holds `needle`'s snapshots. full = every snapshot found and no foreign snapshot in the run.
+    function syLocateBySnaps(needle, hay) {
+        const ns = sySnaps(needle), hs = sySnaps(hay);
+        if (!ns.length || !hs.length) return null;
+        const used = {}; const hit = [];
+        ns.forEach(a => { const j = hs.findIndex((b, jj) => !used[jj] && sySnapNear(a, b)); if (j >= 0) { used[j] = true; hit.push(j); } });
+        if (hit.length < Math.max(1, Math.ceil(ns.length * 0.8))) return null;
+        const lo = Math.min.apply(null, hit), hi = Math.max.apply(null, hit);
+        if (hit.length < Math.ceil((hi - lo + 1) * 0.8)) return null;
+        const lead = ns[0].i, trail = needle.length - 1 - ns[ns.length - 1].i;
+        const floor = lo > 0 ? hs[lo - 1].i + 1 : 0, ceil = hi < hs.length - 1 ? hs[hi + 1].i : hay.length;
+        return { s: Math.max(floor, hs[lo].i - lead), e: Math.min(ceil, hs[hi].i + 1 + trail), exact: false, full: hit.length === ns.length && hi - lo + 1 === ns.length, hit: hit.length, of: ns.length };
+    }
+    function syCounts(steps) { return steps.filter(x => x.type === SY_NAV).length + ' nav / ' + steps.filter(x => x.type === SY_SNAP).length + ' snap / ' + steps.length + ' steps'; }
+    // list = the site's missions (fresh) · macroId = the live macro's id in that list · pre = the macro's live steps
+    // (ids = working-copy ids) · work = the edited working copy.
+    function syBuildPlan(list, macroId, pre, work) {
+        const preB = syBody(pre), workB = syBody(work), preSig = preB.map(sySig);
+        const idx = {}; preB.forEach((st, i) => { idx[st.id] = i; });
+        // Which original step does each edited step belong to? A new step (duplicated block) follows its source.
+        let own = -1; const owner = workB.map(w => { if (!w._new && idx[w.id] != null) own = idx[w.id]; return own; });
+        const firstReal = owner.find(o => o >= 0); for (let i = 0; i < owner.length && owner[i] < 0; i++) owner[i] = firstReal != null ? firstReal : 0;
+        const newBlockOf = (s, e) => {
+            const at = []; workB.forEach((w, i) => { if (owner[i] >= s && owner[i] < e) at.push(i); });
+            const contiguous = !at.length || at[at.length - 1] - at[0] + 1 === at.length;
+            return { steps: at.map(i => workB[i]), contiguous };
+        };
+        const others = (list || []).filter(a => a && Number(a.id) !== Number(macroId) && Array.isArray(a.instructions)).map(a => { const ins = syIns(a); const body = syBody(ins); return { app: a, ins, body, sig: body.map(sySig) }; }).filter(o => o.body.length);
+        // 1) units = missions that live inside this macro
+        const units = [];
+        others.forEach(o => {
+            if (o.body.length > preB.length) return;
+            const runs = syFindRuns(preSig, o.sig);
+            if (runs.length === 1) { units.push({ o, s: runs[0], e: runs[0] + o.body.length, exact: true, full: true }); return; }
+            if (runs.length > 1) { units.push({ o, s: runs[0], e: runs[0] + o.body.length, exact: true, full: true, manual: 'its steps appear ' + runs.length + ' times in this macro' }); return; }
+            const loc = syLocateBySnaps(o.body, preB);
+            if (loc && loc.e > loc.s) units.push(Object.assign({ o }, loc));
+        });
+        const inside = (a, b) => a.s >= b.s && a.e <= b.e && (a.e - a.s) < (b.e - b.s);
+        const overlap = (a, b) => a.s < b.e && b.s < a.e;
+        // a snapshot-located mission that CONTAINS another located mission is a macro, not a pad — handled per pad below
+        const demoted = units.filter(u => !u.exact && units.some(v => v !== u && inside(v, u)));
+        const padUnits = units.filter(u => demoted.indexOf(u) < 0);
+        padUnits.filter(u => !u.exact).forEach(u => {
+            padUnits.filter(v => v.exact && overlap(u, v) && !inside(v, u) && !inside(u, v) && !(u.s === v.s && u.e === v.e)).forEach(v => { if (v.s <= u.s) u.s = Math.max(u.s, v.e); else u.e = Math.min(u.e, v.s); });
+            if (u.e <= u.s) u.manual = 'could not tell its steps apart from a neighbouring pad';
+        });
+        padUnits.filter(u => !u.exact && !u.manual).forEach(u => { if (padUnits.some(v => v !== u && !v.exact && !v.manual && overlap(u, v) && !(u.s === v.s && u.e === v.e) && !inside(u, v) && !inside(v, u))) u.manual = 'its snapshots overlap another micro that also differs from this macro'; });
+        // 2) pads + unit targets
+        const pads = {}; const targets = [];
+        padUnits.forEach(u => {
+            const key = u.s + '-' + u.e;
+            const oldBlock = preB.slice(u.s, u.e), nb = newBlockOf(u.s, u.e);
+            const edited = oldBlock.map(stepSig).join('\n') !== nb.steps.map(stepSig).join('\n');
+            if (!edited && u.exact) return;   // in sync and untouched
+            const isPad = !padUnits.some(v => v !== u && inside(v, u));
+            if (!pads[key]) pads[key] = { key, s: u.s, e: u.e, label: u.o.app.name, oldBlock, newBlock: nb.steps, edited, isPad };
+            else if (isPad && u.o.body.length <= oldBlock.length) pads[key].label = pads[key].label || u.o.app.name;
+            const manual = [];
+            if (u.manual) manual.push(u.manual);
+            if (!nb.contiguous) manual.push('its steps are no longer one run in the edited macro');
+            if (!nb.steps.length) manual.push('every step of this pad was deleted in the macro');
+            const t = { id: u.o.app.id, name: u.o.app.name, app: u.o.app, ins: u.o.ins, kind: isPad ? 'micro' : 'macro', edited, reps: [{ pad: pads[key], ts: 0, te: u.o.body.length, exact: u.exact, full: u.full, hit: u.hit, of: u.of }], manual };
+            targets.push(t);
+        });
+        // 3) other missions that carry an EDITED pad (the Tattu / Tulip twin, a bigger macro, …)
+        const unitIds = {}; padUnits.forEach(u => { unitIds[u.o.app.id] = true; });
+        const editedPads = Object.keys(pads).map(k => pads[k]).filter(p => p.edited && p.newBlock.length).sort((a, b) => (b.e - b.s) - (a.e - a.s));
+        others.forEach(o => {
+            if (unitIds[o.app.id]) return;
+            const reps = [], manual = [];
+            editedPads.forEach(p => {
+                const needle = p.oldBlock.map(sySig);
+                const runs = syFindRuns(o.sig, needle);
+                let r = null;
+                if (runs.length === 1) r = { pad: p, ts: runs[0], te: runs[0] + needle.length, exact: true, full: true };
+                else if (runs.length > 1) { manual.push('"' + p.label + '" appears ' + runs.length + ' times in it'); return; }
+                else { const loc = syLocateBySnaps(p.oldBlock, o.body); if (loc && loc.e > loc.s) r = { pad: p, ts: loc.s, te: loc.e, exact: false, full: loc.full, hit: loc.hit, of: loc.of }; }
+                if (r && !reps.some(x => x.ts < r.te && r.ts < x.te)) reps.push(r);
+            });
+            if (reps.length || manual.length) targets.push({ id: o.app.id, name: o.app.name, app: o.app, ins: o.ins, kind: 'macro', edited: true, reps, manual });
+        });
+        // 4) the steps each target would be saved with
+        targets.forEach(t => {
+            try {
+                const bi = []; t.ins.forEach((st, i) => { if (st.type !== 0 && st.type !== 99) bi.push(i); });
+                if (!bi.length || bi[bi.length - 1] - bi[0] + 1 !== bi.length) throw new Error('it has a takeoff / return-home step in the middle of its steps');
+                const body = t.ins.slice(bi[0], bi[bi.length - 1] + 1);
+                t.reps.slice().sort((a, b) => b.ts - a.ts).forEach(r => { body.splice.apply(body, [r.ts, r.te - r.ts].concat(deepCopy(r.pad.newBlock))); });
+                t.newIns = t.ins.slice(0, bi[0]).concat(body, t.ins.slice(bi[bi.length - 1] + 1));
+                if (!t.reps.length) throw new Error('nothing to replace');
+            } catch (e) { t.manual.push(e.message); }
+            t.loose = t.reps.some(r => !r.exact);
+            t.defaultOn = !t.manual.length && t.edited && t.reps.every(r => r.exact || r.full);
+            t.key = t.id + ':' + (t.newIns ? t.newIns.length : 'x') + ':' + t.reps.map(r => r.ts + '-' + r.te).join(',');
+        });
+        // edited steps that sit in no pad at all (nothing to sync them to)
+        const covered = (i) => padUnits.some(u => i >= u.s && i < u.e);
+        let uncovered = 0;
+        preB.forEach((st, i) => { if (covered(i)) return; const n = workB.find(w => w.id === st.id); if (!n || stepSig(n) !== stepSig(st)) uncovered++; });
+        workB.forEach((w, i) => { if (w._new && !covered(owner[i])) uncovered++; });
+        return { targets, uncovered, missions: others.length };
+    }
+    function syRowText(t) {
+        return t.reps.map(r => {
+            const whole = t.kind === 'micro' || (r.ts === 0 && r.te === syBody(t.ins).length);
+            return (whole ? 'whole mission' : 'pad "' + r.pad.label + '"') + ': ' + (r.te - r.ts) + ' → ' + r.pad.newBlock.length + ' steps (' + syCounts(r.pad.newBlock) + ')';
+        }).join(' · ');
+    }
+    function syRenderBox(plan, err) {
+        if (err) return '<div class="warn">Could not check the micros / other macros (' + esc(err) + ') — Apply will update ONLY this mission.</div>';
+        const row = (t) => {
+            const notes = [];
+            if (t.manual.length) notes.push('🛑 not synced here — ' + t.manual.join('; ') + ' → fix it in the Mission Bank');
+            else if (t.loose) notes.push('⚠ it did not match this macro before this edit (' + t.reps.filter(r => !r.exact).map(r => r.hit + '/' + r.of + ' snapshots line up').join(', ') + ') — its version of the pad will be overwritten');
+            if (!t.edited) notes.push('not touched by this edit');
+            return '<tr><td>' + (t.manual.length ? '' : '<input type="checkbox" data-aim-vv-sync="' + esc(t.id) + '" data-aim-vv-synckey="' + esc(t.key) + '" ' + (t.defaultOn ? 'checked' : '') + '>') + '</td><td><b>' + esc(t.name) + '</b></td><td>' + (t.kind === 'micro' ? 'micro' : 'macro') + '</td><td>' + esc(t.manual.length ? '' : syRowText(t)) + '</td><td class="' + (notes.length ? 'warn' : 'dim') + '" style="white-space:normal;max-width:330px">' + esc(notes.join(' · ')) + '</td></tr>';
+        };
+        const mine = plan.targets.filter(t => t.edited), drift = plan.targets.filter(t => !t.edited);
+        let h = '<div style="margin:8px 0 2px"><b>Keep the other missions in step</b> <span class="dim">(checked ' + plan.missions + ' other missions on this site)</span></div>';
+        if (!mine.length) h += '<div class="dim">No micro or other macro shares the steps you edited — nothing else to update.</div>';
+        else {
+            h += '<div class="dim" style="white-space:normal;max-width:860px">The Mission Bank builds this macro from each pad\'s micro mission, and the same pad can also be in another macro (the Tattu / Tulip pair). Ticked missions get that pad\'s steps replaced with this macro\'s edited version — <b>this macro is the master copy</b>. Their own takeoff / return home, name and settings stay. Untick one to leave it as it is (the Mission Bank ⟳ will then show that pad as different).</div>'
+                + '<table><tr class="dim"><td></td><td>mission</td><td></td><td>what changes</td><td></td></tr>' + mine.map(row).join('') + '</table>';
+        }
+        if (plan.uncovered) h += '<div class="dim">' + plan.uncovered + ' edited step' + (plan.uncovered === 1 ? ' is' : 's are') + ' not part of any micro — nothing to sync for ' + (plan.uncovered === 1 ? 'it' : 'them') + '.</div>';
+        if (drift.length) h += '<details style="margin-top:4px"><summary class="dim" style="cursor:pointer">' + drift.length + ' micro' + (drift.length === 1 ? '' : 's') + ' already differ from this macro (not from this edit) — tick to overwrite with the macro\'s version</summary><table>' + drift.map(row).join('') + '</table></details>';
+        return h;
+    }
+    // Fill the review dialog's sync section; Apply stays disabled until the check has finished (or failed).
+    function syFillReview(el) {
+        const host = el.querySelector('[data-aim-vv-syncbox]'), btn = el.querySelector('[data-aim-vv-rv="apply"]');
+        const done = (html) => { if (ed.reviewEl !== el) return; host.innerHTML = html; if (btn && !el.__aimBlocked) btn.disabled = false; };
+        if (el.__aimBlocked) { host.innerHTML = ''; return; }
+        const sid = model.sid, macroId = model.liveApp && model.liveApp.id;
+        getJSON('/available_app/?site_id=' + encodeURIComponent(sid) + '&type=1').then(arr => {
+            const list = Array.isArray(arr) ? arr : (arr && (arr.results || arr.apps)) || [];
+            const plan = syBuildPlan(list, macroId, liveBase(), edEnsureWork());
+            log('sync check: ' + plan.targets.length + ' mission(s) share edited / drifted pads (' + plan.targets.map(t => '"' + t.name + '" ' + t.kind + (t.manual.length ? ' MANUAL: ' + t.manual.join('; ') : (t.loose ? ' loose' : ''))).join(', ') + ') · ' + plan.uncovered + ' edited step(s) outside any micro');
+            done(syRenderBox(plan, null));
+        }).catch(e => { warn('sync check failed:', e); done(syRenderBox(null, e.message)); });
+    }
+    function syReadTicks(el) {
+        const out = {}; if (!el) return out;
+        el.querySelectorAll('input[data-aim-vv-sync]').forEach(c => { if (c.checked) out[c.dataset.aimVvSync] = c.dataset.aimVvSynckey; });
+        return out;
+    }
+    const syWait = (ms) => new Promise(r => setTimeout(r, ms));
+    // Save every ticked target. Never throws: each target reports ok / error.
+    async function sySaveTargets(plan, ticks, sid, shape, csrf, stamp) {
+        const results = [];
+        const want = Object.keys(ticks);
+        const picked = [];
+        want.forEach(id => {
+            const t = plan.targets.find(x => String(x.id) === String(id));
+            if (!t) { results.push({ id, name: '(mission ' + id + ')', ok: false, error: 'it changed or disappeared between Review and Apply — not touched' }); return; }
+            if (t.key !== ticks[id] || t.manual.length || !t.newIns) { results.push({ id, name: t.name, kind: t.kind, ok: false, error: t.manual.length ? t.manual.join('; ') : 'it changed between Review and Apply — not touched (reopen Review)' }); return; }
+            picked.push(t);
+        });
+        if (!picked.length) return results;
+        status('backing up ' + picked.length + ' linked mission' + (picked.length === 1 ? '' : 's') + '…');
+        download('vv-sync-backup-' + sid + '-' + stamp + '.json', { site: sid, savedAt: new Date().toISOString(), reason: 'vv-sync', missions: picked.map(t => t.app) });
+        for (const t of picked) {
+            const res = { id: t.id, name: t.name, kind: t.kind, ok: false, steps: t.newIns.length, what: syRowText(t) };
+            results.push(res);
+            try {
+                status('updating "' + t.name + '"…');
+                const built = buildBody(t.app, t.newIns, shape);
+                const r = await fetch('/available_app/', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrf }, body: JSON.stringify(built.body) });
+                const txt = await r.text().catch(() => '');
+                if (!r.ok) { warn('sync save of "' + t.name + '" failed HTTP ' + r.status + ': ' + txt.slice(0, 500)); warn('failing body:', built.body); throw new Error('save refused (HTTP ' + r.status + ')' + (txt ? ': ' + txt.replace(/\s+/g, ' ').slice(0, 160) : '')); }
+                res.saved = true;
+            } catch (e) { res.error = e.message; warn('sync of "' + t.name + '" failed:', e); }
+            await syWait(300);
+        }
+        const saved = results.filter(r => r.saved);
+        if (!saved.length) return results;
+        status('verifying linked missions…');
+        try {
+            const arr = await getJSON('/available_app/?site_id=' + encodeURIComponent(sid) + '&type=1');
+            const list = Array.isArray(arr) ? arr : (arr && (arr.results || arr.apps)) || [];
+            saved.forEach(res => {
+                const t = picked.find(x => x.id === res.id);
+                const cands = list.filter(a => a && a.name === t.name);
+                if (!cands.length) { res.error = 'saved, but no mission named "' + t.name + '" was found afterwards'; return; }
+                const exp = t.newIns.map(sySig).join('\n');
+                const hit = cands.find(a => syIns(a).map(sySig).join('\n') === exp);
+                if (!hit) { res.error = 'saved, but it read back different (' + syIns(cands[0]).length + ' steps, expected ' + t.newIns.length + ')'; return; }
+                const rb = JSON.stringify(t.app.robot_type_names || []), ra = JSON.stringify(hit.robot_type_names || []);
+                if (rb !== ra) { res.error = 'steps saved, but its drone types changed ' + rb + ' → ' + ra + ' — re-tick them in the Mission Bank editor'; return; }
+                res.ok = true; res.newId = hit.id;
+            });
+        } catch (e) { warn('sync verify read failed:', e); saved.forEach(res => { res.error = 'saved, but could not be re-read to verify (' + e.message + ')'; }); }
+        return results;
+    }
+    function syShowResults(name, results, note) {
+        const bad = results.filter(r => !r.ok);
+        const el = document.createElement('div'); el.className = 'aim-vv-review';
+        el.innerHTML = '<div class="aim-vv-review__box"><div><b>"' + esc(name) + '" saved' + (results.length ? ' — linked missions: ' + (results.length - bad.length) + ' updated' + (bad.length ? ', <span class="warn">' + bad.length + ' FAILED</span>' : '') : '') + '</b></div>'
+            + (note ? '<div class="warn" style="white-space:normal;max-width:860px">' + esc(note) + '</div>' : '')
+            + (results.length ? '<table>' + results.map(r => '<tr><td>' + (r.ok ? '✅' : '🛑') + '</td><td><b>' + esc(r.name) + '</b></td><td>' + esc(r.kind || '') + '</td><td style="white-space:normal;max-width:520px" class="' + (r.ok ? 'dim' : 'warn') + '">' + esc(r.ok ? (r.what || 'updated') + ' · verified' : r.error || 'failed') + '</td></tr>').join('') + '</table>' : '')
+            + (bad.length ? '<div class="warn" style="white-space:normal;max-width:860px">The failed missions still hold their OLD steps. Fix them in the Mission Bank before the next ⟳ Re-merge, or that pad\'s correction can be pulled back out of this macro.</div>' : '')
+            + '<div class="aim-vv-edit__row"><button type="button" data-aim-vv-rv="cancel">Close</button></div></div>';
+        if (ed.reviewEl) ed.reviewEl.remove();
+        document.body.appendChild(el); ed.reviewEl = el;
+    }
     // ---- review + apply ----
     function openReview() {
         const diff = edDiff();
@@ -2255,9 +2511,12 @@
             + '<table><tr class="dim"><td>step</td><td>change</td><td>before</td><td>after</td><td></td></tr>' + rows + '</table>'
             + shapeNote + '<div class="dim" style="margin:6px 0">Rails: the plan is re-read and compared first · a full JSON backup is saved (script storage + download) · ONE save · re-read and verified · a before/after report is saved + downloaded.</div>'
             + (function() { try { const app = model.liveApp || model.mission.app; const r = resolveSelectedRobot(app, loadShape()); if (!r.value) blockers.push('Cannot resolve selected_robot: ' + r.from); const rep = Array.isArray(app.data_report_object_arr) ? app.data_report_object_arr.map(x => x && (x.name || x.id)).join(', ') : 'none'; return '<div class="dim">will send: name "' + esc(app.name) + '" · type ' + esc(app.type) + ' · site_id ' + esc(app.site) + ' · app_id <b>' + esc(app.id) + '</b>' + (app.__aimVvHow ? ' <span class="dim">(live app, ' + esc(app.__aimVvHow) + ')</span>' : '') + ' · selected_robot <b>' + esc(r.value || '?') + '</b> <span class="dim">(' + esc(r.from) + ')</span> · reports: ' + esc(rep) + ' · ' + edEnsureWork().length + ' instructions</div>'; } catch (e) { blockers.push('preflight failed: ' + e.message); return ''; } })()
+            + '<div data-aim-vv-syncbox><div class="dim" style="margin:8px 0 2px">Checking which micros / other macros share these pads…</div></div>'
             + (blockers.length ? '<div class="warn">' + blockers.map(esc).join('<br>') + '</div>' : '')
-            + '<div class="aim-vv-edit__row"><button type="button" data-aim-vv-rv="apply" ' + (blockers.length ? 'disabled' : '') + '>Apply ' + diff.length + ' change' + (diff.length === 1 ? '' : 's') + '</button><button type="button" data-aim-vv-rv="cancel">Cancel</button><span class="aim-vv-review__status dim"></span></div></div>';
+            + '<div class="aim-vv-edit__row"><button type="button" data-aim-vv-rv="apply" disabled>Apply ' + diff.length + ' change' + (diff.length === 1 ? '' : 's') + '</button><button type="button" data-aim-vv-rv="cancel">Cancel</button><span class="aim-vv-review__status dim"></span></div></div>';
         document.body.appendChild(el); ed.reviewEl = el;
+        el.__aimBlocked = blockers.length > 0;
+        syFillReview(el);
     }
     function onReviewClick(e) {
         const b = e.target.closest && e.target.closest('[data-aim-vv-rv]'); if (!b) return;
@@ -2320,6 +2579,7 @@
     async function applyChanges() {
         if (ed.busy) return; ed.busy = true;
         const diff = edDiff(); const mid = model.mid, sid = model.sid;
+        const syTicks = syReadTicks(ed.reviewEl);
         try {
             const shape = loadShape(), csrf = getCsrf();
             if (isLite() || !shape || !shape.sample || !csrf || !diff.length) throw new Error('blocked (lite / shape / csrf / empty)');
@@ -2336,6 +2596,12 @@
             const backup = { at, mid, sid, appId: freshApp.id, name: freshApp.name, app: freshApp };
             gmPush(BACKUPS_KEY, backup, 20); download('vv-backup-' + mid + '-' + stamp + '.json', backup);
             const fresh = { app: freshApp };
+            // Linked missions: plan from the SAME fresh read the macro was just checked against (before anything is written).
+            let syPlan = null, syNote = '';
+            if (Object.keys(syTicks).length) {
+                try { if (!lastType1 || lastType1.sid !== String(sid)) throw new Error('no fresh mission list'); syPlan = syBuildPlan(lastType1.list, freshApp.id, liveBase(), ed.work); }
+                catch (e) { warn('sync plan failed:', e); syNote = 'The linked missions were NOT updated (' + e.message + ') — only this mission was saved.'; }
+            }
             const built = buildBody(freshApp, ed.work, shape);
             log('save base = live app ' + freshApp.id + ' (' + freshIns.length + ' steps; flown record ' + appId + ')');
             log('save body: ' + built.body.instructions.length + ' instructions · keys ' + Object.keys(built.body).join(',') + (built.fromSample.length ? ' · from learned sample (unchanged): ' + built.fromSample.join(',') : '') + ' · shape: ' + shapeLabel(shape));
@@ -2354,13 +2620,21 @@
             if (repB !== repA) mism.push('data reports changed: ' + repB + ' → ' + repA);
             if (afterIns.length !== ed.work.length) mism.push('step count ' + afterIns.length + ' ≠ expected ' + ed.work.length);
             ed.work.forEach((w, i) => { const a = afterIns[i]; if (!a) return; const wa = deepCopy(w); delete wa._new; const dd = fieldDiffs(Object.assign({ type_name: w.type_name }, a), Object.assign({ type_name: w.type_name }, wa)); if (a.type !== w.type) mism.push('#' + i + ' type ' + a.type + ' ≠ ' + w.type); dd.forEach(d => mism.push('#' + i + ' ' + d.field + ': server ' + d.before + ' vs sent ' + d.after)); });
-            const report = { at, mid, sid, appId: fresh.app.id, name: fresh.app.name, group: model.mission.mission_group_id, actions: ed.log.map(a => ({ at: new Date(a.at).toISOString(), what: a.what, step: a.step })), changes: diff, verify: { ok: !mism.length, mismatches: mism }, httpStatus: r.status };
+            let syResults = [];
+            if (syPlan) {
+                if (afterIns.length !== ed.work.length) syNote = 'This mission read back with a different step count, so the linked missions were NOT updated. Sort this one out first.';
+                else { try { syResults = await sySaveTargets(syPlan, syTicks, sid, shape, csrf, stamp); } catch (e) { warn('sync failed:', e); syNote = 'Updating the linked missions stopped early (' + e.message + ') — check each one in the Mission Bank.'; } }
+            }
+            const syBad = syResults.filter(x => !x.ok).length;
+            const report = { at, mid, sid, appId: fresh.app.id, name: fresh.app.name, group: model.mission.mission_group_id, actions: ed.log.map(a => ({ at: new Date(a.at).toISOString(), what: a.what, step: a.step })), changes: diff, verify: { ok: !mism.length, mismatches: mism }, httpStatus: r.status, sync: { asked: Object.keys(syTicks).length, note: syNote, results: syResults.map(x => ({ name: x.name, kind: x.kind, ok: x.ok, error: x.error || null, what: x.what || null, oldId: x.id, newId: x.newId || null })) } };
             gmPush(REPORTS_KEY, report, 200); download('vv-correction-' + mid + '-' + stamp + '.json', report);
             sessionReports.push(report);
             if (mism.length) { warn('verify mismatches:', mism); toast('Saved, but ' + mism.length + ' field(s) read back differently — see console + report', true); }
-            else toast('✅ Saved ' + diff.length + ' change' + (diff.length === 1 ? '' : 's') + ' · verified · backup + report downloaded', false);
+            else if (syBad || syNote) toast('Saved this mission, but ' + (syBad ? syBad + ' linked mission' + (syBad === 1 ? '' : 's') + ' FAILED to update' : 'the linked missions were not updated') + ' — see the list', true);
+            else toast('✅ Saved ' + diff.length + ' change' + (diff.length === 1 ? '' : 's') + ' · verified' + (syResults.length ? ' · ' + syResults.length + ' linked mission' + (syResults.length === 1 ? '' : 's') + ' updated' : '') + ' · backup + report downloaded', false);
             status(mism.length ? 'saved with ' + mism.length + ' mismatch(es)' : 'saved + verified');
             if (ed.reviewEl) { ed.reviewEl.remove(); ed.reviewEl = null; }
+            if (syResults.length || syNote) syShowResults(fresh.app.name, syResults, syNote);
             ed.work = null; ed.log = []; ed.busy = false;
             reloadModel('after save');
             return;

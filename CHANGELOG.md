@@ -1,3 +1,10 @@
+## 2026-11-12 — 🎞 AIM Video Validation latest v0.62 (latest only) — corrections now reach the micro missions
+
+- **Apply can update the micro too.** When you correct a macro mission from Mission Playback, the Review window now lists every mission that shares the pads you edited: the pad's micro mission and any other macro that carries the same pad (the Tattu / Tulip pair). They are ticked by default; Apply replaces that pad's steps in each one with the macro's corrected version. Each mission keeps its own takeoff, return home, name and settings.
+- **The macro is the master copy.** A micro that already differed from the macro before your edit is flagged in the list. Micros that differ but that you did not touch are listed separately and are not ticked.
+- **Nothing is guessed.** A pad is matched by its steps, and by its snapshots when the steps have drifted (never by navigation points alone). If a pad cannot be matched cleanly it is marked for a manual fix in the Mission Bank and left alone.
+- **Errors are shown.** After Apply a result list says which missions were updated and verified and which failed, and why. One backup file covering every updated mission downloads first (Mission Bank ↩ Restore reads it).
+
 ## 2026-11-11 — 🎞 AIM Video Validation ⭐PROD v0.61 (was v0.58)
 
 - **Shot card keeps a fixed height** — a long pad list no longer wraps the first line, so the video and the `10s ›` button stop moving between shots (hover the line for the full asset list).
