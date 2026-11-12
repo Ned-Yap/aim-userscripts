@@ -1,3 +1,16 @@
+## 2026-11-12 — 🌐 AIM Fleet Tools latest v0.85 (latest only) — 📅 Sweep Scheduler
+
+- **New Fleet Tools section: 📅 Sweep Scheduler.** One click reads the mission bank, the flown log and the docked drone of every FPL site, then lists each feeder mission by how old its oldest pole is and what to fly next. It replaces the manual export → spreadsheet step (feature #335).
+- **Which missions count:** `FDR` in the name and a `P1` / `P2` / `P3`; per feeder only the highest phase is used. `NO FLY` and lateral (`LAT`) missions are left out. A mission that exists in numbered parts is listed part by part.
+- **Oldest pole, not last flight.** A mission takes many flights to sweep, so the age is found by counting back through its flights until 90 % of one full sweep is covered.
+- **The table:** order number, site, AIM mission to fly, oldest pole (days and date), flights planned this month and next, flights per sweep, last flown, payload (4.0 / 3.0 / none) and why it is where it is. "All columns" adds sweep size, estimated poles, air hours and check-before-flying notes.
+- **The order rotates sites** instead of finishing one site before starting the next, using each site's real pace over the last 8 weeks.
+- **Sites without a 4.0 are shown in red and are not scheduled.** Click a site chip to switch it on or off, for example to see what opens up if a drone moves there. ⏸ on a row holds one mission out of the plan. Both are saved on your computer only.
+- **Summary line:** flights per working day, flights planned per month, how many missions still need a sweep this cycle and the date they are caught up at the current pace.
+- **Export:** Copy → Sheets, CSV (both carry every column) and a short "Copy for Slack" text with the next 25 missions in order.
+- A site whose read fails is named in an orange warning with a Retry failed button, so a slow mission bank can no longer silently drop a site.
+- Read-only: nothing is written to Percepto.
+
 ## 2026-11-12 — 🎞 AIM Video Validation latest v0.67 (latest only) — viewfinder uses the real lens width
 
 - The Adjust viewfinder and side profile now use the field of view of the camera that took the picture, instead of one assumed 60° lens: Sony ILX-LR1 50 mm 39.5° × 27°, Blackfly 24 MP 50° × 44°, Boson 640 18 mm 24° × 19° / 14 mm 32° × 26°, Ventus OGI 21.7° × 17.5°.

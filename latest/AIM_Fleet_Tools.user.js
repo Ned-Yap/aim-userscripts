@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.84
+// @version      0.85
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
-// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.84 (#334): ⚙ ESC Sweep — for every flown flight of the picked sites × date window, download the log archive (in memory only), read the ESC telemetry and list each flight where the drone raised the ESC ratio alarm (false alarm vs real) plus long takeoff spikes; capped per run with Continue, Pause / Stop, gentle mode, finished flights remembered, Sheets / CSV, each row links to the full Mission Logs card. v0.82 (#331): 🎬 Mission Review — sweep the mission log of the picked sites (or every site) for flagged flights; checks are a registry (first: flew but NO video; also no images / fewer images than planned / landing failed); per-site counts, every flight a link to its Mission Playback, Copy → Sheets / CSV. v0.79 (#329): 🚩 SOP Sweep — run Site-Setup SOP checks across the picked sites (or every site) from LIVE /map_objects/; first check = FP ⨯ FP crossing (segments that cross / T / overlap with no shared vertex); per-site rows, 🎯 fly-to on the landing map, ↗ opens the site in a NEW tab and jumps to the spot (?aim-goto deep link, Site Setup Tools v4.498+), Copy → Sheets / CSV. v0.78 (#318): 🖼 Map Export — renders what the landing map shows (KML layers, cross-ref bands, site setups, site names) on its own canvas at print size with basemap tiles, legend, scale bar, north arrow, title and a dead-space trim (transparent outside the content); preview modal with toggles; ⬇ PNG poster or 🌐 self-contained interactive HTML (small, zooms forever). v0.77: Site setups scope — draw the FFZs / flight paths / assets of ONLY the sites matching a names box or the 📦 Fleet Data pick (independent of the label filter, "= labels" copies it) so another client's setup never shows on a shared map. v0.76: site labels "Only matching / picked" mode (names box or the 📦 Fleet Data pick keep their label, every other site name hidden), 🗺 on-map legend (cross-ref bands + numbers, shown KML layers, site-setup colours) and 📷 Client view (names hidden, legend on, panel + button tucked away for a screenshot; ↩ Exit restores). v0.75: 📊 Fleet Metrics follows the 📦 Fleet Data pick ("picked only" checkbox, on by default; nothing picked → every site) — table, totals, Sheets / CSV and 🛂 Approval FPs. v0.67 (#285): 📡 Coverage — radius circles on the landing map (any Ø, drag centre / edge, live count of sites inside under a fully-inside / centre-inside rule, KML export), footprint of the picked sites (span, convex hull, smallest enclosing circle, site extents + FFZ acreage), 🧠 Best spot (centre covering the MOST sites at a Ø — exact candidate search) + 🗂 Plan all (greedy: how many circles cover every site), 📏 two-click ruler. v0.57 (#274): data check shows whether the skipped no-duration rows carry images / videos (+ first video object), and 🔎 probes one /missions/ page without the field filter to list every server field (hunting an abort / end-reason field). v0.56 (#274): 📋 Copy check button on the data check. v0.55 (#276): Utilization lenses — 🧑‍✈️ Pilots / 🛸 Drones / 📍 Sites / 🏢 Clients (sites + clients: flights, drone-hrs, air, flyable drone-hrs, util %, coverage, sites never flown, incomplete, capture %, gaps); Drones gain flyable hrs + util %. v0.54 (#274): Incomplete flights + Capture % from planned-vs-actual image counts (Pilots / Pilot-days / Flights), raw state codes + mission_data_reports sample in the data check. v0.53 (#274): ⚙ Site rules is a real button. v0.52 (#274): Pilot Utilization hides all-zero / blank columns (panel + Sheets + CSV) with a 'hidden:' note and a checkbox to show them. v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
+// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.85 (#335): 📅 Sweep Scheduler — for a client's recurring inspection missions (first profile: FPL feeder poles) it reads the live mission bank, the flown log and each base's docked drone, works out how old each mission's oldest pole is (count-back to 90 % of a full sweep), and lists what to fly next in order with flights planned per month, flights per sweep, payload (4.0 / 3.0 / none), per-site schedule switches, mission holds, Sheets / CSV / Slack text. v0.84 (#334): ⚙ ESC Sweep — for every flown flight of the picked sites × date window, download the log archive (in memory only), read the ESC telemetry and list each flight where the drone raised the ESC ratio alarm (false alarm vs real) plus long takeoff spikes; capped per run with Continue, Pause / Stop, gentle mode, finished flights remembered, Sheets / CSV, each row links to the full Mission Logs card. v0.82 (#331): 🎬 Mission Review — sweep the mission log of the picked sites (or every site) for flagged flights; checks are a registry (first: flew but NO video; also no images / fewer images than planned / landing failed); per-site counts, every flight a link to its Mission Playback, Copy → Sheets / CSV. v0.79 (#329): 🚩 SOP Sweep — run Site-Setup SOP checks across the picked sites (or every site) from LIVE /map_objects/; first check = FP ⨯ FP crossing (segments that cross / T / overlap with no shared vertex); per-site rows, 🎯 fly-to on the landing map, ↗ opens the site in a NEW tab and jumps to the spot (?aim-goto deep link, Site Setup Tools v4.498+), Copy → Sheets / CSV. v0.78 (#318): 🖼 Map Export — renders what the landing map shows (KML layers, cross-ref bands, site setups, site names) on its own canvas at print size with basemap tiles, legend, scale bar, north arrow, title and a dead-space trim (transparent outside the content); preview modal with toggles; ⬇ PNG poster or 🌐 self-contained interactive HTML (small, zooms forever). v0.77: Site setups scope — draw the FFZs / flight paths / assets of ONLY the sites matching a names box or the 📦 Fleet Data pick (independent of the label filter, "= labels" copies it) so another client's setup never shows on a shared map. v0.76: site labels "Only matching / picked" mode (names box or the 📦 Fleet Data pick keep their label, every other site name hidden), 🗺 on-map legend (cross-ref bands + numbers, shown KML layers, site-setup colours) and 📷 Client view (names hidden, legend on, panel + button tucked away for a screenshot; ↩ Exit restores). v0.75: 📊 Fleet Metrics follows the 📦 Fleet Data pick ("picked only" checkbox, on by default; nothing picked → every site) — table, totals, Sheets / CSV and 🛂 Approval FPs. v0.67 (#285): 📡 Coverage — radius circles on the landing map (any Ø, drag centre / edge, live count of sites inside under a fully-inside / centre-inside rule, KML export), footprint of the picked sites (span, convex hull, smallest enclosing circle, site extents + FFZ acreage), 🧠 Best spot (centre covering the MOST sites at a Ø — exact candidate search) + 🗂 Plan all (greedy: how many circles cover every site), 📏 two-click ruler. v0.57 (#274): data check shows whether the skipped no-duration rows carry images / videos (+ first video object), and 🔎 probes one /missions/ page without the field filter to list every server field (hunting an abort / end-reason field). v0.56 (#274): 📋 Copy check button on the data check. v0.55 (#276): Utilization lenses — 🧑‍✈️ Pilots / 🛸 Drones / 📍 Sites / 🏢 Clients (sites + clients: flights, drone-hrs, air, flyable drone-hrs, util %, coverage, sites never flown, incomplete, capture %, gaps); Drones gain flyable hrs + util %. v0.54 (#274): Incomplete flights + Capture % from planned-vs-actual image counts (Pilots / Pilot-days / Flights), raw state codes + mission_data_reports sample in the data check. v0.53 (#274): ⚙ Site rules is a real button. v0.52 (#274): Pilot Utilization hides all-zero / blank columns (panel + Sheets + CSV) with a 'hidden:' note and a checkbox to show them. v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        *://qa.percepto.app/*
@@ -33,6 +33,8 @@
 //   📡 Coverage (#285): radius circles on the landing map (drag / resize,
 //     sites-inside counts), picked-sites footprint, 🧠 best-spot / 🗂 plan
 //     (how many Ø-mile circles cover the fleet), 📏 ruler, KML export.
+//   📅 Sweep Scheduler (#335): what has / has not been flown for a client's
+//     recurring inspection missions and what to fly next, in order.
 // GitHub PAT arrives over the AIM_CONTROL_CHANNEL TOKEN_VALUE broadcast
 // (the Control Panel's channel runs on the landing page — verified).
 // No hotkeys. Log tag: [AIM FLEET]
@@ -44,7 +46,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.84';
+    const SCRIPT_VERSION = '0.85';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -135,6 +137,8 @@
             nvCustom: false, nvStart: '', nvEnd: '',   // v0.83: custom date range (YYYY-MM-DD, local; blank end = today)
             // v0.84 (#334): ⚙ ESC Sweep scope + window (days back) + max downloads per run + one-at-a-time mode + which rows show
             esPicked: true, esProdOnly: true, esDays: 7, esCap: 200, esGentle: false, esShow: 'flag',
+            // v0.85 (#335): 📅 Sweep Scheduler — site-name filter, log months, cycle start / age-limit overrides ('' / 0 = profile default), view switches
+            sk: { terms: 'FPL', prodOnly: true, lookMo: 12, cycleStart: '', limitDays: 0, showOther: true, onlyDue: false, adv: false },
         };
     }
     function loadCfg() {
@@ -157,6 +161,13 @@
             if (typeof s.esDays === 'number' && s.esDays > 0) d.esDays = s.esDays;
             if (typeof s.esCap === 'number' && s.esCap >= 1) d.esCap = s.esCap;
             if (s.esShow === 'all' || s.esShow === 'flag') d.esShow = s.esShow;
+            if (s.sk && typeof s.sk === 'object') {
+                if (typeof s.sk.terms === 'string') d.sk.terms = s.sk.terms;
+                if (typeof s.sk.lookMo === 'number' && s.sk.lookMo >= 1 && s.sk.lookMo <= 24) d.sk.lookMo = s.sk.lookMo;
+                if (typeof s.sk.cycleStart === 'string' && /^(\d{4}-\d{2}-\d{2})?$/.test(s.sk.cycleStart)) d.sk.cycleStart = s.sk.cycleStart;
+                if (typeof s.sk.limitDays === 'number' && s.sk.limitDays >= 0) d.sk.limitDays = s.sk.limitDays;
+                ['prodOnly', 'showOther', 'onlyDue', 'adv'].forEach(k => { if (typeof s.sk[k] === 'boolean') d.sk[k] = s.sk[k]; });
+            }
             if (typeof s.nvMinMin === 'number' && s.nvMinMin >= 0) d.nvMinMin = s.nvMinMin;
             if (s.nvChecks && typeof s.nvChecks === 'object') d.nvChecks = s.nvChecks;
             if (typeof s.nvCustom === 'boolean') d.nvCustom = s.nvCustom;
@@ -4436,7 +4447,7 @@
     let buttonEl = null;
     let panelEl = null;
     // v0.31: every section starts COLLAPSED (user request) — open what you need.
-    let openSections = { issues: false, data: false, fc: false, pilots: false, sweep: false, sop: false, nv: false, es: false, map: false, cov: false, kml: false, xref: false, mx: false, metrics: false, surveys: false };
+    let openSections = { issues: false, data: false, fc: false, pilots: false, sweep: false, sop: false, sk: false, nv: false, es: false, map: false, cov: false, kml: false, xref: false, mx: false, metrics: false, surveys: false };
     // v0.25 (#257): 🚩 Fleet Issues front door. AIM Issues owns the engine +
     // panel (one copy of the merge/Slack/role rules); we ask it for a summary
     // and open it over tab-local DOM events on `document` (NOT the
@@ -8135,6 +8146,562 @@
     }
 
     // ==================================================================
+    // 📅 SWEEP SCHEDULER (v0.85, #335) — "what has / has not been flown, and
+    // what to fly next". For the sites of a client profile it reads the LIVE
+    // mission bank (/available_app/), the flown log (/missions/) and each
+    // base's docked drone (/map_objects/), then for every recurring mission:
+    //   · oldest-pole date = count back through the flights (newest first)
+    //     until 90 % of one full sweep is covered — a mission takes many
+    //     flights, so "last flown" alone would make a stale mission look fresh
+    //   · tier = age limit / not swept this cycle / never fully swept / oldest
+    //   · a day-by-day plan at the pace of the last 8 weeks → flights per
+    //     month, the pilot order, and when the backlog is cleared
+    // Port of Sam Jones's FPL reference scripts (2026-11-12); the client
+    // specifics live in SK_PROFILES so another client is one more entry.
+    // Read-only. Holds + site overrides are local (GM) view settings.
+    // ==================================================================
+    // ---- [AIM_SK_CORE] begin — pure (no DOM / GM / network): runs under Node against exported CSVs ----
+    const SK_PROFILES = {
+        fpl: {
+            key: 'fpl', label: 'FPL feeder poles', siteTerms: 'FPL', stripSite: '^FPL\\s*-\\s*',
+            feederRe: 'FDR',                                                  // only missions with this in the name
+            phases: [{ key: 'P3', re: 'P3' }, { key: 'P2', re: 'P2' }, { key: 'P1', re: 'P1' }],   // highest first — a lower phase is ignored once a higher one exists
+            idRe: '(?<!\\d)(\\d{6})(?!\\d)',                                  // feeder id = the family key across versions
+            bRe: 'P[123]\\s*-\\s*B\\b', partRe: 'P[123](?:\\s*-\\s*B)?\\s+(\\d)\\s*$', tailRe: '^.*?P[123](v\\d)?(\\s*-\\s*B)?(\\s+\\d)?',
+            noFlyRe: 'NO FLY', skipRe: '(^|\\s)LAT(\\s|$)',
+            stepType: 'orbit inspection', pairsPerPoint: 2.04, imagesPerPair: 2, pairsPerAsset: 4, assetWord: 'poles', fallbackPoints: 100,
+            sweepPct: 0.9, limitDays: 180, warnDays: 21, cycleStart: '2026-08-01', tz: 'America/New_York',
+            holidays: ['2026-11-26', '2026-11-27', '2026-12-24', '2026-12-25', '2026-12-31', '2027-01-01'],
+            capWeeks: 8, liveDays: 30, minCap: 2,
+            payloads: [{ label: '4.0', re: 'SONY_ILX', want: true }, { label: '3.0', re: '.', want: false }],   // first match on the docked drone's camera list
+        },
+    };
+    const SK_DAY = 86400000;
+    const skDn = (ymd) => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(ymd || '')); return m ? Math.round(Date.UTC(+m[1], +m[2] - 1, +m[3]) / SK_DAY) : NaN; };
+    const skYmd = (dn) => (dn == null || !isFinite(dn)) ? '' : new Date(dn * SK_DAY).toISOString().slice(0, 10);
+    const skDow = (dn) => new Date(dn * SK_DAY).getUTCDay();
+    const skFmtCache = {};
+    function skDayOfMs(ms, tz) {
+        const f = skFmtCache[tz] || (skFmtCache[tz] = new Intl.DateTimeFormat('en-US', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }));
+        const p = {}; f.formatToParts(new Date(ms)).forEach(x => { p[x.type] = x.value; });
+        return skDn(`${p.year}-${p.month}-${p.day}`);
+    }
+    function skCompile(P) {
+        return Object.assign({}, P, {
+            _feeder: new RegExp(P.feederRe), _phases: P.phases.map(p => ({ key: p.key, re: new RegExp(p.re) })), _id: new RegExp(P.idRe),
+            _b: new RegExp(P.bRe), _part: new RegExp(P.partRe), _tail: new RegExp(P.tailRe), _nofly: new RegExp(P.noFlyRe, 'i'), _skip: new RegExp(P.skipRe, 'i'), _strip: new RegExp(P.stripSite, 'i'),
+        });
+    }
+    function skParse(C, name) {
+        const n = String(name == null ? '' : name).trim();
+        const idm = C._id.exec(n);
+        let phase = null, rank = -1;
+        for (let i = 0; i < C._phases.length; i++) if (C._phases[i].re.test(n)) { phase = C._phases[i].key; rank = i; break; }
+        const pm = C._part.exec(n);
+        return { name: n, feeder: C._feeder.test(n), fid: idm ? idm[1] : null, phase, rank, b: C._b.test(n), part: pm ? Number(pm[1]) : null,
+            tail: phase ? n.replace(C._tail, '').replace(/^[\s-]+|[\s-]+$/g, '') : '', nofly: C._nofly.test(n), skip: C._skip.test(n) };
+    }
+    // credited flights newest → oldest until pct of one sweep is covered → { day, n } or null
+    function skOldest(cr, S, pct) {
+        if (!(S > 0)) return null;
+        const s = cr.slice().sort((a, b) => (b.day - a.day) || (b.pairs - a.pairs));
+        let acc = 0;
+        for (let i = 0; i < s.length; i++) { acc += s[i].pairs; if (acc >= pct * S) return { day: s[i].day, n: i + 1, full: s.slice(0, i + 1).every(x => x.full) }; }
+        return null;
+    }
+    // input: { today:'YYYY-MM-DD', sites:[{sid,name,want,payload,drone}], missions:[{sid,id,name,points}], flights:[{sid,id,name,when,durMs,images}], hold:{ 'sid|name':true } }
+    function skCompute(P, input) {
+        const C = skCompile(P);
+        const today = skDn(input.today);
+        if (!isFinite(today)) throw new Error('sweep scheduler: bad run date');
+        const cyc = skDn(C.cycleStart), limit = C.limitDays, tier1Age = limit - C.warnDays;
+        const hold = input.hold || {};
+        const siteById = {};
+        input.sites.forEach(s => { siteById[String(s.sid)] = Object.assign({}, s, { sid: String(s.sid), short: String(s.name || '').replace(C._strip, '').trim() }); });
+
+        const bySite = {};
+        input.missions.forEach(m => {
+            const sid = String(m.sid); if (!siteById[sid]) return;
+            const p = skParse(C, m.name); if (!p.feeder || !p.phase || p.skip) return;
+            (bySite[sid] = bySite[sid] || []).push(Object.assign(p, { sid, id: Number(m.id), points: Number(m.points) || 0 }));
+        });
+        const seen = new Set(); const lastLogDay = {}; const lfBySite = {}; const lfAll = [];
+        input.flights.forEach(f => {
+            if (f.id == null || seen.has(f.id)) return; seen.add(f.id);
+            const sid = String(f.sid); if (!siteById[sid]) return;
+            const p = skParse(C, f.name); if (!p.feeder) return;
+            const t = typeof f.when === 'number' ? f.when : Date.parse(f.when); if (!isFinite(t)) return;
+            const day = skDayOfMs(t, C.tz);
+            if (!(lastLogDay[sid] >= day)) lastLogDay[sid] = day;
+            const durMs = Number(f.durMs) || 0;
+            if (!(durMs > 0) || p.skip) return;                       // 0 duration = aborted / placeholder, not a flight
+            const row = Object.assign(p, { sid, id: f.id, t, day, durMs, pairs: (Number(f.images) || 0) / C.imagesPerPair });
+            (lfBySite[sid] = lfBySite[sid] || []).push(row); lfAll.push(row);
+        });
+
+        // ---- units: one per mission to fly (a split family = one unit per part) ----
+        const units = [], excluded = [];
+        Object.keys(bySite).forEach(sid => {
+            const groups = {}; const order = [];
+            bySite[sid].forEach(m => { const k = m.fid ? 'f:' + m.fid : 'n:' + m.name; if (!groups[k]) { groups[k] = []; order.push(k); } groups[k].push(m); });
+            let top = Infinity; bySite[sid].forEach(m => { if (m.rank < top) top = m.rank; });
+            order.forEach(k => {
+                const g = groups[k]; const rank = Math.min.apply(null, g.map(m => m.rank));
+                if (k[0] === 'n' && rank > top) return;                // no family id + the site already has a higher phase → superseded
+                const cand = g.filter(m => m.rank === rank); const ok = cand.filter(m => !m.nofly);
+                const phase = cand[0].phase, fid = cand[0].fid;
+                const gfl = (lfBySite[sid] || []).filter(x => fid ? (x.fid === fid && x.phase === phase) : x.name === cand[0].name);
+                if (!ok.length) { excluded.push({ sid, site: siteById[sid].short, name: cand[0].name, why: 'only version in AIM is marked NO FLY' }); return; }
+                const lastT = (list) => { const names = new Set(list.map(m => m.name)); let t = 0; gfl.forEach(x => { if (x.pairs > 0 && names.has(x.name) && x.t > t) t = x.t; }); return t; };
+                const newest = (list) => list.slice().sort((a, b) => (lastT([b]) - lastT([a])) || (b.id - a.id))[0];
+                const mk = (aim, extra) => units.push(Object.assign({ sid, site: siteById[sid].short, fid, phase, aim, gfl, versions: cand.length, lowerPhases: g.length - cand.length }, extra));
+                const fams = [false, true].map(b => ok.filter(m => m.part != null && m.b === b)).filter(l => new Set(l.map(m => m.part)).size >= 2);
+                if (fid && fams.length) {
+                    const fam = fams.sort((a, b) => (lastT(b) - lastT(a)) || (Math.max.apply(null, b.map(m => m.id)) - Math.max.apply(null, a.map(m => m.id))))[0];
+                    const nos = Array.from(new Set(fam.map(m => m.part))).sort((a, b) => a - b);
+                    const chosen = {}; nos.forEach(pn => { chosen[pn] = newest(fam.filter(m => m.part === pn)); });
+                    const tot = nos.reduce((n, pn) => n + chosen[pn].points, 0);
+                    nos.forEach(pn => mk(chosen[pn], { part: pn, share: tot ? chosen[pn].points / tot : 0 }));
+                } else {
+                    const un = ok.filter(m => m.part == null); const pool = un.length ? un : ok;
+                    const names = new Set(pool.map(m => m.name)); let best = null;
+                    gfl.forEach(x => { if (x.part == null && x.pairs > 0 && names.has(x.name) && (!best || x.t > best.t)) best = x; });
+                    let aim = best ? pool.filter(m => m.name === best.name).sort((a, b) => b.id - a.id)[0] : null;
+                    if (!aim) { const plain = pool.filter(m => !m.tail); aim = (plain.length ? plain : pool).slice().sort((a, b) => (Number(b.b) - Number(a.b)) || (b.id - a.id))[0]; }   // never flown: the reduced "B" build if there is one, else the newest
+                    mk(aim, { part: null, share: 1, pickedBy: best ? 'flown' : 'newest' });
+                }
+            });
+        });
+
+        // ---- capacity: pace of the last capWeeks weeks (weekdays) ----
+        const w1 = today - 1, w0 = w1 - (C.capWeeks * 7 - 1);
+        let nd = 0; for (let d = w0; d <= w1; d++) { const w = skDow(d); if (w >= 1 && w <= 5) nd++; }
+        const stats = {}; let netPairs = 0, netN = 0, netDur = 0;
+        lfAll.forEach(x => {
+            if (x.day < w0 || x.day > w1) return; const w = skDow(x.day); if (w < 1 || w > 5) return;
+            const s = stats[x.sid] || (stats[x.sid] = { n: 0, pairs: 0, dur: 0, perDay: {} });
+            s.n++; s.pairs += x.pairs; s.dur += x.durMs; s.perDay[x.day] = (s.perDay[x.day] || 0) + 1;
+            netPairs += x.pairs; netDur += x.durMs; netN++;
+        });
+        const netAvg = netN ? netPairs / netN : 30, netDurAvg = netN ? netDur / netN : 20 * 60000;
+        const sitePace = (sid) => stats[sid] ? stats[sid].n / nd : 0;
+        const siteAvgPairs = (sid) => (stats[sid] && stats[sid].pairs > 0) ? stats[sid].pairs / stats[sid].n : netAvg;
+        const siteCap = (sid) => Math.max(C.minCap, stats[sid] ? Math.max.apply(null, Object.values(stats[sid].perDay)) : 0);
+        const live = (sid) => lastLogDay[sid] != null && lastLogDay[sid] >= w1 - C.liveDays;
+
+        // ---- per unit: credit, sweep size, oldest pole ----
+        units.forEach((u, i) => {
+            u.i = i;
+            u.key = `${u.sid}|${u.aim.name}`;
+            u.held = !!hold[u.key];
+            u.want = !!siteById[u.sid].want;
+            u.points = u.aim.points;
+            u.S = C.pairsPerPoint * (u.points > 0 ? u.points : C.fallbackPoints);
+            u.sizeFrom = u.points > 0 ? 'mission steps' : 'assumed';
+            const cr = [];
+            u.gfl.forEach(x => {
+                if (u.part != null) { if (x.part === u.part) cr.push({ day: x.day, pairs: x.pairs, dur: x.durMs, full: true }); else if (x.part == null) cr.push({ day: x.day, pairs: x.pairs * u.share, dur: x.durMs, full: false }); }
+                else cr.push({ day: x.day, pairs: x.pairs, dur: x.durMs, full: true });
+            });
+            u.cr = cr; u.nFlights = cr.length;
+            let last = null; cr.forEach(x => { if (x.pairs > 0 && (last == null || x.day > last)) last = x.day; }); u.lastFlown = last;
+            const o = skOldest(cr, u.S, C.sweepPct);
+            u.od = o ? o.day : null; u.age = o ? today - o.day : null;
+            u.tier = !o ? 3 : (u.age >= tier1Age ? 1 : (o.day < cyc ? 2 : 4));
+            u.state = !o ? (cr.some(x => x.pairs > 0) ? 'Not fully swept' : 'Not flown') : (o.day >= cyc ? 'Swept this cycle' : 'Not swept this cycle');
+            u.passDay = o ? o.day + limit : null;
+            const fullDur = cr.filter(x => x.full && x.dur > 0);
+            const ownPairs = fullDur.reduce((n, x) => n + x.pairs, 0);
+            u.ownHistory = fullDur.length >= 3 && ownPairs > 0;              // enough of its own flights to size it from its own past
+            u.pairsPerFlight = u.ownHistory ? ownPairs / fullDur.length : siteAvgPairs(u.sid);
+            u.estFlights = Math.max(1, Math.ceil(u.S / siteAvgPairs(u.sid)));   // at the site's average flight
+            u.expFlights = Math.max(1, Math.ceil(u.S / u.pairsPerFlight));      // at this mission's own average flight when it has history
+            u.histFlights = (o && o.full) ? o.n : null;                      // flights the last 90 % really took
+            u.avgDurMin = (fullDur.length ? fullDur.reduce((n, x) => n + x.dur, 0) / fullDur.length : (stats[u.sid] && stats[u.sid].n ? stats[u.sid].dur / stats[u.sid].n : netDurAvg)) / 60000;
+            u.estHours = u.expFlights * u.avgDurMin / 60;
+        });
+
+        // ---- day-by-day plan (sites with the wanted payload, not held) ----
+        const E = units.filter(u => u.want && !u.held && (!C.requireLive || live(u.sid)));
+        const schedSites = Array.from(new Set(E.map(u => u.sid)));
+        const N = schedSites.reduce((n, sid) => n + sitePace(sid), 0);
+        const hol = new Set((C.holidays || []).map(skDn));
+        const start = today + 1;
+        const sd = new Date(start * SK_DAY);
+        const winEnd = Math.round(Date.UTC(sd.getUTCFullYear(), sd.getUTCMonth() + 2, 0) / SK_DAY);   // last day of next month
+        const ymOf = (d) => skYmd(d).slice(0, 7);
+        const months = [ymOf(start), ymOf(winEnd)].filter((v, i, a) => a.indexOf(v) === i);
+        const fl = {}, cur = {}, od0 = {};
+        E.forEach(u => { fl[u.i] = u.cr.slice(); od0[u.i] = u.od; cur[u.i] = u.od; u.sim = []; u.planned = {}; u.peak = 0; u.doneDay = null; u.firstSeq = null; });
+        const tierAt = (u, d) => {
+            const c = cur[u.i];
+            if (c != null && c >= start) return [5, d - c];
+            const o = od0[u.i];
+            if (o == null) return [3, null];
+            const age = d - o;
+            return [age >= tier1Age ? 1 : (o < cyc ? 2 : 4), age];
+        };
+        const plan = []; let carry = 0, seq = 0, workDays = 0, flightsInWin = 0, backlogDone = null;
+        const HORIZON = start + 420;
+        for (let d = start; d <= HORIZON && N > 0 && E.length; d++) {
+            const w = skDow(d); if (w < 1 || w > 5 || hol.has(d)) continue;
+            if (d > winEnd && !E.some(u => tierAt(u, d)[0] <= 3)) break;      // past the window and nothing overdue left
+            if (d <= winEnd) workDays++;
+            carry += N; const k = Math.floor(carry + 1e-9); carry -= k;
+            const used = {};
+            for (let s = 0; s < k; s++) {
+                let best = null, bestKey = null;
+                for (let e = 0; e < E.length; e++) {
+                    const u = E[e]; const us = used[u.sid] || 0;
+                    if (us >= siteCap(u.sid)) continue;
+                    const ta = tierAt(u, d);
+                    const key = [ta[0], -(ta[1] || 0), us, -u.S];
+                    let lt = false;
+                    if (!bestKey) lt = true; else for (let q = 0; q < 4; q++) { if (key[q] < bestKey[q]) { lt = true; break; } if (key[q] > bestKey[q]) break; }
+                    if (lt) { best = u; bestKey = key; }
+                }
+                if (!best) break;
+                used[best.sid] = (used[best.sid] || 0) + 1;
+                fl[best.i].push({ day: d, pairs: best.pairsPerFlight, dur: 0, full: true });
+                const o = skOldest(fl[best.i], best.S, C.sweepPct); cur[best.i] = o ? o.day : null;
+                if (best.doneDay == null && o && o.day >= start) best.doneDay = d;
+                best.sim.push(d); if (best.firstSeq == null) best.firstSeq = seq; seq++;
+                if (d <= winEnd) { best.planned[ymOf(d)] = (best.planned[ymOf(d)] || 0) + 1; flightsInWin++; }
+                if (bestKey[0] <= 3) backlogDone = d;
+                plan.push({ day: d, i: best.i, tier: bestKey[0] });
+            }
+            if (d <= winEnd) E.forEach(u => { const ta = tierAt(u, d); if (ta[1] != null && ta[1] > u.peak) u.peak = ta[1]; });
+        }
+        E.forEach(u => {
+            const c = cur[u.i];
+            u.ageAtEnd = (c != null && c >= start && u.doneDay != null && u.doneDay <= winEnd) ? winEnd - c : (u.od != null ? winEnd - u.od : null);
+            u.first = u.sim.length ? u.sim[0] : null;
+            u.breach = u.passDay != null && (u.doneDay == null || u.doneDay > u.passDay);   // crosses the limit before its sweep finishes
+        });
+        const backlogLeft = E.filter(u => { const o = od0[u.i]; return (o == null || o < cyc || (today - o) >= tier1Age) && u.doneDay == null; }).length;
+
+        // ---- order: the plan's own sequence (rotates sites), then everything else oldest first ----
+        const rankKey = (u) => [u.tier, -(u.age || 0), -u.S];
+        const cmp = (a, b) => { const x = rankKey(a), y = rankKey(b); for (let q = 0; q < 3; q++) if (x[q] !== y[q]) return x[q] - y[q]; return a.i - b.i; };
+        const inPlan = E.filter(u => u.firstSeq != null).sort((a, b) => a.firstSeq - b.firstSeq);
+        const waiting = E.filter(u => u.firstSeq == null).sort(cmp);
+        const off = units.filter(u => E.indexOf(u) < 0).sort((a, b) => (Number(a.held) - Number(b.held)) || cmp(a, b));
+        inPlan.concat(waiting).forEach((u, n) => { u.order = n + 1; });
+        off.forEach(u => { u.order = null; });
+        units.forEach(u => {
+            const ck = [];
+            if (u.age != null && u.age >= limit) ck.push(`at / over ${limit} days`);
+            else if (u.breach) ck.push(`passes ${limit} days ${skYmd(u.passDay)} before its sweep finishes`);
+            if (u.versions > 1) ck.push(`${u.versions} versions in AIM${u.pickedBy === 'flown' ? ' — using the one flown last' : ''}`);
+            if (u.sizeFrom === 'assumed') ck.push('sweep size assumed (no orbit steps)');
+            if (u.want && !live(u.sid)) ck.push(`site has not flown in ${C.liveDays} days`);
+            u.check = ck.join('; ');
+        });
+        const sitesNoMissions = Object.values(siteById).filter(s => !(bySite[s.sid] || []).length).map(s => s.short);
+        const byTier = { 1: 0, 2: 0, 3: 0, 4: 0 }; E.forEach(u => { byTier[u.tier]++; });
+        const due = E.filter(u => u.tier <= 3);
+        return {
+            profile: C.key, today: input.today, months, start: skYmd(start), winEnd: skYmd(winEnd), cycleStart: C.cycleStart, cycleEnd: skYmd(cyc + limit), limit, tier1Age,
+            rows: inPlan.concat(waiting, off), eligible: E.length, units: units.length, excluded, sitesNoMissions,
+            N, workDays, flightsInWin, plan, byTier, schedSites: schedSites.length,
+            dueFlights: due.reduce((n, u) => n + u.expFlights, 0), dueHours: due.reduce((n, u) => n + u.estHours, 0),
+            backlogDone: backlogLeft ? null : (backlogDone != null ? skYmd(backlogDone) : skYmd(today)), backlogLeft,
+            overNow: E.filter(u => u.age != null && u.age >= limit).length, breaches: E.filter(u => u.breach).length,
+            peak: E.reduce((n, u) => Math.max(n, u.peak || 0), 0),
+            cap: { from: skYmd(w0), to: skYmd(w1), weekdays: nd, netAvgPairs: netAvg },
+        };
+    }
+    // ---- [AIM_SK_CORE] end ----
+
+    const KEY_SK = 'aim-ft-sk' + ENV_SUFFIX;          // { hold: { 'sid|name': 1 }, siteOn: { sid: bool } } — small, written on click only
+    const skLocal = (() => { const v = loadJson(KEY_SK, {}); return { hold: (v.hold && typeof v.hold === 'object') ? v.hold : {}, siteOn: (v.siteOn && typeof v.siteOn === 'object') ? v.siteOn : {} }; })();
+    const skLocalSave = () => gmSet(KEY_SK, JSON.stringify(skLocal));
+    const SK_CONCURRENCY = 2;
+    let skData = null;      // { at, sites: { sid: { name, status, payload, drone, cams, missions:[…], flights:[…], err:{bank,log,setup} } }, start, end }
+    let skRes = null;       // skCompute result
+    let skRun = null;       // { done, total, msg, aborted, seq }
+    let skRunSeq = 0;
+    const skProfile = () => { const P = Object.assign({}, SK_PROFILES.fpl); if (/^\d{4}-\d{2}-\d{2}$/.test(ftCfg.sk.cycleStart || '')) P.cycleStart = ftCfg.sk.cycleStart; if (Number(ftCfg.sk.limitDays) >= 30) P.limitDays = Number(ftCfg.sk.limitDays); return P; };
+    function skScopeIds() {
+        const all = rawSites ? Object.keys(rawSites) : [];
+        const terms = String(ftCfg.sk.terms || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+        return all.filter(id => { const st = siteStatus(id); if (ftCfg.sk.prodOnly && st && st !== 'Production') return false; const nm = siteName(id).toLowerCase(); return !terms.length || terms.some(t => nm.indexOf(t) >= 0); });
+    }
+    function skPayloadOf(P, entities) {
+        // → { label, want, drone, cams } from the Base Station entities (type 8) of a site
+        const out = { label: 'none', want: false, drone: '', cams: '' };
+        const drones = [];
+        entities.forEach(e => { if (!e || e.type !== 8) return; const d = fxDrone(e); if (!d || !(d.name || d.id != null)) return; drones.push({ name: String(d.name || d.id), cams: (d.camera_types && typeof d.camera_types === 'object') ? Object.keys(d.camera_types).join(', ') : '' }); });
+        if (!drones.length) return out;
+        let bestIdx = Infinity;
+        drones.forEach(d => { const i = P.payloads.findIndex(p => new RegExp(p.re).test(d.cams)); const idx = i < 0 ? P.payloads.length : i; if (idx < bestIdx) { bestIdx = idx; out.drone = d.name; out.cams = d.cams; } });
+        if (bestIdx >= P.payloads.length) { out.label = 'other'; return out; }
+        out.label = P.payloads[bestIdx].label; out.want = !!P.payloads[bestIdx].want;
+        return out;
+    }
+    async function skFetchSite(sid, P, start, end, isDead, only) {
+        const rec = (skData.sites[sid] = skData.sites[sid] || { name: siteName(sid), status: siteStatus(sid), payload: null, missions: null, flights: null, err: {} });
+        const want = (k) => !only || only[k];
+        if (want('setup')) {
+            try { const raw = await fdGetJson(`/map_objects/?getPoiMapObjectsAsList=true&site_id=${encodeURIComponent(sid)}`, 60000); rec.payload = skPayloadOf(P, extractList(raw)); delete rec.err.setup; }
+            catch (e) { rec.err.setup = (e && e.message) || String(e); console.warn(`${TAG} sweep scheduler: site ${sid} setup failed:`, e); }
+        }
+        if (isDead()) return;
+        if (want('bank')) {
+            const url = `/available_app/?site_id=${encodeURIComponent(sid)}&type=1`;
+            try {
+                let raw;
+                try { raw = await fdGetJson(url, 120000); }
+                catch (e) { if (/401\/403|login page/.test(String(e && e.message))) throw e; console.warn(`${TAG} sweep scheduler: site ${sid} mission bank failed (${e && e.message || e}) — retrying once`); raw = await fdGetJson(url, 240000); }
+                if (!Array.isArray(raw)) throw new Error('unexpected /available_app/ response shape (not a list)');
+                rec.missions = raw.filter(m => m && m.is_active !== false).map(m => ({ id: m.id, name: m.name || '', points: (m.instructions || []).filter(i => i && i.type_name === P.stepType).length }));
+                delete rec.err.bank;
+            } catch (e) { rec.err.bank = (e && e.message) || String(e); console.warn(`${TAG} sweep scheduler: site ${sid} mission bank failed:`, e); }
+        }
+        if (isDead()) return;
+        if (want('log')) {
+            try {
+                const got = await nvFetchSite(sid, start, end, isDead);
+                rec.flights = got.rows.map(m => ({ id: m.id, name: m.app_name || '', when: m.when, durMs: Number(m.duration) || 0, images: m.image_count }));
+                if (got.partial) rec.err.log = 'page cap hit — older flights were not read'; else delete rec.err.log;
+            } catch (e) { if (e && e.message === 'aborted') return; rec.err.log = (e && e.message) || String(e); console.warn(`${TAG} sweep scheduler: site ${sid} mission log failed:`, e); }
+        }
+    }
+    async function skRunFetch(retryFailed) {
+        if (skRun) return;
+        try { await fetchRawSites(false); } catch (e) { console.warn(`${TAG} sweep scheduler: /sites/ failed:`, e); setStatus(`Sweep scheduler: /sites/ failed — ${e.message}`); return; }
+        const P = skProfile();
+        let jobs;
+        if (retryFailed && skData) jobs = Object.keys(skData.sites).filter(sid => Object.keys(skData.sites[sid].err).length).map(sid => ({ sid, only: { setup: !!skData.sites[sid].err.setup, bank: !!skData.sites[sid].err.bank, log: !!skData.sites[sid].err.log } }));
+        else {
+            const ids = skScopeIds();
+            if (!ids.length) { setStatus('Sweep scheduler: no site matches the site filter'); return; }
+            const end = new Date(); const start = new Date(); start.setMonth(start.getMonth() - (Number(ftCfg.sk.lookMo) > 0 ? Number(ftCfg.sk.lookMo) : 12));
+            skData = { at: Date.now(), sites: {}, start, end };
+            skRes = null;
+            jobs = ids.map(sid => ({ sid, only: null }));
+        }
+        if (!jobs.length) { setStatus('Sweep scheduler: nothing to retry'); return; }
+        const seq = ++skRunSeq;
+        skRun = { done: 0, total: jobs.length, msg: 'starting…', aborted: false, seq };
+        renderPanel();
+        console.log(`${TAG} sweep scheduler ${seq}: ${jobs.length} site(s), log ${fdYmd(skData.start)} → ${fdYmd(skData.end)}${retryFailed ? ' (retry failed)' : ''}`);
+        const isDead = () => skRunSeq !== seq || !skRun || skRun.aborted;
+        let cursor = 0;
+        const worker = async () => {
+            while (cursor < jobs.length) {
+                if (isDead()) return;
+                const job = jobs[cursor++];
+                await skFetchSite(job.sid, P, skData.start, skData.end, isDead, job.only);
+                if (skRunSeq !== seq) return;
+                skRun.done++; skRun.msg = siteName(job.sid);
+                setStatus(`Sweep scheduler… ${skRun.done}/${skRun.total} · ${skRun.msg}`);
+                renderPanel();
+            }
+        };
+        let stopped = false;
+        try { await Promise.all(Array.from({ length: Math.min(SK_CONCURRENCY, jobs.length) }, worker)); }
+        finally { if (skRunSeq === seq) { stopped = !!(skRun && skRun.aborted); skRun = null; } }
+        if (skRunSeq !== seq) return;
+        if (stopped) skData.partial = true; else if (!retryFailed) skData.partial = false;
+        skRecompute();
+        const failed = skFailed();
+        setStatus(`Sweep scheduler done — ${skRes ? `${skRes.eligible} mission(s) to schedule on ${skRes.schedSites} site(s)` : 'no result'}${failed.length ? ` · ⚠ ${failed.length} site(s) had a FAILED read — their rows are incomplete (↻ Retry failed)` : ''}`);
+        console.log(`${TAG} sweep scheduler ${seq}: done — ${skRes ? `${skRes.units} unit(s), ${skRes.eligible} eligible, N ${skRes.N.toFixed(2)}` : 'no result'}, ${failed.length} failed site(s)`);
+        renderPanel();
+    }
+    function skFailed() { return skData ? Object.keys(skData.sites).filter(sid => Object.keys(skData.sites[sid].err).length) : []; }
+    function skSiteWant(sid) { const ov = skLocal.siteOn[sid]; if (typeof ov === 'boolean') return ov; const r = skData && skData.sites[sid]; return !!(r && r.payload && r.payload.want); }
+    function skRecompute() {
+        if (!skData) { skRes = null; return; }
+        const P = skProfile();
+        const sites = [], missions = [], flights = [];
+        Object.keys(skData.sites).forEach(sid => {
+            const r = skData.sites[sid];
+            sites.push({ sid, name: r.name, want: skSiteWant(sid) });
+            (r.missions || []).forEach(m => missions.push({ sid, id: m.id, name: m.name, points: m.points }));
+            (r.flights || []).forEach(f => flights.push({ sid, id: f.id, name: f.name, when: f.when, durMs: f.durMs, images: f.images }));
+        });
+        const today = skYmd(skDayOfMs(Date.now(), P.tz));
+        try { skRes = skCompute(P, { today, sites, missions, flights, hold: skLocal.hold }); }
+        catch (e) { skRes = null; console.error(`${TAG} sweep scheduler compute failed:`, e); setStatus(`Sweep scheduler: compute failed — ${e && e.message || e}`); }
+    }
+    const SK_MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const skMonLabel = (ym) => SK_MON[Number(String(ym).slice(5, 7)) - 1] || ym;
+    const SK_TIER = { 1: 'Age limit', 2: 'Not swept this cycle', 3: 'No full sweep in the log', 4: 'Swept — oldest first' };
+    const skPayloadLabel = (sid) => { const r = skData && skData.sites[sid]; return r && r.payload ? r.payload.label : '?'; };
+    // one column registry drives the panel table, Sheets and CSV. adv = only with "All columns".
+    function skCols() {
+        const R = skRes; const P = skProfile();
+        const cols = [
+            { label: '#', get: u => u.order != null ? u.order : '', num: true },
+            { label: 'Site', get: u => u.site },
+            { label: 'AIM mission to fly', get: u => u.aim.name },
+            { label: 'Oldest pole today (days)', get: u => u.age != null ? u.age : u.state, num: true },
+            { label: 'Oldest pole date', get: u => skYmd(u.od) },
+        ];
+        R.months.forEach(ym => cols.push({ label: `${skMonLabel(ym)} flights planned`, get: u => u.planned ? (u.planned[ym] || 0) : '', num: true }));
+        cols.push(
+            { label: 'Est. flights per sweep', get: u => u.expFlights, num: true },
+            { label: 'Last flown', get: u => skYmd(u.lastFlown) },
+            { label: 'Payload', get: u => skPayloadLabel(u.sid) },
+            { label: 'Scheduled', get: u => u.held ? 'held' : (u.want ? 'yes' : 'no') },
+            { label: 'Why', get: u => u.tier === 3 ? u.state : SK_TIER[u.tier] },
+            { label: 'Phase', get: u => u.phase, adv: true },
+            { label: `Passes ${R.limit} days on`, get: u => skYmd(u.passDay), adv: true },
+            { label: 'First planned flight', get: u => skYmd(u.first), adv: true },
+            { label: `Oldest pole ${R.winEnd} (days)`, get: u => u.ageAtEnd != null ? u.ageAtEnd : '', num: true, adv: true },
+            { label: 'Sweep size (image pairs)', get: u => Math.round(u.S), num: true, adv: true },
+            { label: `Est. ${P.assetWord}`, get: u => Math.round(u.S / P.pairsPerAsset), num: true, adv: true },
+            { label: 'Size from', get: u => u.sizeFrom, adv: true },
+            { label: 'Flights last sweep took', get: u => u.histFlights != null ? u.histFlights : '', num: true, adv: true },
+            { label: 'Flights at site average', get: u => u.estFlights, num: true, adv: true },
+            { label: 'Estimate from', get: u => u.ownHistory ? 'its own past flights' : 'site average flight', adv: true },
+            { label: 'Avg flight (min)', get: u => Math.round(u.avgDurMin), num: true, adv: true },
+            { label: 'Est. air hours per sweep', get: u => (Math.round(u.estHours * 10) / 10), num: true, adv: true },
+            { label: 'Flights in log', get: u => u.nFlights, num: true, adv: true },
+            { label: 'Check before flying', get: u => u.check, adv: true },
+        );
+        return cols;
+    }
+    function skViewRows() {
+        if (!skRes) return [];
+        return skRes.rows.filter(u => (ftCfg.sk.showOther || u.want) && (!ftCfg.sk.onlyDue || u.tier <= 3));
+    }
+    const skAgeColor = (u) => u.held ? '#777' : (!u.want ? '#ff7a7a' : (u.age != null && u.age >= skRes.limit ? '#ff3d00' : (u.tier === 1 ? '#ffa030' : (u.tier <= 3 ? '#ffd27a' : '#ddd'))));
+    function skHeadline() {
+        const R = skRes; if (!R) return '';
+        const mon = R.months.map(ym => `${skMonLabel(ym)} ${R.rows.reduce((n, u) => n + ((u.planned && u.planned[ym]) || 0), 0)}`).join(' · ');
+        return `${R.eligible} mission(s) on ${R.schedSites} site(s) · pace ${R.N.toFixed(1)} flights / working day (from ${R.cap.from} → ${R.cap.to}) · planned ${mon} · `
+            + `still to sweep this cycle: ${R.byTier[1] + R.byTier[2] + R.byTier[3]} mission(s), about ${R.dueFlights} flight(s) / ${Math.round(R.dueHours)} air h · `
+            + (R.backlogDone ? `all caught up by ${R.backlogDone} at this pace` : `NOT caught up within 14 months at this pace (${R.backlogLeft} left)`)
+            + ` · cycle ${R.cycleStart} → ${R.cycleEnd}`
+            + (R.overNow ? ` · ${R.overNow} at / over ${R.limit} days NOW` : '') + (R.breaches ? ` · ${R.breaches} will pass ${R.limit} days before their sweep finishes` : '');
+    }
+    function skExport(all) {
+        const cols = skCols().filter(c => all || !c.adv || ftCfg.sk.adv);
+        return { cols, rows: skViewRows().map(u => cols.map(c => { try { return c.get(u); } catch (e) { console.warn(`${TAG} sweep scheduler: column "${c.label}" threw:`, e); return ''; } })) };
+    }
+    function skCopySheets() {
+        if (!skRes) { setStatus('Sweep scheduler: nothing to copy — run it first'); return; }
+        const { cols, rows } = skExport(true);
+        if (!rows.length) { setStatus('Sweep scheduler: nothing to copy'); return; }
+        const us = skViewRows();
+        const esc = (v) => escapeHtml(String(v == null ? '' : v));
+        const html = `<p><b>AIM Sweep Scheduler</b> — ${esc(skProfile().label)} — run ${esc(skRes.today)} — ${esc(skHeadline())}</p>`
+            + `<table border="1" style="border-collapse:collapse;font-family:Arial;font-size:10pt"><tr>${cols.map(c => `<th style="background:#1f5fa8;color:#fff">${esc(c.label)}</th>`).join('')}</tr>`
+            + rows.map((r, i) => `<tr style="${!us[i].want || us[i].held ? 'color:#c00000' : ''}">${r.map(v => `<td>${esc(v)}</td>`).join('')}</tr>`).join('') + '</table>';
+        const text = [cols.map(c => c.label).join('\t')].concat(rows.map(r => r.join('\t'))).join('\n');
+        copyHtmlToClipboard(html, text, `Sweep schedule copied — ${rows.length} row(s) for Sheets`);
+    }
+    function skDownloadCsv() {
+        if (!skRes) { setStatus('Sweep scheduler: nothing to export — run it first'); return; }
+        const { cols, rows } = skExport(true);
+        const q = (v) => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`;
+        const csv = [cols.map(c => q(c.label)).join(',')].concat(rows.map(r => r.map(q).join(','))).join('\r\n');
+        fdDownload(new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' }), `AIM_Sweep_Schedule_${skRes.today}.csv`);
+        setStatus(`Sweep schedule CSV — ${rows.length} row(s)`);
+    }
+    function skCopySlack() {
+        if (!skRes) { setStatus('Sweep scheduler: nothing to copy — run it first'); return; }
+        const top = skRes.rows.filter(u => u.order != null && u.tier <= 3).slice(0, 25);
+        const lines = [`*${skProfile().label} — what to fly next* (run ${skRes.today})`, skHeadline(), ''];
+        top.forEach(u => lines.push(`${u.order}. ${u.site} — ${u.aim.name} — ${u.age != null ? `oldest pole ${u.age} d (${skYmd(u.od)})` : u.state.toLowerCase()} — about ${u.expFlights} flight(s)`));
+        if (!top.length) lines.push('Nothing overdue — every scheduled mission has been swept this cycle.');
+        const failed = skFailed(); if (failed.length) lines.push('', `⚠ ${failed.length} site(s) could not be read and are incomplete: ${failed.map(siteName).join(', ')}`);
+        copyText(lines.join('\n'), `Slack text copied — top ${top.length} mission(s) in order`);
+    }
+    function skOpt(t) {
+        const k = t.getAttribute('data-sk-opt');
+        if (k === 'terms') { ftCfg.sk.terms = String(t.value || '').slice(0, 200); saveCfg(); setStatus('Sweep scheduler: site filter changed — takes effect on the next run'); renderPanel(); return; }
+        if (k === 'lookMo') { const v = Number(t.value); if (v >= 1 && v <= 24) { ftCfg.sk.lookMo = v; saveCfg(); setStatus('Sweep scheduler: log window changed — takes effect on the next run'); } return; }
+        if (k === 'cycleStart') { if (/^(\d{4}-\d{2}-\d{2})?$/.test(t.value)) { ftCfg.sk.cycleStart = t.value; saveCfg(); skRecompute(); renderPanel(); } return; }
+        if (k === 'limitDays') { const v = Number(t.value); if (v >= 30 && v <= 730) { ftCfg.sk.limitDays = v; saveCfg(); skRecompute(); renderPanel(); } else setStatus('Sweep scheduler: age limit must be 30–730 days'); return; }
+        if (k === 'prodOnly' || k === 'showOther' || k === 'onlyDue' || k === 'adv') { ftCfg.sk[k] = !!t.checked; saveCfg(); renderPanel(); return; }
+    }
+    function skToggleSite(sid) {
+        const now = skSiteWant(sid); const auto = !!(skData && skData.sites[sid] && skData.sites[sid].payload && skData.sites[sid].payload.want);
+        if (!now === auto) delete skLocal.siteOn[sid]; else skLocal.siteOn[sid] = !now;
+        skLocalSave(); skRecompute();
+        setStatus(`Sweep scheduler: ${siteName(sid)} ${!now ? 'IS' : 'is NOT'} scheduled${!now === auto ? '' : ' (your override — click again to undo)'}`);
+        renderPanel();
+    }
+    function skToggleHold(key) {
+        if (skLocal.hold[key]) delete skLocal.hold[key]; else skLocal.hold[key] = 1;
+        skLocalSave(); skRecompute(); renderPanel();
+    }
+    function renderSkSection() {
+        if (!openSections.sk) return '';
+        const h = [];
+        const running = !!skRun;
+        const P = skProfile();
+        const inCss = 'background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;font:inherit;padding:1px 3px;';
+        const ids = rawSites ? skScopeIds() : [];
+        const chk = (k, label, title) => `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;" title="${escapeHtml(title)}"><input type="checkbox" data-sk-opt="${k}" ${ftCfg.sk[k] ? 'checked' : ''}> ${label}</label>`;
+        h.push('<div style="padding:6px 10px;display:flex;gap:12px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;">'
+            + `<span style="color:#7adfe6" title="Client profile: which missions count, the age limit, sweep-size rule, holidays">${escapeHtml(P.label)}</span>`
+            + `<label style="display:inline-flex;align-items:center;gap:3px;" title="Sites whose name contains any of these (comma separated). Takes effect on the next run.">sites <input type="text" data-sk-opt="terms" value="${escapeHtml(ftCfg.sk.terms)}" ${running ? 'disabled' : ''} style="${inCss}width:90px"></label>`
+            + chk('prodOnly', 'Production only', 'Skip sites whose status is not Production. Takes effect on the next run.')
+            + `<label style="display:inline-flex;align-items:center;gap:3px;" title="How many months of mission log to read. Longer = fewer &quot;no full sweep in the log&quot; rows, slower run.">log <select data-sk-opt="lookMo" ${running ? 'disabled' : ''} style="${inCss}">${[6, 9, 12, 18].map(m => `<option value="${m}" ${Number(ftCfg.sk.lookMo) === m ? 'selected' : ''}>${m} months</option>`).join('')}</select></label>`
+            + `<label style="display:inline-flex;align-items:center;gap:3px;" title="Start of the inspection cycle — a mission whose oldest pole is before this date still needs its sweep. Applies instantly.">cycle from <input type="date" data-sk-opt="cycleStart" value="${escapeHtml(P.cycleStart)}" style="${inCss}color-scheme:dark"></label>`
+            + `<label style="display:inline-flex;align-items:center;gap:3px;" title="No pole may go longer than this without an inspection. Applies instantly.">limit <input type="number" data-sk-opt="limitDays" min="30" max="730" value="${P.limitDays}" style="${inCss}width:50px"> d</label>`
+            + `<span style="color:#888">${rawSites ? `${ids.length} site(s) match` : 'site list not loaded yet'}</span>`
+            + '</div>');
+        h.push('<div style="padding:6px 10px;display:flex;gap:14px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;">'
+            + (running
+                ? `<span data-ft="sk-abort" style="cursor:pointer;color:#ff5252;font-weight:bold">■ Stop (${skRun.done}/${skRun.total})</span><span style="color:#aaa">${escapeHtml(skRun.msg)} — big mission banks take a minute or two each</span>`
+                : `<span data-ft="sk-run" style="cursor:pointer;color:#5fff5f;font-weight:bold">▶ ${skData ? 'Re-run' : 'Run'} — read missions + flown log</span>`)
+            + (!running && skFailed().length ? `<span data-ft="sk-retry" style="cursor:pointer;color:#ffa030;font-weight:bold" title="Re-read only what failed">↻ Retry failed (${skFailed().length})</span>` : '')
+            + (skRes && !running ? '<span data-ft="sk-sheets" style="cursor:pointer;color:#7adfe6" title="The table (every column) on the clipboard — paste into Google Sheets / Excel">📋 Copy → Sheets</span>'
+                + '<span data-ft="sk-csv" style="cursor:pointer;color:#7adfe6">⬇ CSV</span>'
+                + '<span data-ft="sk-slack" style="cursor:pointer;color:#7adfe6" title="Short text for Slack: the summary line + the next 25 missions to fly, in order">💬 Copy for Slack</span>' : '')
+            + '</div>');
+        if (!skData) { h.push('<div style="padding:8px 10px;color:#888">Not run yet. Reads the mission bank, the flown log and the docked drone of every matching site, then lists each mission by how old its oldest pole is and what to fly next. Read-only.</div>'); return h.join(''); }
+        const failed = skFailed();
+        if (skData.partial) h.push('<div style="padding:5px 10px;color:#ffa030;border-bottom:1px solid #222834;">⚠ The last run was STOPPED part-way — some sites were not read, so this table is incomplete. Re-run for the full picture.</div>');
+        if (failed.length) {
+            h.push(`<div style="padding:5px 10px;color:#ffa030;border-bottom:1px solid #222834;">⚠ ${failed.length} site(s) had a FAILED read — their missions below are missing or wrong until retried:<br>`
+                + failed.map(sid => { const e = skData.sites[sid].err; return `<span style="color:#ddd">${escapeHtml(siteName(sid))}</span> — ${escapeHtml(Object.keys(e).map(k => `${k === 'bank' ? 'mission bank' : k === 'log' ? 'mission log' : 'site setup'}: ${e[k]}`).join(' · '))}`; }).join('<br>') + '</div>');
+        }
+        if (!skRes) { h.push(`<div style="padding:8px 10px;color:#888">${running ? 'Reading…' : 'No result.'}</div>`); return h.join(''); }
+        const R = skRes;
+        h.push(`<div style="padding:5px 10px;color:#aaa;border-bottom:1px solid #222834;">Read ${new Date(skData.at).toLocaleString()} · log ${fdYmd(skData.start)} → ${fdYmd(skData.end)} · <span style="color:#ddd">${escapeHtml(skHeadline())}</span></div>`);
+        // site chips — click = schedule / don't schedule this site (the "what if I moved a drone here" switch)
+        const sids = Object.keys(skData.sites).sort((a, b) => skData.sites[a].name.localeCompare(skData.sites[b].name));
+        const unitsBySite = {}; R.rows.forEach(u => { unitsBySite[u.sid] = (unitsBySite[u.sid] || 0) + 1; });
+        h.push('<div style="padding:5px 10px;display:flex;gap:5px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;"><span style="color:#888" title="Green = scheduled (has the wanted payload). Red = not scheduled. Click a site to switch it — for example to see what opens up if a drone moves there.">Sites:</span>'
+            + sids.filter(sid => unitsBySite[sid]).map(sid => {
+                const r = skData.sites[sid]; const on = skSiteWant(sid); const ov = typeof skLocal.siteOn[sid] === 'boolean';
+                const pl = r.payload ? `${r.payload.label}${r.payload.drone ? ` · ${r.payload.drone} · ${r.payload.cams || 'no camera list'}` : ' · no drone docked'}` : 'site setup not read';
+                return `<span data-sk-site="${escapeHtml(sid)}" title="${escapeHtml(`${r.name} — payload ${pl} — ${unitsBySite[sid]} mission(s)${ov ? ' — your override' : ''}`)}" style="cursor:pointer;border:1px ${ov ? 'dashed' : 'solid'} ${on ? '#5fff5f' : '#ff7a7a'};color:${on ? '#5fff5f' : '#ff7a7a'};border-radius:3px;padding:0 4px;white-space:nowrap">${escapeHtml(r.name.replace(new RegExp(P.stripSite, 'i'), ''))} <span style="color:#888">${escapeHtml(skPayloadLabel(sid))}</span></span>`;
+            }).join('') + '</div>');
+        h.push('<div style="padding:4px 10px;display:flex;gap:14px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;">'
+            + chk('showOther', 'show sites that are not scheduled (red)', 'Sites without the wanted payload: the backup pool if a drone moves there.')
+            + chk('onlyDue', 'only what still needs a sweep', 'Hide missions already swept this cycle.')
+            + chk('adv', 'all columns', 'Sweep size, estimated poles, flights the last sweep took, air hours, check-before-flying flags… (exports always carry every column)')
+            + `<span style="color:#888">${skViewRows().length} row(s) · ⏸ = hold a mission out of the plan</span>`
+            + '</div>');
+        if (R.sitesNoMissions.length || R.excluded.length) {
+            h.push('<div style="padding:4px 10px;color:#888;border-bottom:1px solid #222834;font-size:11px">'
+                + (R.sitesNoMissions.length ? `No matching mission in the bank: ${escapeHtml(R.sitesNoMissions.join(', '))}. ` : '')
+                + (R.excluded.length ? `<span title="${escapeHtml(R.excluded.map(x => `${x.site}: ${x.name}`).join('\n'))}">Left out — ${R.excluded.length} mission(s) whose only version is marked NO FLY (hover).</span>` : '')
+                + '</div>');
+        }
+        const cols = skCols().filter(c => !c.adv || ftCfg.sk.adv);
+        const rows = skViewRows();
+        const th = 'position:sticky;top:0;background:#1f5fa8;color:#fff;padding:3px 6px;text-align:left;font-weight:bold;white-space:normal;vertical-align:bottom;';
+        h.push('<style>#aim-sk-list td{padding:2px 6px;white-space:nowrap}#aim-sk-list td.n{text-align:right}</style><div id="aim-sk-list" style="max-height:520px;overflow:auto"><table style="border-collapse:collapse;width:100%;font-size:11px">'
+            + `<tr><th style="${th}"></th>${cols.map(c => `<th style="${th}${c.num ? 'text-align:right;' : ''}">${escapeHtml(c.label)}</th>`).join('')}</tr>`
+            + rows.map(u => `<tr class="aim-ft-row" style="color:${skAgeColor(u)};border-top:1px solid #1e2430;${u.held ? 'text-decoration:line-through;' : ''}" title="${escapeHtml(u.check || '')}">`
+                + `<td data-sk-hold="${escapeHtml(u.key)}" title="${u.held ? 'Held — click to put it back in the plan' : 'Hold this mission out of the plan (saved on this computer)'}" style="cursor:pointer;color:${u.held ? '#ffa030' : '#555'}">⏸</td>`
+                + cols.map(c => { let v; try { v = c.get(u); } catch (e) { v = '⚠'; console.warn(`${TAG} sweep scheduler: column "${c.label}" threw:`, e); } return `<td${c.num ? ' class="n"' : ''}>${escapeHtml(String(v == null ? '' : v))}</td>`; }).join('')
+                + '</tr>').join('')
+            + '</table></div>');
+        if (!rows.length) h.push('<div style="padding:8px 10px;color:#888">No row matches the view filters.</div>');
+        return h.join('');
+    }
+
+    // ==================================================================
     // 🎬 MISSION REVIEW (v0.82, #331) — fleet sweep of the mission log for
     // flagged FLOWN flights (duration > 0). Checks are a registry (NV_CHECKS)
     // so new flags are one entry each; the first is "no video" (the Mission
@@ -9021,12 +9588,14 @@
         const body = panelEl.querySelector('#aim-ft-body');
         if (!body) return;
         const isum = issuesSummary;
-        panelEl.style.width = ((mtWide && openSections.metrics) || (fdWide && openSections.data)) ? '96vw' : '640px';
+        panelEl.style.width = ((mtWide && openSections.metrics) || (fdWide && openSections.data) || (openSections.sk && skRes)) ? '96vw' : '640px';
         body.innerHTML = ''
             + sectionHeader('issues', '🚩', 'Fleet Issues', isum && isum.hasToken ? `${isum.open} open · ${isum.pending} pending${isum.myPending ? ` · ⚡ ${isum.myPending} for you` : ''}` : 'all sites in one panel')
             + renderIssuesSection()
             + sectionHeader('data', '📦', 'Fleet Data', `${fdSelected.size} site(s) picked · browse + export`)
             + renderDataSection()
+            + sectionHeader('sk', '📅', 'Sweep Scheduler', skRun ? `reading ${skRun.done}/${skRun.total}` : (skRes ? `${skRes.eligible} mission(s) · ${skRes.byTier[1] + skRes.byTier[2] + skRes.byTier[3]} still to sweep this cycle${skRes.overNow ? ` · ${skRes.overNow} over ${skRes.limit} d` : ''}` : 'what has / has not been flown — what to fly next'))
+            + renderSkSection()
             + sectionHeader('fc', '🎥', 'Flight Checks', fcResults ? `${fcResults.flights.length} flight(s) · ${fcFlights().reduce((n, f) => n + f.flagged, 0)} flagged shots` : 'planned vs actual, every flown flight of the picked sites')
             + renderFcSection()
             + sectionHeader('pilots', '📈', 'Utilization', puResults ? `${puResults.pilots.length} pilot(s) · ${(puResults.drones || []).length} drone(s) · ${(puResults.sites || []).length} site(s) · ${puResults.flights.length} flight(s) · last ${puResults.days} d` : 'pilots · drones · sites · clients — overlapping drones count once')
@@ -9084,7 +9653,7 @@
 
             // Delegated — the body is rebuilt on every render, the root never is
             panelEl.addEventListener('click', (ev) => {
-                if (ev.target.closest('input[data-ft-class],input[data-ft-flag],select[data-es-opt],input[data-es-opt],input[data-sop-check],select[data-nv-days],input[data-nv-min],input[data-nv-date],input[data-nv-check],input[data-ft-view],input[data-kml-show],input[data-kml-fill],input[data-kml-color],input[data-fd-site],input[data-fd-clientsel],select[data-fd-pick],input[data-fd-dataset],select[data-fd-range],input[data-fd-date],input[data-kx-inc],select[data-kx-mode],input[data-kx-pad],input[data-fx-inc],input[data-fx-opt],input[data-fc-thr],input[data-pu-opt],input[data-pu-chk],select[data-pu-tz],select[data-pu-end],select[data-pu-rule],input[data-pu-rule],select[data-pu-bulk],#aim-ft-xr-picked')) return;   // checkbox/color/select → change handler
+                if (ev.target.closest('input[data-ft-class],input[data-ft-flag],select[data-es-opt],input[data-es-opt],select[data-sk-opt],input[data-sk-opt],input[data-sop-check],select[data-nv-days],input[data-nv-min],input[data-nv-date],input[data-nv-check],input[data-ft-view],input[data-kml-show],input[data-kml-fill],input[data-kml-color],input[data-fd-site],input[data-fd-clientsel],select[data-fd-pick],input[data-fd-dataset],select[data-fd-range],input[data-fd-date],input[data-kx-inc],select[data-kx-mode],input[data-kx-pad],input[data-fx-inc],input[data-fx-opt],input[data-fc-thr],input[data-pu-opt],input[data-pu-chk],select[data-pu-tz],select[data-pu-end],select[data-pu-rule],input[data-pu-rule],select[data-pu-bulk],#aim-ft-xr-picked')) return;   // checkbox/color/select → change handler
                 const clAll = ev.target.closest('[data-ft-clients]');
                 if (clAll) {
                     if (clAll.getAttribute('data-ft-clients') === 'all') {
@@ -9126,6 +9695,10 @@
                 if (sopFlyEl) { const [fsid, fidx] = sopFlyEl.getAttribute('data-sop-fly').split(':'); sopFly(fsid, Number(fidx)); return; }
                 const sopSiteEl = ev.target.closest('[data-sop-site]');
                 if (sopSiteEl && !ev.target.closest('a')) { const ssid = sopSiteEl.getAttribute('data-sop-site'); sopOpenSite = sopOpenSite === ssid ? null : ssid; fdRenderKeepScroll(); return; }
+                const skSiteEl = ev.target.closest('[data-sk-site]');
+                if (skSiteEl) { skToggleSite(skSiteEl.getAttribute('data-sk-site')); return; }
+                const skHoldEl = ev.target.closest('[data-sk-hold]');
+                if (skHoldEl) { skToggleHold(skHoldEl.getAttribute('data-sk-hold')); return; }
                 const nvSiteEl = ev.target.closest('[data-nv-site]');
                 if (nvSiteEl && !ev.target.closest('a')) { const nsid = nvSiteEl.getAttribute('data-nv-site'); nvOpenSite = nvOpenSite === nsid ? null : nsid; fdRenderKeepScroll(); return; }
                 const act = ev.target.closest('[data-ft]');
@@ -9137,6 +9710,11 @@
                     else if (cmd === 'sop-sheets') sopCopySheets();
                     else if (cmd === 'sop-csv') sopDownloadCsv();
                     else if (cmd === 'sop-clear') { sopSweepSeq++; sopSweep = null; sopOpenSite = null; renderPanel(); }
+                    else if (cmd === 'sk-run' || cmd === 'sk-retry') skRunFetch(cmd === 'sk-retry').catch(e => { console.warn(`${TAG} sweep scheduler threw:`, e); setStatus(`Sweep scheduler failed — ${e.message}`); skRun = null; renderPanel(); });
+                    else if (cmd === 'sk-abort') { if (skRun) skRun.aborted = true; setStatus('Sweep scheduler stopping after the reads already started…'); }
+                    else if (cmd === 'sk-sheets') skCopySheets();
+                    else if (cmd === 'sk-csv') skDownloadCsv();
+                    else if (cmd === 'sk-slack') skCopySlack();
                     else if (cmd === 'nv-run') nvRunSweep().catch(e => { console.warn(`${TAG} mission review threw:`, e); setStatus(`Mission review failed — ${e.message}`); if (nvSweep) nvSweep.running = false; renderPanel(); });
                     else if (cmd === 'nv-abort') { if (nvSweep) nvSweep.aborted = true; setStatus('Mission review aborting after the in-flight sites…'); }
                     else if (cmd === 'nv-sheets') nvCopySheets();
@@ -9384,6 +9962,7 @@
                 const t = ev.target;
                 if (t.hasAttribute && t.hasAttribute('data-cov-in')) { covInput(t); return; }
                 if (t.hasAttribute && t.hasAttribute('data-es-opt')) { esOpt(t); return; }
+                if (t.hasAttribute && t.hasAttribute('data-sk-opt')) { skOpt(t); return; }
                 if (t.hasAttribute && t.hasAttribute('data-nv-check')) { const k = t.getAttribute('data-nv-check'); if (NV_CHECKS.some(c => c.key === k)) { ftCfg.nvChecks[k] = !!t.checked; saveCfg(); fdRenderKeepScroll(); } return; }
                 if (t.hasAttribute && t.hasAttribute('data-nv-days')) { if (t.value === 'custom') { ftCfg.nvCustom = true; saveCfg(); setStatus('Mission review: pick the start / end dates — takes effect on the next run'); renderPanel(); return; } const v = Number(t.value); if (NV_DAY_OPTS.some(o => o[0] === v)) { ftCfg.nvDays = v; ftCfg.nvCustom = false; saveCfg(); setStatus(`Mission review window: ${v} day(s) — takes effect on the next run`); renderPanel(); } return; }
                 if (t.hasAttribute && t.hasAttribute('data-nv-date')) { const k = t.getAttribute('data-nv-date') === 'end' ? 'nvEnd' : 'nvStart'; if (/^(\d{4}-\d{2}-\d{2})?$/.test(t.value)) { ftCfg[k] = t.value; saveCfg(); const r = nvRange(); setStatus(r.err ? `Mission review: ${r.err}` : `Mission review range: ${fdYmd(r.start)} → ${fdYmd(r.end)} — takes effect on the next run`); } return; }
