@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.66
+// @version      0.67
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -33,7 +33,7 @@
 
     const SCRIPT_ID = 'aim-video-validation';
     const IS_DEV = (function() { try { return /^Latest - /.test((GM_info && GM_info.script && GM_info.script.name) || ''); } catch (e) { return false; } })();
-    const SCRIPT_VERSION = '0.66';
+    const SCRIPT_VERSION = '0.67';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -94,6 +94,7 @@
         liveDiffOverlay: true, // yellow markers where the CURRENT saved plan differs from what flew
         liveColor: '#ffe95f',
         navKeepAim: true,      // moving a nav re-aims its in-place snapshots at their look-points
+        deckLens: {},          // viewfinder lens picked per '<drone type>|<picture kind>' (empty = default for the picture kind)
         deckView: 'vf',        // Adjust deck centre: 'vf' viewfinder preview / 'pr' side profile
         navColor: '#5fa8ff', snapColor: '#ff7ad9', actualColor: '#5fe3ff',
         navLineW: 2, snapLineW: 2.5, actualLineW: 1.5, flownLineW: 3,
@@ -2038,7 +2039,20 @@
         const alt = (lp.capped || g == null) ? (alt0 != null ? alt0 - lp.dist * Math.tan(Math.abs(gimbalToDeg((st.extra_options || {}).pitch)) * RAD) : null) : g;
         return { ll: lp.ll, alt, dist: lp.dist, capped: lp.capped };
     }
-    const DK_W = 330, DK_H = 220, DK_HFOV = 60;   // viewfinder box + assumed lens width (approximate preview)
+    const DK_W = 330, DK_H = 220;   // viewfinder box
+    // Lens field of view per camera (degrees, horizontal × vertical) — payload spec sheets, 2026-11-12. First of a kind = default for that picture kind.
+    const DK_LENSES = [
+        { id: 'sony50', kind: 'RGB', label: 'Sony ILX-LR1 50 mm (RGB)', h: 39.5, v: 27 },
+        { id: 'bfly24', kind: 'RGB', label: 'Blackfly 24 MP 16 mm (RGB)', h: 50, v: 44 },
+        { id: 'boson18', kind: 'T', label: 'Boson 640 18 mm (thermal)', h: 24, v: 19 },
+        { id: 'boson14', kind: 'T', label: 'Boson 640 14 mm (thermal)', h: 32, v: 26 },
+        { id: 'ventus25', kind: 'G', label: 'Ventus OGI 25 mm (GEM)', h: 21.7, v: 17.5 },
+    ];
+    function dkLensKey(im) { const d = model && model.mission && model.mission.drone; return String((d && d.robot_type_name) || '?') + '|' + ((im && im.kind) || 'RGB'); }
+    function dkLens(im) {
+        const picked = (settings.deckLens || {})[dkLensKey(im)];
+        return DK_LENSES.find(l => l.id === picked) || DK_LENSES.find(l => l.kind === ((im && im.kind) || 'RGB')) || DK_LENSES[0];
+    }
     const DK_ARROW = { up: 'M5 15l7-7 7 7', down: 'M5 9l7 7 7-7', left: 'M15 5l-7 7 7 7', right: 'M9 5l7 7-7 7', altUp: 'M12 19V5M5 12l7-7 7 7', altDown: 'M12 5v14M5 12l7 7 7-7' };
     const dkSvg = (d, cls, style) => '<svg aria-hidden="true" class="' + (cls || '') + '" style="' + (style || '') + '" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="' + d + '"></path></svg>';
     function dkDial(segs, centre) {
@@ -2072,7 +2086,7 @@
             + dkRead([['to target', 'dist', 'range'], ['moved', 'moved', ''], ['drone alt', 'dalt', 'alt']]) + '</div>'
             + '<div class="aim-vv-dk-mid"><div class="aim-vv-dk-tabs"><button type="button" class="aim-vv-dk-tab' + (view === 'vf' ? ' on' : '') + '" data-aim-vv-ed="view" data-v="vf">Viewfinder</button><button type="button" class="aim-vv-dk-tab' + (view === 'pr' ? ' on' : '') + '" data-aim-vv-ed="view" data-v="pr">Side profile</button></div>'
             + '<div class="aim-vv-dk-frame" title="Approximate preview. Striped = outside the original picture; dashed = the original frame.">' + (view === 'vf' ? (src ? '<img data-aim-vv-vf="1" alt="" src="' + esc(src) + '">' : '<div class="dim" style="padding:8px">no picture for this shot</div>') + '<span class="ch-v"></span><span class="ch-h"></span>' : '<svg data-aim-vv-pr="1" width="' + DK_W + '" height="' + DK_H + '" viewBox="0 0 ' + DK_W + ' ' + DK_H + '"></svg>') + '</div>'
-            + '<span class="dim" style="font-size:11px">approximate preview</span></div>'
+            + '<span class="dim" style="font-size:11px">approximate preview · lens <select data-aim-vv-lens="' + esc(dkLensKey(im)) + '" title="Camera that took this picture. Sets how far the preview moves per degree. Remembered per drone type." style="font:inherit;background:#171b22;color:#cfd8e3;border:1px solid #2a3442;border-radius:6px;padding:1px 4px">' + DK_LENSES.map(l => '<option value="' + l.id + '"' + (l.id === dkLens(im).id ? ' selected' : '') + '>' + esc(l.label) + ' · ' + l.h + '° × ' + l.v + '°</option>').join('') + '</select></span></div>'
             + '<div class="aim-vv-dk-card"><div class="aim-vv-dk-title" style="color:' + esc(settings.snapColor) + '">CAMERA</div><div class="aim-vv-dk-ctl">'
             + dkDial([{ act: 'c-tilt', n: 1, title: gps ? 'Aim ' + sf + ' ft farther away (camera tilts up)' : 'Tilt the camera ' + sp + '° up' }, { act: 'turn', n: 1, title: gps ? 'Move the aim point ' + sf + ' ft to the right' : 'Turn the camera ' + sd + '° right' }, { act: 'turn', n: -1, title: gps ? 'Move the aim point ' + sf + ' ft to the left' : 'Turn the camera ' + sd + '° left' }, { act: 'c-tilt', n: -1, title: gps ? 'Aim ' + sf + ' ft closer (camera tilts down)' : 'Tilt the camera ' + sp + '° down' }],
                 { act: 'aim-place', armed: pAim, color: settings.snapColor, icon: camIc, title: 'Place the camera target on the map (click here, then click the map)' + (gps ? '' : ' — converts this shot to a GPS aim point') })
@@ -2103,7 +2117,7 @@
         // Viewfinder: where does the ORIGINAL look-point sit in the frame of the pose as edited?
         const img = el.querySelector('[data-aim-vv-vf]');
         if (img) {
-            const ppd = DK_W / DK_HFOV; let x = 0, y = 0, sc = 1;
+            const ppd = DK_W / dkLens(shot.primary).h; let x = 0, y = 0, sc = 1;   // picture fills the box width (object-fit: cover), so px per degree comes from the horizontal lens width
             if (oLook && oLook.alt != null && nav && nav.location && typeof nav.value1 === 'number' && pose.heading != null && pose.pitchDeg != null && oNav && typeof oNav.value1 === 'number') {
                 const h = distM(nav.location, oLook.ll), brg = bearingDeg(nav.location, oLook.ll);
                 const pitchTo = Math.atan2(oLook.alt - nav.value1, Math.max(0.5, h)) / RAD;
@@ -2124,7 +2138,7 @@
                 const base = Math.min(g != null ? g : look.alt, look.alt), D = Math.max(1, look.dist), up = Math.max(3, nav.value1 - base);
                 const s = Math.min(250 / D, 150 / up), X0 = 36, GY = 196;
                 const Y = (a) => GY - (a - base) * s, dx = X0, dy = Y(nav.value1), tx = X0 + D * s, ty = Y(look.alt), gy = Y(g != null ? g : look.alt);
-                const ang = Math.atan2(nav.value1 - look.alt, D), half = (DK_HFOV * DK_H / DK_W) / 2 * RAD;
+                const ang = Math.atan2(nav.value1 - look.alt, D), half = dkLens(shot.primary).v / 2 * RAD;
                 const edge = (a) => { const len = a > 0.03 ? Math.min(360, (gy - dy) / Math.sin(a)) : 360; return '<line x1="' + dx + '" y1="' + dy.toFixed(1) + '" x2="' + (dx + Math.cos(a) * len).toFixed(1) + '" y2="' + (dy + Math.sin(a) * len).toFixed(1) + '" stroke="' + esc(settings.snapColor) + '" stroke-opacity=".4"></line>'; };
                 const tAnchor = tx > 250 ? 'end' : 'start';
                 h = '<rect x="0" y="' + gy.toFixed(1) + '" width="' + DK_W + '" height="' + (DK_H - gy + 1).toFixed(1) + '" fill="#3a2f24"></rect>'
@@ -3535,7 +3549,7 @@
         document.addEventListener('pointerup', onHoldUp, true);
         document.addEventListener('pointercancel', onHoldUp, true);
         window.addEventListener('blur', onHoldUp);
-        document.addEventListener('change', (e) => { const c = e.target; if (!c || !c.matches) return; if (c.matches('[data-aim-vv-ed-check="nav-keep-aim"]')) { settings.navKeepAim = !!c.checked; saveSettings(); log('nav keep-aim = ' + settings.navKeepAim); } else if (c.matches('[data-aim-vv-restore-file]')) onRestoreFile(e); }, true);
+        document.addEventListener('change', (e) => { const c = e.target; if (!c || !c.matches) return; if (c.matches('[data-aim-vv-lens]')) { settings.deckLens = Object.assign({}, settings.deckLens); settings.deckLens[c.dataset.aimVvLens] = c.value; saveSettings(); log('viewfinder lens ' + c.dataset.aimVvLens + ' = ' + c.value); deckRefresh(); } else if (c.matches('[data-aim-vv-ed-check="nav-keep-aim"]')) { settings.navKeepAim = !!c.checked; saveSettings(); log('nav keep-aim = ' + settings.navKeepAim); } else if (c.matches('[data-aim-vv-restore-file]')) onRestoreFile(e); }, true);
         document.addEventListener('click', onMapPlaceClick, true);
         window.addEventListener('keydown', onPlaceKey, true);
         document.addEventListener('keydown', (e) => { const t = e.target; if (t && t.matches && t.matches('[data-aim-vv-latlng]')) { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); const b = ed.panelEl && ed.panelEl.querySelector('[data-aim-vv-ed="nav-set"]'); if (b) b.click(); } } }, true);

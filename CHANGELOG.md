@@ -1,3 +1,8 @@
+## 2026-11-12 — 🎞 AIM Video Validation latest v0.67 (latest only) — viewfinder uses the real lens width
+
+- The Adjust viewfinder and side profile now use the field of view of the camera that took the picture, instead of one assumed 60° lens: Sony ILX-LR1 50 mm 39.5° × 27°, Blackfly 24 MP 50° × 44°, Boson 640 18 mm 24° × 19° / 14 mm 32° × 26°, Ventus OGI 21.7° × 17.5°.
+- The lens is chosen from the picture kind (RGB / thermal / GEM); a picker under the preview changes it, remembered per drone type.
+
 ## 2026-11-12 — 🎞 AIM Video Validation latest v0.66 (latest only) — Adjust is now a flight deck
 
 - **Review window in plain language** (v0.66) — one line per shot saying what the camera and the drone will do differently (for example `Camera heading 111° → 115°, angle -30° → -48°`), a short "Also update" list for the micro missions, and one Save button. The field-by-field table and save information are under Details.
