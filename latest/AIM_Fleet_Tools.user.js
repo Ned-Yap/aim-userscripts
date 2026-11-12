@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.83
+// @version      0.84
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
-// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.82 (#331): 🎬 Mission Review — sweep the mission log of the picked sites (or every site) for flagged flights; checks are a registry (first: flew but NO video; also no images / fewer images than planned / landing failed); per-site counts, every flight a link to its Mission Playback, Copy → Sheets / CSV. v0.79 (#329): 🚩 SOP Sweep — run Site-Setup SOP checks across the picked sites (or every site) from LIVE /map_objects/; first check = FP ⨯ FP crossing (segments that cross / T / overlap with no shared vertex); per-site rows, 🎯 fly-to on the landing map, ↗ opens the site in a NEW tab and jumps to the spot (?aim-goto deep link, Site Setup Tools v4.498+), Copy → Sheets / CSV. v0.78 (#318): 🖼 Map Export — renders what the landing map shows (KML layers, cross-ref bands, site setups, site names) on its own canvas at print size with basemap tiles, legend, scale bar, north arrow, title and a dead-space trim (transparent outside the content); preview modal with toggles; ⬇ PNG poster or 🌐 self-contained interactive HTML (small, zooms forever). v0.77: Site setups scope — draw the FFZs / flight paths / assets of ONLY the sites matching a names box or the 📦 Fleet Data pick (independent of the label filter, "= labels" copies it) so another client's setup never shows on a shared map. v0.76: site labels "Only matching / picked" mode (names box or the 📦 Fleet Data pick keep their label, every other site name hidden), 🗺 on-map legend (cross-ref bands + numbers, shown KML layers, site-setup colours) and 📷 Client view (names hidden, legend on, panel + button tucked away for a screenshot; ↩ Exit restores). v0.75: 📊 Fleet Metrics follows the 📦 Fleet Data pick ("picked only" checkbox, on by default; nothing picked → every site) — table, totals, Sheets / CSV and 🛂 Approval FPs. v0.67 (#285): 📡 Coverage — radius circles on the landing map (any Ø, drag centre / edge, live count of sites inside under a fully-inside / centre-inside rule, KML export), footprint of the picked sites (span, convex hull, smallest enclosing circle, site extents + FFZ acreage), 🧠 Best spot (centre covering the MOST sites at a Ø — exact candidate search) + 🗂 Plan all (greedy: how many circles cover every site), 📏 two-click ruler. v0.57 (#274): data check shows whether the skipped no-duration rows carry images / videos (+ first video object), and 🔎 probes one /missions/ page without the field filter to list every server field (hunting an abort / end-reason field). v0.56 (#274): 📋 Copy check button on the data check. v0.55 (#276): Utilization lenses — 🧑‍✈️ Pilots / 🛸 Drones / 📍 Sites / 🏢 Clients (sites + clients: flights, drone-hrs, air, flyable drone-hrs, util %, coverage, sites never flown, incomplete, capture %, gaps); Drones gain flyable hrs + util %. v0.54 (#274): Incomplete flights + Capture % from planned-vs-actual image counts (Pilots / Pilot-days / Flights), raw state codes + mission_data_reports sample in the data check. v0.53 (#274): ⚙ Site rules is a real button. v0.52 (#274): Pilot Utilization hides all-zero / blank columns (panel + Sheets + CSV) with a 'hidden:' note and a checkbox to show them. v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
+// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.84 (#333): ⚙ ESC Sweep — for every flown flight of the picked sites × date window, download the log archive (in memory only), read the ESC telemetry and list each flight where the drone raised the ESC ratio alarm (false alarm vs real) plus long takeoff spikes; capped per run with Continue, Pause / Stop, gentle mode, finished flights remembered, Sheets / CSV, each row links to the full Mission Logs card. v0.82 (#331): 🎬 Mission Review — sweep the mission log of the picked sites (or every site) for flagged flights; checks are a registry (first: flew but NO video; also no images / fewer images than planned / landing failed); per-site counts, every flight a link to its Mission Playback, Copy → Sheets / CSV. v0.79 (#329): 🚩 SOP Sweep — run Site-Setup SOP checks across the picked sites (or every site) from LIVE /map_objects/; first check = FP ⨯ FP crossing (segments that cross / T / overlap with no shared vertex); per-site rows, 🎯 fly-to on the landing map, ↗ opens the site in a NEW tab and jumps to the spot (?aim-goto deep link, Site Setup Tools v4.498+), Copy → Sheets / CSV. v0.78 (#318): 🖼 Map Export — renders what the landing map shows (KML layers, cross-ref bands, site setups, site names) on its own canvas at print size with basemap tiles, legend, scale bar, north arrow, title and a dead-space trim (transparent outside the content); preview modal with toggles; ⬇ PNG poster or 🌐 self-contained interactive HTML (small, zooms forever). v0.77: Site setups scope — draw the FFZs / flight paths / assets of ONLY the sites matching a names box or the 📦 Fleet Data pick (independent of the label filter, "= labels" copies it) so another client's setup never shows on a shared map. v0.76: site labels "Only matching / picked" mode (names box or the 📦 Fleet Data pick keep their label, every other site name hidden), 🗺 on-map legend (cross-ref bands + numbers, shown KML layers, site-setup colours) and 📷 Client view (names hidden, legend on, panel + button tucked away for a screenshot; ↩ Exit restores). v0.75: 📊 Fleet Metrics follows the 📦 Fleet Data pick ("picked only" checkbox, on by default; nothing picked → every site) — table, totals, Sheets / CSV and 🛂 Approval FPs. v0.67 (#285): 📡 Coverage — radius circles on the landing map (any Ø, drag centre / edge, live count of sites inside under a fully-inside / centre-inside rule, KML export), footprint of the picked sites (span, convex hull, smallest enclosing circle, site extents + FFZ acreage), 🧠 Best spot (centre covering the MOST sites at a Ø — exact candidate search) + 🗂 Plan all (greedy: how many circles cover every site), 📏 two-click ruler. v0.57 (#274): data check shows whether the skipped no-duration rows carry images / videos (+ first video object), and 🔎 probes one /missions/ page without the field filter to list every server field (hunting an abort / end-reason field). v0.56 (#274): 📋 Copy check button on the data check. v0.55 (#276): Utilization lenses — 🧑‍✈️ Pilots / 🛸 Drones / 📍 Sites / 🏢 Clients (sites + clients: flights, drone-hrs, air, flyable drone-hrs, util %, coverage, sites never flown, incomplete, capture %, gaps); Drones gain flyable hrs + util %. v0.54 (#274): Incomplete flights + Capture % from planned-vs-actual image counts (Pilots / Pilot-days / Flights), raw state codes + mission_data_reports sample in the data check. v0.53 (#274): ⚙ Site rules is a real button. v0.52 (#274): Pilot Utilization hides all-zero / blank columns (panel + Sheets + CSV) with a 'hidden:' note and a checkbox to show them. v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        *://qa.percepto.app/*
@@ -12,6 +12,7 @@
 // @grant        GM_setValue
 // @grant        unsafeWindow
 // @grant        GM_xmlhttpRequest
+// @connect      d2lb831xgi5b1q.cloudfront.net
 // @connect      server.arcgisonline.com
 // @connect      basemap.nationalmap.gov
 // @run-at       document-end
@@ -43,7 +44,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.83';
+    const SCRIPT_VERSION = '0.84';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -132,6 +133,8 @@
             // v0.82 (#331): 🎬 Mission Review scope + window (days back) + min flight length (minutes, display filter) + which checks show
             nvPicked: true, nvProdOnly: true, nvDays: 30, nvMinMin: 0, nvChecks: {},
             nvCustom: false, nvStart: '', nvEnd: '',   // v0.83: custom date range (YYYY-MM-DD, local; blank end = today)
+            // v0.84 (#333): ⚙ ESC Sweep scope + window (days back) + max downloads per run + one-at-a-time mode + which rows show
+            esPicked: true, esProdOnly: true, esDays: 7, esCap: 200, esGentle: false, esShow: 'flag',
         };
     }
     function loadCfg() {
@@ -148,6 +151,12 @@
             if (typeof s.nvPicked === 'boolean') d.nvPicked = s.nvPicked;
             if (typeof s.nvProdOnly === 'boolean') d.nvProdOnly = s.nvProdOnly;
             if (typeof s.nvDays === 'number' && s.nvDays > 0) d.nvDays = s.nvDays;
+            if (typeof s.esPicked === 'boolean') d.esPicked = s.esPicked;
+            if (typeof s.esProdOnly === 'boolean') d.esProdOnly = s.esProdOnly;
+            if (typeof s.esGentle === 'boolean') d.esGentle = s.esGentle;
+            if (typeof s.esDays === 'number' && s.esDays > 0) d.esDays = s.esDays;
+            if (typeof s.esCap === 'number' && s.esCap >= 1) d.esCap = s.esCap;
+            if (s.esShow === 'all' || s.esShow === 'flag') d.esShow = s.esShow;
             if (typeof s.nvMinMin === 'number' && s.nvMinMin >= 0) d.nvMinMin = s.nvMinMin;
             if (s.nvChecks && typeof s.nvChecks === 'object') d.nvChecks = s.nvChecks;
             if (typeof s.nvCustom === 'boolean') d.nvCustom = s.nvCustom;
@@ -4427,7 +4436,7 @@
     let buttonEl = null;
     let panelEl = null;
     // v0.31: every section starts COLLAPSED (user request) — open what you need.
-    let openSections = { issues: false, data: false, fc: false, pilots: false, sweep: false, sop: false, nv: false, map: false, cov: false, kml: false, xref: false, mx: false, metrics: false, surveys: false };
+    let openSections = { issues: false, data: false, fc: false, pilots: false, sweep: false, sop: false, nv: false, es: false, map: false, cov: false, kml: false, xref: false, mx: false, metrics: false, surveys: false };
     // v0.25 (#257): 🚩 Fleet Issues front door. AIM Issues owns the engine +
     // panel (one copy of the merge/Slack/role rules); we ask it for a summary
     // and open it over tab-local DOM events on `document` (NOT the
@@ -8403,6 +8412,610 @@
         return h.join('');
     }
 
+    // ==================================================================
+    // ⚙ ESC SWEEP (v0.84, #333) — fleet sweep of the ESC ratio alert.
+    // Per flown flight of the scoped sites × date window: fetch the app-log
+    // archive (one tar.gz per mission — there is no per-file endpoint),
+    // keep ONLY the ESC telemetry log + the date-named drone log(s) while
+    // it is unpacked as a stream, run the Mission Logs ESC engine, keep one
+    // small result row, drop the archive. Read-only.
+    // Rails: ES_CONCURRENCY archives in memory at most (1 in gentle mode) ·
+    // per-run cap (Continue for the next batch) · archive size cap · per-
+    // mission timeout + its own error row · Pause / Stop (aborts in-flight
+    // downloads) · finished missions are remembered (GM cache) and never
+    // downloaded twice.
+    // ==================================================================
+    // ---- [AIM_ML_ESC_ENGINE] copied VERBATIM from AIM_Mission_Logs v0.9 — edit there, re-copy here ----
+    const mlText = (bytes) => new TextDecoder('utf-8').decode(bytes);
+    const mlPad = (n) => String(n).padStart(2, '0');
+    const mlHms = (date) => date ? `${mlPad(date.getUTCHours())}:${mlPad(date.getUTCMinutes())}:${mlPad(date.getUTCSeconds())}` : '—';
+    // ---- ESC telemetry (motor controllers) — v0.9 ---------------------------
+    // Port of Support's ESC-alert review (Niv, 2026-11). The drone raises
+    // "escN critical_current_rpm_ratio alert (value = … > 1)" and returns home. When the
+    // ESC agent was logging only a few readings per second at that moment, the alert is
+    // judged a likely FALSE POSITIVE; with normal sampling it is treated as real.
+    // Inputs: *esc_telemetry*.log (per-ESC samples + the agent's "IPC publishing" summaries
+    // carrying msg_in_sec) and the date-named main drone log(s) (the alert + action lines).
+    const ML_ESC_RATIO_THR = 1.0;     // ratio above this = an above-threshold stretch
+    const ML_ESC_SAMP_THR = 3;        // fewer readings per second than this = low sampling
+    const ML_ESC_ALERT_LOOKBACK_S = 60;   // the drone alerts late (it only sees published values) — judge stretches this close before the alert
+    const ML_ESC_FIELDS = ['throttle_in', 'throttle_out', 'rpm', 'voltage', 'current', 'mosfet_temp', 'capacitor_temp', 'status_code', 'critical_current_rpm_ratio'];
+    const ML_DRONE_LOG_RE = /^\d{4}_\d\d_\d\d__\d\d_\d\d_\d\d\.log$/;
+
+    // "2026-10-01 18:59:49,263" at offset i → epoch ms (null when the text there is not a stamp).
+    // The on-board log clock is UTC — the same clock as syslog and the mission start_time.
+    function mlLogTs(s, i) {
+        if (s.length < i + 23 || s[i + 4] !== '-' || s[i + 10] !== ' ' || s[i + 19] !== ',') return null;
+        const n = (a, b) => +s.slice(i + a, i + b);
+        const t = Date.UTC(n(0, 4), n(5, 7) - 1, n(8, 10), n(11, 13), n(14, 16), n(17, 19), n(20, 23));
+        return isFinite(t) ? t : null;
+    }
+    const mlHmsMs = (ms) => { const d = new Date(ms); return `${mlHms(d)}.${String(d.getUTCMilliseconds()).padStart(3, '0')}`; };
+    function mlLowerBound(arr, v) { let lo = 0, hi = arr.length; while (lo < hi) { const mid = (lo + hi) >> 1; if (arr[mid] < v) lo = mid + 1; else hi = mid; } return lo; }
+
+    function mlParseEscLog(text) {
+        const series = {}, pubs = {}, pubTimes = [];
+        let powerTrain = null, enumerated = null, t0 = null, t1 = null, samples = 0;
+        const kvRe = /'(\w+)': (-?\d[\d.]*(?:[eE][-+]?\d+)?)/g;
+        const pubRe = /'(esc\d+)': \{([^}]*)\}/g;
+        let pos = 0;
+        while (pos < text.length) {
+            let nl = text.indexOf('\n', pos); if (nl < 0) nl = text.length;
+            const line = text.slice(pos, nl); pos = nl + 1;
+            const t = mlLogTs(line, 0); if (t == null) continue;
+            const rest = line.slice(24);
+            if (t0 == null || t < t0) t0 = t;
+            if (t1 == null || t > t1) t1 = t;
+            if (/^esc\d+:\{/.test(rest)) {
+                const name = rest.slice(0, rest.indexOf(':'));
+                let s = series[name];
+                if (!s) { s = series[name] = { t: [] }; for (const f of ML_ESC_FIELDS) s[f] = []; }
+                const row = {}; let m; kvRe.lastIndex = 0;
+                while ((m = kvRe.exec(rest))) row[m[1]] = +m[2];
+                s.t.push(t);
+                for (const f of ML_ESC_FIELDS) s[f].push(row[f] != null ? row[f] : NaN);
+                samples++;
+            } else if (rest.startsWith('IPC publishing')) {
+                let m, any = false; pubRe.lastIndex = 0;
+                while ((m = pubRe.exec(rest))) {
+                    const mm = /'msg_in_sec': (-?[\d.]+)/.exec(m[2]); if (!mm) continue;
+                    const p = pubs[m[1]] || (pubs[m[1]] = { t: [], v: [] });
+                    p.t.push(t); p.v.push(+mm[1]); any = true;
+                }
+                if (any) pubTimes.push(t);
+            } else {
+                const pt = /configured power train is (\S+)/.exec(rest); if (pt) powerTrain = pt[1];
+                const en = /Enumerated ESCs: \[(.*)\]/.exec(rest); if (en) enumerated = en[1];
+            }
+        }
+        return { series, pubs, pubTimes, powerTrain, enumerated, t0, t1, samples };
+    }
+
+    // Alert + action lines from the main drone log(s). Each alert: {t, esc, value, limit, line, file}.
+    function mlFindEscAlerts(files) {
+        const logs = files.filter(f => ML_DRONE_LOG_RE.test(f.base));
+        const alerts = [], actions = [], seen = new Set();
+        const hitRe = /critical_current_rpm_ratio alert|Motor Malfunction Detected/gi;
+        const alertRe = /(esc\d+)\W{0,12}critical_current_rpm_ratio alert[^\n(]*\(\s*value\s*=\s*([-\d.eE+]+)\s*>\s*([-\d.eE+]+)/i;
+        for (const f of logs) {
+            const text = mlText(f.bytes);
+            let m; hitRe.lastIndex = 0;
+            while ((m = hitRe.exec(text))) {
+                const a = text.lastIndexOf('\n', m.index) + 1; let b = text.indexOf('\n', m.index); if (b < 0) b = text.length;
+                const line = text.slice(a, b).replace(/\r$/, ''); hitRe.lastIndex = b;
+                const t = mlLogTs(line, 0), key = `${t}|${line.slice(24)}`;
+                if (seen.has(key)) continue; seen.add(key);
+                if (/Motor Malfunction Detected/i.test(m[0])) { const i = line.search(/ESC and\/or Motor|Motor Malfunction/i); actions.push({ t, text: line.slice(i).trim().slice(0, 200), file: f.base }); continue; }
+                const am = alertRe.exec(line);
+                alerts.push({ t, esc: am ? am[1].toLowerCase() : null, value: am ? +am[2] : null, limit: am ? +am[3] : null, line: line.slice(0, 300), file: f.base });
+            }
+        }
+        alerts.sort((x, y) => (x.t || 0) - (y.t || 0)); actions.sort((x, y) => (x.t || 0) - (y.t || 0));
+        return { alerts, actions, mainLogs: logs.map(f => f.base) };
+    }
+
+    function mlExtractEsc(files, roles) {
+        const found = mlFindEscAlerts(files);
+        const main = files.filter(f => ML_DRONE_LOG_RE.test(f.base)).sort((a, b) => b.bytes.length - a.bytes.length)[0];
+        if (main) roles.droneLog = main;
+        const escFiles = files.filter(f => /esc_telemetry.*\.log$/i.test(f.base)).sort((a, b) => b.bytes.length - a.bytes.length);
+        if (!escFiles.length) return Object.assign({ present: false, note: 'no *esc_telemetry*.log in this archive' }, found);
+        roles.esc = escFiles[0];
+        const p = mlParseEscLog(mlText(escFiles[0].bytes));
+        const names = Object.keys(p.series).sort((a, b) => (parseInt(a.slice(3), 10) || 0) - (parseInt(b.slice(3), 10) || 0));
+        if (!names.length) return Object.assign({ present: false, note: `${escFiles[0].base} has no ESC telemetry lines` }, found);
+        // dense per-clock-second sample counts per ESC (a second with no reading counts as 0)
+        const perSec = {};
+        let runFrom = null, runTo = null;
+        for (const n of names) {
+            const s = p.series[n], T = s.t, s0 = Math.floor(T[0] / 1000);
+            const counts = new Array(Math.floor(T[T.length - 1] / 1000) - s0 + 1).fill(0);
+            for (let i = 0; i < T.length; i++) {
+                counts[Math.floor(T[i] / 1000) - s0]++;
+                if (s.rpm[i] > 0) { if (runFrom == null || T[i] < runFrom) runFrom = T[i]; if (runTo == null || T[i] > runTo) runTo = T[i]; }
+            }
+            perSec[n] = { s0, counts };
+        }
+        const gaps = []; for (let i = 1; i < p.pubTimes.length; i++) gaps.push(p.pubTimes[i] - p.pubTimes[i - 1]);
+        gaps.sort((a, b) => a - b);
+        const pubInterval = gaps.length ? gaps[gaps.length >> 1] : 4000;
+        const unparsed = found.alerts.filter(a => !a.esc || a.t == null).length;
+        return Object.assign({ present: true, file: escFiles[0].base, otherFiles: escFiles.slice(1).map(f => f.base), names, perSec, pubInterval, run: runFrom != null ? { from: runFrom, to: runTo } : null,
+            formatWarning: unparsed ? `${unparsed} ESC alert line(s) in the drone log did not match the expected "escN critical_current_rpm_ratio alert (value = X > Y)" shape — verdict may be incomplete` : null }, p, found);
+    }
+
+    // Re-runnable with different thresholds (the card's controls) — no re-parse.
+    function mlEscAnalyze(e, ratioThr, sampThr) {
+        const stretches = [], stats = [];
+        for (const name of e.names) {
+            const s = e.series[name], T = s.t, Rr = s.critical_current_rpm_ratio, ps = e.perSec[name], pb = e.pubs[name];
+            let a = -1;
+            for (let i = 0; i <= T.length; i++) {
+                if (i < T.length && Rr[i] > ratioThr) { if (a < 0) a = i; continue; }
+                if (a < 0) continue;
+                const b = i - 1, from = T[a], to = T[b];
+                let peak = -Infinity, peakT = from;
+                for (let k = a; k <= b; k++) if (Rr[k] > peak) { peak = Rr[k]; peakT = T[k]; }
+                const k0 = Math.floor(from / 1000) - ps.s0, k1 = Math.floor(to / 1000) - ps.s0;
+                let minPerSec = Infinity, secsBelow = 0;
+                for (let k = k0; k <= k1; k++) { const c = ps.counts[k] || 0; if (c < minPerSec) minPerSec = c; if (c < sampThr) secsBelow++; }
+                // each publish describes the seconds just before it → include one publish interval past the end
+                let minMsg = null;
+                if (pb) for (let j = mlLowerBound(pb.t, from); j < pb.t.length && pb.t[j] <= to + e.pubInterval; j++) if (minMsg == null || pb.v[j] < minMsg) minMsg = pb.v[j];
+                stretches.push({ esc: name, from, to, s: (to - from) / 1000, samples: b - a + 1, peak, peakT, minPerSec, secsBelow, secsTotal: k1 - k0 + 1, minMsg, low: minPerSec < sampThr || (minMsg != null && minMsg < sampThr) });
+                a = -1;
+            }
+            // per-ESC stats while the motors were running
+            const st = { esc: name, n: 0, thrIn: 0, thrOut: 0, rpmAvg: 0, rpmMax: -Infinity, curAvg: 0, curMax: -Infinity, voltMin: Infinity, mosMax: -Infinity, capMax: -Infinity, ratioMax: -Infinity, over: 0, statusNonZero: 0 };
+            if (e.run) for (let i = mlLowerBound(T, e.run.from); i < T.length && T[i] <= e.run.to; i++) {
+                st.n++; st.thrIn += s.throttle_in[i] || 0; st.thrOut += s.throttle_out[i] || 0; st.rpmAvg += s.rpm[i] || 0; st.curAvg += s.current[i] || 0;
+                if (s.rpm[i] > st.rpmMax) st.rpmMax = s.rpm[i];
+                if (s.current[i] > st.curMax) st.curMax = s.current[i];
+                if (s.voltage[i] < st.voltMin) st.voltMin = s.voltage[i];
+                if (s.mosfet_temp[i] > st.mosMax) st.mosMax = s.mosfet_temp[i];
+                if (s.capacitor_temp[i] > st.capMax) st.capMax = s.capacitor_temp[i];
+                if (Rr[i] > st.ratioMax) st.ratioMax = Rr[i];
+                if (Rr[i] > ratioThr) st.over++;
+                if (s.status_code[i]) st.statusNonZero++;
+            }
+            if (st.n) { st.thrIn /= st.n; st.thrOut /= st.n; st.rpmAvg /= st.n; st.curAvg /= st.n; st.overPct = 100 * st.over / st.n; }
+            stats.push(st);
+        }
+        stretches.sort((x, y) => x.from - y.from);
+        const alertEscs = Array.from(new Set(e.alerts.map(x => x.esc).filter(Boolean)));
+        // Which stretches count: with an alert, the alerted ESC's stretches CLOSE to the alert. A healthy
+        // flight already crosses 1.0 for a few seconds at takeoff with normal sampling (237893: all four
+        // ESCs), so judging every stretch of the flight would turn each false positive into "real".
+        // No stretch near the alert → CHECK, never a guess from an unrelated stretch.
+        let judged = stretches;
+        if (alertEscs.length) {
+            const look = ML_ESC_ALERT_LOOKBACK_S * 1000;
+            judged = stretches.filter(x => e.alerts.some(al => al.esc === x.esc && al.t != null && x.from <= al.t + 2000 && x.to >= al.t - look));
+        }
+        for (const x of stretches) x.judged = judged.includes(x);
+        const scopeTxt = `in the ${ML_ESC_ALERT_LOOKBACK_S} s before the alert`;
+        const real = judged.filter(x => !x.low);
+        const span = (x) => `${x.esc} ${mlHms(new Date(x.from))}–${mlHms(new Date(x.to))} (peak ${x.peak.toFixed(3)})`;
+        const worst = stretches.reduce((m, x) => (!m || x.peak > m.peak ? x : m), null);
+        let verdict;
+        if (e.alerts.length) {
+            const who = alertEscs.join(', ') || 'an ESC';
+            if (!judged.length) verdict = { code: 'check', level: 'amber', text: `CHECK — the drone alerted on ${who}, but that ESC is not above ${ratioThr} ${scopeTxt} in this log; the log may not cover the alert time` };
+            else if (!real.length) verdict = { code: 'false', level: 'amber', text: `YES, false positive — every stretch above ${ratioThr} on ${who} ${scopeTxt} (${judged.length}) had low sampling (under ${sampThr}/s)` };
+            else verdict = { code: 'real', level: 'red', text: `NO, not a false positive — treat as real: ${span(real[0])} was above ${ratioThr} with normal sampling${real.length > 1 ? ` (+${real.length - 1} more)` : ''}, ${scopeTxt}` };
+        } else if (!stretches.length) verdict = { code: 'none', level: 'green', text: `No alert — no ESC went above ${ratioThr}` };
+        else if (e.mainLogs.length) verdict = { code: 'quiet', level: 'green', text: `No ESC alert in the drone log. The ratio did go above ${ratioThr} in ${stretches.length} stretch(es) (${stretches.length - stretches.filter(x => x.low).length} with normal sampling; peak ${worst.peak.toFixed(3)} on ${worst.esc}) without the drone alerting` };
+        else if (!real.length) verdict = { code: 'nolog-false', level: 'amber', text: `No drone log in the archive to confirm an alert. Every stretch above ${ratioThr} (${stretches.length}) had low sampling — an alert here would be a false positive` };
+        else verdict = { code: 'nolog-real', level: 'amber', text: `No drone log in the archive to confirm an alert. ${span(real[0])} was above ${ratioThr} with normal sampling — an alert here would be real` };
+        return { ratioThr, sampThr, stretches, judged, stats, alertEscs, verdict };
+    }
+    // ---- end [AIM_ML_ESC_ENGINE] ----
+
+    const ES_WANT = (base) => /esc_telemetry.*\.log$/i.test(base) || ML_DRONE_LOG_RE.test(base);
+    const ES_CONCURRENCY = 2;
+    const ES_LIST_CONCURRENCY = 3;
+    const ES_MAX_MB = 250;             // compressed archive cap — anything bigger is skipped as "too large"
+    const ES_TIMEOUT_MS = 180000;      // per-archive download timeout
+    const ES_TAKEOFF_WIN_S = 60;       // a stretch starting this soon after motor start = the takeoff spike
+    const ES_WATCH_S = 10;             // takeoff spike this long with NO alarm = "watch" (245357's false alarm was a ~15 s spike; healthy flights ~6 s)
+    const ES_CACHE_VER = 1;
+    const ES_CACHE_MAX = 3000;
+    const KEY_ES_CACHE = IS_QA ? 'aim-ft-es-cache-qa' : 'aim-ft-es-cache';   // mission ids are per-DB → env-keyed
+    const ES_DAY_OPTS = [[1, 'last 24 h'], [3, 'last 3 days'], [7, 'last 7 days'], [14, 'last 14 days'], [30, 'last 30 days'], [60, 'last 60 days'], [90, 'last 90 days']];
+    const ES_KINDS = {
+        real: { label: 'REAL', color: '#ff5252', title: 'The drone raised the ESC ratio alarm and the readings behind it arrived at a normal rate — treat as a real motor / ESC problem.' },
+        false: { label: 'false alarm', color: '#ffb347', title: 'The drone raised the ESC ratio alarm while the motor-controller readings were arriving under 3 per second.' },
+        check: { label: 'check', color: '#ffa030', title: 'An alarm that could not be judged from the logs (ESC log missing, alarm line not understood, or no stretch near the alarm time). Open the full card.' },
+        watch: { label: 'watch', color: '#c58bff', title: `No alarm, but the takeoff spike stayed above the alarm level for ${ES_WATCH_S} s or more — the pattern that preceded a false alarm.` },
+        ok: { label: 'ok', color: '#5fff5f', title: 'No ESC alarm.' },
+        noesc: { label: 'no ESC log', color: '#888', title: 'The archive has no ESC telemetry log.' },
+        nolog: { label: 'no logs', color: '#888', title: 'The server has no app-log archive for this flight.' },
+        toolarge: { label: 'too large', color: '#ffa030', title: `Archive over ${ES_MAX_MB} MB — skipped.` },
+        error: { label: 'error', color: '#ffa030', title: 'Download or analysis failed — retried on Continue.' },
+    };
+    const ES_FLAG_KINDS = ['real', 'false', 'check', 'watch', 'error', 'toolarge'];
+    let esSweep = null;     // { at, running, listing, paused, stop, scope, start, end, queue:[{sid,id,when,dur,name,drone,pilot}], rows:{id:result}, siteErr:[], t:{n,ms,bytes,fracSum,fracN}, sitesDone, sitesTotal, runLeft }
+    let esSeq = 0;
+    let esCache = null;     // { v, m: { missionId: result } }
+    let esCacheTimer = null;
+    let esLastRender = 0;
+    const esInflight = new Set();
+
+    function esCacheLoad() {
+        if (esCache) return esCache;
+        const c = loadJson(KEY_ES_CACHE, null);
+        esCache = (c && c.v === ES_CACHE_VER && c.m && typeof c.m === 'object') ? c : { v: ES_CACHE_VER, m: {} };
+        return esCache;
+    }
+    function esCacheSave() {
+        if (!esCache) return;
+        const ids = Object.keys(esCache.m);
+        if (ids.length > ES_CACHE_MAX) ids.map(Number).sort((a, b) => a - b).slice(0, ids.length - ES_CACHE_MAX).forEach(id => { delete esCache.m[id]; });   // drop the oldest mission ids
+        gmSet(KEY_ES_CACHE, JSON.stringify(esCache));
+    }
+    function esCachePut(id, r) {
+        esCacheLoad().m[id] = { st: r.st, code: r.code, al: r.al, at: r.at, ae: r.ae, av: r.av, pk: r.pk, pe: r.pe, lg: r.lg, tk: r.tk, minS: r.minS, nSt: r.nSt, warn: r.warn };
+        if (!esCacheTimer) esCacheTimer = setTimeout(() => { esCacheTimer = null; esCacheSave(); }, 15000);   // GM storage rewrites the whole blob — batch the writes
+    }
+
+    // Cross-origin archive download (CloudFront signed URL) with a size cap and an abort handle.
+    function esFetchBinary(url) {
+        return new Promise((resolve, reject) => {
+            let settled = false, req = null;
+            const fin = (fn, v) => { if (settled) return; settled = true; if (req) esInflight.delete(req); fn(v); };
+            try {
+                req = GM_xmlhttpRequest({
+                    method: 'GET', url, responseType: 'arraybuffer', timeout: ES_TIMEOUT_MS,
+                    onprogress: (e) => {
+                        if (e && e.loaded > ES_MAX_MB * 1048576) { try { req.abort(); } catch (err) { console.warn(`${TAG} ESC sweep: abort failed`, err); } fin(reject, new Error(`too large (over ${ES_MAX_MB} MB)`)); }
+                    },
+                    onload: (r) => (r.status >= 200 && r.status < 300 && r.response) ? fin(resolve, new Uint8Array(r.response)) : fin(reject, new Error(`archive HTTP ${r.status}`)),
+                    onerror: () => fin(reject, new Error('archive download failed (network)')),
+                    ontimeout: () => fin(reject, new Error(`archive download timed out after ${ES_TIMEOUT_MS / 1000} s`)),
+                    onabort: () => fin(reject, new Error('aborted')),
+                });
+                if (req) esInflight.add(req);
+            } catch (e) { fin(reject, e); }
+        });
+    }
+
+    // gunzip + untar as a STREAM, keeping only the members want(base) accepts — the big files
+    // (flight-controller .bin, syslog, collision log) are never held in memory.
+    // → { files:[{name, base, bytes}], members, totalBytes, wantedEndFrac } (wantedEndFrac = how far into
+    // the unpacked archive the last wanted file ends — tells us what an early-stop download could save).
+    async function esUnpackWanted(gz, want) {
+        const reader = new Blob([gz]).stream().pipeThrough(new DecompressionStream('gzip')).getReader();
+        const td = new TextDecoder('utf-8');
+        const str = (u, a, b) => { const s = td.decode(u.subarray(a, b)); const z = s.indexOf('\0'); return (z >= 0 ? s.slice(0, z) : s).trim(); };
+        const join = (chunks, size) => { const o = new Uint8Array(size); let p = 0; for (const c of chunks) { o.set(c, p); p += c.length; } return o; };
+        const files = [];
+        const hdr = new Uint8Array(512);
+        let hdrFill = 0, cur = null, pendingLong = null, pos = 0, members = 0, lastWantedEnd = 0, ended = false;
+        const finish = () => {
+            if (cur.type === 'L') pendingLong = str(join(cur.chunks, cur.size), 0, cur.size);
+            else if (cur.file) { members++; if (cur.chunks) { files.push({ name: cur.name, base: cur.base, bytes: join(cur.chunks, cur.size) }); lastWantedEnd = pos; } }
+            cur = null;
+        };
+        for (;;) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            let p = 0;
+            while (p < value.length && !ended) {
+                if (cur) {
+                    if (cur.left > 0) { const n = Math.min(cur.left, value.length - p); if (cur.chunks) cur.chunks.push(value.subarray(p, p + n)); cur.left -= n; p += n; pos += n; }
+                    if (cur.left === 0 && cur.pad > 0) { const n = Math.min(cur.pad, value.length - p); cur.pad -= n; p += n; pos += n; }
+                    if (cur.left === 0 && cur.pad === 0) finish();
+                    continue;
+                }
+                const n = Math.min(512 - hdrFill, value.length - p);
+                hdr.set(value.subarray(p, p + n), hdrFill); hdrFill += n; p += n; pos += n;
+                if (hdrFill < 512) continue;
+                hdrFill = 0;
+                if (hdr.every(b => b === 0)) { ended = true; break; }      // end-of-archive marker
+                let name = str(hdr, 0, 100);
+                const size = parseInt(str(hdr, 124, 136), 8) || 0;
+                const type = String.fromCharCode(hdr[156] || 48);
+                if (str(hdr, 257, 262) === 'ustar') { const prefix = str(hdr, 345, 500); if (prefix) name = prefix + '/' + name; }
+                const file = type === '0' || type === '\0' || type === '7';
+                if (file && pendingLong) { name = pendingLong; }
+                if (type !== 'L') pendingLong = null;
+                const base = name.split('/').pop();
+                cur = { type, file, name, base, size, left: size, pad: (512 - (size % 512)) % 512, chunks: (type === 'L' || (file && want(base))) ? [] : null };
+                if (cur.left === 0 && cur.pad === 0) finish();
+            }
+            if (ended) break;
+        }
+        if (cur && cur.left === 0 && cur.pad === 0) finish();
+        else if (cur) throw new Error(`archive is truncated (inside ${cur.base})`);
+        if (ended) { try { await reader.cancel(); } catch (e) { console.warn(`${TAG} ESC sweep: stream cancel failed`, e); } }
+        return { files, members, totalBytes: pos, wantedEndFrac: pos ? lastWantedEnd / pos : null };
+    }
+
+    // The engine's full result → one small row.
+    function esSummarize(files) {
+        const e = mlExtractEsc(files, {});
+        const a0 = e.alerts && e.alerts[0];
+        if (!e.present) return { st: 'noesc', note: e.note, al: e.alerts ? e.alerts.length : 0, at: a0 ? a0.t : null, ae: a0 ? (a0.esc || '') : '', av: a0 ? a0.value : null };
+        const an = mlEscAnalyze(e, ML_ESC_RATIO_THR, ML_ESC_SAMP_THR);
+        // in-flight stretches only — after motor stop the ratio reads high while the props spin down (not a load reading)
+        const longest = an.stretches.filter(x => !e.run || x.from <= e.run.to).reduce((m, x) => (!m || x.s > m.s ? x : m), null);
+        const takeoff = e.run ? an.stretches.filter(x => x.from <= e.run.from + ES_TAKEOFF_WIN_S * 1000).reduce((m, x) => Math.max(m, x.s), 0) : 0;
+        const peak = an.stats.filter(s => s.n).reduce((m, s) => (!m || s.ratioMax > m.ratioMax ? s : m), null);
+        const pool = e.alerts.length ? an.judged : [];      // "min readings/s" only means something for the stretches an alarm was judged on
+        return { st: 'ok', code: an.verdict.code, text: an.verdict.text, al: e.alerts.length, at: a0 ? a0.t : null, ae: an.alertEscs.join(', '), av: a0 ? a0.value : null,
+            pk: peak ? peak.ratioMax : null, pe: peak ? peak.esc : '', lg: longest ? longest.s : 0, tk: takeoff, minS: pool.length ? Math.min(...pool.map(x => x.minPerSec)) : null, nSt: an.stretches.length, warn: e.formatWarning ? 1 : 0 };
+    }
+    function esKind(r) {
+        if (!r) return null;
+        if (r.st !== 'ok') return (r.st === 'noesc' && r.al) ? 'check' : r.st;
+        if (r.code === 'real') return 'real';
+        if (r.code === 'false') return 'false';
+        if (r.code === 'check' || r.warn) return 'check';
+        if (r.code === 'nolog-false' || r.code === 'nolog-real') return 'check';
+        return r.tk >= ES_WATCH_S ? 'watch' : 'ok';
+    }
+    const esCardUrl = (mid) => `${location.origin}/dashboard/?aim-ml=${encodeURIComponent(mid)}#/`;   // Mission Logs v0.91+ opens + analyzes this mission
+    const esUtc = (ms) => ms == null ? '' : new Date(ms).toISOString().slice(11, 19);
+
+    async function esOneMission(q, isDead) {
+        const t0 = performance.now();
+        try {
+            let link;
+            try { link = await fdGetJson(`/missions/${encodeURIComponent(q.id)}/logs/new_app_log/`, 30000); }
+            catch (e) { if (/HTTP 404/.test(String(e && e.message))) return { st: 'nolog', note: 'no app-log archive (404)' }; throw e; }
+            if (!link || !link.download_link) return { st: 'nolog', note: 'no app-log archive on the server' };
+            if (isDead()) return null;
+            let gz = await esFetchBinary(link.download_link);
+            if (isDead()) return null;
+            const tDl = performance.now();
+            const mb = gz.length / 1048576;
+            const un = await esUnpackWanted(gz, ES_WANT);
+            gz = null;
+            const r = esSummarize(un.files);
+            r.mb = mb; r.dlMs = tDl - t0; r.cpuMs = performance.now() - tDl; r.frac = un.wantedEndFrac;
+            esCachePut(q.id, r);
+            return r;
+        } catch (e) {
+            if (isDead()) return null;
+            const msg = String(e && e.message || e);
+            console.warn(`${TAG} ESC sweep: mission ${q.id} failed:`, e);
+            return { st: /too large/.test(msg) ? 'toolarge' : 'error', note: msg, fatal: /401\/403|login page/.test(msg) };
+        }
+    }
+
+    function esScopeIds() {
+        const all = rawSites ? Object.keys(rawSites) : [];
+        let ids = (ftCfg.esPicked && fdSelected.size) ? all.filter(id => fdSelected.has(String(id))) : all.slice();
+        if (ftCfg.esProdOnly) ids = ids.filter(id => { const st = siteStatus(id); return !st || st === 'Production'; });
+        return ids;
+    }
+    const esPending = () => esSweep ? esSweep.queue.filter(q => { const r = esSweep.rows[q.id]; return !r || r.st === 'error'; }) : [];
+    function esRerender(force) {
+        const now = Date.now();
+        if (!force && now - esLastRender < 1500) return;
+        esLastRender = now;
+        if (!openSections.es && !force) return;
+        const l = panelEl && panelEl.querySelector('#aim-es-list');
+        const st = l ? l.scrollTop : 0;
+        fdRenderKeepScroll();
+        const again = panelEl && panelEl.querySelector('#aim-es-list');
+        if (again) again.scrollTop = st;
+    }
+
+    // cont = true → keep the listed flights + finished rows, process the next batch (also retries error rows).
+    async function esRun(cont) {
+        if (esSweep && esSweep.running) return;
+        const seq = ++esSeq;
+        const isDead = () => esSeq !== seq || !esSweep || esSweep.stop;
+        if (!cont || !esSweep) {
+            try { await fetchRawSites(false); } catch (e) { console.warn(`${TAG} ESC sweep: /sites/ failed:`, e); setStatus(`ESC sweep: /sites/ failed — ${e.message}`); return; }
+            const ids = esScopeIds();
+            if (!ids.length) { setStatus('ESC sweep: no sites in scope (pick sites in 📦 Fleet Data or untick "picked only")'); return; }
+            const days = Number(ftCfg.esDays) > 0 ? Number(ftCfg.esDays) : 7;
+            const end = new Date(); const start = new Date(); start.setDate(start.getDate() - days);
+            esSweep = { at: Date.now(), running: true, listing: true, paused: false, stop: false, scope: (ftCfg.esPicked && fdSelected.size) ? `picked (${ids.length})` : `all (${ids.length})`, start: fdYmd(start), end: fdYmd(end),
+                queue: [], rows: {}, siteErr: [], t: { n: 0, ms: 0, bytes: 0, fracSum: 0, fracN: 0 }, sitesDone: 0, sitesTotal: ids.length, runLeft: 0, fresh: 0 };
+            esRerender(true);
+            console.log(`${TAG} ESC sweep: listing flights on ${ids.length} site(s), ${esSweep.start} → ${esSweep.end}`);
+            const seen = new Set(); const now = Date.now(); let ci = 0;
+            const lister = async () => {
+                while (ci < ids.length) {
+                    if (isDead()) return;
+                    const sid = ids[ci++];
+                    try {
+                        const got = await nvFetchSite(sid, start, end, isDead);
+                        got.rows.forEach(m => {
+                            if (!m || m.id == null || seen.has(m.id)) return;
+                            seen.add(m.id);
+                            const dur = Number(m.duration);
+                            if (!(dur > 0)) return;                                   // never flew → no ESC data worth a download
+                            const t0 = Date.parse(m.when);
+                            if (isFinite(t0) && now - (t0 + dur) < NV_FRESH_MIN * 60000) { esSweep.fresh++; return; }   // logs may still be uploading
+                            esSweep.queue.push({ sid, id: m.id, when: m.when || '', dur, name: m.app_name || '', drone: m.drone_name || '', pilot: m.created_by_username || '' });
+                        });
+                        if (got.partial) esSweep.siteErr.push(`${siteName(sid)}: page cap hit — older flights not listed`);
+                    } catch (e) {
+                        if (isDead()) return;
+                        esSweep.siteErr.push(`${siteName(sid)}: ${(e && e.message) || e}`);
+                        console.warn(`${TAG} ESC sweep: listing site ${sid} failed:`, e);
+                    }
+                    esSweep.sitesDone++;
+                    setStatus(`ESC sweep: listing flights… ${esSweep.sitesDone}/${esSweep.sitesTotal} site(s) · ${esSweep.queue.length} flown`);
+                }
+            };
+            await Promise.all(Array.from({ length: Math.min(ES_LIST_CONCURRENCY, ids.length) }, lister));
+            if (esSeq !== seq) return;
+            esSweep.queue.sort((a, b) => (Date.parse(b.when) || 0) - (Date.parse(a.when) || 0));
+            esSweep.listing = false;
+            if (esSweep.stop) { esSweep.running = false; setStatus('ESC sweep stopped while listing flights'); esRerender(true); return; }
+        }
+        esSweep.running = true; esSweep.stop = false; esSweep.paused = false;
+        const pending = esPending();
+        const cap = Number(ftCfg.esCap) > 0 ? Math.round(Number(ftCfg.esCap)) : 200;
+        let budget = cap, cursor = 0, fatal = null;
+        esSweep.runLeft = Math.min(cap, pending.length);
+        esRerender(true);
+        console.log(`${TAG} ESC sweep: ${pending.length} flight(s) to check, cap ${cap} download(s) this run, ${ftCfg.esGentle ? 1 : ES_CONCURRENCY} at a time`);
+        const worker = async () => {
+            for (;;) {
+                while (esSweep && esSweep.paused && !isDead()) await new Promise(r => setTimeout(r, 300));
+                if (isDead() || cursor >= pending.length) return;
+                const q = pending[cursor];
+                const cached = esCacheLoad().m[q.id];
+                if (!cached && budget <= 0) return;
+                cursor++;
+                let r;
+                if (cached) r = Object.assign({ cached: true }, cached);
+                else {
+                    budget--;
+                    r = await esOneMission(q, isDead);
+                    if (!r) return;                                           // stopped mid-flight — stays pending
+                    if (r.dlMs != null) { esSweep.t.n++; esSweep.t.ms += r.dlMs + r.cpuMs; esSweep.t.bytes += r.mb * 1048576; if (r.frac != null) { esSweep.t.fracSum += r.frac; esSweep.t.fracN++; } }
+                    if (r.fatal) { fatal = r.note; esSweep.stop = true; }
+                    esSweep.runLeft = Math.max(0, esSweep.runLeft - 1);
+                }
+                esSweep.rows[q.id] = r;
+                const t = esTotals();
+                setStatus(`ESC sweep… ${t.scanned}/${t.flown} flight(s) · ${t.by.real || 0} real · ${t.by.false || 0} false alarm · ${t.by.watch || 0} watch${esSweep.paused ? ' · PAUSED' : ''}`);
+                esRerender(false);
+                await ftYield();
+            }
+        };
+        await Promise.all(Array.from({ length: ftCfg.esGentle ? 1 : ES_CONCURRENCY }, worker));
+        if (esSeq !== seq || !esSweep) return;
+        esSweep.running = false; esSweep.paused = false; esSweep.runLeft = 0;
+        if (esCacheTimer) { clearTimeout(esCacheTimer); esCacheTimer = null; }
+        esCacheSave();
+        const t = esTotals(); const left = esPending().length;
+        setStatus(fatal ? `ESC sweep stopped — ${fatal}` : `ESC sweep ${esSweep.stop ? 'stopped' : left ? 'batch done' : 'done'} — ${t.scanned} of ${t.flown} flight(s) checked · ${t.alarms} alarm(s) (${t.by.real || 0} real · ${t.by.false || 0} false · ${t.by.check || 0} check) · ${t.by.watch || 0} watch${left ? ` · ${left} left — ▶ Continue` : ''}`);
+        console.log(`${TAG} ESC sweep: run finished — ${t.scanned}/${t.flown} checked, ${t.alarms} alarm(s), ${t.by.watch || 0} watch, ${t.by.error || 0} error(s), ${left} left · ${esSweep.t.n} download(s), avg ${esSweep.t.n ? (esSweep.t.ms / esSweep.t.n / 1000).toFixed(1) : '—'} s and ${esSweep.t.n ? (esSweep.t.bytes / esSweep.t.n / 1048576).toFixed(1) : '—'} MB each · wanted logs end on average ${esSweep.t.fracN ? Math.round(100 * esSweep.t.fracSum / esSweep.t.fracN) : '—'}% into the archive`);
+        esRerender(true);
+    }
+    function esStop() {
+        if (!esSweep || !esSweep.running) return;
+        esSweep.stop = true; esSweep.paused = false;
+        esInflight.forEach(req => { try { req.abort(); } catch (e) { console.warn(`${TAG} ESC sweep: abort failed`, e); } });
+        esInflight.clear();
+        setStatus('ESC sweep stopping…');
+    }
+
+    function esTotals() {
+        const t = { flown: 0, scanned: 0, alarms: 0, by: {}, cached: 0 };
+        if (!esSweep) return t;
+        t.flown = esSweep.queue.length;
+        esSweep.queue.forEach(q => {
+            const r = esSweep.rows[q.id]; if (!r) return;
+            t.scanned++; if (r.cached) t.cached++;
+            const k = esKind(r); t.by[k] = (t.by[k] || 0) + 1;
+            if (r.al) t.alarms++;
+        });
+        return t;
+    }
+    function esShownRows() {
+        if (!esSweep) return [];
+        const all = ftCfg.esShow === 'all';
+        const rank = { real: 0, check: 1, false: 2, watch: 3, error: 4, toolarge: 5 };
+        return esSweep.queue.map(q => ({ q, r: esSweep.rows[q.id], k: esKind(esSweep.rows[q.id]) }))
+            .filter(x => x.r && (all || ES_FLAG_KINDS.includes(x.k)))
+            .sort((a, b) => ((rank[a.k] != null ? rank[a.k] : 9) - (rank[b.k] != null ? rank[b.k] : 9)) || ((Date.parse(b.q.when) || 0) - (Date.parse(a.q.when) || 0)));
+    }
+    const esFix = (v, d) => v == null || !isFinite(v) ? '' : Number(v).toFixed(d);
+    function esExportRows() {
+        const cols = ['Site ID', 'Site', 'Client', 'Mission ID', 'Name', 'When (UTC)', 'When (CT)', 'Duration', 'Drone', 'Operator', 'Result', 'Alarm', 'Alarm time (UTC)', 'Alarm ESC', 'Alarm value', 'Peak ratio', 'Peak ESC', 'Longest stretch s', 'Takeoff spike s', 'Min readings/s', 'Stretches above', 'Note', 'Full card'];
+        const rows = esShownRows().map(({ q, r, k }) => [q.sid, siteName(q.sid), clientOf(siteName(q.sid)), q.id, q.name, q.when, fdWhenCT(q.when), fdDur(q.dur), q.drone, q.pilot, ES_KINDS[k] ? ES_KINDS[k].label : k, r.al ? 'yes' : 'no', esUtc(r.at), r.ae || '', r.av != null ? r.av : '',
+            esFix(r.pk, 3), r.pe || '', esFix(r.lg, 1), esFix(r.tk, 1), r.minS != null ? r.minS : '', r.nSt != null ? r.nSt : '', r.note || '', esCardUrl(q.id)]);
+        return { cols, rows };
+    }
+    function esCopySheets() {
+        const { cols, rows } = esExportRows();
+        if (!rows.length) { setStatus('ESC sweep: nothing to copy'); return; }
+        const esc = (v) => escapeHtml(String(v == null ? '' : v));
+        const t = esTotals(); const last = cols.length - 1;
+        const th = (c) => `<th style="background:#1a2029;color:#7adfe6">${esc(c)}</th>`;
+        const html = `<p><b>AIM ESC Sweep</b> — ${esc(esSweep.start)} → ${esc(esSweep.end)} — ${esc(esSweep.scope)} — ${t.scanned} of ${t.flown} flown flight(s) checked — ${t.alarms} alarm(s): ${t.by.real || 0} real, ${t.by.false || 0} false, ${t.by.check || 0} check — ${t.by.watch || 0} watch${ftCfg.esShow === 'all' ? '' : ' — flagged rows only'}</p>`
+            + `<table border="1" style="border-collapse:collapse"><tr>${cols.map(th).join('')}</tr>`
+            + rows.map(r => `<tr>${r.map((v, i) => (i === 3 || i === last) ? `<td><a href="${esc(r[last])}">${i === 3 ? esc(v) : 'open'}</a></td>` : `<td>${esc(v)}</td>`).join('')}</tr>`).join('') + '</table>';
+        copyHtmlToClipboard(html, [cols.join('\t')].concat(rows.map(r => r.join('\t'))).join('\n'), `ESC sweep copied — ${rows.length} row(s) for Sheets`);
+    }
+    function esDownloadCsv() {
+        const { cols, rows } = esExportRows();
+        if (!rows.length) { setStatus('ESC sweep: nothing to export'); return; }
+        const q = (v) => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`;
+        fdDownload(new Blob(['﻿' + [cols.map(q).join(',')].concat(rows.map(r => r.map(q).join(','))).join('\r\n')], { type: 'text/csv;charset=utf-8' }), `AIM_ESC_Sweep_${esSweep.start}_to_${esSweep.end}.csv`);
+        setStatus(`ESC sweep CSV — ${rows.length} row(s)`);
+    }
+    function esOpt(t) {
+        const k = t.getAttribute('data-es-opt');
+        if (k === 'days') { const v = Number(t.value); if (ES_DAY_OPTS.some(o => o[0] === v)) { ftCfg.esDays = v; saveCfg(); setStatus(`ESC sweep window: ${ES_DAY_OPTS.find(o => o[0] === v)[1]} — takes effect on the next ▶ Run`); } }
+        else if (k === 'cap') { const v = Math.round(Number(t.value)); if (isFinite(v) && v >= 1 && v <= 2000) { ftCfg.esCap = v; saveCfg(); setStatus(`ESC sweep: at most ${v} download(s) per run`); } else setStatus('ESC sweep cap: enter a number from 1 to 2000'); }
+        else if (k === 'show') { ftCfg.esShow = t.value === 'all' ? 'all' : 'flag'; saveCfg(); }
+        esRerender(true);
+    }
+    function renderEsSection() {
+        if (!openSections.es) return '';
+        const h = [];
+        const running = !!(esSweep && esSweep.running);
+        const ids = rawSites ? esScopeIds() : [];
+        const selCss = 'background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;font:inherit;padding:1px 3px;';
+        const left = esPending().length;
+        h.push('<div style="padding:6px 10px;display:flex;gap:12px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;">'
+            + `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;" title="Only the sites ticked in 📦 Fleet Data. Nothing picked → every site."><input type="checkbox" data-ft-flag="esPicked" ${ftCfg.esPicked ? 'checked' : ''} ${running ? 'disabled' : ''}> picked only <span style="color:${fdSelected.size ? '#5fff5f' : '#888'}">(${fdSelected.size})</span></label>`
+            + `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;" title="Skip sites whose /sites/ status is not Production"><input type="checkbox" data-ft-flag="esProdOnly" ${ftCfg.esProdOnly ? 'checked' : ''} ${running ? 'disabled' : ''}> Production only</label>`
+            + `<select data-es-opt="days" ${running ? 'disabled' : ''} title="How far back to list flown flights (takes effect on the next ▶ Run)" style="${selCss}">${ES_DAY_OPTS.map(o => `<option value="${o[0]}" ${Number(ftCfg.esDays) === o[0] ? 'selected' : ''}>${o[1]}</option>`).join('')}</select>`
+            + `<label style="display:inline-flex;align-items:center;gap:3px;" title="Most log archives to download in one run. ▶ Continue does the next batch. Flights already checked are remembered and never downloaded again.">max per run <input type="number" data-es-opt="cap" min="1" max="2000" step="10" value="${escapeHtml(String(ftCfg.esCap))}" ${running ? 'disabled' : ''} style="${selCss}width:54px"></label>`
+            + `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;" title="One download at a time instead of ${ES_CONCURRENCY} — slower, lighter on your internet connection (video calls)"><input type="checkbox" data-ft-flag="esGentle" ${ftCfg.esGentle ? 'checked' : ''} ${running ? 'disabled' : ''}> gentle</label>`
+            + `<select data-es-opt="show" title="Which rows the table and the exports show" style="${selCss}"><option value="flag" ${ftCfg.esShow !== 'all' ? 'selected' : ''}>show: alarms + watch</option><option value="all" ${ftCfg.esShow === 'all' ? 'selected' : ''}>show: every flight</option></select>`
+            + `<span style="color:#888">scope: ${rawSites ? `${ids.length} site(s)` : 'roster not loaded yet'}</span>`
+            + '</div>');
+        h.push('<div style="padding:6px 10px;display:flex;gap:14px;flex-wrap:wrap;border-bottom:1px solid #222834;">'
+            + (running
+                ? (esSweep.listing ? '' : `<span data-ft="es-pause" style="cursor:pointer;color:#ffd27a;font-weight:bold">${esSweep.paused ? '▶ Resume' : '⏸ Pause'}</span>`) + '<span data-ft="es-stop" style="cursor:pointer;color:#ff5252;font-weight:bold">■ Stop</span>'
+                : (esSweep && left ? `<span data-ft="es-continue" style="cursor:pointer;color:#5fff5f;font-weight:bold" title="Check the next batch (and retry error rows) without re-listing the flights">▶ Continue (${left} left)</span>` : '')
+                    + `<span data-ft="es-run" style="cursor:pointer;color:${esSweep && left ? '#7adfe6' : '#5fff5f'};font-weight:bold" title="List the flown flights of the scoped sites and start checking them">▶ ${esSweep ? 'New sweep' : 'Run ESC sweep'}</span>`)
+            + '<span data-ft="es-sheets" style="cursor:pointer;color:#7adfe6" title="The rows shown below on the clipboard — paste into Google Sheets / Excel; Mission ID links to the full Mission Logs card">📋 Copy → Sheets</span>'
+            + '<span data-ft="es-csv" style="cursor:pointer;color:#7adfe6">⬇ CSV</span>'
+            + (esSweep && !running ? '<span data-ft="es-clear" style="cursor:pointer;color:#888">✕ Clear</span>' : '')
+            + '</div>');
+        if (!esSweep) { h.push(`<div style="padding:8px 10px;color:#888">No sweep run yet. Downloads each flown flight's log archive (into this tab's memory only — nothing is saved to disk), reads the ESC telemetry, and lists every flight where the drone raised the ESC ratio alarm (false alarm or real) plus flights with a long takeoff spike. About 3–5 s per flight; keep this tab in its own window so Chrome does not slow it down. Read-only.</div>`); return h.join(''); }
+        const t = esTotals(); const tm = esSweep.t;
+        const avgS = tm.n ? tm.ms / tm.n / 1000 : null;
+        const eta = running && avgS && esSweep.runLeft ? Math.round(esSweep.runLeft * avgS / (ftCfg.esGentle ? 1 : ES_CONCURRENCY)) : null;
+        h.push(`<div style="padding:4px 10px;color:#aaa;border-bottom:1px solid #222834;">${running ? (esSweep.listing ? `Listing flights… ${esSweep.sitesDone}/${esSweep.sitesTotal} site(s)` : `${esSweep.paused ? '<span style="color:#ffd27a">PAUSED</span>' : 'Running…'} ${esSweep.runLeft} download(s) left this run${eta != null ? ` · about ${eta >= 90 ? Math.round(eta / 60) + ' min' : eta + ' s'}` : ''}`) : `Ran ${new Date(esSweep.at).toLocaleString()}`} · ${escapeHtml(esSweep.scope)} · ${escapeHtml(esSweep.start)} → ${escapeHtml(esSweep.end)}`
+            + ` → <b>${t.scanned}</b> of ${t.flown} flown flight(s) checked · <span style="color:${t.alarms ? '#ff3d00' : '#5fff5f'};font-weight:bold">${t.alarms} alarm(s)</span>`
+            + (t.alarms ? ` (<span style="color:${ES_KINDS.real.color}">${t.by.real || 0} real</span> · <span style="color:${ES_KINDS.false.color}">${t.by.false || 0} false</span> · <span style="color:${ES_KINDS.check.color}">${t.by.check || 0} check</span>)` : '')
+            + ` · <span style="color:${ES_KINDS.watch.color}">${t.by.watch || 0} watch</span> · ${t.by.ok || 0} ok`
+            + ((t.by.nolog || t.by.noesc) ? ` · <span style="color:#888">${(t.by.nolog || 0) + (t.by.noesc || 0)} without logs</span>` : '')
+            + ((t.by.error || t.by.toolarge) ? ` · <span style="color:#ffa030">${(t.by.error || 0) + (t.by.toolarge || 0)} failed</span>` : '')
+            + (t.cached ? ` · <span style="color:#888" title="already checked in an earlier sweep — not downloaded again">${t.cached} remembered</span>` : '')
+            + (esSweep.fresh ? ` · <span style="color:#888" title="ended less than ${NV_FRESH_MIN} min ago — logs may still be uploading">${esSweep.fresh} too fresh</span>` : '')
+            + (tm.n ? `<br><span style="color:#888">${tm.n} download(s) · avg ${avgS.toFixed(1)} s and ${(tm.bytes / tm.n / 1048576).toFixed(1)} MB each · ${(tm.bytes / 1073741824).toFixed(2)} GB total${tm.fracN ? ` · needed logs end ~${Math.round(100 * tm.fracSum / tm.fracN)}% into the archive` : ''}</span>` : '')
+            + (esSweep.siteErr.length ? `<br><span style="color:#ffa030" title="${escapeHtml(esSweep.siteErr.join('\n'))}">${esSweep.siteErr.length} site(s) could not be listed fully — hover for details</span>` : '')
+            + '</div>');
+        const shown = esShownRows();
+        if (!shown.length) { h.push(`<div style="padding:8px 10px;color:${t.scanned ? '#5fff5f' : '#888'}">${esSweep.listing ? 'listing flights…' : t.scanned ? (ftCfg.esShow === 'all' ? 'nothing to show' : 'No ESC alarm and no long takeoff spike on the flights checked so far ✓') : (t.flown ? 'waiting for the first flight…' : 'No flown flights in this window.')}</div>`); return h.join(''); }
+        const cell = (w, html, extra) => `<span style="width:${w}px;flex:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;${extra || ''}">${html}</span>`;
+        h.push('<div style="padding:3px 10px;display:flex;gap:8px;color:#888;font-size:11px;border-bottom:1px solid #222834">'
+            + cell(64, 'Mission') + cell(86, 'Result') + '<span style="flex:1">Site · mission</span>' + cell(112, 'When (CT)') + cell(70, 'Drone') + cell(38, 'ESC') + cell(40, 'Peak', 'text-align:right') + cell(52, 'Longest', 'text-align:right') + cell(52, 'Takeoff', 'text-align:right') + cell(44, 'Min /s', 'text-align:right') + '</div>');
+        h.push('<div id="aim-es-list" style="max-height:420px;overflow:auto">');
+        shown.forEach(({ q, r, k }) => {
+            const kd = ES_KINDS[k] || { label: k, color: '#888', title: '' };
+            const tip = [kd.title, r.text || '', r.note || '', r.at != null ? `alarm ${esUtc(r.at)} UTC${r.av != null ? `, value ${r.av}` : ''}` : ''].filter(Boolean).join(' — ');
+            h.push('<div class="aim-ft-row" style="padding:3px 10px;display:flex;gap:8px;align-items:center;border-top:1px dashed #1e2430;font-size:11px">'
+                + `<a href="${esCardUrl(q.id)}" target="_blank" rel="noopener" title="Open the full ESC card (charts) for this mission in Mission Logs — new tab" style="color:#7adfe6;text-decoration:none;width:64px;flex:none">${escapeHtml(String(q.id))} ↗</a>`
+                + cell(86, `<span style="color:${kd.color};border:1px solid ${kd.color};border-radius:3px;padding:0 3px" title="${escapeHtml(tip)}">${escapeHtml(kd.label)}</span>`)
+                + `<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(siteName(q.sid))} · ${escapeHtml(q.name)} · ${escapeHtml(q.pilot)}"><b>${escapeHtml(siteName(q.sid))}</b> <span style="color:#888">· ${escapeHtml(q.name || '(no name)')}</span></span>`
+                + cell(112, escapeHtml(fdWhenCT(q.when)), 'color:#aaa') + cell(70, escapeHtml(q.drone), 'color:#888')
+                + cell(38, escapeHtml(r.ae || ''), `color:${r.al ? '#ff7a7a' : '#888'}`)
+                + cell(40, esFix(r.pk, 2), `text-align:right;color:${r.pk > ML_ESC_RATIO_THR ? '#ffd27a' : '#aaa'}`)
+                + cell(52, r.lg ? esFix(r.lg, 1) + ' s' : '', 'text-align:right')
+                + cell(52, r.tk ? esFix(r.tk, 1) + ' s' : '', `text-align:right;color:${r.tk >= ES_WATCH_S ? ES_KINDS.watch.color : '#aaa'}`)
+                + cell(44, r.minS != null ? String(r.minS) : '', `text-align:right;color:${r.minS != null && r.minS < ML_ESC_SAMP_THR ? '#ffb347' : '#aaa'}`)
+                + '</div>');
+        });
+        h.push('</div>');
+        return h.join('');
+    }
+
     function renderPanel() {
         if (!panelEl) return;
         const body = panelEl.querySelector('#aim-ft-body');
@@ -8424,6 +9037,8 @@
             + renderSopSection()
             + sectionHeader('nv', '🎬', 'Mission Review', nvSweep ? `${nvTotals().hits} of ${nvTotals().flown} flown flight(s) flagged${nvSweep.running ? ` · running ${nvSweep.done}/${nvSweep.total}` : ''}` : 'flag flown flights across sites — no video, images, landing — links to Mission Playback')
             + renderNvSection()
+            + sectionHeader('es', '⚙', 'ESC Sweep', esSweep ? `${esTotals().scanned} of ${esTotals().flown} flight(s) checked · ${esTotals().alarms} alarm(s)${esSweep.running ? ' · running' : ''}` : 'ESC ratio alarms across sites — false alarm vs real, from each flight\'s logs')
+            + renderEsSection()
             + sectionHeader('map', '🗺', 'Map', 'basemap + airspace chart')
             + renderMapSection()
             + sectionHeader('cov', '📡', 'Coverage', `${covState.circles.length} circle(s) · Ø ${covState.opts.diaMi} mi · footprint of the picked sites`)
@@ -8469,7 +9084,7 @@
 
             // Delegated — the body is rebuilt on every render, the root never is
             panelEl.addEventListener('click', (ev) => {
-                if (ev.target.closest('input[data-ft-class],input[data-ft-flag],input[data-sop-check],select[data-nv-days],input[data-nv-min],input[data-nv-date],input[data-nv-check],input[data-ft-view],input[data-kml-show],input[data-kml-fill],input[data-kml-color],input[data-fd-site],input[data-fd-clientsel],select[data-fd-pick],input[data-fd-dataset],select[data-fd-range],input[data-fd-date],input[data-kx-inc],select[data-kx-mode],input[data-kx-pad],input[data-fx-inc],input[data-fx-opt],input[data-fc-thr],input[data-pu-opt],input[data-pu-chk],select[data-pu-tz],select[data-pu-end],select[data-pu-rule],input[data-pu-rule],select[data-pu-bulk],#aim-ft-xr-picked')) return;   // checkbox/color/select → change handler
+                if (ev.target.closest('input[data-ft-class],input[data-ft-flag],select[data-es-opt],input[data-es-opt],input[data-sop-check],select[data-nv-days],input[data-nv-min],input[data-nv-date],input[data-nv-check],input[data-ft-view],input[data-kml-show],input[data-kml-fill],input[data-kml-color],input[data-fd-site],input[data-fd-clientsel],select[data-fd-pick],input[data-fd-dataset],select[data-fd-range],input[data-fd-date],input[data-kx-inc],select[data-kx-mode],input[data-kx-pad],input[data-fx-inc],input[data-fx-opt],input[data-fc-thr],input[data-pu-opt],input[data-pu-chk],select[data-pu-tz],select[data-pu-end],select[data-pu-rule],input[data-pu-rule],select[data-pu-bulk],#aim-ft-xr-picked')) return;   // checkbox/color/select → change handler
                 const clAll = ev.target.closest('[data-ft-clients]');
                 if (clAll) {
                     if (clAll.getAttribute('data-ft-clients') === 'all') {
@@ -8527,6 +9142,12 @@
                     else if (cmd === 'nv-sheets') nvCopySheets();
                     else if (cmd === 'nv-csv') nvDownloadCsv();
                     else if (cmd === 'nv-clear') { nvSweepSeq++; nvSweep = null; nvOpenSite = null; renderPanel(); }
+                    else if (cmd === 'es-run' || cmd === 'es-continue') esRun(cmd === 'es-continue').catch(e => { console.warn(`${TAG} ESC sweep threw:`, e); setStatus(`ESC sweep failed — ${e.message}`); if (esSweep) { esSweep.running = false; esSweep.listing = false; } renderPanel(); });
+                    else if (cmd === 'es-pause') { if (esSweep && esSweep.running) { esSweep.paused = !esSweep.paused; setStatus(esSweep.paused ? 'ESC sweep paused — downloads already started will finish' : 'ESC sweep resumed'); esRerender(true); } }
+                    else if (cmd === 'es-stop') esStop();
+                    else if (cmd === 'es-sheets') esCopySheets();
+                    else if (cmd === 'es-csv') esDownloadCsv();
+                    else if (cmd === 'es-clear') { esSeq++; esSweep = null; renderPanel(); }
                     else if (cmd === 'issues-open') openFleetIssues();
                     else if (cmd === 'issues-refresh') { requestIssuesSummary(); renderPanel(); }
                     else if (cmd === 'kml-upload') { const fi = panelEl.querySelector('#aim-ft-kml-file'); if (fi) fi.click(); }
@@ -8762,6 +9383,7 @@
             panelEl.addEventListener('change', (ev) => {
                 const t = ev.target;
                 if (t.hasAttribute && t.hasAttribute('data-cov-in')) { covInput(t); return; }
+                if (t.hasAttribute && t.hasAttribute('data-es-opt')) { esOpt(t); return; }
                 if (t.hasAttribute && t.hasAttribute('data-nv-check')) { const k = t.getAttribute('data-nv-check'); if (NV_CHECKS.some(c => c.key === k)) { ftCfg.nvChecks[k] = !!t.checked; saveCfg(); fdRenderKeepScroll(); } return; }
                 if (t.hasAttribute && t.hasAttribute('data-nv-days')) { if (t.value === 'custom') { ftCfg.nvCustom = true; saveCfg(); setStatus('Mission review: pick the start / end dates — takes effect on the next run'); renderPanel(); return; } const v = Number(t.value); if (NV_DAY_OPTS.some(o => o[0] === v)) { ftCfg.nvDays = v; ftCfg.nvCustom = false; saveCfg(); setStatus(`Mission review window: ${v} day(s) — takes effect on the next run`); renderPanel(); } return; }
                 if (t.hasAttribute && t.hasAttribute('data-nv-date')) { const k = t.getAttribute('data-nv-date') === 'end' ? 'nvEnd' : 'nvStart'; if (/^(\d{4}-\d{2}-\d{2})?$/.test(t.value)) { ftCfg[k] = t.value; saveCfg(); const r = nvRange(); setStatus(r.err ? `Mission review: ${r.err}` : `Mission review range: ${fdYmd(r.start)} → ${fdYmd(r.end)} — takes effect on the next run`); } return; }
@@ -8950,7 +9572,7 @@
                             return;
                         }
                         setStatus(`${prop === 'onlyProduction' ? '"Production only"' : prop} ${flag.checked ? 'ON' : 'OFF'} — takes effect on the next sweep`);
-                        if (prop === 'onlyProduction' || prop === 'sopPicked' || prop === 'sopProdOnly' || prop === 'nvPicked' || prop === 'nvProdOnly') renderPanel();
+                        if (prop === 'onlyProduction' || prop === 'sopPicked' || prop === 'sopProdOnly' || prop === 'nvPicked' || prop === 'nvProdOnly' || prop === 'esPicked' || prop === 'esProdOnly' || prop === 'esGentle') renderPanel();
                     }
                     return;
                 }

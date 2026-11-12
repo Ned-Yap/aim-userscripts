@@ -7,6 +7,14 @@
 - **Nothing is guessed.** A pad is matched by its steps, and by its snapshots when the steps have drifted (never by navigation points alone). If a pad cannot be matched cleanly it is marked for a manual fix in the Mission Bank and left alone.
 - **Errors are shown.** After Apply a result list says which missions were updated and verified and which failed, and why. One backup file covering every updated mission downloads first (Mission Bank ↩ Restore reads it).
 
+## 2026-11-12 — 🌐 AIM Fleet Tools latest v0.84 + 🔎 Mission Logs latest v0.91 (latest only) — ⚙ ESC Sweep
+
+- **New Fleet Tools section: ⚙ ESC Sweep.** Pick sites and a date window; it checks every flown flight's logs for the ESC ratio alarm and lists each alarm as **false alarm** or **real**, plus **watch** flights (no alarm, but a takeoff spike of 10 s or more).
+- **Built not to bog the browser down** — two log archives at a time (one in "gentle" mode), each dropped as soon as it is read; only the ESC log and the drone log are unpacked. Nothing is saved to disk.
+- **Limiter + resume** — at most 200 downloads per run (editable), then ▶ Continue for the next batch. ⏸ Pause and ■ Stop any time. Flights already checked are remembered and never downloaded twice.
+- **Each row links to the full card** — opens Mission Logs on that mission with the charts (needs Mission Logs latest v0.91, which adds the `?aim-ml=<mission id>` link). 📋 Sheets and ⬇ CSV export.
+- The summary line shows real timing (seconds and MB per flight), so we can see how long a fleet-wide sweep actually takes.
+
 ## 2026-11-12 — 🔎 AIM Mission Logs ⭐PROD v0.9 (was v0.8) — ⚙ Motors / ESC card
 
 - **Was the ESC alert a false positive?** Click 🔎 on any mission in the dashboard: the new Motors card reads the ESC telemetry log and the main drone log and says whether the drone's `critical_current_rpm_ratio` alert came while the motor-controller readings were arriving too slowly (false positive) or at a normal rate (treat as real).
