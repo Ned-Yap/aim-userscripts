@@ -5,6 +5,12 @@
 - **Nothing is guessed.** A pad is matched by its steps, and by its snapshots when the steps have drifted (never by navigation points alone). If a pad cannot be matched cleanly it is marked for a manual fix in the Mission Bank and left alone.
 - **Errors are shown.** After Apply a result list says which missions were updated and verified and which failed, and why. One backup file covering every updated mission downloads first (Mission Bank ↩ Restore reads it).
 
+## 2026-11-12 — 🔎 AIM Mission Logs ⭐PROD v0.9 (was v0.8) — ⚙ Motors / ESC card
+
+- **Was the ESC alert a false positive?** Click 🔎 on any mission in the dashboard: the new Motors card reads the ESC telemetry log and the main drone log and says whether the drone's `critical_current_rpm_ratio` alert came while the motor-controller readings were arriving too slowly (false positive) or at a normal rate (treat as real).
+- **Interactive charts per ESC** — drag to zoom all of them, double-click to reset, hover for exact values, click a table row to jump to that stretch. Thresholds are editable.
+- Checked against mission 245357 (Motiva Port Arthur, 2026-11-11): same numbers and verdict as the Support team's standalone review page.
+
 ## 2026-11-11 — 🎞 AIM Video Validation ⭐PROD v0.61 (was v0.58)
 
 - **Shot card keeps a fixed height** — a long pad list no longer wraps the first line, so the video and the `10s ›` button stop moving between shots (hover the line for the full asset list).
