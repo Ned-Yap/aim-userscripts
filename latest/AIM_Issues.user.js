@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.46
+// @version      1.47
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -62,6 +62,10 @@
 // flew it — stored once as issue.mission. Every issue also shows its GPS
 // point (click = copy) with a link that opens Site Setup focused on it.
 //
+// v1.47: the same capture on the LIVE flight page
+// (/#/site/<sid>/react_live_drone/<droneId>/): flight id from the header
+// ("ID: <mission> / <group>"), recording time from the video's "REC m:ss".
+//
 // Log tag: [AIM ISSUES]
 //
 // Map-tools placement: PLE's ⚡ asserts itself as LAST child via its own
@@ -74,7 +78,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.46';
+    const SCRIPT_VERSION = '1.47';
 
     // Server model (v1.36): prod and QA are separate databases — the same
     // numeric site ID is two different sites. QA issues live in their own
@@ -3381,6 +3385,67 @@
         console.log(`${TAG} playback context: mission ${ctx.id} · clock ${ctx.shown || '(not found on screen)'} · video ${ctx.videoSec == null ? '(no <video>)' : fmtClock(ctx.videoSec)}`);
         return ctx;
     }
+    // ------- v1.47: LIVE mission context -------
+    // The live flight page (/#/site/<sid>/react_live_drone/<droneId>/) shows
+    // the flight as "ID: <mission id> / <group id>" in its header and the
+    // recording time as "REC m:ss" on the video. Both are read off the screen
+    // (text-matched — no Percepto class names to drift). The REC time is
+    // stored as the video time, so the issue later opens Mission Playback at
+    // the same moment; `at` is the real clock time the issue was started.
+    const LIVE_ROUTE_RX = /#\/site\/(\d+)\/react_live_drone\/(\d+)/;
+    const LIVE_ID_RX = /^\s*ID\s*:\s*(\d+)(?:\s*\/\s*(\d+))?\s*$/i;
+    const LIVE_REC_RX = /^\s*REC\s*(\d{1,3}:\d\d(?::\d\d)?)\s*$/i;
+    function readLiveRoute() {
+        const m = topHash().match(LIVE_ROUTE_RX);
+        return m ? { sid: m[1], droneId: m[2] } : null;
+    }
+    function scrapeLiveDom() {
+        const out = { mid: '', groupId: '', rec: '' };
+        const ours = (el) => !!(el && el.closest && el.closest('[id^="aim-"], [class*="aim-"]'));
+        // the text may sit in one node or be split across sibling spans
+        const near = (node, rx) => {
+            const el = node.parentElement;
+            const cands = [node.nodeValue, el && el.textContent, el && el.parentElement && el.parentElement.textContent];
+            for (const c of cands) { if (c && c.length <= 40) { const m = c.match(rx); if (m) return m; } }
+            return null;
+        };
+        for (const doc of playbackDocs()) {
+            let walker;
+            try { walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT); }
+            catch (e) { console.warn(`${TAG} live scrape: no tree walker:`, e); continue; }
+            let node;
+            while ((node = walker.nextNode())) {
+                const txt = node.nodeValue;
+                if (!txt || txt.length > 40 || !node.parentElement || ours(node.parentElement)) continue;
+                if (!out.mid && /ID|\d{4,}/.test(txt)) { const m = near(node, LIVE_ID_RX); if (m) { out.mid = m[1]; out.groupId = m[2] || ''; } }
+                if (!out.rec && /REC|\d:\d\d/.test(txt)) { const m = near(node, LIVE_REC_RX); if (m) out.rec = m[1]; }
+                if (out.mid && out.rec) break;
+            }
+            if (out.mid && out.rec) break;
+        }
+        return out;
+    }
+    // Snapshot taken the moment the note modal opens. null off the live page,
+    // or when the flight id is not on screen (nothing to attach the issue to).
+    function captureLiveContext() {
+        const route = readLiveRoute();
+        if (!route || String(route.sid) !== String(siteID)) return null;
+        const dom = scrapeLiveDom();
+        if (!dom.mid) {
+            console.warn(`${TAG} live context: no "ID: <mission> / <group>" text found on the live page — issue will carry no mission info`);
+            return null;
+        }
+        const recSec = parseClock(dom.rec);
+        const ctx = {
+            id: dom.mid, live: true, at0: Date.now(),
+            videoSec: recSec, videoDur: null,
+            shown: recSec != null ? fmtClock(recSec) : '', shownDur: '', domRpic: '',
+            domGroupId: dom.groupId,
+            metaPromise: fetchMissionMeta(dom.mid),
+        };
+        console.log(`${TAG} live context: mission ${ctx.id}${dom.groupId ? ' / group ' + dom.groupId : ''} · REC ${ctx.shown || '(not recording / not found on screen)'}`);
+        return ctx;
+    }
     // Final issue.mission record. `timeText` is the (editable) time field from
     // the note modal; an edit shifts the seek target by the same amount.
     function buildMissionRecord(ctx, timeText) {
@@ -3399,6 +3464,7 @@
             const rec = { id: String(ctx.id) };
             if (meta.name) rec.name = meta.name;
             if (meta.groupId) rec.groupId = meta.groupId;
+            else if (ctx.domGroupId) rec.groupId = String(ctx.domGroupId);
             if (shown) rec.shown = shown;
             if (ctx.shownDur) rec.shownDur = ctx.shownDur;
             if (videoSec != null) rec.videoSec = videoSec;
@@ -3407,7 +3473,13 @@
             if (rpic) rec.rpic = rpic;
             if (meta.drone) rec.drone = meta.drone;
             if (meta.when) rec.when = meta.when;
-            if (meta.t0 != null && videoSec != null) rec.at = new Date(meta.t0 + videoSec * 1000).toISOString();
+            if (ctx.live) {
+                // Filed during the flight: the moment is the real clock when the
+                // box opened, shifted by any edit to the time field.
+                rec.live = true;
+                const shift = (videoSec != null && ctx.videoSec != null) ? (videoSec - ctx.videoSec) * 1000 : 0;
+                rec.at = new Date(ctx.at0 + shift).toISOString();
+            } else if (meta.t0 != null && videoSec != null) rec.at = new Date(meta.t0 + videoSec * 1000).toISOString();
             return rec;
         });
     }
@@ -3545,15 +3617,15 @@
         // v1.46: on the Mission Playback page, snapshot the flight + player
         // clock NOW (the video may keep playing while the note is typed).
         let pbCtx = null;
-        try { pbCtx = capturePlaybackContext(); }
+        try { pbCtx = capturePlaybackContext() || captureLiveContext(); }   // v1.47: live flight page too
         catch (e) { console.warn(`${TAG} playback context capture threw — issue will carry no mission info:`, e); }
         const pbChip = 'display:inline-flex;align-items:center;gap:5px;padding:3px 9px;background:#14171b;border:1px solid rgba(95,179,255,0.45);border-radius:5px;color:#c8cdd4';
         const pbTime0 = pbCtx ? (pbCtx.shown || (pbCtx.videoSec != null ? fmtClock(pbCtx.videoSec) : '')) : '';
         const missionRowHtml = pbCtx ? `
-            <div id="aim-issues-mission-row" title="Captured automatically from Mission Playback — saved with the issue"
+            <div id="aim-issues-mission-row" title="Captured automatically from ${pbCtx.live ? 'the live flight' : 'Mission Playback'} — saved with the issue"
                  style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:2px 0 8px 0;font-size:11px">
                 <span style="${pbChip}">🎞 Mission <b style="color:#5fb3ff">${escHtml(pbCtx.id)}</b><span id="aim-issues-mission-name" style="color:#888"></span></span>
-                <label style="${pbChip}" title="Player time when you opened this box — edit if it is off">⏱
+                <label style="${pbChip}" title="${pbCtx.live ? 'Recording (REC) time' : 'Player time'} when you opened this box — edit if it is off">${pbCtx.live ? '🔴' : '⏱'}
                     <input id="aim-issues-mission-time" value="${escHtml(pbTime0)}" placeholder="m:ss" autocomplete="off"
                         style="width:54px;background:#0e1115;color:#ffd54f;border:1px solid rgba(255,255,255,0.15);border-radius:3px;padding:1px 5px;font:inherit;font-weight:700;text-align:center">
                 </label>

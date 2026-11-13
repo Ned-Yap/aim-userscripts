@@ -1,3 +1,8 @@
+## 2026-11-13 — AIM Issues latest v1.47 (latest only) — issues filed during a live flight carry the flight + time
+
+- **Flag an issue on the live flight page and it records the flight automatically**, the same way Mission Playback does: the mission ID from the page header, the recording time (REC) at the moment you opened the box, and the real clock time. The time field can be edited before saving.
+- The issue's mission link opens that flight's Mission Playback at the same recording time once the flight is over.
+
 ## 2026-11-13 — 🎞 AIM Video Validation PROD v0.75 (was v0.61) — flight-deck Adjust, micro sync, plain-language Save
 
 Promoted from `latest/` (features [#333], [#334]). Adjust stays off by default in prod; turn it on in the Control Panel.
