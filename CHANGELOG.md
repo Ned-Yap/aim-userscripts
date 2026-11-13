@@ -1,3 +1,12 @@
+## 2026-11-13 — AIM Fleet Tools latest v0.88 (latest only) — 📰 Findings Report you can hand to the customer (#341)
+
+- **New 📰 Report button in 📈 Findings Report.** It makes a print-ready page for the last 7, 14 or 30 days: a summary in plain words, one card per asset that had findings (with how often that asset has been flagged in the last 12 months), the assets that keep coming back, the 12-month trend, and a by-site table. Open it and click **Print / Save as PDF**.
+- **The earlier HTML page is now 📊 Dashboard**, unchanged in content.
+- **Fix: finding types that differed only by capitalisation or a typo** ("Emission", "emission", "Emmision") were counted as separate types. They are now one type.
+- **Fix: the chart legend showed "Other" twice** when a real type was called Other. The catch-all group is now "All other types".
+- The report title now reads the client name ("Exxon") when every site in scope starts with the same word.
+- The period can be changed without running the sweep again. A sweep run on v0.87 has to be re-run once so the flight counts for the period are read.
+
 ## 2026-11-13 — AIM Fleet Tools latest v0.87 (latest only) — 📈 Findings Report (#341)
 
 - **New Fleet Tools section: 📈 Findings Report.** It reads the Data View **Issues** tab (emissions and every other finding type the AI and the Insights team record) for every site you picked in 📦 Fleet Data, plus how many flights each site flew per month. This is not the internal AIM Issues list.
