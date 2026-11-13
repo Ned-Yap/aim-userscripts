@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.52
+// @version      1.53
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
-// @description  v1.52: Data View gear docks in the map button row (not the side panel row). v1.51: ⏻ All off starts a separate "New profile" (never overwrites My settings); favorites are per profile and travel with saved / published profiles. v1.50 (#336): profiles (My settings / RO / Regulations / saved, team presets from the data repo, first-run picker, builder: all-off / save-as / copy / import / publish), ★ favorites, FDE label, fallback gear on site pages without .map-tools. v1.49 (#329): check groups — a header toggle with soloGroup renders ☑ All / ☐ None over every boolean toggle sharing that soloGroup, and each such toggle gets a ◎ solo button (only this one on). Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
+// @description  v1.53: Data View gear sits on the map, under the asset-creation button. v1.51: ⏻ All off starts a separate "New profile" (never overwrites My settings); favorites are per profile and travel with saved / published profiles. v1.50 (#336): profiles (My settings / RO / Regulations / saved, team presets from the data repo, first-run picker, builder: all-off / save-as / copy / import / publish), ★ favorites, FDE label, fallback gear on site pages without .map-tools. v1.49 (#329): check groups — a header toggle with soloGroup renders ☑ All / ☐ None over every boolean toggle sharing that soloGroup, and each such toggle gets a ◎ solo button (only this one on). Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        *://qa.percepto.app/*
@@ -58,7 +58,7 @@
     // ============================================================
     // 1. CONSTANTS
     // ============================================================
-    const VERSION = '1.52';
+    const VERSION = '1.53';
     const IS_TOP = window === window.top;
     const TAG = `[AIM CONTROL ${IS_TOP ? 'TOP' : 'IF'}]`;
     const CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -1408,26 +1408,40 @@
     // buttons). Angular re-renders that header freely — detachment is
     // normal; the 2s sync interval re-docks after every wipe.
     // ------------------------------------------------------------
-    // v1.52 — Data View has MORE THAN ONE .map-group-buttons-container (the side
-    // panel has one too) and the first in the DOM is not the map's. The map's
-    // own row is the one holding Percepto's asset-creation button; while that
-    // is not rendered yet, take the selected map group's header.
+    // v1.53 — the header row sits ABOVE the map (its left end is where the gear
+    // landed, by the side panel). Percepto's asset-creation button is a child
+    // of that row but positioned out of it, onto the map's right-hand button
+    // column — so the gear goes on the map too: absolutely placed inside the
+    // map group container, directly under that button (probe 2026-11-13).
     function dockHost() {
-        const anchor = document.querySelector('.data-view-asset-creation');
-        const viaAnchor = anchor && anchor.closest('.map-group-buttons-container');
-        if (viaAnchor) return viaAnchor;
-        const sel = document.querySelectorAll('.selected-map-grop-container .map-group-header .map-group-buttons-container');
-        if (sel.length) return sel[sel.length - 1];
-        return document.querySelector('.map-group-buttons-container');
+        const groups = document.querySelectorAll('.selected-map-grop-container');
+        for (let i = groups.length - 1; i >= 0; i--) {
+            if (groups[i].querySelector('.leaflet-container')) return groups[i];
+        }
+        return null;
     }
 
-    // Space the gear along the row's own direction (the row can be a column).
-    function styleDockedGear(btn, host) {
-        let column = false;
-        try { column = /^column/.test(getComputedStyle(host).flexDirection || ''); }
-        catch (e) { console.warn(`${TAG} could not read the Data View button row layout:`, e); }
-        btn.style.marginLeft = column ? '0' : '6px';
-        btn.style.marginTop = column ? '6px' : '0';
+    // Under the asset-creation button when it exists; otherwise the same spot
+    // measured from the map's top-right corner (page still starting up).
+    function placeDockedGear(btn, host) {
+        try {
+            const hr = host.getBoundingClientRect();
+            const anchor = host.querySelector('.data-view-asset-creation');
+            const ar = anchor ? anchor.getBoundingClientRect() : null;
+            let top, right;
+            if (ar && ar.width && ar.height) {
+                top = Math.round(ar.bottom - hr.top + 6);
+                right = Math.round(hr.right - ar.right);
+            } else {
+                const map = host.querySelector('.leaflet-container');
+                const mr = map ? map.getBoundingClientRect() : hr;
+                top = Math.round(mr.top - hr.top + 280);
+                right = Math.round(hr.right - mr.right + 16);
+            }
+            const t = top + 'px', r = Math.max(0, right) + 'px';
+            if (btn.style.top !== t) btn.style.top = t;        // write only on change
+            if (btn.style.right !== r) btn.style.right = r;
+        } catch (e) { console.warn(`${TAG} could not place the Data View gear:`, e); }
     }
 
     function injectDockedButton() {
@@ -1438,21 +1452,21 @@
         wrapper.innerHTML = `
             <div class="aim-control-button aim-control-button--docked"
                  title="AIM Controls"
-                 style="cursor:pointer;display:inline-flex;align-items:center;justify-content:center;
-                        width:22px;height:22px;margin-left:6px;border-radius:5px;user-select:none">
-                <span style="font-size:15px;line-height:1;color:#39ff14">⚙</span>
+                 style="position:absolute;z-index:1001;cursor:pointer;display:flex;align-items:center;justify-content:center;
+                        width:30px;height:30px;border-radius:4px;background:rgba(24,24,24,0.85);user-select:none">
+                <span style="font-size:18px;line-height:1;color:#39ff14">⚙</span>
             </div>
         `;
         const btn = wrapper.firstElementChild;
         host.appendChild(btn);
-        styleDockedGear(btn, host);
+        placeDockedGear(btn, host);
         state.buttonEl = btn;
         swallowMouseEvents(btn);
         btn.addEventListener('click', (e) => {
             e.preventDefault(); e.stopPropagation();
             togglePanel();
         });
-        console.log(`${TAG} gear docked into .map-group-buttons-container (Data View)`);
+        console.log(`${TAG} gear docked on the map's button column (Data View)`);
         maybeAutoOpenPicker();
         return true;
     }
@@ -1513,16 +1527,16 @@
             }
             // Upgrade a floating gear to docked the moment the header exists.
             if (state.buttonEl && state.buttonEl.classList.contains('aim-control-button--floating')
-                && document.querySelector('.map-group-buttons-container')) {
+                && dockHost()) {
                 removeFloatingButton();
             }
-            // v1.52 — docked in the wrong row (the map's row rendered later)? Move it.
+            // v1.53 — keep the docked gear on the current map group and under the
+            // asset-creation button (it renders late; the side panel resizes the map).
             if (state.buttonEl && state.buttonEl.classList.contains('aim-control-button--docked')) {
                 const want = dockHost();
-                if (want && state.buttonEl.parentElement !== want) {
-                    want.appendChild(state.buttonEl);
-                    styleDockedGear(state.buttonEl, want);
-                    console.log(`${TAG} gear moved to the map's button row (Data View)`);
+                if (want) {
+                    if (state.buttonEl.parentElement !== want) want.appendChild(state.buttonEl);
+                    placeDockedGear(state.buttonEl, want);
                 }
             }
             if (state.buttonEl) return;

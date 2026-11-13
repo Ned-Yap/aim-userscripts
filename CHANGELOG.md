@@ -1,6 +1,6 @@
-## 2026-11-13 — AIM Control Panel latest v1.52 (latest only) — Data View gear sits with the map buttons
+## 2026-11-13 — AIM Control Panel latest v1.53 (latest only) — Data View gear sits with the map buttons
 
-- **The gear on Data View now docks in the map's own button row** (next to the asset-creation button) instead of the side panel's row. If the map's row appears late, the gear moves over on its own.
+- **The gear on Data View now sits on the map, in the right-hand button column directly under the asset-creation button**, instead of at the left end of the header by the side panel. It follows that column when the side panel opens or closes.
 
 ## 2026-11-13 — AIM Issues latest v1.48 (latest only) — issues filed during a live flight carry the flight + time
 
