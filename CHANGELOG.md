@@ -1,3 +1,13 @@
+## 2026-11-13 — AIM Fleet Tools latest v0.87 (latest only) — 📈 Findings Report (#341)
+
+- **New Fleet Tools section: 📈 Findings Report.** It reads the Data View **Issues** tab (emissions and every other finding type the AI and the Insights team record) for every site you picked in 📦 Fleet Data, plus how many flights each site flew per month. This is not the internal AIM Issues list.
+- **What it shows:** findings per month, findings per 100 flights, the trend over the last three full months against the three before, assets flagged on two or more different days, and a per-site breakdown. Each site row opens to its findings; every finding links to the issue in Percepto.
+- **Filters apply instantly, no re-run:** finding type, status, and an internal-only "show rejected" switch (off by default).
+- **Exports:** 📄 a self-contained HTML report for the customer (rows link to the site and to the issue), ⬇ an issues CSV (one row per finding) and ⬇ a monthly CSV (one row per site per month).
+- **Scope:** the Fleet Data pick, optionally narrowed by a site-name filter. The "Exxon ##" button sets that filter to Exxon followed by a number.
+- Findings recorded on video have no asset tag in Percepto, so the asset is worked out from the analyst's note, then the asset boundary the point sits in, then the nearest boundary within about 250 ft. The CSV says how each one was matched.
+- Not yet run against live sites.
+
 ## 2026-11-13 — AIM Control Panel latest v1.55 (latest only) — gear joins the Live Map button column
 
 - **On Live Map the gear sat on top of the Draw polygon button.** It now sits at the top of that button column, lined up with it. Where there is no room above, it sits just to the left instead.

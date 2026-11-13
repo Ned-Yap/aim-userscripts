@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.85
+// @version      0.87
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
-// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.85 (#335): 📅 Sweep Scheduler — for a client's recurring inspection missions (first profile: FPL feeder poles) it reads the live mission bank, the flown log and each base's docked drone, works out how old each mission's oldest pole is (count-back to 90 % of a full sweep), and lists what to fly next in order with flights planned per month, flights per sweep, payload (4.0 / 3.0 / none), per-site schedule switches, mission holds, Sheets / CSV / Slack text. v0.84 (#334): ⚙ ESC Sweep — for every flown flight of the picked sites × date window, download the log archive (in memory only), read the ESC telemetry and list each flight where the drone raised the ESC ratio alarm (false alarm vs real) plus long takeoff spikes; capped per run with Continue, Pause / Stop, gentle mode, finished flights remembered, Sheets / CSV, each row links to the full Mission Logs card. v0.82 (#331): 🎬 Mission Review — sweep the mission log of the picked sites (or every site) for flagged flights; checks are a registry (first: flew but NO video; also no images / fewer images than planned / landing failed); per-site counts, every flight a link to its Mission Playback, Copy → Sheets / CSV. v0.79 (#329): 🚩 SOP Sweep — run Site-Setup SOP checks across the picked sites (or every site) from LIVE /map_objects/; first check = FP ⨯ FP crossing (segments that cross / T / overlap with no shared vertex); per-site rows, 🎯 fly-to on the landing map, ↗ opens the site in a NEW tab and jumps to the spot (?aim-goto deep link, Site Setup Tools v4.498+), Copy → Sheets / CSV. v0.78 (#318): 🖼 Map Export — renders what the landing map shows (KML layers, cross-ref bands, site setups, site names) on its own canvas at print size with basemap tiles, legend, scale bar, north arrow, title and a dead-space trim (transparent outside the content); preview modal with toggles; ⬇ PNG poster or 🌐 self-contained interactive HTML (small, zooms forever). v0.77: Site setups scope — draw the FFZs / flight paths / assets of ONLY the sites matching a names box or the 📦 Fleet Data pick (independent of the label filter, "= labels" copies it) so another client's setup never shows on a shared map. v0.76: site labels "Only matching / picked" mode (names box or the 📦 Fleet Data pick keep their label, every other site name hidden), 🗺 on-map legend (cross-ref bands + numbers, shown KML layers, site-setup colours) and 📷 Client view (names hidden, legend on, panel + button tucked away for a screenshot; ↩ Exit restores). v0.75: 📊 Fleet Metrics follows the 📦 Fleet Data pick ("picked only" checkbox, on by default; nothing picked → every site) — table, totals, Sheets / CSV and 🛂 Approval FPs. v0.67 (#285): 📡 Coverage — radius circles on the landing map (any Ø, drag centre / edge, live count of sites inside under a fully-inside / centre-inside rule, KML export), footprint of the picked sites (span, convex hull, smallest enclosing circle, site extents + FFZ acreage), 🧠 Best spot (centre covering the MOST sites at a Ø — exact candidate search) + 🗂 Plan all (greedy: how many circles cover every site), 📏 two-click ruler. v0.57 (#274): data check shows whether the skipped no-duration rows carry images / videos (+ first video object), and 🔎 probes one /missions/ page without the field filter to list every server field (hunting an abort / end-reason field). v0.56 (#274): 📋 Copy check button on the data check. v0.55 (#276): Utilization lenses — 🧑‍✈️ Pilots / 🛸 Drones / 📍 Sites / 🏢 Clients (sites + clients: flights, drone-hrs, air, flyable drone-hrs, util %, coverage, sites never flown, incomplete, capture %, gaps); Drones gain flyable hrs + util %. v0.54 (#274): Incomplete flights + Capture % from planned-vs-actual image counts (Pilots / Pilot-days / Flights), raw state codes + mission_data_reports sample in the data check. v0.53 (#274): ⚙ Site rules is a real button. v0.52 (#274): Pilot Utilization hides all-zero / blank columns (panel + Sheets + CSV) with a 'hidden:' note and a checkbox to show them. v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
+// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.87 (#341): 📈 Findings Report — the Data View Issues tab (emissions and every other finding type) across the picked sites: findings per month and per 100 flights, assets flagged on 2+ days, by type / component / site, rejected + status + type filters, issues CSV, site×month CSV and a self-contained HTML report whose rows link to the site and the issue. v0.86: 📅 Sweep Scheduler gains a 📆 Calendar view (the forecast day by day, Mon–Fri weeks, exports). v0.85 (#335): 📅 Sweep Scheduler — for a client's recurring inspection missions (first profile: FPL feeder poles) it reads the live mission bank, the flown log and each base's docked drone, works out how old each mission's oldest pole is (count-back to 90 % of a full sweep), and lists what to fly next in order with flights planned per month, flights per sweep, payload (4.0 / 3.0 / none), per-site schedule switches, mission holds, Sheets / CSV / Slack text. v0.84 (#334): ⚙ ESC Sweep — for every flown flight of the picked sites × date window, download the log archive (in memory only), read the ESC telemetry and list each flight where the drone raised the ESC ratio alarm (false alarm vs real) plus long takeoff spikes; capped per run with Continue, Pause / Stop, gentle mode, finished flights remembered, Sheets / CSV, each row links to the full Mission Logs card. v0.82 (#331): 🎬 Mission Review — sweep the mission log of the picked sites (or every site) for flagged flights; checks are a registry (first: flew but NO video; also no images / fewer images than planned / landing failed); per-site counts, every flight a link to its Mission Playback, Copy → Sheets / CSV. v0.79 (#329): 🚩 SOP Sweep — run Site-Setup SOP checks across the picked sites (or every site) from LIVE /map_objects/; first check = FP ⨯ FP crossing (segments that cross / T / overlap with no shared vertex); per-site rows, 🎯 fly-to on the landing map, ↗ opens the site in a NEW tab and jumps to the spot (?aim-goto deep link, Site Setup Tools v4.498+), Copy → Sheets / CSV. v0.78 (#318): 🖼 Map Export — renders what the landing map shows (KML layers, cross-ref bands, site setups, site names) on its own canvas at print size with basemap tiles, legend, scale bar, north arrow, title and a dead-space trim (transparent outside the content); preview modal with toggles; ⬇ PNG poster or 🌐 self-contained interactive HTML (small, zooms forever). v0.77: Site setups scope — draw the FFZs / flight paths / assets of ONLY the sites matching a names box or the 📦 Fleet Data pick (independent of the label filter, "= labels" copies it) so another client's setup never shows on a shared map. v0.76: site labels "Only matching / picked" mode (names box or the 📦 Fleet Data pick keep their label, every other site name hidden), 🗺 on-map legend (cross-ref bands + numbers, shown KML layers, site-setup colours) and 📷 Client view (names hidden, legend on, panel + button tucked away for a screenshot; ↩ Exit restores). v0.75: 📊 Fleet Metrics follows the 📦 Fleet Data pick ("picked only" checkbox, on by default; nothing picked → every site) — table, totals, Sheets / CSV and 🛂 Approval FPs. v0.67 (#285): 📡 Coverage — radius circles on the landing map (any Ø, drag centre / edge, live count of sites inside under a fully-inside / centre-inside rule, KML export), footprint of the picked sites (span, convex hull, smallest enclosing circle, site extents + FFZ acreage), 🧠 Best spot (centre covering the MOST sites at a Ø — exact candidate search) + 🗂 Plan all (greedy: how many circles cover every site), 📏 two-click ruler. v0.57 (#274): data check shows whether the skipped no-duration rows carry images / videos (+ first video object), and 🔎 probes one /missions/ page without the field filter to list every server field (hunting an abort / end-reason field). v0.56 (#274): 📋 Copy check button on the data check. v0.55 (#276): Utilization lenses — 🧑‍✈️ Pilots / 🛸 Drones / 📍 Sites / 🏢 Clients (sites + clients: flights, drone-hrs, air, flyable drone-hrs, util %, coverage, sites never flown, incomplete, capture %, gaps); Drones gain flyable hrs + util %. v0.54 (#274): Incomplete flights + Capture % from planned-vs-actual image counts (Pilots / Pilot-days / Flights), raw state codes + mission_data_reports sample in the data check. v0.53 (#274): ⚙ Site rules is a real button. v0.52 (#274): Pilot Utilization hides all-zero / blank columns (panel + Sheets + CSV) with a 'hidden:' note and a checkbox to show them. v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        *://qa.percepto.app/*
@@ -46,7 +46,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.85';
+    const SCRIPT_VERSION = '0.87';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -138,7 +138,9 @@
             // v0.84 (#334): ⚙ ESC Sweep scope + window (days back) + max downloads per run + one-at-a-time mode + which rows show
             esPicked: true, esProdOnly: true, esDays: 7, esCap: 200, esGentle: false, esShow: 'flag',
             // v0.85 (#335): 📅 Sweep Scheduler — site-name filter, log months, cycle start / age-limit overrides ('' / 0 = profile default), view switches
-            sk: { terms: 'FPL', prodOnly: true, lookMo: 12, cycleStart: '', limitDays: 0, showOther: true, onlyDue: false, adv: false },
+            sk: { terms: 'FPL', prodOnly: true, lookMo: 12, cycleStart: '', limitDays: 0, showOther: true, onlyDue: false, adv: false, view: 'table', calWeeks: 6 },
+            // v0.87 (#341): 📈 Findings Report — scope, site-name filter (regex), months back, display filters (rejected / status / type)
+            fi: { picked: true, prodOnly: true, name: '', months: 12, showRejected: false, statusOff: {}, typeOff: {} },
         };
     }
     function loadCfg() {
@@ -167,6 +169,8 @@
                 if (typeof s.sk.cycleStart === 'string' && /^(\d{4}-\d{2}-\d{2})?$/.test(s.sk.cycleStart)) d.sk.cycleStart = s.sk.cycleStart;
                 if (typeof s.sk.limitDays === 'number' && s.sk.limitDays >= 0) d.sk.limitDays = s.sk.limitDays;
                 ['prodOnly', 'showOther', 'onlyDue', 'adv'].forEach(k => { if (typeof s.sk[k] === 'boolean') d.sk[k] = s.sk[k]; });
+                if (s.sk.view === 'table' || s.sk.view === 'cal') d.sk.view = s.sk.view;
+                if (typeof s.sk.calWeeks === 'number' && s.sk.calWeeks >= 0 && s.sk.calWeeks <= 60) d.sk.calWeeks = s.sk.calWeeks;
             }
             if (typeof s.nvMinMin === 'number' && s.nvMinMin >= 0) d.nvMinMin = s.nvMinMin;
             if (s.nvChecks && typeof s.nvChecks === 'object') d.nvChecks = s.nvChecks;
@@ -174,6 +178,12 @@
             if (typeof s.nvStart === 'string' && /^(\d{4}-\d{2}-\d{2})?$/.test(s.nvStart)) d.nvStart = s.nvStart;
             if (typeof s.nvEnd === 'string' && /^(\d{4}-\d{2}-\d{2})?$/.test(s.nvEnd)) d.nvEnd = s.nvEnd;
             if (s.sopChecks && typeof s.sopChecks === 'object') d.sopChecks = s.sopChecks;
+            if (s.fi && typeof s.fi === 'object') {
+                ['picked', 'prodOnly', 'showRejected'].forEach(k => { if (typeof s.fi[k] === 'boolean') d.fi[k] = s.fi[k]; });
+                if (typeof s.fi.name === 'string') d.fi.name = s.fi.name;
+                if (typeof s.fi.months === 'number' && s.fi.months >= 1 && s.fi.months <= 24) d.fi.months = s.fi.months;
+                ['statusOff', 'typeOff'].forEach(k => { if (s.fi[k] && typeof s.fi[k] === 'object') d.fi[k] = s.fi[k]; });
+            }
             if (typeof s.showOnMap === 'boolean') d.showOnMap = s.showOnMap;
             if (typeof s.drawSetups === 'boolean') d.drawSetups = s.drawSetups;
             if (typeof s.basemap === 'string') d.basemap = s.basemap;
@@ -4447,7 +4457,7 @@
     let buttonEl = null;
     let panelEl = null;
     // v0.31: every section starts COLLAPSED (user request) — open what you need.
-    let openSections = { issues: false, data: false, fc: false, pilots: false, sweep: false, sop: false, sk: false, nv: false, es: false, map: false, cov: false, kml: false, xref: false, mx: false, metrics: false, surveys: false };
+    let openSections = { issues: false, data: false, fc: false, pilots: false, sweep: false, sop: false, sk: false, nv: false, fi: false, es: false, map: false, cov: false, kml: false, xref: false, mx: false, metrics: false, surveys: false };
     // v0.25 (#257): 🚩 Fleet Issues front door. AIM Issues owns the engine +
     // panel (one copy of the merge/Slack/role rules); we ask it for a summary
     // and open it over tab-local DOM events on `document` (NOT the
@@ -8611,8 +8621,97 @@
         const failed = skFailed(); if (failed.length) lines.push('', `⚠ ${failed.length} site(s) could not be read and are incomplete: ${failed.map(siteName).join(', ')}`);
         copyText(lines.join('\n'), `Slack text copied — top ${top.length} mission(s) in order`);
     }
+    // ---- 📆 calendar view (v0.86): the SAME day-by-day plan the table's "planned" columns are counted from, laid out Mon–Fri ----
+    // A forecast at the usual pace, not a commitment: it is rebuilt from what was really flown on every run.
+    const SK_DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const skDayLabel = (dn) => { const d = new Date(dn * SK_DAY); return `${SK_DOW[d.getUTCDay()]} ${SK_MON[d.getUTCMonth()]} ${d.getUTCDate()}`; };
+    const SK_PLAN_WHY = { 1: 'Age limit', 2: 'Not swept this cycle', 3: 'No full sweep in the log', 4: 'Oldest first', 5: 'Second pass (already swept in this plan)' };
+    const skPlanColor = (t) => t === 1 ? '#ffa030' : (t <= 3 ? '#ffd27a' : (t === 4 ? '#ddd' : '#888'));
+    function skCalendar() {
+        const R = skRes; if (!R || !Array.isArray(R.plan) || !R.plan.length) return null;
+        const byI = {}; R.rows.forEach(u => { byI[u.i] = u; });
+        const hol = new Set((skProfile().holidays || []).map(skDn));
+        const days = {};
+        R.plan.forEach(p => {
+            const u = byI[p.i]; if (!u) return;
+            const D = days[p.day] || (days[p.day] = { n: 0, items: [], idx: {} });
+            let it = D.idx[p.i]; if (!it) { it = D.idx[p.i] = { u, n: 0, tier: p.tier, done: u.doneDay === p.day }; D.items.push(it); }
+            it.n++; D.n++;
+        });
+        Object.keys(days).forEach(k => days[k].items.sort((a, b) => a.u.site.localeCompare(b.u.site) || a.u.aim.name.localeCompare(b.u.aim.name)));
+        const first = skDn(R.start); const last = R.plan[R.plan.length - 1].day;
+        const weeks = []; for (let w = first - (skDow(first) + 6) % 7; w <= last; w += 7) weeks.push(w);
+        const cap = Number(ftCfg.sk.calWeeks) > 0 ? Number(ftCfg.sk.calWeeks) : weeks.length;
+        return { days, hol, first, last, allWeeks: weeks.length, weeks: weeks.slice(0, cap) };
+    }
+    // long form (one line per day × mission) for Sheets / CSV — the weeks on screen
+    function skCalRows() {
+        const C = skCalendar(); if (!C) return null;
+        const cols = ['Date', 'Day', 'Week of', 'Site', 'AIM mission to fly', 'Flights that day', 'Why', 'Sweep finishes this day'];
+        const rows = [];
+        C.weeks.forEach(w => { for (let d = w; d < w + 5; d++) { const D = C.days[d]; if (!D) continue; D.items.forEach(it => rows.push([skYmd(d), SK_DOW[skDow(d)], skYmd(w), it.u.site, it.u.aim.name, it.n, SK_PLAN_WHY[it.tier] || '', it.done ? 'yes' : ''])); } });
+        return { cols, rows, C };
+    }
+    function skCalCopySheets() {
+        const x = skCalRows(); if (!x || !x.rows.length) { setStatus('Sweep scheduler: no planned flights to copy'); return; }
+        const esc = (v) => escapeHtml(String(v == null ? '' : v));
+        const html = `<p><b>AIM Sweep Scheduler — forecast calendar</b> — ${esc(skProfile().label)} — run ${esc(skRes.today)} — a forecast at ${esc(skRes.N.toFixed(1))} flights / working day, rebuilt from what was really flown on every run</p>`
+            + `<table border="1" style="border-collapse:collapse;font-family:Arial;font-size:10pt"><tr>${x.cols.map(c => `<th style="background:#1f5fa8;color:#fff">${esc(c)}</th>`).join('')}</tr>`
+            + x.rows.map(r => `<tr>${r.map(v => `<td>${esc(v)}</td>`).join('')}</tr>`).join('') + '</table>';
+        copyHtmlToClipboard(html, [x.cols.join('\t')].concat(x.rows.map(r => r.join('\t'))).join('\n'), `Calendar copied — ${x.rows.length} line(s), ${x.C.weeks.length} week(s), for Sheets`);
+    }
+    function skCalDownloadCsv() {
+        const x = skCalRows(); if (!x || !x.rows.length) { setStatus('Sweep scheduler: no planned flights to export'); return; }
+        const q = (v) => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`;
+        fdDownload(new Blob(['﻿' + [x.cols.map(q).join(',')].concat(x.rows.map(r => r.map(q).join(','))).join('\r\n')], { type: 'text/csv;charset=utf-8' }), `AIM_Sweep_Calendar_${skRes.today}.csv`);
+        setStatus(`Sweep calendar CSV — ${x.rows.length} line(s), ${x.C.weeks.length} week(s)`);
+    }
+    // Slack: the next 5 working days, day by day
+    function skCalCopySlack() {
+        const C = skCalendar(); if (!C) { setStatus('Sweep scheduler: no planned flights to copy'); return; }
+        const dayList = Object.keys(C.days).map(Number).sort((a, b) => a - b).slice(0, 5);
+        const lines = [`*${skProfile().label} — forecast for the next ${dayList.length} working day(s)* (run ${skRes.today}, about ${skRes.N.toFixed(1)} flights / day)`];
+        dayList.forEach(d => {
+            lines.push('', `*${skDayLabel(d)}* — ${C.days[d].n} flight(s)`);
+            C.days[d].items.forEach(it => lines.push(`• ${it.u.site} — ${it.u.aim.name} × ${it.n}${it.done ? ' (finishes the sweep)' : ''}`));
+        });
+        const failed = skFailed(); if (failed.length) lines.push('', `⚠ ${failed.length} site(s) could not be read and are incomplete: ${failed.map(siteName).join(', ')}`);
+        copyText(lines.join('\n'), `Slack text copied — ${dayList.length} day(s) of the forecast`);
+    }
+    function skRenderCalendar() {
+        const C = skCalendar();
+        if (!C) return '<div style="padding:8px 10px;color:#888">No planned flights — no scheduled site has a mission, or the flying pace from the log is zero.</div>';
+        const R = skRes; const strip = new RegExp(skProfile().stripSite, 'i');
+        const h = [];
+        h.push(`<div style="padding:4px 10px;color:#888;border-bottom:1px solid #222834;font-size:11px">Forecast, not a commitment: ${R.N.toFixed(1)} flights per working day (the pace of ${R.cap.from} → ${R.cap.to}), oldest poles first, sites rotated, holidays skipped. It is rebuilt from what was really flown each time you run it. `
+            + `<span style="color:#ffa030">■</span> age limit <span style="color:#ffd27a">■</span> not swept this cycle <span style="color:#ddd">■</span> oldest first <span style="color:#888">■</span> second pass · <span style="color:#5fff5f">✓</span> = that day finishes the mission's sweep · showing ${C.weeks.length} of ${C.allWeeks} week(s)</div>`);
+        h.push('<style>#aim-sk-cal .c{border:1px solid #222834;border-radius:3px;padding:3px 5px;min-width:0;background:#0e1218}#aim-sk-cal .m{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}#aim-sk-cal .s{color:#7adfe6;margin-top:2px}</style><div id="aim-sk-cal" style="max-height:560px;overflow:auto;padding:6px 10px;font-size:11px">');
+        C.weeks.forEach(w => {
+            let wn = 0, wdone = 0; for (let d = w; d < w + 5; d++) { const D = C.days[d]; if (D) { wn += D.n; D.items.forEach(it => { if (it.done) wdone++; }); } }
+            h.push(`<div style="margin:6px 0 3px;color:#7adfe6;font-weight:bold">Week of ${escapeHtml(skDayLabel(w))} <span style="color:#aaa;font-weight:normal">— ${wn} flight(s)${wdone ? ` · ${wdone} sweep(s) finish` : ''}</span></div><div style="display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:4px;align-items:start">`);
+            for (let d = w; d < w + 5; d++) {
+                const D = C.days[d];
+                let body;
+                if (C.hol.has(d)) body = '<div style="color:#666">holiday</div>';
+                else if (d < C.first) body = '<div style="color:#444">—</div>';
+                else if (!D) body = '<div style="color:#666">nothing planned</div>';
+                else {
+                    let site = null; body = '';
+                    D.items.forEach(it => {
+                        if (it.u.site !== site) { site = it.u.site; body += `<div class="s">${escapeHtml(site.replace(strip, ''))}</div>`; }
+                        body += `<div class="m" style="color:${skPlanColor(it.tier)}" title="${escapeHtml(`${it.u.site} — ${it.u.aim.name} — ${it.n} flight(s) — ${SK_PLAN_WHY[it.tier] || ''}${it.done ? ' — this day finishes its sweep' : ''} — whole sweep about ${it.u.expFlights} flight(s)`)}">${it.done ? '<span style="color:#5fff5f">✓</span> ' : ''}<b>×${it.n}</b> ${escapeHtml(it.u.aim.name)}</div>`;
+                    });
+                }
+                h.push(`<div class="c"><div style="display:flex;justify-content:space-between;color:#ddd;font-weight:bold;border-bottom:1px solid #222834;margin-bottom:2px"><span>${escapeHtml(skDayLabel(d))}</span><span style="color:#aaa">${D && !C.hol.has(d) ? D.n : ''}</span></div>${body}</div>`);
+            }
+            h.push('</div>');
+        });
+        h.push('</div>');
+        return h.join('');
+    }
     function skOpt(t) {
         const k = t.getAttribute('data-sk-opt');
+        if (k === 'calWeeks') { const v = Number(t.value); if (v >= 0 && v <= 60) { ftCfg.sk.calWeeks = v; saveCfg(); renderPanel(); } return; }
         if (k === 'terms') { ftCfg.sk.terms = String(t.value || '').slice(0, 200); saveCfg(); setStatus('Sweep scheduler: site filter changed — takes effect on the next run'); renderPanel(); return; }
         if (k === 'lookMo') { const v = Number(t.value); if (v >= 1 && v <= 24) { ftCfg.sk.lookMo = v; saveCfg(); setStatus('Sweep scheduler: log window changed — takes effect on the next run'); } return; }
         if (k === 'cycleStart') { if (/^(\d{4}-\d{2}-\d{2})?$/.test(t.value)) { ftCfg.sk.cycleStart = t.value; saveCfg(); skRecompute(); renderPanel(); } return; }
@@ -8654,7 +8753,7 @@
             + (!running && skFailed().length ? `<span data-ft="sk-retry" style="cursor:pointer;color:#ffa030;font-weight:bold" title="Re-read only what failed">↻ Retry failed (${skFailed().length})</span>` : '')
             + (skRes && !running ? '<span data-ft="sk-sheets" style="cursor:pointer;color:#7adfe6" title="The table (every column) on the clipboard — paste into Google Sheets / Excel">📋 Copy → Sheets</span>'
                 + '<span data-ft="sk-csv" style="cursor:pointer;color:#7adfe6">⬇ CSV</span>'
-                + '<span data-ft="sk-slack" style="cursor:pointer;color:#7adfe6" title="Short text for Slack: the summary line + the next 25 missions to fly, in order">💬 Copy for Slack</span>' : '')
+                + '<span data-ft="sk-slack" style="cursor:pointer;color:#7adfe6" title="Table view: the summary line + the next 25 missions to fly, in order. Calendar view: the next 5 working days, day by day">💬 Copy for Slack</span>' : '')
             + '</div>');
         if (!skData) { h.push('<div style="padding:8px 10px;color:#888">Not run yet. Reads the mission bank, the flown log and the docked drone of every matching site, then lists each mission by how old its oldest pole is and what to fly next. Read-only.</div>'); return h.join(''); }
         const failed = skFailed();
@@ -8681,6 +8780,14 @@
             + chk('adv', 'all columns', 'Sweep size, estimated poles, flights the last sweep took, air hours, check-before-flying flags… (exports always carry every column)')
             + `<span style="color:#888">${skViewRows().length} row(s) · ⏸ = hold a mission out of the plan</span>`
             + '</div>');
+        const isCal = ftCfg.sk.view === 'cal';
+        const tab = (v, label, title) => `<span data-ft="sk-view-${v}" title="${escapeHtml(title)}" style="cursor:pointer;padding:1px 8px;border-radius:3px;border:1px solid ${ftCfg.sk.view === v ? '#7adfe6' : '#2a3140'};color:${ftCfg.sk.view === v ? '#7adfe6' : '#888'};font-weight:bold">${label}</span>`;
+        h.push('<div style="padding:4px 10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;">'
+            + tab('table', '☰ Table', 'Every mission, in the order to fly it')
+            + tab('cal', '📆 Calendar', 'The forecast day by day: which missions on which day, at the usual pace')
+            + (isCal ? `<label style="display:inline-flex;align-items:center;gap:3px;margin-left:8px">show <select data-sk-opt="calWeeks" style="${inCss}">${[[2, '2 weeks'], [4, '4 weeks'], [6, '6 weeks'], [8, '8 weeks'], [13, '13 weeks'], [0, 'the whole plan']].map(o => `<option value="${o[0]}" ${Number(ftCfg.sk.calWeeks) === o[0] ? 'selected' : ''}>${o[1]}</option>`).join('')}</select></label><span style="color:#888">Copy → Sheets / CSV / Slack export this calendar while it is open</span>` : '')
+            + '</div>');
+        if (isCal) { h.push(skRenderCalendar()); return h.join(''); }
         if (R.sitesNoMissions.length || R.excluded.length) {
             h.push('<div style="padding:4px 10px;color:#888;border-bottom:1px solid #222834;font-size:11px">'
                 + (R.sitesNoMissions.length ? `No matching mission in the bank: ${escapeHtml(R.sitesNoMissions.join(', '))}. ` : '')
@@ -8974,6 +9081,559 @@
                     + `<span style="color:#888;width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(x.pilot)} · ${escapeHtml(x.state)}">${escapeHtml(x.pilot)}</span>`
                     + '</div>');
             });
+        });
+        h.push('</div>');
+        return h.join('');
+    }
+
+    // ==================================================================
+    // 📈 FINDINGS REPORT (v0.87, #341) — the Data View "Issues" tab at fleet
+    // scale (emissions and every other type the AI / Insights team flags;
+    // NOT the internal AIM Issues of the 🚩 Fleet Issues section). Per site:
+    //   GET /annotations/?site=<id>&usage_type=issue   (every issue, all time;
+    //       the report window is applied client-side on the FLIGHT time =
+    //       image_created_at | video_created_at | created_at)
+    //   GET /get_all_takeoff_missions_in_site/?…&limit=1 per calendar month
+    //       (only the `count` — flights flown, the rate denominator)
+    //   GET /map_objects/ (asset polygons: video issues come back with
+    //       assets:[] so the asset is derived — analyst text naming an asset,
+    //       else the polygon the issue point sits in, else the nearest asset
+    //       EDGE within FI_NEAR_M; how it matched is kept on every row)
+    // Read-only. Filters (rejected / status / type) apply at render and at
+    // export, never at fetch — toggling needs no re-run. Outputs: issue CSV,
+    // site×month CSV, self-contained HTML report (every row links to the
+    // site's issues tab and to the issue itself).
+    // ==================================================================
+    const FI_CONCURRENCY = 3;
+    const FI_PAGE = 200;
+    const FI_PAGE_CAP = 60;          // 12,000 issues per site safety cap (flagged partial when hit)
+    const FI_NEAR_M = 75;            // nearest-asset fallback radius (to the polygon EDGE)
+    const FI_REJECT_RE = /FALSE|REJECT|DUPLICAT|INVALID|DECLIN/i;
+    const FI_SEV = { 1: 'low', 2: 'medium', 3: 'high' };   // names per the Issues tab chips (0 = none) — numeric mapping not confirmed by Percepto
+    const FI_MONTH_OPTS = [3, 6, 12, 18, 24];
+    const FI_EXXON_RE = '^Exxon\\s*\\d+';
+    let fiSweep = null;              // { at, running, seq, scope, months:[…], sites:{ sid: rec }, done, total, aborted }
+    let fiSweepSeq = 0;
+    let fiOpenSite = null;
+    let fiV = null;                  // memoised view of fiSweep under the current filters (null = rebuild)
+    let fiVocabLogged = false;
+
+    // n calendar months ending with the current one — UTC boundaries (the date filter of
+    // /get_all_takeoff_missions_in_site/ only accepts UTC-midnight epochs, both bounds required).
+    function fiMonths(n) {
+        const now = new Date(); const out = [];
+        for (let i = n - 1; i >= 0; i--) {
+            const a = Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1);
+            const b = Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i + 1, 1);
+            out.push({ key: new Date(a).toISOString().slice(0, 7), a, b, partial: i === 0,
+                label: new Date(a).toLocaleString('en-US', { month: 'short', timeZone: 'UTC' }) + ' ' + String(new Date(a).getUTCFullYear()).slice(2) });
+        }
+        return out;
+    }
+    function fiNameTest() {
+        const s = String(ftCfg.fi.name || '').trim();
+        if (!s) return null;
+        try { const re = new RegExp(s, 'i'); return (n) => re.test(n); }
+        catch (e) { const low = s.toLowerCase(); return (n) => String(n).toLowerCase().includes(low); }
+    }
+    function fiScopeIds() {
+        const all = rawSites ? Object.keys(rawSites) : [];
+        let ids = (ftCfg.fi.picked && fdSelected.size) ? all.filter(id => fdSelected.has(String(id))) : all.slice();
+        if (ftCfg.fi.prodOnly) ids = ids.filter(id => { const st = siteStatus(id); return !st || st === 'Production'; });
+        const nt = fiNameTest();
+        if (nt) ids = ids.filter(id => nt(siteName(id)));
+        return ids;
+    }
+    const fiSiteUrl = (sid) => `${location.origin}/#/site/${encodeURIComponent(sid)}/data_view/issues`;
+    const fiIssueUrl = (x) => `${fiSiteUrl(x.sid)}?${x.video != null ? `videoId=${encodeURIComponent(x.video)}&` : ''}issueId=${encodeURIComponent(x.id)}`;
+
+    // ---- asset attribution ----
+    function fiAssetIndex(entities) {
+        const out = [];
+        (entities || []).forEach(e => {
+            if (!e || e.type !== 3 || !e.name) return;
+            const src = Array.isArray(e.coords) ? e.coords : (Array.isArray(e.points) ? e.points : []);
+            const xs = [], ys = [];
+            src.forEach(p => { if (p && isFinite(p.lat) && isFinite(p.lng)) { xs.push(Number(p.lng)); ys.push(Number(p.lat)); } });
+            if (xs.length < 3) return;
+            let area = 0;
+            for (let i = 0, j = xs.length - 1; i < xs.length; j = i++) area += (xs[j] + xs[i]) * (ys[j] - ys[i]);
+            out.push({ name: String(e.name), low: String(e.name).toLowerCase().trim(), xs, ys, area: Math.abs(area), child: e.parent_asset_name ? 1 : 0,
+                minLat: Math.min(...ys), maxLat: Math.max(...ys), minLng: Math.min(...xs), maxLng: Math.max(...xs) });
+        });
+        return out;
+    }
+    // → { name, how }: 'text' (the analyst's description names a site asset) · 'inside' (issue point inside the polygon;
+    // a pad wins over its nested child, then the smallest) · 'near' (closest polygon EDGE within FI_NEAR_M) · 'none'
+    function fiMatchAsset(idx, lat, lng, text) {
+        if (text) {
+            const low = text.toLowerCase(); let best = null;
+            idx.forEach(a => { if (a.low.length >= 6 && low.includes(a.low) && (!best || a.low.length > best.low.length)) best = a; });
+            if (best) return { name: best.name, how: 'text' };
+        }
+        if (!isFinite(lat) || !isFinite(lng)) return { name: '', how: 'none' };
+        const inside = idx.filter(a => lat >= a.minLat && lat <= a.maxLat && lng >= a.minLng && lng <= a.maxLng && pointInRingXY(lng, lat, a.xs, a.ys));
+        if (inside.length) { inside.sort((p, q) => (p.child - q.child) || (p.area - q.area)); return { name: inside[0].name, how: 'inside' }; }
+        const mLat = 111320, mLng = 111320 * Math.cos(lat * Math.PI / 180);
+        const padLat = FI_NEAR_M / mLat, padLng = FI_NEAR_M / mLng;
+        let bd = Infinity, bn = null;
+        idx.forEach(a => {
+            if (lat < a.minLat - padLat || lat > a.maxLat + padLat || lng < a.minLng - padLng || lng > a.maxLng + padLng) return;
+            for (let i = 0, j = a.xs.length - 1; i < a.xs.length; j = i++) {
+                const ax = (a.xs[j] - lng) * mLng, ay = (a.ys[j] - lat) * mLat, bx = (a.xs[i] - lng) * mLng, by = (a.ys[i] - lat) * mLat;
+                const dx = bx - ax, dy = by - ay; const len2 = dx * dx + dy * dy;
+                let t = len2 ? -(ax * dx + ay * dy) / len2 : 0; t = t < 0 ? 0 : (t > 1 ? 1 : t);
+                const d = Math.hypot(ax + t * dx, ay + t * dy);
+                if (d < bd) { bd = d; bn = a; }
+            }
+        });
+        return (bn && bd <= FI_NEAR_M) ? { name: bn.name, how: 'near' } : { name: '', how: 'none' };
+    }
+    function fiShape(a, sid, idx) {
+        const when = a.image_created_at || a.video_created_at || a.created_at || '';
+        const t = Date.parse(when);
+        const loc = a.annotation_location && Array.isArray(a.annotation_location.coordinates) ? a.annotation_location.coordinates : null;
+        const lng = loc ? Number(loc[0]) : NaN, lat = loc ? Number(loc[1]) : NaN;
+        const desc = a.data && typeof a.data.description === 'string' ? a.data.description.trim() : '';
+        const tagged = Array.isArray(a.assets) ? a.assets.filter(x => x && x.name) : [];
+        let asset = '', how = 'none';
+        if (tagged.length) { asset = String(tagged[0].name); how = 'tagged'; }
+        else if (idx) { const m = fiMatchAsset(idx, lat, lng, desc); asset = m.name; how = m.how; }
+        const status = String(a.validation_status || '') || '(none)';
+        const rejReason = [a.rejection_reason, a.rejection_reason_other].filter(v => v != null && v !== '').map(v => typeof v === 'object' ? (v.name || JSON.stringify(v)) : String(v)).join(' — ');
+        return { id: a.id, sid: String(sid), t: isFinite(t) ? t : null, when, type: (a.type && a.type.name) || '(no type)', comp: (a.component && a.component.name) || '', title: a.title || '', desc,
+            sev: a.severity, status, rejected: !!rejReason || FI_REJECT_RE.test(status), rejReason, ai: !!a.ai_generated, cust: !!a.customer_validated_at,
+            mission: a.mission_id != null ? a.mission_id : '', video: a.video_id != null ? a.video_id : null, image: a.image_id != null ? a.image_id : null,
+            lat, lng, asset, how, by: (a.annotator && a.annotator.username) || '' };
+    }
+
+    // ---- fetch ----
+    async function fiGet(url, ms) {
+        try { return await fdGetJson(url, ms); }
+        catch (e) {
+            if (/401\/403|login page/.test(String(e && e.message))) throw e;
+            console.warn(`${TAG} findings: ${url} failed (${e && e.message || e}) — retrying once`);
+            return await fdGetJson(url, ms * 2);
+        }
+    }
+    async function fiFetchIssues(sid, isDead) {
+        const rows = []; let total = null; let partial = false;
+        for (let page = 0; ; page++) {
+            if (isDead()) throw new Error('aborted');
+            if (page >= FI_PAGE_CAP) { partial = true; break; }
+            const j = await fiGet(`/annotations/?site=${encodeURIComponent(sid)}&usage_type=issue&limit=${FI_PAGE}&offset=${page * FI_PAGE}`, 60000);
+            const list = Array.isArray(j) ? j : (j && Array.isArray(j.results) ? j.results : null);
+            if (!list) throw new Error('unexpected /annotations/ response shape (no results list)');
+            if (total == null && j && typeof j.count === 'number') total = j.count;
+            rows.push(...list);
+            if (!list.length || Array.isArray(j) || !j.next) break;
+        }
+        if (total != null && rows.length < total) partial = true;
+        return { rows, partial };
+    }
+    async function fiFetchFlights(sid, months, isDead) {
+        const out = {};
+        for (const m of months) {
+            if (isDead()) throw new Error('aborted');
+            const j = await fiGet(`/get_all_takeoff_missions_in_site/?site=${encodeURIComponent(sid)}&limit=1&when_after=${m.a / 1000}&when_before=${m.b / 1000}`, 45000);
+            if (!j || typeof j.count !== 'number') throw new Error('flight list returned no count');
+            out[m.key] = j.count;
+        }
+        return out;
+    }
+    async function fiRunSweep() {
+        if (fiSweep && fiSweep.running) return;
+        try { await fetchRawSites(false); } catch (e) { console.warn(`${TAG} findings: /sites/ failed:`, e); setStatus(`Findings: /sites/ failed — ${e.message}`); return; }
+        const ids = fiScopeIds();
+        if (!ids.length) { setStatus('Findings: no sites in scope (pick sites in 📦 Fleet Data, or clear the name filter / "picked only")'); return; }
+        const seq = ++fiSweepSeq;
+        const months = fiMonths(Number(ftCfg.fi.months) > 0 ? Number(ftCfg.fi.months) : 12);
+        fiSweep = { at: Date.now(), running: true, seq, scope: `${(ftCfg.fi.picked && fdSelected.size) ? 'picked' : 'all'}${String(ftCfg.fi.name || '').trim() ? ` · name ~ ${String(ftCfg.fi.name).trim()}` : ''} (${ids.length})`,
+            months, sites: {}, done: 0, total: ids.length, aborted: false };
+        fiOpenSite = null; fiV = null;
+        renderPanel();
+        console.log(`${TAG} findings ${seq}: ${ids.length} site(s), ${months[0].key} → ${months[months.length - 1].key}`);
+        let cursor = 0;
+        const isDead = () => fiSweepSeq !== seq || fiSweep.aborted;
+        const worker = async () => {
+            while (cursor < ids.length) {
+                if (isDead()) return;
+                const sid = ids[cursor++];
+                const rec = { name: siteName(sid), client: clientOf(siteName(sid)), status: siteStatus(sid), issues: [], allTime: 0, flights: null, partial: false, err: null, flightsErr: null, assetsErr: null };
+                try {
+                    const got = await fiFetchIssues(sid, isDead);
+                    rec.partial = got.partial; rec.allTime = got.rows.length;
+                    if (!fiVocabLogged && got.rows.length) {
+                        fiVocabLogged = true;
+                        fdGetJson(`/annotations/status-counts/?site=${encodeURIComponent(sid)}&usage_type=issue`, 30000)
+                            .then(j => console.log(`${TAG} findings: /annotations/status-counts/ for site ${sid} (status vocabulary):`, j))
+                            .catch(e => console.warn(`${TAG} findings: status-counts probe failed (informational only):`, e));
+                    }
+                    let idx = null;
+                    if (got.rows.some(a => !(Array.isArray(a.assets) && a.assets.length))) {
+                        try { idx = fiAssetIndex((await fdFetchSetup(sid, false)).entities); }
+                        catch (e) { rec.assetsErr = (e && e.message) || String(e); console.warn(`${TAG} findings: site ${sid} setup read failed — untagged issues stay without an asset:`, e); }
+                    }
+                    rec.issues = got.rows.map(a => fiShape(a, sid, idx));
+                    try { rec.flights = await fiFetchFlights(sid, months, isDead); }
+                    catch (e) {
+                        if (e && e.message === 'aborted') return;
+                        rec.flightsErr = (e && e.message) || String(e);
+                        console.warn(`${TAG} findings: site ${sid} flight counts failed — rate not available for it:`, e);
+                    }
+                } catch (e) {
+                    if (fiSweepSeq !== seq) return;
+                    if (e && e.message === 'aborted') return;
+                    rec.err = (e && e.message) || String(e);
+                    console.warn(`${TAG} findings: site ${sid} failed:`, e);
+                }
+                if (fiSweepSeq !== seq) return;
+                fiSweep.sites[sid] = rec; fiSweep.done++; fiV = null;
+                setStatus(`Findings… ${fiSweep.done}/${fiSweep.total} · ${rec.name}${rec.err ? ' → FAILED' : ` → ${rec.allTime} issue(s) all time`}`);
+                if (fiSweep.done % 3 === 0 || fiSweep.done === fiSweep.total) fdRenderKeepScroll();
+            }
+        };
+        await Promise.all(Array.from({ length: Math.min(FI_CONCURRENCY, ids.length) }, worker));
+        if (fiSweepSeq !== seq) return;
+        fiSweep.running = false; fiV = null;
+        const v = fiView();
+        setStatus(`Findings done — ${v.n} issue(s) on ${v.sitesHit} of ${fiSweep.done} site(s), ${v.flightsKnown ? `${v.flights.toLocaleString()} flights` : 'flights unknown'}, ${v.repeats.length} repeat asset(s)${v.failed ? ` · ${v.failed} site(s) FAILED` : ''}${fiSweep.aborted ? ' · ABORTED' : ''}`);
+        console.log(`${TAG} findings ${seq}: done — ${v.n} shown of ${v.inWindow} in window, statuses`, v.statuses, 'types', v.typesAll, 'asset match', v.how);
+        renderPanel();
+    }
+
+    // ---- view: the sweep under the current filters ----
+    function fiPass(x) { return (!x.rejected || ftCfg.fi.showRejected) && !ftCfg.fi.statusOff[x.status] && !ftCfg.fi.typeOff[x.type]; }
+    const fiRate = (n, f) => f > 0 ? n / f * 100 : null;
+    const fiRateTxt = (n, f) => { const r = fiRate(n, f); return r == null ? '—' : r.toFixed(r < 10 ? 1 : 0); };
+    function fiView() {
+        if (fiV) return fiV;
+        const S = fiSweep;
+        const v = { n: 0, inWindow: 0, rejected: 0, flights: 0, flightsKnown: true, sitesHit: 0, failed: 0, partial: 0, noFlights: 0, noAssetSites: 0,
+            statuses: {}, typesAll: {}, types: {}, comps: {}, how: {}, months: [], sites: [], issues: [], assets: [], repeats: [], trend: null };
+        if (!S) return v;
+        const t0 = S.months[0].a, t1 = S.months[S.months.length - 1].b;
+        const mk = {}; S.months.forEach(m => { mk[m.key] = { m, n: 0, by: {}, flights: 0 }; });
+        const amap = new Map();
+        Object.keys(S.sites).forEach(sid => {
+            const r = S.sites[sid];
+            if (r.err) v.failed++; if (r.partial) v.partial++; if (r.assetsErr) v.noAssetSites++;
+            const row = { sid, r, n: 0, flights: 0, flightsKnown: !!r.flights, by: {}, issues: [], repeats: 0 };
+            if (r.flights) S.months.forEach(m => { const c = r.flights[m.key] || 0; row.flights += c; mk[m.key].flights += c; });
+            else if (!r.err) { v.noFlights++; v.flightsKnown = false; }
+            r.issues.forEach(x => {
+                if (x.t == null || x.t < t0 || x.t >= t1) return;
+                v.inWindow++; if (x.rejected) v.rejected++;
+                v.statuses[x.status] = (v.statuses[x.status] || 0) + 1;
+                v.typesAll[x.type] = (v.typesAll[x.type] || 0) + 1;
+                if (!fiPass(x)) return;
+                const key = new Date(x.t).toISOString().slice(0, 7);
+                row.n++; row.by[x.type] = (row.by[x.type] || 0) + 1; row.issues.push(x);
+                v.types[x.type] = (v.types[x.type] || 0) + 1;
+                const ck = `${x.type} · ${x.comp || '(no component)'}`; v.comps[ck] = (v.comps[ck] || 0) + 1;
+                v.how[x.how] = (v.how[x.how] || 0) + 1;
+                if (mk[key]) { mk[key].n++; mk[key].by[x.type] = (mk[key].by[x.type] || 0) + 1; }
+                if (x.asset) {
+                    const ak = `${sid}|${x.asset}`;
+                    let a = amap.get(ak);
+                    if (!a) { a = { sid, site: r.name, asset: x.asset, n: 0, days: new Set(), months: new Set(), comps: new Set(), types: new Set(), first: x.t, last: x.t, issues: [] }; amap.set(ak, a); }
+                    a.n++; a.days.add(new Date(x.t).toISOString().slice(0, 10)); a.months.add(key);
+                    if (x.comp) a.comps.add(x.comp); a.types.add(x.type);
+                    if (x.t < a.first) a.first = x.t; if (x.t > a.last) a.last = x.t; a.issues.push(x);
+                }
+            });
+            row.issues.sort((p, q) => q.t - p.t);
+            v.n += row.n; v.flights += row.flights; if (row.n) v.sitesHit++;
+            v.sites.push(row); v.issues.push(...row.issues);
+        });
+        v.months = S.months.map(m => mk[m.key]);
+        v.assets = Array.from(amap.values()).sort((a, b) => (b.days.size - a.days.size) || (b.n - a.n) || a.asset.localeCompare(b.asset));
+        v.repeats = v.assets.filter(a => a.days.size >= 2);    // flagged on 2+ different days = a repeat, not one flight's cluster
+        const rep = new Set(v.repeats.map(a => `${a.sid}|${a.asset}`));
+        v.sites.forEach(row => { row.repeats = v.repeats.filter(a => a.sid === row.sid).length; });
+        v.isRepeat = (x) => !!x.asset && rep.has(`${x.sid}|${x.asset}`);
+        v.assetN = (x) => { const a = x.asset && amap.get(`${x.sid}|${x.asset}`); return a ? a.n : ''; };
+        v.sites.sort((a, b) => (b.n - a.n) || a.r.name.localeCompare(b.r.name));
+        v.issues.sort((p, q) => q.t - p.t);
+        // trend: last 3 COMPLETE months vs the 3 before — on the rate when every site has flight counts, else on raw counts
+        const full = v.months.filter(x => !x.m.partial);
+        if (full.length >= 6) {
+            const sum = (arr) => arr.reduce((o, x) => { o.n += x.n; o.f += x.flights; return o; }, { n: 0, f: 0 });
+            const A = sum(full.slice(-6, -3)), B = sum(full.slice(-3));
+            const useRate = v.flightsKnown && A.f > 0 && B.f > 0;
+            const a = useRate ? A.n / A.f * 100 : A.n, b = useRate ? B.n / B.f * 100 : B.n;
+            v.trend = { useRate, a, b, pct: a > 0 ? (b - a) / a * 100 : null, from: `${full[full.length - 6].m.label}–${full[full.length - 4].m.label}`, to: `${full[full.length - 3].m.label}–${full[full.length - 1].m.label}` };
+        }
+        fiV = v;
+        return v;
+    }
+    function fiTrendText(v) {
+        const t = v.trend;
+        if (!t) return '';
+        const unit = t.useRate ? 'findings per 100 flights' : 'findings';
+        const f = (x) => t.useRate ? x.toFixed(x < 10 ? 1 : 0) : String(x);
+        if (t.pct == null) return `${f(t.b)} ${unit} in ${t.to} (none in ${t.from})`;
+        if (Math.abs(t.pct) < 5) return `Flat: ${f(t.b)} ${unit} in ${t.to} vs ${f(t.a)} in ${t.from}`;
+        return `${t.pct < 0 ? 'Down' : 'Up'} ${Math.abs(t.pct).toFixed(0)}%: ${f(t.b)} ${unit} in ${t.to} vs ${f(t.a)} in ${t.from}`;
+    }
+    const fiPl = (n, one, many) => `${Number(n).toLocaleString()} ${n === 1 ? one : (many || one + 's')}`;
+    const fiDay = (t) => t == null ? '' : new Date(t).toISOString().slice(0, 10);
+    const fiSevTxt = (s) => s == null ? '' : (FI_SEV[s] || String(s));
+    function fiScopeTitle(v) {
+        const cl = Array.from(new Set(v.sites.map(x => x.r.client).filter(Boolean)));
+        return cl.length === 1 ? cl[0] : `${v.sites.length} sites`;
+    }
+
+    // ---- CSV ----
+    const fiQ = (val) => `"${String(val == null ? '' : val).replace(/"/g, '""')}"`;
+    function fiDownloadCsv() {
+        if (!fiSweep) { setStatus('Findings: run the report first'); return; }
+        const v = fiView();
+        if (!v.issues.length) { setStatus('Findings: nothing to export under the current filters'); return; }
+        const cols = ['Site ID', 'Site', 'Client', 'Issue ID', 'Flight date (UTC)', 'Flight time (CT)', 'Month', 'Type', 'Component', 'Title', 'Description', 'Severity', 'Status', 'Rejected', 'Rejection reason', 'Source', 'Customer validated',
+            'Asset', 'Asset match', 'Repeat asset', 'Asset findings in window', 'Mission ID', 'Video ID', 'Image ID', 'Lat', 'Lng', 'Created by', 'Site link', 'Issue link'];
+        const rows = v.issues.map(x => { const r = fiSweep.sites[x.sid]; return [x.sid, r.name, r.client, x.id, fiDay(x.t), fdWhenCT(x.when), new Date(x.t).toISOString().slice(0, 7), x.type, x.comp, x.title, x.desc, fiSevTxt(x.sev), x.status, x.rejected ? 'yes' : '', x.rejReason,
+            x.ai ? 'AI' : 'Insights', x.cust ? 'yes' : '', x.asset, x.how, v.isRepeat(x) ? 'yes' : '', v.assetN(x), x.mission, x.video == null ? '' : x.video, x.image == null ? '' : x.image, isFinite(x.lat) ? x.lat : '', isFinite(x.lng) ? x.lng : '', x.by, fiSiteUrl(x.sid), fiIssueUrl(x)]; });
+        const csv = [cols.map(fiQ).join(',')].concat(rows.map(r => r.map(fiQ).join(','))).join('\r\n');
+        fdDownload(new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' }), `AIM_Findings_${fiSweep.months[0].key}_to_${fiSweep.months[fiSweep.months.length - 1].key}.csv`);
+        setStatus(`Findings CSV — ${rows.length} issue(s)`);
+    }
+    function fiDownloadMonthlyCsv() {
+        if (!fiSweep) { setStatus('Findings: run the report first'); return; }
+        const v = fiView();
+        const types = Object.keys(v.types).sort((a, b) => v.types[b] - v.types[a]);
+        const cols = ['Site ID', 'Site', 'Client', 'Month', 'Month complete', 'Flights', 'Findings', 'Findings per 100 flights'].concat(types);
+        const rows = [];
+        v.sites.forEach(row => fiSweep.months.forEach(m => {
+            const by = {}; let n = 0;
+            row.issues.forEach(x => { if (x.t >= m.a && x.t < m.b) { n++; by[x.type] = (by[x.type] || 0) + 1; } });
+            const f = row.r.flights ? (row.r.flights[m.key] || 0) : '';
+            rows.push([row.sid, row.r.name, row.r.client, m.key, m.partial ? 'no' : 'yes', f, n, f === '' ? '' : (fiRate(n, f) == null ? '' : fiRate(n, f).toFixed(2))].concat(types.map(t => by[t] || 0)));
+        }));
+        const csv = [cols.map(fiQ).join(',')].concat(rows.map(r => r.map(fiQ).join(','))).join('\r\n');
+        fdDownload(new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' }), `AIM_Findings_Monthly_${fiSweep.months[0].key}_to_${fiSweep.months[fiSweep.months.length - 1].key}.csv`);
+        setStatus(`Findings monthly CSV — ${rows.length} site-month row(s)`);
+    }
+
+    // ---- HTML report (self-contained file; the customer-facing piece) ----
+    // Charts: stacked monthly bars (top 3 types + Other, fixed colour order) and a SEPARATE rate line — never a dual axis.
+    function fiChartBars(v, top) {
+        const W = 920, H = 250, L = 44, R = 12, T = 14, B = 34;
+        const max = Math.max(1, ...v.months.map(x => x.n));
+        const raw = max / 4, pw = Math.pow(10, Math.floor(Math.log10(raw))), fr = raw / pw;
+        const step = Math.max(1, (fr <= 1 ? 1 : fr <= 2 ? 2 : fr <= 5 ? 5 : 10) * pw);
+        const yMax = Math.ceil(max / step) * step;
+        const slot = (W - L - R) / v.months.length; const bw = Math.min(34, slot * 0.6);
+        const y = (n) => T + (H - T - B) * (1 - n / yMax);
+        const out = [`<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Findings per month by type" style="width:100%;height:auto;display:block">`];
+        for (let g = 0; g <= yMax + 1e-9; g += step) out.push(`<line x1="${L}" x2="${W - R}" y1="${y(g).toFixed(1)}" y2="${y(g).toFixed(1)}" class="grid"/><text x="${L - 6}" y="${(y(g) + 4).toFixed(1)}" text-anchor="end" class="ax">${Math.round(g * 10) / 10}</text>`);
+        v.months.forEach((mo, i) => {
+            const cx = L + slot * i + slot / 2; let acc = 0;
+            const parts = top.map((t, k) => ({ cls: `s${k + 1}`, name: t, n: mo.by[t] || 0 }));
+            const other = mo.n - parts.reduce((s, p) => s + p.n, 0);
+            if (other > 0) parts.push({ cls: 'so', name: 'Other', n: other });
+            const tip = `${mo.m.label}${mo.m.partial ? ' (month to date)' : ''}: ${fiPl(mo.n, 'finding')}${parts.filter(p => p.n).map(p => ` · ${p.name} ${p.n}`).join('')}${mo.flights ? ` · ${mo.flights.toLocaleString()} flights` : ''}`;
+            parts.forEach(p => {
+                if (!p.n) return;
+                const y1 = y(acc + p.n), y0 = y(acc); acc += p.n;
+                const hgt = Math.max(1, y0 - y1 - 2);     // 2px surface gap between segments
+                out.push(`<rect x="${(cx - bw / 2).toFixed(1)}" y="${y1.toFixed(1)}" width="${bw.toFixed(1)}" height="${hgt.toFixed(1)}" rx="2" class="${p.cls}"/>`);
+            });
+            out.push(`<rect x="${(cx - slot / 2).toFixed(1)}" y="${T}" width="${slot.toFixed(1)}" height="${H - T - B}" fill="transparent" data-tip="${escapeHtml(tip)}"/>`);
+            out.push(`<text x="${cx.toFixed(1)}" y="${H - 14}" text-anchor="middle" class="ax">${escapeHtml(mo.m.label)}${mo.m.partial ? '*' : ''}</text>`);
+        });
+        out.push('</svg>');
+        return out.join('');
+    }
+    function fiChartRate(v) {
+        const W = 920, H = 190, L = 44, R = 12, T = 14, B = 34;
+        const pts = v.months.map((mo, i) => ({ mo, i, r: fiRate(mo.n, mo.flights) }));
+        const max = Math.max(0.1, ...pts.map(p => p.r || 0));
+        const yMax = max <= 1 ? Math.ceil(max * 10) / 10 : Math.ceil(max);
+        const slot = (W - L - R) / v.months.length;
+        const x = (i) => L + slot * i + slot / 2; const y = (n) => T + (H - T - B) * (1 - n / yMax);
+        const out = [`<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Findings per 100 flights by month" style="width:100%;height:auto;display:block">`];
+        [0, yMax / 2, yMax].forEach(g => out.push(`<line x1="${L}" x2="${W - R}" y1="${y(g).toFixed(1)}" y2="${y(g).toFixed(1)}" class="grid"/><text x="${L - 6}" y="${(y(g) + 4).toFixed(1)}" text-anchor="end" class="ax">${Math.round(g * 100) / 100}</text>`));
+        let d = ''; let pen = false;
+        pts.forEach(p => { if (p.r == null) { pen = false; return; } d += `${pen ? 'L' : 'M'}${x(p.i).toFixed(1)} ${y(p.r).toFixed(1)} `; pen = true; });
+        out.push(`<path d="${d.trim()}" class="ln"/>`);
+        pts.forEach(p => {
+            out.push(`<text x="${x(p.i).toFixed(1)}" y="${H - 14}" text-anchor="middle" class="ax">${escapeHtml(p.mo.m.label)}${p.mo.m.partial ? '*' : ''}</text>`);
+            if (p.r == null) return;
+            out.push(`<circle cx="${x(p.i).toFixed(1)}" cy="${y(p.r).toFixed(1)}" r="4" class="dot"/>`);
+            out.push(`<rect x="${(x(p.i) - slot / 2).toFixed(1)}" y="${T}" width="${slot.toFixed(1)}" height="${H - T - B}" fill="transparent" data-tip="${escapeHtml(`${p.mo.m.label}${p.mo.m.partial ? ' (month to date)' : ''}: ${p.r.toFixed(2)} per 100 flights · ${fiPl(p.mo.n, 'finding')} on ${fiPl(p.mo.flights, 'flight')}`)}"/>`);
+        });
+        out.push('</svg>');
+        return out.join('');
+    }
+    function fiReportHtml() {
+        const v = fiView(); const S = fiSweep;
+        const e = (x) => escapeHtml(String(x == null ? '' : x));
+        const types = Object.keys(v.types).sort((a, b) => v.types[b] - v.types[a]);
+        const top = types.slice(0, 3);
+        const range = `${S.months[0].label} – ${S.months[S.months.length - 1].label}`;
+        const a = (href, text) => `<a href="${e(href)}" target="_blank" rel="noopener">${e(text)}</a>`;
+        const internal = !!ftCfg.fi.showRejected;
+        const comps = Object.keys(v.comps).sort((p, q) => v.comps[q] - v.comps[p]);
+        const lead = types.length ? `${v.types[types[0]].toLocaleString()} ${e(types[0].toLowerCase())}` : '0';
+        const caveats = [];
+        if (v.failed) caveats.push(`${v.failed} site(s) could not be read and are not counted.`);
+        if (v.partial) caveats.push(`${v.partial} site(s) returned a partial issue list.`);
+        if (v.noFlights) caveats.push(`Flight counts were unavailable for ${v.noFlights} site(s); rates leave those sites' flights out.`);
+        if (v.noAssetSites) caveats.push(`Asset boundaries were unavailable for ${v.noAssetSites} site(s); their findings carry no asset unless tagged.`);
+        const noAsset = v.issues.filter(x => !x.asset).length;
+        const css = ':root{--bg:#fcfcfb;--card:#f4f3f0;--line:#dddcd6;--ink:#0b0b0b;--ink2:#52514e;--s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a;--so:#eda100;--accent:#2a78d6}'
+            + '@media (prefers-color-scheme:dark){:root{--bg:#1a1a19;--card:#232322;--line:#383835;--ink:#f0efec;--ink2:#c3c2b7;--s1:#3987e5;--s2:#d95926;--s3:#199e70;--so:#c98500;--accent:#6da7ec}}'
+            + '*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}'
+            + '.wrap{max-width:1040px;margin:0 auto;padding:32px 16px 64px}.eyebrow{font:12px/1.4 ui-monospace,Consolas,monospace;letter-spacing:.12em;text-transform:uppercase;color:var(--ink2)}'
+            + 'h1{font-size:34px;line-height:1.15;margin:6px 0 10px}h2{font-size:21px;margin:40px 0 4px}p.sub{color:var(--ink2);margin:0 0 14px;max-width:70ch}'
+            + '.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:1px;background:var(--line);border:1px solid var(--line);border-radius:6px;overflow:hidden;margin:18px 0}'
+            + '.tile{background:var(--card);padding:14px 16px}.tile b{display:block;font-size:28px;line-height:1.2}.tile span{color:var(--ink2);font-size:13px}'
+            + '.card{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:14px 16px;margin:10px 0}.legend{display:flex;gap:16px;flex-wrap:wrap;font-size:13px;color:var(--ink2);margin-bottom:6px}'
+            + '.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}'
+            + '.s1{fill:var(--s1)}.s2{fill:var(--s2)}.s3{fill:var(--s3)}.so{fill:var(--so)}.grid{stroke:var(--line);stroke-width:1}.ax{fill:var(--ink2);font-size:11px}'
+            + '.ln{fill:none;stroke:var(--s1);stroke-width:2}.dot{fill:var(--s1);stroke:var(--card);stroke-width:2}'
+            + '.scroll{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:13px}th{text-align:left;color:var(--ink2);font-weight:600;border-bottom:1px solid var(--line);padding:6px 8px;white-space:nowrap}'
+            + 'td{border-bottom:1px solid var(--line);padding:6px 8px;vertical-align:top}td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}a{color:var(--accent)}'
+            + '.note{color:var(--ink2);font-size:12px;margin-top:6px}.flag{border:1px solid var(--s2);border-radius:4px;padding:8px 12px;margin:12px 0;font-size:13px}'
+            + '#tip{position:absolute;display:none;pointer-events:none;background:var(--ink);color:var(--bg);font-size:12px;padding:5px 8px;border-radius:4px;max-width:300px;z-index:9}'
+            + 'details summary{cursor:pointer;color:var(--accent);margin:8px 0}';
+        const h = [];
+        h.push(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Inspection Findings — ${e(fiScopeTitle(v))}</title><style>${css}</style></head><body><div class="wrap">`);
+        h.push(`<div class="eyebrow">${e(fiScopeTitle(v))} · drone inspection findings · ${e(range)}</div><h1>Inspection Findings</h1>`);
+        h.push(`<p class="sub">${v.flightsKnown ? fiPl(v.flights, 'flight') : 'Flights'} across ${fiPl(v.sites.length, 'site')} produced ${fiPl(v.n, 'finding')}, ${lead} among them. ${fiPl(v.repeats.length, 'asset was', 'assets were')} flagged on more than one day. ${e(fiTrendText(v))}${v.trend ? '.' : ''}</p>`);
+        if (internal) h.push('<div class="flag"><b>Internal copy.</b> Rejected / false findings are included. Untick "show rejected" before exporting a customer copy.</div>');
+        h.push('<div class="tiles">'
+            + `<div class="tile"><b>${v.n.toLocaleString()}</b><span>findings on ${v.sitesHit} of ${v.sites.length} sites</span></div>`
+            + `<div class="tile"><b>${v.flightsKnown ? v.flights.toLocaleString() : '—'}</b><span>flights flown</span></div>`
+            + `<div class="tile"><b>${v.flightsKnown ? fiRateTxt(v.n, v.flights) : '—'}</b><span>findings per 100 flights</span></div>`
+            + `<div class="tile"><b>${v.repeats.length}</b><span>assets flagged on 2+ days</span></div></div>`);
+        h.push('<h2>Findings by month</h2><p class="sub">Each bar is one calendar month, split by finding type. Hover a month for the numbers.</p><div class="card">'
+            + `<div class="legend">${top.map((t, k) => `<span><i style="background:var(--s${k + 1})"></i>${e(t)}</span>`).join('')}${types.length > 3 ? '<span><i style="background:var(--so)"></i>Other</span>' : ''}</div>`
+            + fiChartBars(v, top) + '<div class="note">* current month, to date. Months are UTC.</div></div>');
+        if (v.flights > 0) h.push('<h2>Findings per 100 flights</h2><p class="sub">The same months divided by how much was flown, so a busy month does not read as a bad one.</p><div class="card">' + fiChartRate(v) + '<div class="note">* current month, to date.</div></div>');
+        h.push('<h2>Assets flagged more than once</h2><p class="sub">An asset appears here when findings were recorded on two or more different days. One flight that finds several things on the same asset is not a repeat.</p>');
+        if (!v.repeats.length) h.push('<div class="card">No asset was flagged on more than one day in this period.</div>');
+        else h.push('<div class="card scroll"><table><tr><th>Asset</th><th>Site</th><th class="n">Days flagged</th><th class="n">Findings</th><th>What</th><th>First</th><th>Latest</th><th>Findings</th></tr>'
+            + v.repeats.map(r => `<tr><td><b>${e(r.asset)}</b></td><td>${a(fiSiteUrl(r.sid), r.site)}</td><td class="n">${r.days.size}</td><td class="n">${r.n}</td><td>${e(Array.from(r.types).join(', '))}${r.comps.size ? `<div class="note">${e(Array.from(r.comps).join(' · '))}</div>` : ''}</td><td>${fiDay(r.first)}</td><td>${fiDay(r.last)}</td>`
+                + `<td>${r.issues.slice().sort((p, q) => q.t - p.t).slice(0, 8).map(x => a(fiIssueUrl(x), fiDay(x.t))).join(', ')}${r.issues.length > 8 ? ` +${r.issues.length - 8}` : ''}</td></tr>`).join('') + '</table></div>');
+        h.push('<h2>What was found</h2><p class="sub">Finding type and the equipment it was recorded against.</p><div class="card scroll"><table><tr><th>Type · component</th><th class="n">Findings</th><th class="n">Share</th></tr>'
+            + comps.map(k => `<tr><td>${e(k)}</td><td class="n">${v.comps[k]}</td><td class="n">${(v.comps[k] / v.n * 100).toFixed(0)}%</td></tr>`).join('') + '</table></div>');
+        h.push('<h2>By site</h2><div class="card scroll"><table><tr><th>Site</th><th class="n">Flights</th><th class="n">Findings</th><th class="n">Per 100 flights</th><th class="n">Repeat assets</th><th>Types</th></tr>'
+            + v.sites.map(s => `<tr><td>${a(fiSiteUrl(s.sid), s.r.name)}${s.r.err ? ' <span class="note">(could not be read)</span>' : ''}</td><td class="n">${s.flightsKnown ? s.flights.toLocaleString() : '—'}</td><td class="n">${s.n}</td><td class="n">${s.flightsKnown ? fiRateTxt(s.n, s.flights) : '—'}</td><td class="n">${s.repeats || ''}</td>`
+                + `<td>${e(Object.keys(s.by).sort((p, q) => s.by[q] - s.by[p]).map(t => `${t} ${s.by[t]}`).join(' · '))}</td></tr>`).join('') + '</table></div>');
+        h.push(`<h2>Every finding</h2><details><summary>Show all ${v.issues.length.toLocaleString()} findings</summary><div class="card scroll"><table><tr><th>Date</th><th>Site</th><th>Asset</th><th>Type</th><th>Component</th><th>Severity</th>${internal ? '<th>Status</th>' : ''}<th>Finding</th></tr>`
+            + v.issues.map(x => `<tr><td>${fiDay(x.t)}</td><td>${a(fiSiteUrl(x.sid), S.sites[x.sid].name)}</td><td>${e(x.asset || '—')}</td><td>${e(x.type)}</td><td>${e(x.comp)}</td><td>${e(fiSevTxt(x.sev))}</td>${internal ? `<td>${e(x.status)}${x.rejected ? ' · rejected' : ''}</td>` : ''}<td>${a(fiIssueUrl(x), `#${x.id}`)}</td></tr>`).join('')
+            + '</table></div></details>');
+        h.push(`<h2>Method</h2><p class="sub">Findings are the issues recorded in the platform's Data Map for each site, dated by the flight that captured them. Flights are every flown mission in the same months. `
+            + `Findings recorded on video carry a map point, not an asset tag; each was assigned to the asset named in the analyst's note, or the asset boundary the point falls in, or the nearest boundary within ${Math.round(FI_NEAR_M * 3.28084)} ft.`
+            + `${noAsset ? ` ${fiPl(noAsset, 'finding')} could not be assigned to an asset and ${noAsset === 1 ? 'is' : 'are'} left out of the repeat list.` : ''}${caveats.length ? ' ' + e(caveats.join(' ')) : ''}</p>`);
+        h.push(`<div class="note">Generated ${e(new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' }))}.</div></div><div id="tip"></div>`);
+        h.push('<script>(function(){var t=document.getElementById("tip");document.addEventListener("mousemove",function(ev){var el=ev.target.closest?ev.target.closest("[data-tip]"):null;if(!el){t.style.display="none";return;}t.textContent=el.getAttribute("data-tip");t.style.display="block";var w=t.offsetWidth;t.style.left=Math.max(4,Math.min(ev.pageX+12,window.scrollX+document.documentElement.clientWidth-w-8))+"px";t.style.top=(ev.pageY+16)+"px";});})();<\/script></body></html>');
+        return h.join('');
+    }
+    function fiDownloadHtml() {
+        if (!fiSweep || fiSweep.running) { setStatus('Findings: run the report first (and let it finish)'); return; }
+        const v = fiView();
+        if (!v.n) { setStatus('Findings: nothing to report under the current filters'); return; }
+        fdDownload(new Blob([fiReportHtml()], { type: 'text/html;charset=utf-8' }), `Inspection_Findings_${fdSafe(fiScopeTitle(v)).replace(/\s+/g, '_')}_${fiSweep.months[0].key}_to_${fiSweep.months[fiSweep.months.length - 1].key}.html`);
+        setStatus(`Findings report downloaded — ${v.n} finding(s)${ftCfg.fi.showRejected ? ' · INTERNAL copy (rejected shown)' : ''}`);
+    }
+
+    // ---- panel ----
+    function fiOpt(t) {
+        const k = t.getAttribute('data-fi-opt');
+        if (k === 'months') { const n = Number(t.value); if (FI_MONTH_OPTS.indexOf(n) !== -1) { ftCfg.fi.months = n; saveCfg(); setStatus(`Findings: ${n} months — takes effect on the next run`); } return; }
+        if (k === 'name') { ftCfg.fi.name = String(t.value || '').trim().slice(0, 120); saveCfg(); renderPanel(); return; }
+        if (k === 'picked' || k === 'prodOnly') { ftCfg.fi[k] = !!t.checked; saveCfg(); renderPanel(); return; }
+        if (k === 'showRejected') { ftCfg.fi.showRejected = !!t.checked; saveCfg(); fiV = null; fdRenderKeepScroll(); return; }
+        if (k === 'status' || k === 'type') {
+            const map = k === 'status' ? ftCfg.fi.statusOff : ftCfg.fi.typeOff; const name = t.getAttribute('data-fi-val');
+            if (t.checked) delete map[name]; else map[name] = true;
+            saveCfg(); fiV = null; fdRenderKeepScroll(); return;
+        }
+        console.warn(`${TAG} findings: unknown option "${k}"`);
+    }
+    function renderFiSection() {
+        if (!openSections.fi) return '';
+        const h = [];
+        const running = !!(fiSweep && fiSweep.running);
+        const ids = rawSites ? fiScopeIds() : [];
+        const selCss = 'background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;font:inherit;padding:1px 3px;';
+        const dis = running ? 'disabled' : '';
+        h.push('<div style="padding:6px 10px;display:flex;gap:12px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;">'
+            + `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;" title="Only the sites ticked in 📦 Fleet Data. Nothing picked → every site."><input type="checkbox" data-fi-opt="picked" ${ftCfg.fi.picked ? 'checked' : ''} ${dis}> picked only <span style="color:${fdSelected.size ? '#5fff5f' : '#888'}">(${fdSelected.size})</span></label>`
+            + `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;" title="Skip sites whose /sites/ status is not Production"><input type="checkbox" data-fi-opt="prodOnly" ${ftCfg.fi.prodOnly ? 'checked' : ''} ${dis}> Production only</label>`
+            + `<label style="display:inline-flex;align-items:center;gap:3px;" title="Optional: only sites whose NAME matches this text (a regular expression, case-insensitive). Narrows the pick above. Blank = no name filter.">name <input type="text" data-fi-opt="name" value="${escapeHtml(ftCfg.fi.name)}" placeholder="any" ${dis} style="${selCss}width:120px"></label>`
+            + `<span data-ft="fi-exxon" style="cursor:pointer;color:#7adfe6" title="Set the name filter to: Exxon followed by a number (Exxon 01 … Exxon 41)">Exxon ##</span>`
+            + `<select data-fi-opt="months" ${dis} title="Calendar months in the report, ending with the current month (takes effect on the next run)" style="${selCss}">${FI_MONTH_OPTS.map(n => `<option value="${n}" ${Number(ftCfg.fi.months) === n ? 'selected' : ''}>last ${n} months</option>`).join('')}</select>`
+            + `<span style="color:#888">scope: ${rawSites ? `${ids.length} site(s)` : 'roster not loaded yet'}</span>`
+            + '</div>');
+        h.push('<div style="padding:6px 10px;display:flex;gap:14px;flex-wrap:wrap;border-bottom:1px solid #222834;">'
+            + (running
+                ? `<span data-ft="fi-abort" style="cursor:pointer;color:#ff5252;font-weight:bold">■ Abort (${fiSweep.done}/${fiSweep.total})</span>`
+                : '<span data-ft="fi-run" style="cursor:pointer;color:#5fff5f;font-weight:bold">▶ Run findings report</span>')
+            + '<span data-ft="fi-html" style="cursor:pointer;color:#7adfe6" title="Self-contained HTML report (charts, repeat assets, by site, every finding) — every row links to the site and to the issue. Uses the filters below.">📄 HTML report</span>'
+            + '<span data-ft="fi-csv" style="cursor:pointer;color:#7adfe6" title="One row per finding, with site + issue links. Uses the filters below.">⬇ Issues CSV</span>'
+            + '<span data-ft="fi-csvm" style="cursor:pointer;color:#7adfe6" title="One row per site per month: flights, findings, rate, findings per type">⬇ Monthly CSV</span>'
+            + (fiSweep && !running ? '<span data-ft="fi-clear" style="cursor:pointer;color:#888">✕ Clear</span>' : '')
+            + '</div>');
+        if (!fiSweep) { h.push('<div style="padding:8px 10px;color:#888">No report run yet. Reads the Data View Issues tab (emissions and every other finding type) of each site in scope, plus flights flown per month. Read-only.</div>'); return h.join(''); }
+        const v = fiView();
+        const chip = (kind, name, n, off, color) => `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;color:${color}" title="Applies instantly — no re-run"><input type="checkbox" data-fi-opt="${kind}" data-fi-val="${escapeHtml(name)}" ${off ? '' : 'checked'}> ${escapeHtml(name)} <span style="color:#888">${n}</span></label>`;
+        h.push('<div style="padding:4px 10px;display:flex;gap:12px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;"><span style="color:#7adfe6">Type:</span>'
+            + Object.keys(v.typesAll).sort((a, b) => v.typesAll[b] - v.typesAll[a]).map(t => chip('type', t, v.typesAll[t], ftCfg.fi.typeOff[t], '#ddd')).join('') + '</div>');
+        h.push('<div style="padding:4px 10px;display:flex;gap:12px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;"><span style="color:#7adfe6">Status:</span>'
+            + Object.keys(v.statuses).sort((a, b) => v.statuses[b] - v.statuses[a]).map(s => chip('status', s, v.statuses[s], ftCfg.fi.statusOff[s], FI_REJECT_RE.test(s) ? '#ffa030' : '#ddd')).join('')
+            + `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;color:#ffa030" title="INTERNAL: include findings marked false / rejected / duplicate. Leave OFF for anything that goes to the customer — the HTML report labels itself Internal when this is on."><input type="checkbox" data-fi-opt="showRejected" ${ftCfg.fi.showRejected ? 'checked' : ''}> show rejected <span style="color:#888">${v.rejected}</span></label>`
+            + '</div>');
+        h.push(`<div style="padding:4px 10px;color:#aaa;border-bottom:1px solid #222834;">${running ? `Running… ${fiSweep.done}/${fiSweep.total}` : `Ran ${new Date(fiSweep.at).toLocaleString()} · ${escapeHtml(fiSweep.scope)}${fiSweep.aborted ? ' · <span style="color:#ff5252">ABORTED</span>' : ''}`} · ${escapeHtml(fiSweep.months[0].label)} → ${escapeHtml(fiSweep.months[fiSweep.months.length - 1].label)}`
+            + ` → <span style="color:#fff;font-weight:bold">${v.n} finding(s)</span> on ${v.sitesHit} site(s) · ${v.flightsKnown ? `${v.flights.toLocaleString()} flights · ${fiRateTxt(v.n, v.flights)} per 100` : 'flights unknown'}`
+            + ` · <span style="color:#ffd27a">${v.repeats.length} repeat asset(s)</span>`
+            + (v.trend ? ` · ${escapeHtml(fiTrendText(v))}` : '')
+            + (v.failed ? ` · <span style="color:#ffa030">${v.failed} site(s) FAILED — not counted</span>` : '')
+            + (v.partial ? ` · <span style="color:#ffa030">${v.partial} site(s) partial</span>` : '')
+            + (v.noFlights ? ` · <span style="color:#ffa030" title="the flight-count read failed — rates leave these sites out">${v.noFlights} site(s) without flight counts</span>` : '')
+            + (v.noAssetSites ? ` · <span style="color:#ffa030">${v.noAssetSites} site(s) without asset boundaries</span>` : '')
+            + `<div style="color:#888;font-size:11px" title="how each shown finding got its asset">asset match: ${['tagged', 'text', 'inside', 'near', 'none'].filter(k => v.how[k]).map(k => `${k} ${v.how[k]}`).join(' · ') || '—'}</div>`
+            + '</div>');
+        const mMax = Math.max(1, ...v.months.map(x => x.n));
+        h.push('<div style="padding:6px 10px;display:flex;gap:3px;align-items:flex-end;height:64px;border-bottom:1px solid #222834;">'
+            + v.months.map(mo => `<div title="${escapeHtml(`${mo.m.label}${mo.m.partial ? ' (to date)' : ''}: ${mo.n} finding(s) · ${mo.flights.toLocaleString()} flights · ${fiRateTxt(mo.n, mo.flights)} per 100`)}" style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%;font-size:9px;color:#888">`
+                + `<div style="width:70%;max-width:22px;height:${Math.round(mo.n / mMax * 38)}px;min-height:${mo.n ? 2 : 0}px;background:#3987e5;border-radius:2px 2px 0 0"></div><div>${escapeHtml(mo.m.label.slice(0, 3))}</div></div>`).join('')
+            + '</div>');
+        if (v.repeats.length) {
+            h.push(`<div style="padding:4px 10px;color:#ffd27a;border-bottom:1px solid #222834;">Flagged on 2+ days — top ${Math.min(12, v.repeats.length)} of ${v.repeats.length}</div><div style="max-height:190px;overflow:auto;border-bottom:1px solid #222834;">`);
+            v.repeats.slice(0, 12).forEach(r => h.push('<div style="padding:3px 10px;display:flex;gap:8px;align-items:center;font-size:11px;border-top:1px dashed #1e2430">'
+                + `<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(`${r.asset} · ${Array.from(r.comps).join(' · ')}`)}"><b>${escapeHtml(r.asset)}</b> <span style="color:#888">· ${escapeHtml(r.site)}</span></span>`
+                + `<span style="white-space:nowrap"><span style="color:#ffd27a;font-weight:bold">${r.days.size} days</span> <span style="color:#888">· ${r.n} · ${fiDay(r.first)} → ${fiDay(r.last)}</span></span>`
+                + `<a href="${fiIssueUrl(r.issues.slice().sort((p, q) => q.t - p.t)[0])}" target="_blank" rel="noopener" title="Open the latest finding in a new tab" style="color:#7adfe6;text-decoration:none">↗</a></div>`));
+            h.push('</div>');
+        }
+        const shown = v.sites.filter(s => s.n || s.r.err || s.r.partial || s.r.flightsErr);
+        if (!shown.length) { h.push(`<div style="padding:8px 10px;color:#5fff5f">${fiSweep.done ? 'No finding on the swept sites under the current filters.' : 'waiting for the first site…'}</div>`); return h.join(''); }
+        h.push('<div style="max-height:420px;overflow:auto">');
+        shown.forEach(s => {
+            const r = s.r; const open = fiOpenSite === s.sid;
+            h.push(`<div data-fi-site="${escapeHtml(s.sid)}" style="padding:4px 10px;cursor:pointer;border-top:1px solid #1e2430;display:flex;gap:8px;align-items:center;${r.err ? 'color:#ffa030' : ''}">`
+                + `<span style="width:12px;color:#888">${open ? '▾' : '▸'}</span>`
+                + `<span style="flex:1"><b>${escapeHtml(r.name)}</b> <span style="color:#888">· ${escapeHtml(Object.keys(s.by).sort((p, q) => s.by[q] - s.by[p]).map(t => `${t} ${s.by[t]}`).join(' · '))}${s.repeats ? ` · <span style="color:#ffd27a">${s.repeats} repeat</span>` : ''}</span></span>`
+                + (r.partial ? '<span style="color:#ffa030" title="the issue list came back short of its own count">partial</span>' : '')
+                + (r.flightsErr ? `<span style="color:#ffa030" title="${escapeHtml(r.flightsErr)}">no flights</span>` : '')
+                + (r.err ? `<span title="${escapeHtml(r.err)}">⚠ failed</span>` : `<span><span style="color:#fff;font-weight:bold">${s.n}</span> <span style="color:#888">/ ${s.flightsKnown ? `${s.flights.toLocaleString()} · ${fiRateTxt(s.n, s.flights)} per 100` : '—'}</span></span>`)
+                + `<a href="${fiSiteUrl(s.sid)}" target="_blank" rel="noopener" title="Open this site's Issues tab in a new tab" style="color:#7adfe6;text-decoration:none">↗</a>`
+                + '</div>');
+            if (!open) return;
+            if (r.err) { h.push(`<div style="padding:3px 10px 3px 30px;color:#ffa030;font-size:11px">${escapeHtml(r.err)}</div>`); return; }
+            s.issues.slice(0, 300).forEach(x => h.push('<div style="padding:3px 10px 3px 30px;display:flex;gap:8px;align-items:center;border-top:1px dashed #1e2430;font-size:11px">'
+                + `<a href="${fiIssueUrl(x)}" target="_blank" rel="noopener" title="Open this issue in a new tab" style="color:#7adfe6;text-decoration:none;width:64px">${escapeHtml(String(x.id))} ↗</a>`
+                + `<span style="width:70px;color:#aaa">${fiDay(x.t)}</span>`
+                + `<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(`${x.title}${x.desc ? ` — ${x.desc}` : ''}`)}">${escapeHtml(x.type)}${x.comp ? ` <span style="color:#888">· ${escapeHtml(x.comp)}</span>` : ''}</span>`
+                + `<span style="width:190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${x.asset ? (v.isRepeat(x) ? '#ffd27a' : '#ddd') : '#888'}" title="${escapeHtml(`${x.asset || 'no asset'} · match: ${x.how}`)}">${escapeHtml(x.asset || '(no asset)')}</span>`
+                + `<span style="width:52px;color:#888">${escapeHtml(fiSevTxt(x.sev))}</span>`
+                + (x.rejected ? '<span style="color:#ffa030">rejected</span>' : '')
+                + '</div>'));
+            if (s.issues.length > 300) h.push(`<div style="padding:3px 10px 3px 30px;color:#888;font-size:11px">+ ${s.issues.length - 300} more — in the CSV</div>`);
         });
         h.push('</div>');
         return h.join('');
@@ -9606,6 +10266,8 @@
             + renderSopSection()
             + sectionHeader('nv', '🎬', 'Mission Review', nvSweep ? `${nvTotals().hits} of ${nvTotals().flown} flown flight(s) flagged${nvSweep.running ? ` · running ${nvSweep.done}/${nvSweep.total}` : ''}` : 'flag flown flights across sites — no video, images, landing — links to Mission Playback')
             + renderNvSection()
+            + sectionHeader('fi', '📈', 'Findings Report', fiSweep ? `${fiView().n} finding(s) on ${fiView().sitesHit} site(s) · ${fiView().repeats.length} repeat asset(s)${fiSweep.running ? ` · running ${fiSweep.done}/${fiSweep.total}` : ''}` : 'Data View issues (emissions + more) across sites — trends, repeat assets, HTML report + CSV')
+            + renderFiSection()
             + sectionHeader('es', '⚙', 'ESC Sweep', esSweep ? `${esTotals().scanned} of ${esTotals().flown} flight(s) checked · ${esTotals().alarms} alarm(s)${esSweep.running ? ' · running' : ''}` : 'ESC ratio alarms across sites — false alarm vs real, from each flight\'s logs')
             + renderEsSection()
             + sectionHeader('map', '🗺', 'Map', 'basemap + airspace chart')
@@ -9653,7 +10315,7 @@
 
             // Delegated — the body is rebuilt on every render, the root never is
             panelEl.addEventListener('click', (ev) => {
-                if (ev.target.closest('input[data-ft-class],input[data-ft-flag],select[data-es-opt],input[data-es-opt],select[data-sk-opt],input[data-sk-opt],input[data-sop-check],select[data-nv-days],input[data-nv-min],input[data-nv-date],input[data-nv-check],input[data-ft-view],input[data-kml-show],input[data-kml-fill],input[data-kml-color],input[data-fd-site],input[data-fd-clientsel],select[data-fd-pick],input[data-fd-dataset],select[data-fd-range],input[data-fd-date],input[data-kx-inc],select[data-kx-mode],input[data-kx-pad],input[data-fx-inc],input[data-fx-opt],input[data-fc-thr],input[data-pu-opt],input[data-pu-chk],select[data-pu-tz],select[data-pu-end],select[data-pu-rule],input[data-pu-rule],select[data-pu-bulk],#aim-ft-xr-picked')) return;   // checkbox/color/select → change handler
+                if (ev.target.closest('input[data-ft-class],input[data-ft-flag],select[data-es-opt],input[data-es-opt],select[data-sk-opt],input[data-sk-opt],input[data-sop-check],select[data-nv-days],input[data-nv-min],input[data-nv-date],input[data-nv-check],input[data-fi-opt],select[data-fi-opt],input[data-ft-view],input[data-kml-show],input[data-kml-fill],input[data-kml-color],input[data-fd-site],input[data-fd-clientsel],select[data-fd-pick],input[data-fd-dataset],select[data-fd-range],input[data-fd-date],input[data-kx-inc],select[data-kx-mode],input[data-kx-pad],input[data-fx-inc],input[data-fx-opt],input[data-fc-thr],input[data-pu-opt],input[data-pu-chk],select[data-pu-tz],select[data-pu-end],select[data-pu-rule],input[data-pu-rule],select[data-pu-bulk],#aim-ft-xr-picked')) return;   // checkbox/color/select → change handler
                 const clAll = ev.target.closest('[data-ft-clients]');
                 if (clAll) {
                     if (clAll.getAttribute('data-ft-clients') === 'all') {
@@ -9701,6 +10363,8 @@
                 if (skHoldEl) { skToggleHold(skHoldEl.getAttribute('data-sk-hold')); return; }
                 const nvSiteEl = ev.target.closest('[data-nv-site]');
                 if (nvSiteEl && !ev.target.closest('a')) { const nsid = nvSiteEl.getAttribute('data-nv-site'); nvOpenSite = nvOpenSite === nsid ? null : nsid; fdRenderKeepScroll(); return; }
+                const fiSiteEl = ev.target.closest('[data-fi-site]');
+                if (fiSiteEl && !ev.target.closest('a')) { const fsid = fiSiteEl.getAttribute('data-fi-site'); fiOpenSite = fiOpenSite === fsid ? null : fsid; fdRenderKeepScroll(); return; }
                 const act = ev.target.closest('[data-ft]');
                 if (act) {
                     const cmd = act.getAttribute('data-ft');
@@ -9712,14 +10376,22 @@
                     else if (cmd === 'sop-clear') { sopSweepSeq++; sopSweep = null; sopOpenSite = null; renderPanel(); }
                     else if (cmd === 'sk-run' || cmd === 'sk-retry') skRunFetch(cmd === 'sk-retry').catch(e => { console.warn(`${TAG} sweep scheduler threw:`, e); setStatus(`Sweep scheduler failed — ${e.message}`); skRun = null; renderPanel(); });
                     else if (cmd === 'sk-abort') { if (skRun) skRun.aborted = true; setStatus('Sweep scheduler stopping after the reads already started…'); }
-                    else if (cmd === 'sk-sheets') skCopySheets();
-                    else if (cmd === 'sk-csv') skDownloadCsv();
-                    else if (cmd === 'sk-slack') skCopySlack();
+                    else if (cmd === 'sk-sheets') { if (ftCfg.sk.view === 'cal' && skRes) skCalCopySheets(); else skCopySheets(); }
+                    else if (cmd === 'sk-csv') { if (ftCfg.sk.view === 'cal' && skRes) skCalDownloadCsv(); else skDownloadCsv(); }
+                    else if (cmd === 'sk-slack') { if (ftCfg.sk.view === 'cal' && skRes) skCalCopySlack(); else skCopySlack(); }
+                    else if (cmd === 'sk-view-table' || cmd === 'sk-view-cal') { ftCfg.sk.view = cmd === 'sk-view-cal' ? 'cal' : 'table'; saveCfg(); renderPanel(); }
                     else if (cmd === 'nv-run') nvRunSweep().catch(e => { console.warn(`${TAG} mission review threw:`, e); setStatus(`Mission review failed — ${e.message}`); if (nvSweep) nvSweep.running = false; renderPanel(); });
                     else if (cmd === 'nv-abort') { if (nvSweep) nvSweep.aborted = true; setStatus('Mission review aborting after the in-flight sites…'); }
                     else if (cmd === 'nv-sheets') nvCopySheets();
                     else if (cmd === 'nv-csv') nvDownloadCsv();
                     else if (cmd === 'nv-clear') { nvSweepSeq++; nvSweep = null; nvOpenSite = null; renderPanel(); }
+                    else if (cmd === 'fi-run') fiRunSweep().catch(e => { console.warn(`${TAG} findings report threw:`, e); setStatus(`Findings report failed — ${e.message}`); if (fiSweep) fiSweep.running = false; fiV = null; renderPanel(); });
+                    else if (cmd === 'fi-abort') { if (fiSweep) fiSweep.aborted = true; setStatus('Findings report aborting after the in-flight sites…'); }
+                    else if (cmd === 'fi-html') { try { fiDownloadHtml(); } catch (e) { console.warn(`${TAG} findings HTML report threw:`, e); setStatus(`Findings HTML report failed — ${e.message}`); } }
+                    else if (cmd === 'fi-csv') fiDownloadCsv();
+                    else if (cmd === 'fi-csvm') fiDownloadMonthlyCsv();
+                    else if (cmd === 'fi-exxon') { if (fiSweep && fiSweep.running) setStatus('Findings: wait for the run to finish'); else { ftCfg.fi.name = FI_EXXON_RE; saveCfg(); renderPanel(); setStatus('Findings: name filter = Exxon + number'); } }
+                    else if (cmd === 'fi-clear') { fiSweepSeq++; fiSweep = null; fiOpenSite = null; fiV = null; renderPanel(); }
                     else if (cmd === 'es-run' || cmd === 'es-continue') esRun(cmd === 'es-continue').catch(e => { console.warn(`${TAG} ESC sweep threw:`, e); setStatus(`ESC sweep failed — ${e.message}`); if (esSweep) { esSweep.running = false; esSweep.listing = false; } renderPanel(); });
                     else if (cmd === 'es-pause') { if (esSweep && esSweep.running) { esSweep.paused = !esSweep.paused; setStatus(esSweep.paused ? 'ESC sweep paused — downloads already started will finish' : 'ESC sweep resumed'); esRerender(true); } }
                     else if (cmd === 'es-stop') esStop();
@@ -9963,6 +10635,7 @@
                 if (t.hasAttribute && t.hasAttribute('data-cov-in')) { covInput(t); return; }
                 if (t.hasAttribute && t.hasAttribute('data-es-opt')) { esOpt(t); return; }
                 if (t.hasAttribute && t.hasAttribute('data-sk-opt')) { skOpt(t); return; }
+                if (t.hasAttribute && t.hasAttribute('data-fi-opt')) { fiOpt(t); return; }
                 if (t.hasAttribute && t.hasAttribute('data-nv-check')) { const k = t.getAttribute('data-nv-check'); if (NV_CHECKS.some(c => c.key === k)) { ftCfg.nvChecks[k] = !!t.checked; saveCfg(); fdRenderKeepScroll(); } return; }
                 if (t.hasAttribute && t.hasAttribute('data-nv-days')) { if (t.value === 'custom') { ftCfg.nvCustom = true; saveCfg(); setStatus('Mission review: pick the start / end dates — takes effect on the next run'); renderPanel(); return; } const v = Number(t.value); if (NV_DAY_OPTS.some(o => o[0] === v)) { ftCfg.nvDays = v; ftCfg.nvCustom = false; saveCfg(); setStatus(`Mission review window: ${v} day(s) — takes effect on the next run`); renderPanel(); } return; }
                 if (t.hasAttribute && t.hasAttribute('data-nv-date')) { const k = t.getAttribute('data-nv-date') === 'end' ? 'nvEnd' : 'nvStart'; if (/^(\d{4}-\d{2}-\d{2})?$/.test(t.value)) { ftCfg[k] = t.value; saveCfg(); const r = nvRange(); setStatus(r.err ? `Mission review: ${r.err}` : `Mission review range: ${fdYmd(r.start)} → ${fdYmd(r.end)} — takes effect on the next run`); } return; }
