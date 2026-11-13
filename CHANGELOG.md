@@ -1,3 +1,9 @@
+## 2026-11-13 — Control Panel latest v1.51 · Map Styler latest v34.173 (latest only) — profile builder + line thickness fixes
+
+- **⏻ All off no longer overwrites My settings.** It now starts a separate **🆕 New profile (not saved yet)** with everything off; the profile you were on is left exactly as it was. Turn on what the profile needs, then 💾 Save as… or ⬆ Publish to team.
+- **Favorites are per profile** (feature #337). A saved, copied or published profile carries its ★ list, so a preset can open with its favorites already pinned. Anyone can still add or remove stars on their own computer, and doing so does not stop team updates to that preset.
+- **Force line thickness could get stuck thick** (Map Styler). With the option off and no buffer, band or shielding shown, Flight Path / Free Fly Zone / No Fly Zone lines never went back to their normal width. Fixed.
+
 ## 2026-11-12 — Control Panel latest v1.50 · Map Styler latest v34.172 · Site Setup Tools latest v4.499 (latest only) — profiles, favorites, flying fixes
 
 **Control Panel v1.50 — profiles (feature #336)**

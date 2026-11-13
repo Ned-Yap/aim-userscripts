@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.50
+// @version      1.51
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
-// @description  v1.50 (#336): profiles (My settings / RO / Regulations / saved, team presets from the data repo, first-run picker, builder: all-off / save-as / copy / import / publish), ★ favorites, FDE label, fallback gear on site pages without .map-tools. v1.49 (#329): check groups — a header toggle with soloGroup renders ☑ All / ☐ None over every boolean toggle sharing that soloGroup, and each such toggle gets a ◎ solo button (only this one on). Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
+// @description  v1.51: ⏻ All off starts a separate "New profile" (never overwrites My settings); favorites are per profile and travel with saved / published profiles. v1.50 (#336): profiles (My settings / RO / Regulations / saved, team presets from the data repo, first-run picker, builder: all-off / save-as / copy / import / publish), ★ favorites, FDE label, fallback gear on site pages without .map-tools. v1.49 (#329): check groups — a header toggle with soloGroup renders ☑ All / ☐ None over every boolean toggle sharing that soloGroup, and each such toggle gets a ◎ solo button (only this one on). Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        *://qa.percepto.app/*
@@ -58,7 +58,7 @@
     // ============================================================
     // 1. CONSTANTS
     // ============================================================
-    const VERSION = '1.50';
+    const VERSION = '1.51';
     const IS_TOP = window === window.top;
     const TAG = `[AIM CONTROL ${IS_TOP ? 'TOP' : 'IF'}]`;
     const CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -89,7 +89,8 @@
     const USER_PROFILES_KEY = 'aim-control-user-profiles';  // [ profile ] saved on this machine
     const TEAM_PROFILES_KEY = 'aim-control-team-profiles';  // { at, profiles } cache of the data-repo file
     const TEAM_PROFILES_PATH = 'cp-profiles.json';          // in KMLS_REPO
-    const FAVS_KEY = 'aim-control-favs';                    // [ "scriptId|toggleId" ]
+    const FAVS_KEY = 'aim-control-favs';                    // [ "scriptId|toggleId" ] — legacy list, now My settings' fallback
+    const FAVS_BY_PROFILE_KEY = 'aim-control-favs-by-profile';   // v1.51: { profileId: [keys] } — your own stars per profile
     // Scripts allowed in LITE mode (everyone). Everything NOT listed is a
     // CSM-only building tool that stays inert unless aim-mode==='full'. Used to
     // hide CSM sections from the panel in Lite (defense for un-guarded installs).
@@ -277,7 +278,7 @@
     // across prod/QA origins, so a wiped origin restores the settings last
     // saved on EITHER — acceptable (same user, same preferences).
     const GM_LS_BACKUP_PREFIX = 'aim-cp-ls-backup:';
-    const MIRRORED_LS_KEYS = [PREFS_KEY, HOTKEYS_KEY, PANEL_UI_KEY, MODE_KEY, MODE_CSM_KEY, MODE_LOGIN_KEY, PROFILE_STATE_KEY, PROFILE_SLOTS_KEY, USER_PROFILES_KEY, FAVS_KEY];
+    const MIRRORED_LS_KEYS = [PREFS_KEY, HOTKEYS_KEY, PANEL_UI_KEY, MODE_KEY, MODE_CSM_KEY, MODE_LOGIN_KEY, PROFILE_STATE_KEY, PROFILE_SLOTS_KEY, USER_PROFILES_KEY, FAVS_KEY, FAVS_BY_PROFILE_KEY];
     function lsSetMirrored(key, value) {
         try { localStorage.setItem(key, value); } catch (e) {}
         gmSet(GM_LS_BACKUP_PREFIX + key, String(value));
@@ -469,6 +470,7 @@
         { id: 'stock', name: '📦 AIM defaults', rev: 1, base: 'defaults', keep: [], prefs: {},
           desc: 'Every setting as shipped.' },
     ];
+    const DRAFT_ID = 'draft';   // v1.51: the unsaved profile ⏻ All off starts (kept in a slot like My settings)
     function lsJson(key, def) {
         try { const v = JSON.parse(localStorage.getItem(key) || 'null'); return v == null ? def : v; }
         catch (e) { console.warn(`${TAG} unreadable JSON in ${key} — using default:`, e); return def; }
@@ -487,7 +489,7 @@
     function setProfState(ps) { lsSetMirrored(PROFILE_STATE_KEY, JSON.stringify(ps)); }
     function markProfileDirty() {
         const ps = getProfState();
-        if (ps.active === 'my' || ps.dirty) return;
+        if (ps.active === 'my' || ps.active === DRAFT_ID || ps.dirty) return;
         ps.dirty = true;
         setProfState(ps);
         scheduleRender();
@@ -578,11 +580,11 @@
         if (id === ps.active) { if (!ps.chosen) { ps.chosen = true; setProfState(ps); } return; }
         const slots = lsJson(PROFILE_SLOTS_KEY, {}) || {};
         // Stash what we're leaving: My settings always; a preset only if changed.
-        if (ps.active === 'my' || ps.dirty) slots[ps.active] = snapshotLive();
+        if (ps.active === 'my' || ps.active === DRAFT_ID || ps.dirty) slots[ps.active] = snapshotLive();
         let data = null, next = { active: id, dirty: false, rev: null };
         if (slots[id] && slots[id].prefs) {
             data = slots[id];
-            next.dirty = id !== 'my';
+            next.dirty = id !== 'my' && id !== DRAFT_ID;
             next.rev = ps.rev;
         } else if (id !== 'my') {
             const p = allProfiles().find(x => x.id === id);
@@ -603,22 +605,22 @@
         const slots = lsJson(PROFILE_SLOTS_KEY, {}) || {};
         delete slots[p.id];
         lsSetMirrored(PROFILE_SLOTS_KEY, JSON.stringify(slots));
+        dropFavsFor(p.id);
         loadLive(stockData(p), { active: p.id, dirty: false, rev: p.rev });
         state.profileSwitched = true;
     }
     // Builder: every registered script's masters off NOW, and later-registering
     // scripts follow (base all-off). Then tick on what the profile should keep.
     function allOffNow() {
-        if (!confirm('Turn EVERYTHING off?\n\nEvery tool\'s master switch (and every Map Display category) goes off. Your current settings are kept under the profile you are leaving — switch back any time.\n\nThen turn on only what this profile should have and use 💾 Save as…')) return;
+        if (!confirm('Start a NEW profile with everything off?\n\nEvery tool\'s master switch (and every Map Display category) goes off in a separate "New profile". The profile you are on now is left exactly as it is — switch back any time.\n\nThen turn on only what the new profile should have and use 💾 Save as… (or ⬆ Publish to team).')) return;
+        // v1.51: never edits the profile you were on (it overwrote My settings in v1.50).
         const ps0 = getProfState();
-        if (ps0.active === 'my') {   // keep the pre-wipe state recoverable
-            const slots = lsJson(PROFILE_SLOTS_KEY, {}) || {};
-            slots['my-before-all-off'] = snapshotLive();
-            lsSetMirrored(PROFILE_SLOTS_KEY, JSON.stringify(slots));
-        }
-        markProfileDirty();
-        const ps = getProfState();
-        ps.base = 'all-off'; ps.keep = []; ps.done = {};
+        const slots0 = lsJson(PROFILE_SLOTS_KEY, {}) || {};
+        if (ps0.active === 'my' || (ps0.active !== DRAFT_ID && ps0.dirty)) slots0[ps0.active] = snapshotLive();
+        delete slots0[DRAFT_ID];
+        lsSetMirrored(PROFILE_SLOTS_KEY, JSON.stringify(slots0));
+        if (ps0.active !== DRAFT_ID) dropFavsFor(DRAFT_ID);   // a fresh draft starts with no stars
+        const ps = { active: DRAFT_ID, dirty: false, chosen: true, rev: null, base: 'all-off', keep: [], done: {} };
         let n = 0;
         state.registry.forEach(script => {
             masterToggleIds(script.toggles).forEach(id => {
@@ -644,13 +646,15 @@
         const existing = list.find(p => p.name.toLowerCase() === name.toLowerCase());
         if (existing && !confirm(`Replace your saved profile "${existing.name}"?`)) return;
         const snap = snapshotLive();
-        const prof = { id: existing ? existing.id : `u-${slugify(name)}-${Date.now().toString(36)}`, name, desc: '', base: snap.base, keep: snap.keep, prefs: snap.prefs, rev: Date.now() };
+        const prof = { id: existing ? existing.id : `u-${slugify(name)}-${Date.now().toString(36)}`, name, desc: '', base: snap.base, keep: snap.keep, prefs: snap.prefs, favs: getFavs(), rev: Date.now() };
         saveUserProfiles(existing ? list.map(p => p.id === existing.id ? prof : p) : list.concat([prof]));
         const ps = getProfState();
         const slots = lsJson(PROFILE_SLOTS_KEY, {}) || {};
         if (ps.active === 'my') slots.my = snap;
         delete slots[prof.id];
+        delete slots[DRAFT_ID];   // the draft became this profile
         lsSetMirrored(PROFILE_SLOTS_KEY, JSON.stringify(slots));
+        dropFavsFor(prof.id); dropFavsFor(DRAFT_ID);   // the saved profile now carries the stars
         setProfState({ ...ps, active: prof.id, dirty: false, chosen: true, rev: prof.rev });
         console.log(`${TAG} profile saved: ${name}`);
     }
@@ -673,6 +677,7 @@
     function activeProfileName() {
         const ps = getProfState();
         if (ps.active === 'my') return 'My settings';
+        if (ps.active === DRAFT_ID) return 'New profile';
         const p = allProfiles().find(x => x.id === ps.active);
         return p ? p.name : 'Profile';
     }
@@ -700,7 +705,7 @@
     function exportProfileCode() {
         const snap = snapshotLive();
         const who = getModeLogin();
-        const obj = { name: `${activeProfileName()}${who ? ` (${who})` : ''}`, base: snap.base, keep: snap.keep, prefs: snap.prefs };
+        const obj = { name: `${activeProfileName()}${who ? ` (${who})` : ''}`, base: snap.base, keep: snap.keep, prefs: snap.prefs, favs: getFavs() };
         copyText(PROFILE_CODE_PREFIX + b64enc(JSON.stringify(obj)));
         alert('Profile copied.\n\nSend that text to a coworker — they open ⚙ → Profile ⋯ → 📥 Import and paste it.');
     }
@@ -719,7 +724,7 @@
         }
         const name = (prompt('Name for this profile:', String(obj.name || 'Imported profile')) || '').trim();
         if (!name) return;
-        const prof = { id: `u-${slugify(name)}-${Date.now().toString(36)}`, name, desc: 'imported', base: obj.base === 'all-off' ? 'all-off' : 'defaults', keep: Array.isArray(obj.keep) ? obj.keep : [], prefs: obj.prefs, rev: Date.now() };
+        const prof = { id: `u-${slugify(name)}-${Date.now().toString(36)}`, name, desc: 'imported', base: obj.base === 'all-off' ? 'all-off' : 'defaults', keep: Array.isArray(obj.keep) ? obj.keep : [], prefs: obj.prefs, favs: Array.isArray(obj.favs) ? obj.favs.filter(x => typeof x === 'string') : [], rev: Date.now() };
         saveUserProfiles(userProfiles().concat([prof]));
         switchProfile(prof.id);
     }
@@ -779,7 +784,7 @@
         const id = builtin ? builtin.id : `t-${slugify(ans)}`;
         const name = builtin ? builtin.name : ans;
         const snap = snapshotLive();
-        const prof = { id, name, desc: builtin ? builtin.desc : '', base: snap.base, keep: snap.keep, prefs: snap.prefs, rev: Date.now(), by: getModeLogin() || '' };
+        const prof = { id, name, desc: builtin ? builtin.desc : '', base: snap.base, keep: snap.keep, prefs: snap.prefs, favs: getFavs(), rev: Date.now(), by: getModeLogin() || '' };
         if (!confirm(`Publish "${name}" to the whole team?\n\nIt replaces the team's current "${name}" preset. People who changed their copy keep their changes.`)) return;
         ghRequest('GET', `${TEAM_PROFILES_URL}?ref=${KMLS_BRANCH}`, token, null, (status, file) => {
             let list = [], sha;
@@ -805,7 +810,9 @@
                 const slots = lsJson(PROFILE_SLOTS_KEY, {}) || {};
                 if (getProfState().active === 'my') slots.my = snapshotLive();
                 delete slots[id];
+                delete slots[DRAFT_ID];
                 lsSetMirrored(PROFILE_SLOTS_KEY, JSON.stringify(slots));
+                dropFavsFor(id); dropFavsFor(DRAFT_ID);
                 setProfState({ ...getProfState(), active: id, dirty: false, chosen: true, rev: prof.rev });
                 console.log(`${TAG} published team profile ${id}`);
                 alert(`Published "${name}". Coworkers get it on their next page load.`);
@@ -814,12 +821,34 @@
         });
     }
     // ---- favorites ----
-    function getFavs() { const a = lsJson(FAVS_KEY, []); return Array.isArray(a) ? a.filter(x => typeof x === 'string') : []; }
+    // v1.51 — favorites are PER PROFILE. Order of precedence for the active
+    // profile: your own stars for it (set the first time you star / unstar
+    // there) → the stars the profile was saved / published with → for My
+    // settings, the pre-1.51 global list. Starring never marks a preset
+    // "modified", so team updates to its settings keep arriving.
+    function favMap() { const m = lsJson(FAVS_BY_PROFILE_KEY, {}); return (m && typeof m === 'object' && !Array.isArray(m)) ? m : {}; }
+    function strList(a) { return Array.isArray(a) ? a.filter(x => typeof x === 'string') : []; }
+    function getFavs() {
+        const id = getProfState().active;
+        const m = favMap();
+        if (Array.isArray(m[id])) return strList(m[id]);
+        if (id === 'my') return strList(lsJson(FAVS_KEY, []));
+        const p = allProfiles().find(x => x.id === id);
+        return p ? strList(p.favs) : [];
+    }
     function toggleFav(key) {
         const a = getFavs();
         const i = a.indexOf(key);
         if (i === -1) a.push(key); else a.splice(i, 1);
-        lsSetMirrored(FAVS_KEY, JSON.stringify(a));
+        const m = favMap();
+        m[getProfState().active] = a;
+        lsSetMirrored(FAVS_BY_PROFILE_KEY, JSON.stringify(m));
+    }
+    function dropFavsFor(id) {
+        const m = favMap();
+        if (!Object.prototype.hasOwnProperty.call(m, id)) return;
+        delete m[id];
+        lsSetMirrored(FAVS_BY_PROFILE_KEY, JSON.stringify(m));
     }
     // Find a toggle (or a category master) inside a script's schema, with its parent label.
     function findToggleCtx(toggles, id) {
@@ -2836,7 +2865,7 @@
         // pick any profile and still change every setting afterwards.
         let ps = getProfState();
         const profs = allProfiles();
-        if (ps.active !== 'my' && !profs.some(p => p.id === ps.active)) {   // preset was removed → your live settings become My settings
+        if (ps.active !== 'my' && ps.active !== DRAFT_ID && !profs.some(p => p.id === ps.active)) {   // preset was removed → your live settings become My settings
             ps = { ...ps, active: 'my', dirty: false, rev: null };
             setProfState(ps);
         }
@@ -2861,6 +2890,7 @@
                     <select data-profile-select title="${escapeAttr(activeProf && activeProf.desc ? activeProf.desc : 'Presets of settings. Switching keeps your previous settings — switch back any time.')}"
                             style="flex:1;min-width:0;background:#1f2228;color:#e6e6e6;color-scheme:dark;border:1px solid rgba(255,255,255,0.18);border-radius:3px;padding:2px 6px;cursor:pointer;font:inherit">
                         ${profOpt('my', '👤 My settings')}
+                        ${(ps.active === DRAFT_ID || (lsJson(PROFILE_SLOTS_KEY, {}) || {})[DRAFT_ID]) ? profOpt(DRAFT_ID, '🆕 New profile (not saved yet)') : ''}
                         <optgroup label="Presets">${presetOpts}</optgroup>
                         ${userOpts ? `<optgroup label="Saved on this computer">${userOpts}</optgroup>` : ''}
                     </select>
