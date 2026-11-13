@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.72
+// @version      0.73
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -33,7 +33,7 @@
 
     const SCRIPT_ID = 'aim-video-validation';
     const IS_DEV = (function() { try { return /^Latest - /.test((GM_info && GM_info.script && GM_info.script.name) || ''); } catch (e) { return false; } })();
-    const SCRIPT_VERSION = '0.72';
+    const SCRIPT_VERSION = '0.73';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -1214,8 +1214,8 @@
     }
     function groundAt(ll) {
         const v = demCache[(+ll.lat).toFixed(5) + ',' + (+ll.lng).toFixed(5)];
-        if (v !== undefined) return v;
-        // A nav moved in the working copy has no exact lookup yet — use the nearest cached terrain within 300 m (preview only).
+        if (v != null) return v;
+        // No exact lookup (a nav moved in the working copy, or the lookup failed) — use the nearest cached terrain within 300 m (preview only).
         let best = null, bd = 300;
         Object.keys(demCache).forEach(k => { const g = demCache[k]; if (g == null) return; const [la, ln] = k.split(',').map(Number); const d = distM(ll, { lat: la, lng: ln }); if (d < bd) { bd = d; best = g; } });
         return best;
@@ -2007,6 +2007,8 @@
     // Convert an in-place snapshot to a GPS aim point at the place it is CURRENTLY planned to look (no nav move).
     function edConvertPlanned(step) {
         const nav = wkNavOf(step); if (!nav || !nav.location || isGps(step)) return false;
+        // Never convert without terrain: the look-point would be the 500 ft ray cap, far below the real ground (S23 on HF - P3_3, 2026-11-13).
+        if (groundAt(nav.location) == null) { demCached(nav.location).then(() => deckRefresh()); return false; }
         const lk = lookOf(step, nav); if (!lk || lk.alt == null) return false;
         step.location = { lat: +(+lk.ll.lat).toFixed(8), lng: +(+lk.ll.lng).toFixed(8) }; step.value1 = +lk.alt.toFixed(2);
         const e = eo(step); e.heading = 0; e.pitch = 2000;   // placeholders Percepto stores on GPS snapshots
@@ -2109,7 +2111,7 @@
             + dkDial([{ act: 'd-range', n: 1, title: 'Move the drone ' + sf + ' ft closer to what the camera sees (camera stays on it)' }, { act: 'd-slide', n: 1, title: 'Slide the drone ' + sf + ' ft to the right' }, { act: 'd-slide', n: -1, title: 'Slide the drone ' + sf + ' ft to the left' }, { act: 'd-range', n: -1, title: 'Move the drone ' + sf + ' ft farther away' }],
                 { act: 'nav-place', armed: pNav, color: settings.navColor, icon: droneIc, title: 'Place the drone on the map (click here, then click the map)' })
             + dkAlt('alt', 'Drone altitude +' + sa + ' ft', 'Drone altitude −' + sa + ' ft') + '</div>'
-            + dkRead([['to target', 'dist', 'range'], ['moved', 'moved', ''], ['drone alt', 'dalt', 'alt']]) + '</div>'
+            + dkRead([['ground dist', 'dist', 'range'], ['moved', 'moved', ''], ['drone alt', 'dalt', 'alt']]) + '</div>'
             + '<div class="aim-vv-dk-mid"><div class="aim-vv-dk-tabs"><button type="button" class="aim-vv-dk-tab' + (view === 'vf' ? ' on' : '') + '" data-aim-vv-ed="view" data-v="vf">Viewfinder</button><button type="button" class="aim-vv-dk-tab' + (view === 'pr' ? ' on' : '') + '" data-aim-vv-ed="view" data-v="pr">Side profile</button>' + kindTabs + '</div>'
             + '<div class="aim-vv-dk-frame" title="Approximate preview. Striped = outside the original picture; dashed = the original frame.">' + (view === 'vf' ? (src ? '<img data-aim-vv-vf="1" alt="" src="' + esc(src) + '">' : '<div class="dim" style="padding:8px">no picture for this shot</div>') + '<span class="ch-v"></span><span class="ch-h"></span>' : '<svg data-aim-vv-pr="1" width="' + DK_W + '" height="' + DK_H + '" viewBox="0 0 ' + DK_W + ' ' + DK_H + '"></svg>') + '</div>'
             + '<span class="dim" style="font-size:11px">approximate preview · lens <select data-aim-vv-lens="' + esc(dkLensKey(im)) + '" title="Camera that took this picture. Sets how far the preview moves per degree. From the drone that flew this mission when Percepto lists its cameras. Remembered per drone type." style="font:inherit;background:#171b22;color:#cfd8e3;border:1px solid #2a3442;border-radius:6px;padding:1px 4px">' + dkLensList().map(l => '<option value="' + esc(l.id) + '"' + (l.id === dkLens(im).id ? ' selected' : '') + '>' + esc(l.label) + ' · ' + l.h + '° × ' + l.v + '°</option>').join('') + '</select> <span data-aim-vv-lenshow="1">' + esc(dkLens(im).how) + '</span></span></div>'
@@ -2128,18 +2130,21 @@
         if (!step || !el.querySelector('.aim-vv-deck')) return;
         const nav = wkNavOf(step), gps = isGps(step);
         const oStep = origOf(step.id) || step, oNav = nav ? (origOf(nav.id) || nav) : null;
+        // Terrain under the drone drives every distance here. The map only loads it with look-points on, so load it for this shot.
+        [nav, oNav].forEach(n => { if (n && n.location && demCache[(+n.location.lat).toFixed(5) + ',' + (+n.location.lng).toFixed(5)] === undefined) demCached(n.location).then(() => deckRefresh()); });
+        const noGround = !!(nav && nav.location && groundAt(nav.location) == null);
         const pose = poseOf(step, nav), oPose = oNav ? poseOf(oStep, oNav) : pose;
         const look = lookOf(step, nav), oLook = lookOf(oStep, oNav);
         const set = (k, txt, on) => { const n = el.querySelector('[data-aim-vv-val="' + k + '"]'); if (!n) return; if (n.textContent !== txt) n.textContent = txt; if (on !== undefined) n.classList.toggle('on', !!on); };
         const dFt = (m) => { if (m == null || !isFinite(m)) return ['—', false]; const v = Math.round(settings.units === 'm' ? m : m * M_TO_FT); return v ? [(v > 0 ? '+' : '−') + Math.abs(v) + (settings.units === 'm' ? ' m' : ' ft'), true] : ['—', false]; };
         const dDeg = (d) => { if (d == null || !isFinite(d)) return ['—', false]; const v = Math.round(d); return v ? [(v > 0 ? '+' : '−') + Math.abs(v) + '°', true] : ['—', false]; };
-        set('dist', look ? fmtDist(look.dist) + (look.capped ? ' (far)' : '') : '?'); { const d = dFt(look && oLook ? look.dist - oLook.dist : null); set('dist-d', d[0], d[1]); }
+        set('dist', (noGround && !gps) ? 'terrain loading' : (look ? fmtDist(look.dist) + (look.capped ? ' (far)' : '') : '?')); { const d = dFt(look && oLook ? look.dist - oLook.dist : null); set('dist-d', d[0], d[1]); }
         const mv = (nav && oNav && nav.location && oNav.location) ? distM(oNav.location, nav.location) : null;
         set('moved', mv != null && mv > 0.15 ? fmtDist(mv) + ' ' + compass16(bearingDeg(oNav.location, nav.location)) : 'not moved'); set('moved-d', '', false);
         set('dalt', fmtAlt(nav ? nav.value1 : null)); { const d = dFt(nav && oNav && typeof nav.value1 === 'number' && typeof oNav.value1 === 'number' ? nav.value1 - oNav.value1 : null); set('dalt-d', d[0], d[1]); }
         set('hdg', pose.heading != null ? pose.heading.toFixed(0) + '°' : '–'); { const d = dDeg(pose.heading != null && oPose.heading != null ? hdgDelta(oPose.heading, pose.heading) : null); set('hdg-d', d[0], d[1]); }
         set('ang', pose.pitchDeg != null ? pose.pitchDeg.toFixed(0) + '°' : '–'); { const d = dDeg(pose.pitchDeg != null && oPose.pitchDeg != null ? pose.pitchDeg - oPose.pitchDeg : null); set('ang-d', d[0], d[1]); }
-        set('talt', gps ? fmtAlt(step.value1) : (look && look.alt != null ? fmtAlt(look.alt) + ' (ground)' : 'ground')); { const d = dFt(gps && oLook && oLook.alt != null ? step.value1 - oLook.alt : null); set('talt-d', d[0], d[1]); }
+        set('talt', gps ? fmtAlt(step.value1) : (noGround ? 'terrain loading' : (look && look.alt != null ? fmtAlt(look.alt) + (look.capped ? ' (far)' : ' (ground)') : 'ground'))); { const d = dFt(gps && oLook && oLook.alt != null ? step.value1 - oLook.alt : null); set('talt-d', d[0], d[1]); }
         // Viewfinder: where does the ORIGINAL look-point sit in the frame of the pose as edited?
         const img = el.querySelector('[data-aim-vv-vf]');
         if (img) {
@@ -2168,14 +2173,14 @@
                 const edge = (a) => { const len = a > 0.03 ? Math.min(360, (gy - dy) / Math.sin(a)) : 360; return '<line x1="' + dx + '" y1="' + dy.toFixed(1) + '" x2="' + (dx + Math.cos(a) * len).toFixed(1) + '" y2="' + (dy + Math.sin(a) * len).toFixed(1) + '" stroke="' + esc(settings.snapColor) + '" stroke-opacity=".4"></line>'; };
                 const tAnchor = tx > 250 ? 'end' : 'start';
                 h = '<rect x="0" y="' + gy.toFixed(1) + '" width="' + DK_W + '" height="' + (DK_H - gy + 1).toFixed(1) + '" fill="#3a2f24"></rect>'
-                    + '<text x="6" y="' + Math.min(DK_H - 4, gy + 12).toFixed(1) + '" fill="#d8c8b0" font-size="10">ground ' + esc(fmtAlt(g != null ? g : look.alt)) + '</text>'
+                    + '<text x="6" y="' + Math.min(DK_H - 4, gy + 12).toFixed(1) + '" fill="#d8c8b0" font-size="10">' + (g != null ? 'ground ' + esc(fmtAlt(g)) : 'terrain not loaded') + '</text>'
                     + edge(ang - half) + edge(ang + half)
                     + '<line x1="' + dx + '" y1="' + dy.toFixed(1) + '" x2="' + (dx + 70) + '" y2="' + dy.toFixed(1) + '" stroke="#9aa4b2" stroke-dasharray="3 3"></line>'
                     + '<line x1="' + dx + '" y1="' + dy.toFixed(1) + '" x2="' + dx + '" y2="' + gy.toFixed(1) + '" stroke="' + esc(settings.navColor) + '" stroke-dasharray="3 3"></line>'
                     + '<line x1="' + dx + '" y1="' + dy.toFixed(1) + '" x2="' + tx.toFixed(1) + '" y2="' + ty.toFixed(1) + '" stroke="' + esc(settings.snapColor) + '" stroke-width="2"></line>'
                     + '<rect x="' + (dx - 9) + '" y="' + (dy - 4).toFixed(1) + '" width="18" height="8" rx="2" fill="' + esc(settings.navColor) + '"></rect>'
                     + '<text x="' + (dx + 14) + '" y="' + Math.max(11, dy - 8).toFixed(1) + '" fill="' + esc(settings.navColor) + '" font-size="10">drone ' + esc(fmtAlt(nav.value1)) + (g != null ? ' · ' + esc(fmtDist(nav.value1 - g)) + ' above ground' : '') + '</text>'
-                    + '<text x="' + (dx + 74) + '" y="' + (dy + 12).toFixed(1) + '" fill="' + esc(settings.snapColor) + '" font-size="10">' + (pose.pitchDeg != null ? pose.pitchDeg.toFixed(0) + '°' : '') + ' · ' + esc(fmtDist(Math.hypot(D, nav.value1 - look.alt))) + ' line of sight</text>'
+                    + '<text x="' + (dx + 74) + '" y="' + (dy + 12).toFixed(1) + '" fill="' + esc(settings.snapColor) + '" font-size="10">' + (pose.pitchDeg != null ? pose.pitchDeg.toFixed(0) + '°' : '') + ' · ' + esc(fmtDist(Math.hypot(D, nav.value1 - look.alt))) + ' camera to target</text>'
                     + '<rect x="' + (tx - 5).toFixed(1) + '" y="' + (ty - 5).toFixed(1) + '" width="10" height="10" fill="' + esc(settings.snapColor) + '" stroke="#fff"></rect>'
                     + '<text x="' + tx.toFixed(1) + '" y="' + (ty - 9).toFixed(1) + '" text-anchor="' + tAnchor + '" fill="' + esc(settings.snapColor) + '" font-size="10">target ' + esc(fmtAlt(look.alt)) + '</text>';
             } else h = '<text x="12" y="24" fill="#9aa4b2" font-size="11">Terrain for this shot is not loaded yet.</text>';
