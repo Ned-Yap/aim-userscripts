@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.51
+// @version      1.52
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
-// @description  v1.51: ⏻ All off starts a separate "New profile" (never overwrites My settings); favorites are per profile and travel with saved / published profiles. v1.50 (#336): profiles (My settings / RO / Regulations / saved, team presets from the data repo, first-run picker, builder: all-off / save-as / copy / import / publish), ★ favorites, FDE label, fallback gear on site pages without .map-tools. v1.49 (#329): check groups — a header toggle with soloGroup renders ☑ All / ☐ None over every boolean toggle sharing that soloGroup, and each such toggle gets a ◎ solo button (only this one on). Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
+// @description  v1.52: Data View gear docks in the map button row (not the side panel row). v1.51: ⏻ All off starts a separate "New profile" (never overwrites My settings); favorites are per profile and travel with saved / published profiles. v1.50 (#336): profiles (My settings / RO / Regulations / saved, team presets from the data repo, first-run picker, builder: all-off / save-as / copy / import / publish), ★ favorites, FDE label, fallback gear on site pages without .map-tools. v1.49 (#329): check groups — a header toggle with soloGroup renders ☑ All / ☐ None over every boolean toggle sharing that soloGroup, and each such toggle gets a ◎ solo button (only this one on). Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        *://qa.percepto.app/*
@@ -58,7 +58,7 @@
     // ============================================================
     // 1. CONSTANTS
     // ============================================================
-    const VERSION = '1.51';
+    const VERSION = '1.52';
     const IS_TOP = window === window.top;
     const TAG = `[AIM CONTROL ${IS_TOP ? 'TOP' : 'IF'}]`;
     const CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -1408,8 +1408,30 @@
     // buttons). Angular re-renders that header freely — detachment is
     // normal; the 2s sync interval re-docks after every wipe.
     // ------------------------------------------------------------
+    // v1.52 — Data View has MORE THAN ONE .map-group-buttons-container (the side
+    // panel has one too) and the first in the DOM is not the map's. The map's
+    // own row is the one holding Percepto's asset-creation button; while that
+    // is not rendered yet, take the selected map group's header.
+    function dockHost() {
+        const anchor = document.querySelector('.data-view-asset-creation');
+        const viaAnchor = anchor && anchor.closest('.map-group-buttons-container');
+        if (viaAnchor) return viaAnchor;
+        const sel = document.querySelectorAll('.selected-map-grop-container .map-group-header .map-group-buttons-container');
+        if (sel.length) return sel[sel.length - 1];
+        return document.querySelector('.map-group-buttons-container');
+    }
+
+    // Space the gear along the row's own direction (the row can be a column).
+    function styleDockedGear(btn, host) {
+        let column = false;
+        try { column = /^column/.test(getComputedStyle(host).flexDirection || ''); }
+        catch (e) { console.warn(`${TAG} could not read the Data View button row layout:`, e); }
+        btn.style.marginLeft = column ? '0' : '6px';
+        btn.style.marginTop = column ? '6px' : '0';
+    }
+
     function injectDockedButton() {
-        const host = document.querySelector('.map-group-buttons-container');
+        const host = dockHost();
         if (!host) return false;
         ensureGearStyles(document);
         const wrapper = document.createElement('div');
@@ -1423,6 +1445,7 @@
         `;
         const btn = wrapper.firstElementChild;
         host.appendChild(btn);
+        styleDockedGear(btn, host);
         state.buttonEl = btn;
         swallowMouseEvents(btn);
         btn.addEventListener('click', (e) => {
@@ -1492,6 +1515,15 @@
             if (state.buttonEl && state.buttonEl.classList.contains('aim-control-button--floating')
                 && document.querySelector('.map-group-buttons-container')) {
                 removeFloatingButton();
+            }
+            // v1.52 — docked in the wrong row (the map's row rendered later)? Move it.
+            if (state.buttonEl && state.buttonEl.classList.contains('aim-control-button--docked')) {
+                const want = dockHost();
+                if (want && state.buttonEl.parentElement !== want) {
+                    want.appendChild(state.buttonEl);
+                    styleDockedGear(state.buttonEl, want);
+                    console.log(`${TAG} gear moved to the map's button row (Data View)`);
+                }
             }
             if (state.buttonEl) return;
             if (injectDockedButton()) return;

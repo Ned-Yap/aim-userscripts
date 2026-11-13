@@ -1,3 +1,7 @@
+## 2026-11-13 — AIM Control Panel latest v1.52 (latest only) — Data View gear sits with the map buttons
+
+- **The gear on Data View now docks in the map's own button row** (next to the asset-creation button) instead of the side panel's row. If the map's row appears late, the gear moves over on its own.
+
 ## 2026-11-13 — AIM Issues latest v1.48 (latest only) — issues filed during a live flight carry the flight + time
 
 - **Flag an issue on the live flight page and it records the flight automatically**, the same way Mission Playback does: the mission ID from the page header, the recording time (REC) at the moment you opened the box, and the real clock time. The time field can be edited before saving.
