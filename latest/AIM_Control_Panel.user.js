@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.54
+// @version      1.55
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
-// @description  v1.54: floating gear steps left of any native button under it (Live Map). v1.53: Data View gear sits on the map, under the asset-creation button. v1.51: ⏻ All off starts a separate "New profile" (never overwrites My settings); favorites are per profile and travel with saved / published profiles. v1.50 (#336): profiles (My settings / RO / Regulations / saved, team presets from the data repo, first-run picker, builder: all-off / save-as / copy / import / publish), ★ favorites, FDE label, fallback gear on site pages without .map-tools. v1.49 (#329): check groups — a header toggle with soloGroup renders ☑ All / ☐ None over every boolean toggle sharing that soloGroup, and each such toggle gets a ◎ solo button (only this one on). Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
+// @description  v1.55: floating gear joins the top of a native button column instead of covering it (Live Map). v1.53: Data View gear sits on the map, under the asset-creation button. v1.51: ⏻ All off starts a separate "New profile" (never overwrites My settings); favorites are per profile and travel with saved / published profiles. v1.50 (#336): profiles (My settings / RO / Regulations / saved, team presets from the data repo, first-run picker, builder: all-off / save-as / copy / import / publish), ★ favorites, FDE label, fallback gear on site pages without .map-tools. v1.49 (#329): check groups — a header toggle with soloGroup renders ☑ All / ☐ None over every boolean toggle sharing that soloGroup, and each such toggle gets a ◎ solo button (only this one on). Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        *://qa.percepto.app/*
@@ -58,7 +58,7 @@
     // ============================================================
     // 1. CONSTANTS
     // ============================================================
-    const VERSION = '1.54';
+    const VERSION = '1.55';
     const IS_TOP = window === window.top;
     const TAG = `[AIM CONTROL ${IS_TOP ? 'TOP' : 'IF'}]`;
     const CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -1365,21 +1365,43 @@
         if (!btn || !btn.classList.contains('aim-control-button--floating')) return;
         if (state.urlScope === 'data-view') return;   // has its own offset
         try {
-            const x0 = window.innerWidth - FLOAT_HOME_RIGHT - FLOAT_SIZE, y0 = FLOAT_TOP;
-            const pts = [[2, 2], [FLOAT_SIZE - 2, 2], [2, FLOAT_SIZE - 2], [FLOAT_SIZE - 2, FLOAT_SIZE - 2], [FLOAT_SIZE / 2, FLOAT_SIZE / 2]];
-            let minLeft = Infinity;
-            for (const [dx, dy] of pts) {
-                for (const el of document.elementsFromPoint(x0 + dx, y0 + dy)) {
+            // Button-sized page control at a point (never the map's own layers, never ours).
+            const controlAt = (x, y) => {
+                for (const el of document.elementsFromPoint(x, y)) {
                     if (el === btn || btn.contains(el)) continue;
                     if (state.panelEl && state.panelEl.contains(el)) continue;
                     if (el.closest('.leaflet-map-pane')) continue;        // markers / lines / tiles pan underneath
                     const r = el.getBoundingClientRect();
-                    if (!r.width || r.width > 90 || r.height > 90) continue;   // button-sized things only
-                    if (r.left < minLeft) minLeft = r.left;
+                    if (!r.width || r.width > 90 || r.height > 90) continue;
+                    return r;
                 }
+                return null;
+            };
+            const x0 = window.innerWidth - FLOAT_HOME_RIGHT - FLOAT_SIZE, y0 = FLOAT_TOP;
+            const pts = [[2, 2], [FLOAT_SIZE - 2, 2], [2, FLOAT_SIZE - 2], [FLOAT_SIZE - 2, FLOAT_SIZE - 2], [FLOAT_SIZE / 2, FLOAT_SIZE / 2]];
+            let hit = null;
+            for (const [dx, dy] of pts) {
+                const r = controlAt(x0 + dx, y0 + dy);
+                if (r && (!hit || r.left < hit.left)) hit = r;
             }
-            const right = (minLeft === Infinity ? FLOAT_HOME_RIGHT : Math.round(window.innerWidth - minLeft + 8)) + 'px';
-            if (btn.style.right !== right) btn.style.right = right;
+            let top = FLOAT_TOP, right = FLOAT_HOME_RIGHT;
+            if (hit) {
+                // v1.55 — join the column: walk up to its top button and sit above
+                // it, centred on the column. No room above → sit left of it (v1.54).
+                const cx = hit.left + hit.width / 2;
+                let colTop = hit.top;
+                for (let n = 0; n < 12; n++) {
+                    const up = controlAt(cx, colTop - 10);
+                    if (!up || up.top >= colTop) break;
+                    colTop = up.top;
+                }
+                const above = Math.round(colTop - FLOAT_SIZE - 6);
+                if (above >= 4) { top = above; right = Math.round(window.innerWidth - cx - FLOAT_SIZE / 2); }
+                else right = Math.round(window.innerWidth - hit.left + 8);
+            }
+            const t = top + 'px', r = Math.max(0, right) + 'px';
+            if (btn.style.top !== t) btn.style.top = t;
+            if (btn.style.right !== r) btn.style.right = r;
         } catch (e) { console.warn(`${TAG} floating gear overlap check failed:`, e); }
     }
 

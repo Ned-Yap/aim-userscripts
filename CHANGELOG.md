@@ -1,6 +1,6 @@
-## 2026-11-13 — AIM Control Panel latest v1.54 (latest only) — gear no longer covers a Live Map button
+## 2026-11-13 — AIM Control Panel latest v1.55 (latest only) — gear joins the Live Map button column
 
-- **On Live Map the gear sat on top of the Draw polygon button.** The floating gear now checks what the page draws under it and sits just to the left of any native button there.
+- **On Live Map the gear sat on top of the Draw polygon button.** It now sits at the top of that button column, lined up with it. Where there is no room above, it sits just to the left instead.
 
 ## 2026-11-13 — AIM Control Panel latest v1.53 (latest only) — Data View gear sits with the map buttons
 
