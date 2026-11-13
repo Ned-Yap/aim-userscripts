@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.174
+// @version      34.175
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -69,7 +69,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.174';
+    const SCRIPT_VERSION = '34.175';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -4538,8 +4538,8 @@
     // <div class="map-marker__flight-path-vertex">, so the show / size / colour
     // settings silently did nothing. Both shapes are handled. SVG circles can
     // only be resized by scaling (their radius lives in the path `d`); 10 px
-    // is treated as Percepto's native dot size. "middle" rings keep their own
-    // colour so the dot keeps its light centre.
+    // is treated as Percepto's native dot size. v34.175: every ring takes the
+    // chosen colour (skipping "middle" rings left the dot white).
     const VERTEX_SVG_BASE = '.leaflet-marker-pane svg path.leaflet-interactive';
     const VERTEX_SVG_SEL = `${VERTEX_SVG_BASE}:is([stroke^="var(--map-vertex"], [fill^="var(--map-vertex"])`;
     const VERTEX_SVG_KEEP = ['error', 'disconnect', 'invalid', 'warning'].map(w => `:not([stroke*="${w}"]):not([fill*="${w}"])`).join('');
@@ -4594,8 +4594,8 @@
                     transform-origin: center !important;
                     transform: scale(${k}) !important;
                 }
-                ${VERTEX_SVG_BASE}[stroke^="var(--map-vertex"]:not([stroke*="middle"]) { stroke: ${color} !important; }
-                ${VERTEX_SVG_BASE}[fill^="var(--map-vertex"]:not([fill*="middle"]) { fill: ${color} !important; }
+                ${VERTEX_SVG_BASE}[stroke^="var(--map-vertex"] { stroke: ${color} !important; }
+                ${VERTEX_SVG_BASE}[fill^="var(--map-vertex"] { fill: ${color} !important; }
             `);
             verts.forEach(d => d.style.removeProperty('display'));
         } else {
