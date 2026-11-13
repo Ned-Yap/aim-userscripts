@@ -30,7 +30,7 @@ Promoted from `latest/` (features [#333], [#334]). Adjust stays off by default i
 - **Show 2 / 4 / 6 / 8 / 13 weeks or the whole plan.** While the calendar is open, Copy → Sheets and CSV export it as one line per day and mission, and Copy for Slack gives the next 5 working days.
 - No new reads; nothing is written to Percepto.
 
-## 2026-11-13 — Map Styler latest v34.174 (latest only) — flight-path vertex dots work again
+## 2026-11-13 — Map Styler latest v34.175 (latest only) — flight-path vertex dots work again
 
 - **Show / size / colour of flight-path vertex dots did nothing.** Percepto changed how it draws the dots; the Styler now handles the new dots as well as the old ones. Size is a scale of Percepto's own dot (10 px = unchanged).
 
