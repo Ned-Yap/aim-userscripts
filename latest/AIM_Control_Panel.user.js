@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.53
+// @version      1.54
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
-// @description  v1.53: Data View gear sits on the map, under the asset-creation button. v1.51: ⏻ All off starts a separate "New profile" (never overwrites My settings); favorites are per profile and travel with saved / published profiles. v1.50 (#336): profiles (My settings / RO / Regulations / saved, team presets from the data repo, first-run picker, builder: all-off / save-as / copy / import / publish), ★ favorites, FDE label, fallback gear on site pages without .map-tools. v1.49 (#329): check groups — a header toggle with soloGroup renders ☑ All / ☐ None over every boolean toggle sharing that soloGroup, and each such toggle gets a ◎ solo button (only this one on). Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
+// @description  v1.54: floating gear steps left of any native button under it (Live Map). v1.53: Data View gear sits on the map, under the asset-creation button. v1.51: ⏻ All off starts a separate "New profile" (never overwrites My settings); favorites are per profile and travel with saved / published profiles. v1.50 (#336): profiles (My settings / RO / Regulations / saved, team presets from the data repo, first-run picker, builder: all-off / save-as / copy / import / publish), ★ favorites, FDE label, fallback gear on site pages without .map-tools. v1.49 (#329): check groups — a header toggle with soloGroup renders ☑ All / ☐ None over every boolean toggle sharing that soloGroup, and each such toggle gets a ◎ solo button (only this one on). Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        *://qa.percepto.app/*
@@ -58,7 +58,7 @@
     // ============================================================
     // 1. CONSTANTS
     // ============================================================
-    const VERSION = '1.53';
+    const VERSION = '1.54';
     const IS_TOP = window === window.top;
     const TAG = `[AIM CONTROL ${IS_TOP ? 'TOP' : 'IF'}]`;
     const CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -1354,9 +1354,38 @@
     // drone view). TOP frame only. Self-styled because the map
     // iframe's .map-tools__button CSS doesn't exist in this document.
     // ------------------------------------------------------------
+    // v1.54 — the floating gear's home spot (top:130 / right:12) is where Live
+    // Map keeps its own button column (it covered Draw polygon). Look at what
+    // the page draws under the HOME spot; if a small non-map control is there,
+    // sit just left of it. Always measured from the home spot, so it cannot
+    // creep or oscillate; writes only when the answer changes.
+    const FLOAT_HOME_RIGHT = 12, FLOAT_TOP = 130, FLOAT_SIZE = 34;
+    function clearFloatingGear() {
+        const btn = state.buttonEl;
+        if (!btn || !btn.classList.contains('aim-control-button--floating')) return;
+        if (state.urlScope === 'data-view') return;   // has its own offset
+        try {
+            const x0 = window.innerWidth - FLOAT_HOME_RIGHT - FLOAT_SIZE, y0 = FLOAT_TOP;
+            const pts = [[2, 2], [FLOAT_SIZE - 2, 2], [2, FLOAT_SIZE - 2], [FLOAT_SIZE - 2, FLOAT_SIZE - 2], [FLOAT_SIZE / 2, FLOAT_SIZE / 2]];
+            let minLeft = Infinity;
+            for (const [dx, dy] of pts) {
+                for (const el of document.elementsFromPoint(x0 + dx, y0 + dy)) {
+                    if (el === btn || btn.contains(el)) continue;
+                    if (state.panelEl && state.panelEl.contains(el)) continue;
+                    if (el.closest('.leaflet-map-pane')) continue;        // markers / lines / tiles pan underneath
+                    const r = el.getBoundingClientRect();
+                    if (!r.width || r.width > 90 || r.height > 90) continue;   // button-sized things only
+                    if (r.left < minLeft) minLeft = r.left;
+                }
+            }
+            const right = (minLeft === Infinity ? FLOAT_HOME_RIGHT : Math.round(window.innerWidth - minLeft + 8)) + 'px';
+            if (btn.style.right !== right) btn.style.right = right;
+        } catch (e) { console.warn(`${TAG} floating gear overlap check failed:`, e); }
+    }
+
     function injectFloatingButton() {
         if (!document.body) return false;
-        if (state.buttonEl && document.body.contains(state.buttonEl)) return true;
+        if (state.buttonEl && document.body.contains(state.buttonEl)) { clearFloatingGear(); return true; }
         ensureGearStyles(document);
         // v1.37 — Data View's native leaflet-draw control strip hugs the map's
         // right edge at right:~10px from y≈110 down; sit LEFT of it there so we
@@ -1382,6 +1411,7 @@
             togglePanel();
         });
         console.log(`${TAG} floating button injected (${state.urlScope} page)`);
+        clearFloatingGear();
         maybeAutoOpenPicker();
         return true;
     }
@@ -1511,7 +1541,7 @@
                 if (!state.buttonEl) injectButton();
             } else if (wantFallbackGear()) {
                 if (state.buttonEl && !document.body.contains(state.buttonEl)) state.buttonEl = null;
-                if (!state.buttonEl) injectFloatingButton();
+                injectFloatingButton();
             } else if (floating) removeFloatingButton();
             return;
         }
@@ -1546,7 +1576,7 @@
         }
         if (wantFallbackGear()) {
             if (state.buttonEl && !document.body.contains(state.buttonEl)) state.buttonEl = null;
-            if (!state.buttonEl) injectFloatingButton();
+            injectFloatingButton();
             return;
         }
         removeFloatingButton();
