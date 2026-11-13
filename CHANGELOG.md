@@ -1,3 +1,15 @@
+## 2026-11-13 — 🎞 AIM Video Validation PROD v0.75 (was v0.61) — flight-deck Adjust, micro sync, plain-language Save
+
+Promoted from `latest/` (features [#333], [#334]). Adjust stays off by default in prod; turn it on in the Control Panel.
+
+- **Adjust is a flight deck.** DRONE and CAMERA dials, altitude arrows, hold to repeat, centre icon places the drone or the camera target on the map. Live viewfinder preview and a side profile.
+- **Real lens widths.** The preview uses the cameras of the drone that flew the mission (RGB / Thermal / GEM switch). A line under it says how much ground the picture covers.
+- **AGL by default**, with an AGL / MSL switch. The profile shows the distance along the ground.
+- **Corrections reach the micro missions.** Saving a macro offers to update the pad's micro mission and any other macro that carries the pad, with a tick box each and a per-mission result list.
+- **Save window in plain language**: what changes per shot, what else gets updated, one Save button, details collapsed.
+- **One download per Save** (backup, linked backups and report in a single file).
+- **Fix:** ground-height lookups were refused when the page loaded (too many at once), which could put a look-point far underground. They are now paced and retried, and a shot is never converted to a GPS aim point without ground height.
+
 ## 2026-11-13 — Site Setup Tools latest v4.502 (latest only) — 🛗 Raise existing: elevators on rising ground
 
 - **⬆ Raise existing skipped elevators whose floor sits level with or above the bridge floor** (the ground rises on that side). They are now recognised and raised like the rest.

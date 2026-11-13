@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.61
+// @version      0.75
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -33,7 +33,7 @@
 
     const SCRIPT_ID = 'aim-video-validation';
     const IS_DEV = (function() { try { return /^Latest - /.test((GM_info && GM_info.script && GM_info.script.name) || ''); } catch (e) { return false; } })();
-    const SCRIPT_VERSION = '0.61';
+    const SCRIPT_VERSION = '0.75';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -94,6 +94,10 @@
         liveDiffOverlay: true, // yellow markers where the CURRENT saved plan differs from what flew
         liveColor: '#ffe95f',
         navKeepAim: true,      // moving a nav re-aims its in-place snapshots at their look-points
+        deckLens: {},          // viewfinder lens picked per '<drone type>|<picture kind>' (empty = default for the picture kind)
+        deckAltRef: 'agl',     // deck altitudes: 'agl' above the ground / 'msl' above sea level
+        deckKind: 'RGB',       // which picture of the shot the viewfinder shows: 'RGB' / 'T' thermal / 'G' GEM
+        deckView: 'vf',        // Adjust deck centre: 'vf' viewfinder preview / 'pr' side profile
         navColor: '#5fa8ff', snapColor: '#ff7ad9', actualColor: '#5fe3ff',
         navLineW: 2, snapLineW: 2.5, actualLineW: 1.5, flownLineW: 3,
     };
@@ -245,6 +249,7 @@
     // Mission Bank edits has a different id (e.g. 183822) and is not in the site list under the frozen id. Resolve the
     // live app by name, disambiguating same-name missions by structure and geometry against the flown plan.
     // (GET /available_app/<id>/ is 404 and the list needs type=1 — without it the server answers 400.)
+    let lastType1 = null;   // { sid, at, list } — the site's type-1 mission list as last read by fetchLiveApp
     function fetchLiveApp(sid, appId, name, flownPlan) {
         const norm = (v) => String(v || '').trim().toLowerCase().replace(/\s+/g, ' ');
         const flown = flownPlan || [];
@@ -284,6 +289,7 @@
         };
         const listOf = (type) => getJSON('/available_app/?site_id=' + encodeURIComponent(sid) + '&type=' + type).then(arr => Array.isArray(arr) ? arr : (arr && (arr.results || arr.apps)) || []).catch(e => { log('mission list type=' + type + ': ' + e.message); return []; });
         return listOf(1).then(l1 => {
+            lastType1 = { sid: String(sid), at: Date.now(), list: l1 };
             const r1 = resolveIn(l1, 'type 1'); if (r1) return r1;
             // Other mission types (Percepto: 1 = patrol; others exist) — the flown mission may not be a patrol.
             return Promise.all([listOf(2), listOf(3), listOf(0)]).then(more => {
@@ -538,6 +544,39 @@
             .aim-vv-lg__row { white-space: normal; } .aim-vv-lg__sw { display: inline-block; width: 20px; text-align: center; margin-right: 4px; }
             .aim-vv-ov-live { width: 22px; height: 22px; border-radius: 4px; border: 2px solid #ffe95f; background: rgba(0,0,0,.55); color: #ffe95f; font: 800 9px/18px monospace; text-align: center; }
             .aim-vv-ov-ghost { width: 22px; height: 22px; border-radius: 50%; border: 2px dashed #fff; background: rgba(0,0,0,.35); color: #fff; font: 800 9px/18px monospace; text-align: center; }
+            .aim-vv-deck { max-width: 900px; font: 12px/1.35 Inter, system-ui, -apple-system, "Segoe UI", sans-serif; font-variant-numeric: tabular-nums; color: #e6e9ee; }
+            .aim-vv-dk-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 6px; } .aim-vv-dk-head b { font-size: 14px; }
+            .aim-vv-dk-hint { flex: 1; text-align: center; color: #ffd45f; }
+            .aim-vv-dk-grid { display: grid; grid-template-columns: 236px 1fr 236px; gap: 12px; align-items: start; }
+            .aim-vv-dk-card { background: #131820; border-radius: 14px; box-shadow: 0 0 0 1px #1f2733; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+            .aim-vv-dk-title { font-weight: 700; font-size: 11px; letter-spacing: 1.5px; }
+            .aim-vv-dk-ctl { display: flex; gap: 12px; align-items: center; }
+            .aim-vv-dk-dial { position: relative; width: 140px; height: 140px; flex-shrink: 0; }
+            .aim-vv-dk-rot { position: absolute; inset: 0; border-radius: 50%; overflow: hidden; transform: rotate(45deg); display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; gap: 2px; background: #0b0e13; box-shadow: 0 0 0 1px #2a3442, 0 8px 24px rgba(0,0,0,.45); }
+            .aim-vv-edit button.aim-vv-dk-seg { background: #1c232e; border: 0; border-radius: 0; padding: 0; }
+            .aim-vv-edit button.aim-vv-dk-seg:hover { background: #2a3545; } .aim-vv-edit button.aim-vv-dk-seg:active { background: #3a4a60; }
+            .aim-vv-dk-ic { position: absolute; pointer-events: none; color: #dfe7f1; width: 20px; height: 20px; }
+            .aim-vv-edit button.aim-vv-dk-c { position: absolute; left: 42px; top: 42px; width: 56px; height: 56px; border-radius: 50%; background: #0b0e13; border: 2px solid #2a3442; box-shadow: 0 0 0 4px #0b0e13; display: flex; align-items: center; justify-content: center; padding: 0; }
+            .aim-vv-edit button.aim-vv-dk-c:hover { background: #18202b; }
+            .aim-vv-dk-altcol { display: flex; flex-direction: column; gap: 4px; align-items: center; font-size: 10px; color: #9aa4b2; }
+            .aim-vv-edit button.aim-vv-dk-alt { width: 40px; height: 40px; border-radius: 50%; background: #1c232e; border: 0; box-shadow: 0 0 0 1px #2a3442; color: #dfe7f1; display: flex; align-items: center; justify-content: center; padding: 0; }
+            .aim-vv-edit button.aim-vv-dk-alt:hover { background: #2a3545; color: #dfe7f1; }
+            .aim-vv-dk-read { display: grid; grid-template-columns: 66px 1fr auto; row-gap: 2px; column-gap: 6px; } .aim-vv-dk-read .lbl { color: #9aa4b2; } .aim-vv-dk-read .d { text-align: right; color: #9aa4b2; } .aim-vv-dk-read .d.on { color: #5fff8f; }
+            .aim-vv-dk-read b { color: #e6e9ee; font-weight: 600; }
+            .aim-vv-dk-mid { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+            .aim-vv-dk-tabs { display: flex; gap: 2px; background: #131820; border-radius: 10px; padding: 2px; box-shadow: 0 0 0 1px #1f2733; }
+            .aim-vv-edit button.aim-vv-dk-tab { border: 0; border-radius: 8px; padding: 5px 12px; background: transparent; color: #9aa4b2; font-weight: 600; }
+            .aim-vv-edit button.aim-vv-dk-tab:hover { background: #1c232e; color: #fff; } .aim-vv-edit button.aim-vv-dk-tab.on { background: #2a3545; color: #fff; }
+            .aim-vv-dk-frame { position: relative; width: 330px; height: 220px; overflow: hidden; border-radius: 12px; box-shadow: 0 0 0 1px #2a3442, 0 8px 24px rgba(0,0,0,.45); background: repeating-linear-gradient(45deg, #171b22 0 8px, #0e1116 8px 16px); }
+            .aim-vv-dk-frame img { position: absolute; left: 0; top: 0; width: 330px; height: 220px; object-fit: cover; outline: 1px dashed #fff; transform-origin: 50% 50%; }
+            .aim-vv-dk-frame .ch-v { position: absolute; left: 164px; top: 94px; width: 2px; height: 32px; background: #5fe3ff; } .aim-vv-dk-frame .ch-h { position: absolute; left: 149px; top: 109px; width: 32px; height: 2px; background: #5fe3ff; }
+            .aim-vv-dk-frame svg { position: absolute; inset: 0; background: #131820; }
+            .aim-vv-dk-bar { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+            .aim-vv-edit button.aim-vv-dk-btn { background: #1c232e; border: 0; box-shadow: 0 0 0 1px #2a3442; color: #dfe7f1; border-radius: 9px; padding: 6px 12px; font-weight: 500; }
+            .aim-vv-edit button.aim-vv-dk-btn:hover { background: #2a3545; color: #fff; }
+            .aim-vv-edit button.aim-vv-dk-btn.pri { background: #5fe3ff; color: #04222a; box-shadow: none; font-weight: 700; } .aim-vv-edit button.aim-vv-dk-btn.pri:hover { background: #8cecff; }
+            .aim-vv-edit button.aim-vv-dk-btn.bad { color: #ff8a8a; }
+            .aim-vv-dk-more { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; padding-top: 8px; border-top: 1px solid #1f2733; }
             .aim-vv-edit__row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 4px; }
             .aim-vv-edit__row > .dim:first-child { min-width: 82px; }
             .aim-vv-edit button, .aim-vv-review button { background: #1f2228; color: #5fe3ff; border: 1px solid rgba(95,227,255,.5); border-radius: 3px; padding: 2px 8px; font: inherit; cursor: pointer; }
@@ -551,8 +590,18 @@
             .leaflet-container.aim-vv-placing, .leaflet-container.aim-vv-placing * { cursor: crosshair !important; }
             .aim-vv-edit__foot { border-top: 1px solid rgba(255,255,255,.12); padding-top: 4px; margin-top: 6px; }
             .aim-vv-review { position: fixed; inset: 0; z-index: 100000; background: rgba(0,0,0,.6); display: flex; align-items: center; justify-content: center; }
-            .aim-vv-review__box { max-width: 900px; max-height: 80vh; overflow: auto; background: #12151a; color: #e6e6e6; border: 1px solid rgba(95,227,255,.5); border-radius: 6px; padding: 12px 14px; font: 12px/1.45 monospace; }
+            .aim-vv-review__box { max-width: 760px; max-height: 80vh; overflow: auto; background: #12151a; color: #e6e6e6; border: 1px solid rgba(95,227,255,.5); border-radius: 6px; padding: 12px 14px; font: 12px/1.45 monospace; }
             .aim-vv-cardhost canvas { display: block; max-width: 100%; height: auto; border-radius: 6px; }
+            .aim-vv-review__box.aim-vv-rv { width: 560px; max-width: 92vw; font: 13px/1.45 Inter, system-ui, -apple-system, "Segoe UI", sans-serif; background: #131820; border: 0; border-radius: 14px; box-shadow: 0 0 0 1px #2a3442, 0 18px 50px rgba(0,0,0,.6); padding: 18px 20px; }
+            .aim-vv-rv-title { font-size: 16px; font-weight: 700; color: #fff; } .aim-vv-rv .dim { color: #9aa4b2; } .aim-vv-rv b { color: #fff; }
+            .aim-vv-rv-sec { margin-top: 14px; white-space: normal; } .aim-vv-rv-h { font-size: 11px; font-weight: 700; letter-spacing: 1.2px; text-transform: uppercase; color: #5fe3ff; margin-bottom: 4px; }
+            .aim-vv-rv-line { display: grid; grid-template-columns: 54px 1fr; gap: 8px; padding: 6px 0; border-top: 1px solid #1f2733; } .aim-vv-rv-line .k { display: inline-block; width: 58px; color: #9aa4b2; }
+            .aim-vv-rv-item { display: grid; grid-template-columns: 20px 1fr; gap: 8px; padding: 6px 0; border-top: 1px solid #1f2733; cursor: pointer; align-items: start; } .aim-vv-rv-item input { margin-top: 3px; }
+            .aim-vv-rv summary { cursor: pointer; } .aim-vv-rv details > .dim, .aim-vv-rv details > table { margin-top: 6px; }
+            .aim-vv-rv-foot { display: flex; align-items: center; gap: 8px; margin-top: 16px; }
+            .aim-vv-review .aim-vv-rv button { background: #1c232e; border: 0; box-shadow: 0 0 0 1px #2a3442; color: #dfe7f1; border-radius: 9px; padding: 7px 16px; }
+            .aim-vv-review .aim-vv-rv button:hover { background: #2a3545; color: #fff; }
+            .aim-vv-review .aim-vv-rv button.aim-vv-rv-pri { background: #5fe3ff; color: #04222a; box-shadow: none; font-weight: 700; } .aim-vv-review .aim-vv-rv button.aim-vv-rv-pri:hover { background: #8cecff; color: #04222a; }
             .aim-vv-review table { border-collapse: collapse; margin: 6px 0; } .aim-vv-review td { padding: 2px 10px 2px 0; white-space: nowrap; border-bottom: 1px solid rgba(255,255,255,.06); }
             .aim-vv-review b { color: #5fe3ff; } .aim-vv-review .dim { color: #888; } .aim-vv-review .warn { color: #ffb347; }
             .aim-vv-toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); z-index: 100001; background: rgba(10,14,18,.95); color: #e6e6e6; border: 1px solid rgba(95,227,255,.6); border-radius: 4px; padding: 8px 14px; font: 12px/1.4 monospace; display: none; max-width: 70vw; }
@@ -1166,8 +1215,8 @@
     }
     function groundAt(ll) {
         const v = demCache[(+ll.lat).toFixed(5) + ',' + (+ll.lng).toFixed(5)];
-        if (v !== undefined) return v;
-        // A nav moved in the working copy has no exact lookup yet — use the nearest cached terrain within 300 m (preview only).
+        if (v != null) return v;
+        // No exact lookup (a nav moved in the working copy, or the lookup failed) — use the nearest cached terrain within 300 m (preview only).
         let best = null, bd = 300;
         Object.keys(demCache).forEach(k => { const g = demCache[k]; if (g == null) return; const [la, ln] = k.split(',').map(Number); const d = distM(ll, { lat: la, lng: ln }); if (d < bd) { bd = d; best = g; } });
         return best;
@@ -1424,10 +1473,45 @@
     // Planned look-point of an in-place snapshot: from the nav (planned altitude above the terrain under it),
     // at the planned heading and camera angle, down to the ground (cap = rayCapFt). Terrain via /location_altitude/, cached.
     const demCache = {};
+    // /location_altitude/ rate-limits (HTTP 429 when ~35 lookups went out at once on load, 2026-11-13 — every one failed and stayed failed).
+    // So: 2 at a time, a short gap between, back off and retry on 429, share one request per point, reuse a known height within 15 m,
+    // and forget a failure after a minute so a later draw asks again.
+    const demInflight = {}, demQueue = [];
+    let demActive = 0, demPauseUntil = 0, demTimer = 0;
     function demCached(ll) {
         const k = (+ll.lat).toFixed(5) + ',' + (+ll.lng).toFixed(5);
         if (demCache[k] !== undefined) return Promise.resolve(demCache[k]);
-        return dem(ll).then(v => { demCache[k] = v; return v; }).catch(e => { warn('dem:', e.message); demCache[k] = null; return null; });
+        const keys = Object.keys(demCache);
+        for (let i = 0; i < keys.length; i++) {
+            const g = demCache[keys[i]]; if (g == null) continue;
+            const c = keys[i].split(',');
+            if (distM(ll, { lat: +c[0], lng: +c[1] }) < 15) { demCache[k] = g; return Promise.resolve(g); }
+        }
+        if (demInflight[k]) return demInflight[k];
+        const p = new Promise(res => { demQueue.push({ ll: { lat: +ll.lat, lng: +ll.lng }, k, res, tries: 0 }); });
+        demInflight[k] = p; demPump();
+        return p;
+    }
+    function demDone(job, v) {
+        demCache[job.k] = v; delete demInflight[job.k];
+        if (v == null) setTimeout(() => { if (demCache[job.k] === null) delete demCache[job.k]; }, 60000);
+        demActive--; job.res(v);
+        setTimeout(demPump, 120);
+    }
+    function demPump() {
+        if (demActive >= 2 || !demQueue.length) return;
+        const wait = demPauseUntil - Date.now();
+        if (wait > 0) { if (!demTimer) demTimer = setTimeout(() => { demTimer = 0; demPump(); }, wait + 20); return; }
+        const job = demQueue.shift(); demActive++;
+        dem(job.ll).then(v => demDone(job, v), e => {
+            const msg = String(e && e.message || e);
+            if (/HTTP 429/.test(msg) && job.tries < 5) {
+                job.tries++; demPauseUntil = Date.now() + 1500 * job.tries; demQueue.unshift(job); demActive--;
+                if (job.tries === 1) log('terrain lookups are being rate-limited — slowing down and retrying');
+                demPump(); return;
+            }
+            warn('dem:', msg); demDone(job, null);
+        });
     }
     function lookPointFor(nav, step, ground) {
         const e = step.extra_options || {};
@@ -1865,7 +1949,7 @@
         if (typeof im.alt === 'number') setNavAlt(nav, im.alt);
         if (!isGps(step)) { const e = eo(step); if (typeof im.drone_heading === 'number') e.heading = im.drone_heading; if (typeof im.camera_pitch === 'number') e.pitch = gimbalFromDeg(im.camera_pitch); }
     }
-    function dem(ll) { return getJSON('/location_altitude/?location=' + encodeURIComponent(JSON.stringify({ lat: ll.lat, lng: ll.lng }))).then(j => (j && typeof j.altitude === 'number') ? j.altitude : null); }
+    function dem(ll) { return getJSON('/location_altitude/?location=' + encodeURIComponent(JSON.stringify({ lat: ll.lat, lng: ll.lng }))).then(j => { const a = j == null ? NaN : Number(j.altitude); if (isFinite(a) && j.altitude !== null && j.altitude !== '') return a; warn('terrain lookup gave no altitude at ' + (+ll.lat).toFixed(5) + ',' + (+ll.lng).toFixed(5) + ':', JSON.stringify(j).slice(0, 200)); return null; }); }
     // Convert an in-place snapshot to a GPS aim point by casting the ACTUAL camera ray to the ground (cap = rayCapFt).
     function edConvertGps(step, shot) {
         const im = shot.primary; if (!im || !im.location || typeof im.drone_heading !== 'number' || typeof im.camera_pitch !== 'number') { toast('Convert needs the actual shot pose (position, heading, camera angle)', true); return Promise.resolve(false); }
@@ -1955,6 +2039,228 @@
             try { add(L.marker([ll.lat, ll.lng], { icon: L.divIcon({ className: 'aim-vv-ov', html: '<div class="aim-vv-ov-ghost" style="border-color:' + col + '">' + esc(stepLabel(st)) + '</div>', iconSize: [22, 22], iconAnchor: [11, 11] }), interactive: false, zIndexOffset: 700 })); } catch (e) { warn('ghost marker failed:', e); }
         });
     }
+    // ---- flight deck helpers (v0.64) ----
+    // Convert an in-place snapshot to a GPS aim point at the place it is CURRENTLY planned to look (no nav move).
+    function edConvertPlanned(step) {
+        const nav = wkNavOf(step); if (!nav || !nav.location || isGps(step)) return false;
+        // Never convert without terrain: the look-point would be the 500 ft ray cap, far below the real ground (S23 on HF - P3_3, 2026-11-13).
+        if (groundAt(nav.location) == null) { demCached(nav.location).then(() => deckRefresh()); return false; }
+        const lk = lookOf(step, nav); if (!lk || lk.alt == null) return false;
+        step.location = { lat: +(+lk.ll.lat).toFixed(8), lng: +(+lk.ll.lng).toFixed(8) }; step.value1 = +lk.alt.toFixed(2);
+        const e = eo(step); e.heading = 0; e.pitch = 2000;   // placeholders Percepto stores on GPS snapshots
+        delete step._aim;
+        return true;
+    }
+    // Drone closer(-) / farther(+) to what the camera sees. In-place: the nav slides along its sightline and the camera
+    // re-tilts (edRange). GPS: the nav moves along the nav→aim line, the aim point stays.
+    function edDroneRange(step, dM) {
+        if (!isGps(step)) { edRange(step, dM); return; }
+        const nav = wkNavOf(step); if (!nav || !nav.location) return;
+        const r = distM(nav.location, step.location); if (r == null) return;
+        moveNavKeepAim(nav, moveLL(step.location, Math.max(3, r + dM), bearingDeg(step.location, nav.location)));
+    }
+    // Heading + camera angle of ANY step/nav pair (working copy or original).
+    function poseOf(st, nv) {
+        if (isGps(st)) {
+            if (!nv || !nv.location) return { heading: null, pitchDeg: null };
+            const h = distM(nv.location, st.location);
+            return { heading: bearingDeg(nv.location, st.location), pitchDeg: (typeof st.value1 === 'number' && typeof nv.value1 === 'number') ? Math.atan2(st.value1 - nv.value1, h) / RAD : null };
+        }
+        const e = st.extra_options || {};
+        return { heading: typeof e.heading === 'number' ? e.heading : 0, pitchDeg: gimbalToDeg(e.pitch) != null ? gimbalToDeg(e.pitch) : 0 };
+    }
+    // Where a step/nav pair looks: { ll, alt, dist (horizontal m) }. In-place = its ray to the terrain under the nav.
+    function lookOf(st, nv) {
+        if (!nv || !nv.location) return null;
+        if (isGps(st)) return { ll: st.location, alt: typeof st.value1 === 'number' ? st.value1 : null, dist: distM(nv.location, st.location) };
+        const g = groundAt(nv.location); const lp = lookPointFor(nv, st, g); if (!lp) return null;
+        const alt0 = typeof nv.value1 === 'number' ? nv.value1 : (st.extra_options || {}).abs_alt;
+        const alt = (lp.capped || g == null) ? (alt0 != null ? alt0 - lp.dist * Math.tan(Math.abs(gimbalToDeg((st.extra_options || {}).pitch)) * RAD) : null) : g;
+        return { ll: lp.ll, alt, dist: lp.dist, capped: lp.capped };
+    }
+    const DK_W = 330, DK_H = 220;   // viewfinder box
+    // FALLBACK lens table (payload spec sheets, 2026-11-12) — used only when the mission's drone carries no camera list. First of a kind = default for that picture kind.
+    const DK_LENSES = [
+        { id: 'sony50', kind: 'RGB', label: 'Sony ILX-LR1 50 mm (RGB)', h: 39.5, v: 27 },
+        { id: 'bfly24', kind: 'RGB', label: 'Blackfly 24 MP 16 mm (RGB)', h: 50, v: 44 },
+        { id: 'boson18', kind: 'T', label: 'Boson 640 18 mm (thermal)', h: 24, v: 19 },
+        { id: 'boson14', kind: 'T', label: 'Boson 640 14 mm (thermal)', h: 32, v: 26 },
+        { id: 'ventus25', kind: 'G', label: 'Ventus OGI 25 mm (thermal + GEM)', h: 21.7, v: 17.5 },
+    ];
+    // The picture the viewfinder shows: the shot's picture of the chosen kind, else its main one.
+    function dkImg(shot) { if (!shot) return null; return (shot.images || []).find(i => i.kind === settings.deckKind) || shot.primary; }
+    // Terrain the deck needs (under the drone, at the target). Debounced: a held arrow moves the point every 90 ms.
+    const dkWant = {}; let dkWantTimer = 0;
+    function dkWantTerrain(role, ll) {
+        if (!ll || typeof ll.lat !== 'number' && isNaN(+ll.lat)) return;
+        if (demCache[(+ll.lat).toFixed(5) + ',' + (+ll.lng).toFixed(5)] !== undefined) { delete dkWant[role]; return; }
+        dkWant[role] = { lat: +ll.lat, lng: +ll.lng };
+        clearTimeout(dkWantTimer);
+        dkWantTimer = setTimeout(() => {
+            const list = Object.keys(dkWant).map(k => dkWant[k]); Object.keys(dkWant).forEach(k => delete dkWant[k]);
+            if (!list.length) return;
+            Promise.all(list.map(x => demCached(x))).then(vs => { log('deck terrain: ' + vs.map(v => v == null ? 'none' : fmtAlt(v)).join(', ')); deckRefresh(); });
+        }, 350);
+    }
+    // Deck altitude text: above ground when the ground is known (default), else above sea level.
+    function dkAltTxt(m, ground) {
+        if (m == null || !isFinite(m)) return '–';
+        return (settings.deckAltRef !== 'msl' && ground != null) ? fmtDist(m - ground) + ' AGL' : fmtAlt(m) + ' MSL';
+    }
+    function dkLensKey(im) { const d = model && model.mission && model.mission.drone; return String((d && d.robot_type_name) || '?') + '|' + ((im && im.kind) || 'RGB'); }
+    // Percepto states each camera's field of view on the drone that flew the mission: mission.drone.camera_types = { KEY: { horizontal_fov, vertical_fov } }.
+    // The robot type name does NOT identify the payload (AIRMAX_POWERTRAIN drones carry either the Sony or the 24 MP payload).
+    function dkDroneLenses() {
+        const d = model && model.mission && model.mission.drone, ct = d && d.camera_types;
+        if (!ct || typeof ct !== 'object') return [];
+        return Object.keys(ct).map(k => {
+            const c = ct[k] || {}, a = Number(c.horizontal_fov), b = Number(c.vertical_fov);
+            if (!(a > 1 && a < 180 && b > 1 && b < 180)) return null;
+            // Pictures are landscape, so the wide angle is the horizontal one. Percepto lists the Sony with the two swapped (26.8 / 39.2), seen live 2026-11-13.
+            const h = Math.max(a, b), v = Math.min(a, b);
+            return { id: 'drone:' + k, kind: /OGI|VENTUS/i.test(k) ? 'G' : (/THERMAL|BOSON|TAU/i.test(k) ? 'T' : 'RGB'), label: k + ' (this drone)', h, v };
+        }).filter(Boolean);
+    }
+    function dkLensList() { return dkDroneLenses().concat(DK_LENSES); }
+    function dkLens(im) {
+        const list = dkLensList(), kind = (im && im.kind) || 'RGB';
+        const picked = (settings.deckLens || {})[dkLensKey(im)];
+        if (picked) { const l = list.find(x => x.id === picked); if (l) return Object.assign({ how: 'your pick' }, l); }
+        const mine = dkDroneLenses();
+        // OGI payload: thermal and GEM pictures come from the same camera, so a thermal picture falls back to the OGI lens.
+        const auto = mine.find(l => l.kind === kind) || (kind === 'T' ? mine.find(l => l.kind === 'G') : null);
+        if (auto) return Object.assign({ how: 'auto (from drone)' }, auto);
+        return Object.assign({ how: 'default (drone lists no cameras)' }, DK_LENSES.find(l => l.kind === kind) || DK_LENSES[0]);
+    }
+
+    const DK_ARROW = { up: 'M5 15l7-7 7 7', down: 'M5 9l7 7 7-7', left: 'M15 5l-7 7 7 7', right: 'M9 5l7 7-7 7', altUp: 'M12 19V5M5 12l7-7 7 7', altDown: 'M12 5v14M5 12l7 7 7-7' };
+    const dkSvg = (d, cls, style) => '<svg aria-hidden="true" class="' + (cls || '') + '" style="' + (style || '') + '" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="' + d + '"></path></svg>';
+    function dkDial(segs, centre) {
+        // segs: [top, right, left, bottom] = { act, n, title } · the 2×2 grid is rotated 45° so each cell is a wedge
+        const seg = (g) => '<button type="button" class="aim-vv-dk-seg" data-aim-vv-ed="' + g.act + '" data-n="' + g.n + '" data-rep="1" title="' + esc(g.title) + '" aria-label="' + esc(g.title) + '"></button>';
+        return '<div class="aim-vv-dk-dial"><div class="aim-vv-dk-rot">' + segs.map(seg).join('') + '</div>'
+            + dkSvg(DK_ARROW.up, 'aim-vv-dk-ic', 'left:60px;top:10px') + dkSvg(DK_ARROW.down, 'aim-vv-dk-ic', 'left:60px;top:110px') + dkSvg(DK_ARROW.left, 'aim-vv-dk-ic', 'left:10px;top:60px') + dkSvg(DK_ARROW.right, 'aim-vv-dk-ic', 'left:110px;top:60px')
+            + '<button type="button" class="aim-vv-dk-c" data-aim-vv-ed="' + centre.act + '" style="' + (centre.armed ? 'border-color:' + centre.color : '') + '" title="' + esc(centre.title) + '" aria-label="' + esc(centre.title) + '">' + centre.icon + '</button></div>';
+    }
+    function dkAlt(act, upTitle, dnTitle) {
+        return '<div class="aim-vv-dk-altcol"><button type="button" class="aim-vv-dk-alt" data-aim-vv-ed="' + act + '" data-n="1" data-rep="1" title="' + esc(upTitle) + '" aria-label="' + esc(upTitle) + '">' + dkSvg(DK_ARROW.altUp) + '</button>ALT'
+            + '<button type="button" class="aim-vv-dk-alt" data-aim-vv-ed="' + act + '" data-n="-1" data-rep="1" title="' + esc(dnTitle) + '" aria-label="' + esc(dnTitle) + '">' + dkSvg(DK_ARROW.altDown) + '</button></div>';
+    }
+    function dkRead(rows) { return '<div class="aim-vv-dk-read">' + rows.map(r => '<span class="lbl">' + r[0] + '</span><b data-aim-vv-val="' + r[1] + '"' + (r[2] ? ' data-aim-vv-scrub="' + r[2] + '" class="aim-vv-scrub" title="drag ↔ to change (Shift ×5)"' : '') + '></b><span class="d" data-aim-vv-val="' + r[1] + '-d"></span>').join('') + '</div>'; }
+    function deckHtml(step, shot) {
+        const nav = wkNavOf(step), gps = isGps(step);
+        const sd = Number(settings.stepDeg) || 1, sp = Number(settings.stepPitch) || 1, sf = Number(settings.stepFt) || 1, sa = Number(settings.stepAltFt) || 1;
+        const pNav = ed.placing && ed.placing.navId != null, pAim = ed.placing && ed.placing.aimId != null;
+        const droneIc = '<svg aria-hidden="true" width="30" height="30" viewBox="0 0 48 48" fill="none" stroke="' + esc(settings.navColor) + '" stroke-width="3"><circle cx="10" cy="10" r="7"></circle><circle cx="38" cy="10" r="7"></circle><circle cx="10" cy="38" r="7"></circle><circle cx="38" cy="38" r="7"></circle><path d="M15 15l18 18M33 15L15 33"></path></svg>';
+        const camIc = '<svg aria-hidden="true" width="30" height="28" viewBox="0 0 48 44" fill="none" stroke="' + esc(settings.snapColor) + '" stroke-width="3"><rect x="3" y="10" width="42" height="30" rx="4"></rect><path d="M16 10l3-6h10l3 6"></path><circle cx="24" cy="25" r="8"></circle></svg>';
+        const im = dkImg(shot); const src = im ? (im.thumbnail_url || im.url || '') : '';
+        const kinds = ['RGB', 'T', 'G'].filter(k => shot && (shot.images || []).some(i => i.kind === k)), kName = { RGB: 'RGB', T: 'Thermal', G: 'GEM' };
+        const kindTabs = kinds.length > 1 ? '<span style="width:10px"></span>' + kinds.map(k => '<button type="button" class="aim-vv-dk-tab' + (im && im.kind === k ? ' on' : '') + '" data-aim-vv-ed="vkind" data-v="' + k + '" title="Show the ' + kName[k] + ' picture and use that camera\'s lens">' + kName[k] + '</button>').join('') : '';
+        const view = settings.deckView === 'pr' ? 'pr' : 'vf';
+        return '<div class="aim-vv-deck"><div class="aim-vv-dk-head"><b>Adjust ' + esc(stepLabel(step)) + '</b><span class="dim">' + (gps ? 'GPS aim point' : 'in-place') + ' · nav ' + (nav ? esc(stepLabel(nav)) : '–') + '</span>'
+            + '<span class="aim-vv-dk-hint">' + (pNav ? 'Click the map where the drone should be · Esc cancels' : (pAim ? 'Click the map where the camera should aim · Esc cancels' : '')) + '</span>'
+            + '<span class="aim-vv-dk-tabs" title="Altitudes above the ground (AGL) or above sea level (MSL)">' + ['agl', 'msl'].map(k => '<button type="button" class="aim-vv-dk-tab' + ((settings.deckAltRef === 'msl' ? 'msl' : 'agl') === k ? ' on' : '') + '" data-aim-vv-ed="altref" data-v="' + k + '">' + k.toUpperCase() + '</button>').join('') + '</span>'
+            + '<span class="dim">click = 1 step · Shift ×5 · hold repeats</span></div>'
+            + '<div class="aim-vv-dk-grid">'
+            + '<div class="aim-vv-dk-card"><div class="aim-vv-dk-title" style="color:' + esc(settings.navColor) + '">DRONE</div><div class="aim-vv-dk-ctl">'
+            + dkDial([{ act: 'd-range', n: 1, title: 'Move the drone ' + sf + ' ft closer to what the camera sees (camera stays on it)' }, { act: 'd-slide', n: 1, title: 'Slide the drone ' + sf + ' ft to the right' }, { act: 'd-slide', n: -1, title: 'Slide the drone ' + sf + ' ft to the left' }, { act: 'd-range', n: -1, title: 'Move the drone ' + sf + ' ft farther away' }],
+                { act: 'nav-place', armed: pNav, color: settings.navColor, icon: droneIc, title: 'Place the drone on the map (click here, then click the map)' })
+            + dkAlt('alt', 'Drone altitude +' + sa + ' ft', 'Drone altitude −' + sa + ' ft') + '</div>'
+            + dkRead([['ground dist', 'dist', 'range'], ['moved', 'moved', ''], ['drone alt', 'dalt', 'alt']]) + '</div>'
+            + '<div class="aim-vv-dk-mid"><div class="aim-vv-dk-tabs"><button type="button" class="aim-vv-dk-tab' + (view === 'vf' ? ' on' : '') + '" data-aim-vv-ed="view" data-v="vf">Viewfinder</button><button type="button" class="aim-vv-dk-tab' + (view === 'pr' ? ' on' : '') + '" data-aim-vv-ed="view" data-v="pr">Side profile</button>' + kindTabs + '</div>'
+            + '<div class="aim-vv-dk-frame" title="Approximate preview. Striped = outside the original picture; dashed = the original frame.">' + (view === 'vf' ? (src ? '<img data-aim-vv-vf="1" alt="" src="' + esc(src) + '">' : '<div class="dim" style="padding:8px">no picture for this shot</div>') + '<span class="ch-v"></span><span class="ch-h"></span>' : '<svg data-aim-vv-pr="1" width="' + DK_W + '" height="' + DK_H + '" viewBox="0 0 ' + DK_W + ' ' + DK_H + '"></svg>') + '</div>'
+            + '<div data-aim-vv-val="foot" style="width:330px;font-size:11px;line-height:1.35;color:#aeb8c5;min-height:30px"></div>'
+            + '<span class="dim" style="font-size:11px">approximate preview · lens <select data-aim-vv-lens="' + esc(dkLensKey(im)) + '" title="Camera that took this picture. Sets how far the preview moves per degree. From the drone that flew this mission when Percepto lists its cameras. Remembered per drone type." style="font:inherit;background:#171b22;color:#cfd8e3;border:1px solid #2a3442;border-radius:6px;padding:1px 4px">' + dkLensList().map(l => '<option value="' + esc(l.id) + '"' + (l.id === dkLens(im).id ? ' selected' : '') + '>' + esc(l.label) + ' · ' + l.h + '° × ' + l.v + '°</option>').join('') + '</select> <span data-aim-vv-lenshow="1">' + esc(dkLens(im).how) + '</span></span></div>'
+            + '<div class="aim-vv-dk-card"><div class="aim-vv-dk-title" style="color:' + esc(settings.snapColor) + '">CAMERA</div><div class="aim-vv-dk-ctl">'
+            + dkDial([{ act: 'c-tilt', n: 1, title: gps ? 'Aim ' + sf + ' ft farther away (camera tilts up)' : 'Tilt the camera ' + sp + '° up' }, { act: 'turn', n: 1, title: gps ? 'Move the aim point ' + sf + ' ft to the right' : 'Turn the camera ' + sd + '° right' }, { act: 'turn', n: -1, title: gps ? 'Move the aim point ' + sf + ' ft to the left' : 'Turn the camera ' + sd + '° left' }, { act: 'c-tilt', n: -1, title: gps ? 'Aim ' + sf + ' ft closer (camera tilts down)' : 'Tilt the camera ' + sp + '° down' }],
+                { act: 'aim-place', armed: pAim, color: settings.snapColor, icon: camIc, title: 'Place the camera target on the map (click here, then click the map)' + (gps ? '' : ' — converts this shot to a GPS aim point') })
+            + dkAlt('t-alt', 'Target altitude +' + sa + ' ft' + (gps ? '' : ' — converts this shot to a GPS aim point'), 'Target altitude −' + sa + ' ft' + (gps ? '' : ' — converts this shot to a GPS aim point')) + '</div>'
+            + dkRead([['heading', 'hdg', 'heading'], ['angle', 'ang', 'camera'], ['target alt', 'talt', gps ? 'target-alt' : '']]) + '</div>'
+            + '</div></div>';
+    }
+    // Fill the deck's numbers + move the preview. Never rebuilds elements (safe during a drag or a held button).
+    function deckRefresh() {
+        const el = ed.panelEl; if (!el || !model) return;
+        const shot = currentShotForEdit();
+        const step = shot && shot.step && shot.step.type_name === 'snapshot' ? wk(shot.step.id) : null;
+        if (!step || !el.querySelector('.aim-vv-deck')) return;
+        const nav = wkNavOf(step), gps = isGps(step);
+        const oStep = origOf(step.id) || step, oNav = nav ? (origOf(nav.id) || nav) : null;
+        // Terrain under the drone drives every distance here. The map only loads it with look-points on, so load it for this shot.
+        if (nav && nav.location) dkWantTerrain('nav', nav.location);
+        const gNav = nav && nav.location ? groundAt(nav.location) : null;
+        const noGround = !!(nav && nav.location && gNav == null);
+        const pose = poseOf(step, nav), oPose = oNav ? poseOf(oStep, oNav) : pose;
+        const look = lookOf(step, nav), oLook = lookOf(oStep, oNav);
+        if (look && look.ll) dkWantTerrain('tgt', look.ll);
+        const gTgt = look && look.ll ? groundAt(look.ll) : null;
+        const set = (k, txt, on) => { const n = el.querySelector('[data-aim-vv-val="' + k + '"]'); if (!n) return; if (n.textContent !== txt) n.textContent = txt; if (on !== undefined) n.classList.toggle('on', !!on); };
+        const dFt = (m) => { if (m == null || !isFinite(m)) return ['—', false]; const v = Math.round(settings.units === 'm' ? m : m * M_TO_FT); return v ? [(v > 0 ? '+' : '−') + Math.abs(v) + (settings.units === 'm' ? ' m' : ' ft'), true] : ['—', false]; };
+        const dDeg = (d) => { if (d == null || !isFinite(d)) return ['—', false]; const v = Math.round(d); return v ? [(v > 0 ? '+' : '−') + Math.abs(v) + '°', true] : ['—', false]; };
+        set('dist', (noGround && !gps) ? 'terrain loading' : (look ? fmtDist(look.dist) + (look.capped ? ' (far)' : '') : '?')); { const d = dFt(look && oLook ? look.dist - oLook.dist : null); set('dist-d', d[0], d[1]); }
+        const mv = (nav && oNav && nav.location && oNav.location) ? distM(oNav.location, nav.location) : null;
+        set('moved', mv != null && mv > 0.15 ? fmtDist(mv) + ' ' + compass16(bearingDeg(oNav.location, nav.location)) : 'not moved'); set('moved-d', '', false);
+        set('dalt', dkAltTxt(nav ? nav.value1 : null, gNav)); { const d = dFt(nav && oNav && typeof nav.value1 === 'number' && typeof oNav.value1 === 'number' ? nav.value1 - oNav.value1 : null); set('dalt-d', d[0], d[1]); }
+        set('hdg', pose.heading != null ? pose.heading.toFixed(0) + '°' : '–'); { const d = dDeg(pose.heading != null && oPose.heading != null ? hdgDelta(oPose.heading, pose.heading) : null); set('hdg-d', d[0], d[1]); }
+        set('ang', pose.pitchDeg != null ? pose.pitchDeg.toFixed(0) + '°' : '–'); { const d = dDeg(pose.pitchDeg != null && oPose.pitchDeg != null ? pose.pitchDeg - oPose.pitchDeg : null); set('ang-d', d[0], d[1]); }
+        set('talt', gps ? dkAltTxt(step.value1, gTgt) : (noGround ? 'terrain loading' : (look && look.alt != null ? fmtAlt(look.alt) + (look.capped ? ' (far)' : ' (ground)') : 'ground'))); { const d = dFt(gps && oLook && oLook.alt != null ? step.value1 - oLook.alt : null); set('talt-d', d[0], d[1]); }
+        // What the picture covers on the ground (flat ground at the target's height; approximate).
+        {
+            const lens = dkLens(dkImg(shot)); let txt = '';
+            if (nav && typeof nav.value1 === 'number' && look && look.alt != null && nav.value1 - look.alt > 0.5) {
+                const H = nav.value1 - look.alt, D = Math.max(0.5, look.dist), ang = Math.atan2(H, D), half = lens.v / 2 * RAD;
+                const near = ang + half < Math.PI / 2 - 0.01 ? H / Math.tan(ang + half) : 0, far = ang - half > 0.03 ? H / Math.tan(ang - half) : Infinity;
+                const wide = 2 * Math.hypot(D, H) * Math.tan(lens.h / 2 * RAD);
+                txt = 'Picture covers ' + fmtDist(near) + ' to ' + (isFinite(far) ? fmtDist(far) : 'the horizon') + ' from the drone' + (isFinite(far) ? ' (' + fmtDist(far - near) + ' deep)' : '') + ', about ' + fmtDist(wide) + ' wide at the target.'
+                    + (gNav != null ? ' Ground ' + fmtAlt(gNav) + ' MSL.' : ' Ground height not loaded.');
+            }
+            set('foot', txt);
+        }
+        // Viewfinder: where does the ORIGINAL look-point sit in the frame of the pose as edited?
+        const img = el.querySelector('[data-aim-vv-vf]');
+        if (img) {
+            const ppd = DK_W / dkLens(dkImg(shot)).h; let x = 0, y = 0, sc = 1;   // picture fills the box width (object-fit: cover), so px per degree comes from the horizontal lens width
+            if (oLook && oLook.alt != null && nav && nav.location && typeof nav.value1 === 'number' && pose.heading != null && pose.pitchDeg != null && oNav && typeof oNav.value1 === 'number') {
+                const h = distM(nav.location, oLook.ll), brg = bearingDeg(nav.location, oLook.ll);
+                const pitchTo = Math.atan2(oLook.alt - nav.value1, Math.max(0.5, h)) / RAD;
+                x = hdgDelta(pose.heading, brg) * ppd; y = -(pitchTo - pose.pitchDeg) * ppd;
+                const s0 = Math.hypot(oLook.dist, oNav.value1 - oLook.alt), s1 = Math.hypot(h, nav.value1 - oLook.alt);
+                if (s0 > 0.5 && s1 > 0.5) sc = s0 / s1;
+            } else if (pose.heading != null && oPose.heading != null) { x = -hdgDelta(oPose.heading, pose.heading) * ppd; y = ((pose.pitchDeg || 0) - (oPose.pitchDeg || 0)) * ppd; }
+            x = Math.max(-DK_W, Math.min(DK_W, x)); y = Math.max(-DK_H, Math.min(DK_H, y)); sc = Math.max(0.4, Math.min(3, sc));
+            const t = 'translate(' + x.toFixed(1) + 'px,' + y.toFixed(1) + 'px) scale(' + sc.toFixed(3) + ')';
+            if (img.style.transform !== t) img.style.transform = t;
+        }
+        // Side profile: drone, sight line, picture edges, ground, target (uniform scale so the angle reads true).
+        const svg = el.querySelector('[data-aim-vv-pr]');
+        if (svg) {
+            let h = '';
+            if (nav && typeof nav.value1 === 'number' && look && look.alt != null) {
+                const g = gNav;
+                const base = Math.min(g != null ? g : look.alt, look.alt), D = Math.max(1, look.dist), up = Math.max(3, nav.value1 - base);
+                const s = Math.min(250 / D, 150 / up), X0 = 36, GY = 196;
+                const Y = (a) => GY - (a - base) * s, dx = X0, dy = Y(nav.value1), tx = X0 + D * s, ty = Y(look.alt), gy = Y(g != null ? g : look.alt);
+                const ang = Math.atan2(nav.value1 - look.alt, D), half = dkLens(dkImg(shot)).v / 2 * RAD;
+                const edge = (a) => { const len = a > 0.03 ? Math.min(360, (gy - dy) / Math.sin(a)) : 360; return '<line x1="' + dx + '" y1="' + dy.toFixed(1) + '" x2="' + (dx + Math.cos(a) * len).toFixed(1) + '" y2="' + (dy + Math.sin(a) * len).toFixed(1) + '" stroke="' + esc(settings.snapColor) + '" stroke-opacity=".4"></line>'; };
+                const tAnchor = tx > 250 ? 'end' : 'start';
+                h = '<rect x="0" y="' + gy.toFixed(1) + '" width="' + DK_W + '" height="' + (DK_H - gy + 1).toFixed(1) + '" fill="#3a2f24"></rect>'
+                    + '<text x="6" y="' + Math.min(DK_H - 4, gy + 12).toFixed(1) + '" fill="#d8c8b0" font-size="10" text-anchor="middle">' + '</text>'
+                    + '<line x1="' + dx + '" y1="' + (gy + 5).toFixed(1) + '" x2="' + tx.toFixed(1) + '" y2="' + (gy + 5).toFixed(1) + '" stroke="#d8c8b0" stroke-opacity=".7"></line>'
+                    + '<text x="' + ((dx + tx) / 2).toFixed(1) + '" y="' + Math.min(DK_H - 3, gy + 17).toFixed(1) + '" fill="#d8c8b0" font-size="10" text-anchor="middle">' + esc(fmtDist(D)) + ' along the ground</text>'
+                    + edge(ang - half) + edge(ang + half)
+                    + '<line x1="' + dx + '" y1="' + dy.toFixed(1) + '" x2="' + (dx + 70) + '" y2="' + dy.toFixed(1) + '" stroke="#9aa4b2" stroke-dasharray="3 3"></line>'
+                    + '<line x1="' + dx + '" y1="' + dy.toFixed(1) + '" x2="' + dx + '" y2="' + gy.toFixed(1) + '" stroke="' + esc(settings.navColor) + '" stroke-dasharray="3 3"></line>'
+                    + '<line x1="' + dx + '" y1="' + dy.toFixed(1) + '" x2="' + tx.toFixed(1) + '" y2="' + ty.toFixed(1) + '" stroke="' + esc(settings.snapColor) + '" stroke-width="2"></line>'
+                    + '<rect x="' + (dx - 9) + '" y="' + (dy - 4).toFixed(1) + '" width="18" height="8" rx="2" fill="' + esc(settings.navColor) + '"></rect>'
+                    + '<text x="' + (dx + 14) + '" y="' + Math.max(11, dy - 8).toFixed(1) + '" fill="' + esc(settings.navColor) + '" font-size="10">drone ' + esc(dkAltTxt(nav.value1, g)) + '</text>'
+                    + '<text x="' + (dx + 74) + '" y="' + (dy + 12).toFixed(1) + '" fill="' + esc(settings.snapColor) + '" font-size="10">' + (pose.pitchDeg != null ? pose.pitchDeg.toFixed(0) + '°' : '') + ' · ' + esc(fmtDist(Math.hypot(D, nav.value1 - look.alt))) + ' camera to target</text>'
+                    + '<rect x="' + (tx - 5).toFixed(1) + '" y="' + (ty - 5).toFixed(1) + '" width="10" height="10" fill="' + esc(settings.snapColor) + '" stroke="#fff"></rect>'
+                    + '<text x="' + tx.toFixed(1) + '" y="' + (ty - 9).toFixed(1) + '" text-anchor="' + tAnchor + '" fill="' + esc(settings.snapColor) + '" font-size="10">target ' + esc(dkAltTxt(look.alt, gTgt)) + '</text>';
+            } else h = '<text x="12" y="24" fill="#9aa4b2" font-size="11">Terrain for this shot is not loaded yet.</text>';
+            if (svg.__aimH !== h) { svg.innerHTML = h; svg.__aimH = h; }
+        }
+    }
+    function setPanelHtml(el, html) { if (el.__aimHtml !== html) { el.innerHTML = html; el.__aimHtml = html; } }
     // ---- panel ----
     function currentShotForEdit() { if (!selectedRec || !model) return null; return model.shots.find(sh => sh.images.includes(selectedRec)) || null; }
     function ensureEditPanel() {
@@ -1976,61 +2282,42 @@
         const btn = (act, txt, title, extra) => '<button type="button" data-aim-vv-ed="' + act + '" ' + (extra || '') + ' title="' + esc(title || '') + '">' + txt + '</button>';
         let html = '';
         const blocked = editsBlocked();
-        if (blocked) { html = '<div><b>Adjust</b> <span class="warn">— editing unavailable: ' + esc(blocked) + '</span></div>'; if (el.innerHTML !== html) el.innerHTML = html; return; }
+        if (blocked) { html = '<div><b>Adjust</b> <span class="warn">— editing unavailable: ' + esc(blocked) + '</span></div>'; setPanelHtml(el, html); return; }
         if (model.liveApp && Number(model.liveApp.id) !== Number(model.mission.app && model.mission.app.id)) html += '<div class="dim">live mission app <b>' + esc(model.liveApp.id) + '</b> (this flight\'s record is a frozen copy, ' + esc(model.mission.app.id) + ') · resolved ' + esc(model.liveApp.__aimVvHow || '') + '</div>';
         if ((model.liveDiff && model.liveDiff.length) || model.liveAdded || (model.liveRemoved && model.liveRemoved.length)) {
             const lbl = (id) => (model.numbering[id] || {}).n || '#' + (model.byId[id] ? model.byId[id].index_in_app : id);
             html += '<div class="warn">⚠ the live plan differs from what flew: ' + (model.liveDiff || []).length + ' changed' + ((model.liveDiff || []).length ? ' (' + esc(model.liveDiff.map(lbl).join(', ')) + ')' : '') + (model.liveAdded ? ' · ' + model.liveAdded + ' step(s) added since the flight' : '') + ((model.liveRemoved || []).length ? ' · ' + model.liveRemoved.length + ' removed since the flight (' + esc(model.liveRemoved.map(lbl).join(', ')) + ')' : '') + ' — the map shows the FLOWN plan; the saved plan is drawn in yellow where it differs; edits start from the saved values</div>';
         }
-        if (removed) { html += '<div><b>Adjust ' + esc(stepLabel(shot.step)) + '</b> <span class="warn">— this step no longer exists in the live mission (removed since the flight); nothing to edit here</span></div>'; if (el.innerHTML !== html) el.innerHTML = html; return; }
+        if (removed) { html += '<div><b>Adjust ' + esc(stepLabel(shot.step)) + '</b> <span class="warn">— this step no longer exists in the live mission (removed since the flight); nothing to edit here</span></div>'; setPanelHtml(el, html); return; }
         if (!step) {
             html += '<div><b>Adjust</b> <span class="dim">— select a snapshot (click a thumbnail) to edit its step' + (shot && shot.step ? ' · active step is a ' + esc(shot.step.type_name) + ', not a snapshot' : '') + '</span></div>';
-        } else {
-            const pose = wkPose(step), nav = pose.nav, gps = isGps(step);
-            const sc = (kind, txt, title) => '<b data-aim-vv-scrub="' + kind + '" class="aim-vv-scrub" title="' + esc(title) + ' — drag ↔ to change (Shift ×5)">' + txt + '</b>';
-            const sd = Number(settings.stepDeg) || 1, sp = Number(settings.stepPitch) || 1, sf = Number(settings.stepFt) || 1, sa = Number(settings.stepAltFt) || 1;
-            html += '<div><b>Adjust ' + esc(stepLabel(step)) + '</b> <span class="dim">· ' + (gps ? 'GPS aim point' : 'in-place') + ' · nav ' + (nav ? esc(stepLabel(nav)) : '–') + ' · steps ' + sd + '° / ' + sp + '° / ' + sf + ' ft / ' + sa + ' ft alt · Shift = ×5</span></div>';
-            html += '<div class="aim-vv-edit__row"><span class="dim">picture</span>'
-                + btn('turn', '◀ left', gps ? 'Move the aim point ' + sf + ' ft to the left of the nav→aim line' : 'Turn the heading ' + sd + '° left', 'data-n="-1"')
-                + btn('turn', 'right ▶', gps ? 'Move the aim point ' + sf + ' ft to the right' : 'Turn the heading ' + sd + '° right', 'data-n="1"')
-                + btn('tilt', '▲ up', gps ? 'Raise the target altitude ' + sa + ' ft' : 'Tilt the camera ' + sp + '° up', 'data-n="1"')
-                + btn('tilt', '▼ down', gps ? 'Lower the target altitude ' + sa + ' ft' : 'Tilt the camera ' + sp + '° down', 'data-n="-1"')
-                + btn('range', 'closer', gps ? 'Move the aim point ' + sf + ' ft toward the nav' : 'Bring the nav ' + sf + ' ft toward what it is looking at (camera re-tilts to stay on it)', 'data-n="-1"')
-                + btn('range', 'farther', gps ? 'Move the aim point ' + sf + ' ft away from the nav' : 'Back the nav ' + sf + ' ft away from what it is looking at (camera re-tilts)', 'data-n="1"')
-                + btn('alt', 'alt −', 'Drone (nav) altitude −' + sa + ' ft' + (gps ? '' : ' (camera re-tilts to keep the look-point)'), 'data-n="-1"')
-                + btn('alt', 'alt +', 'Drone (nav) altitude +' + sa + ' ft' + (gps ? '' : ' (camera re-tilts to keep the look-point)'), 'data-n="1"') + '</div>';
-            html += '<div class="aim-vv-edit__row"><span class="dim">now</span> heading ' + sc('heading', pose.heading != null ? pose.heading.toFixed(0) + '°' : '–', gps ? 'aim point sideways, 1 ft per step' : 'heading') + ' · camera ' + sc('camera', pose.pitchDeg != null ? pose.pitchDeg.toFixed(0) + '°' : '–', gps ? 'target altitude' : 'camera angle') + ' · drone alt ' + sc('alt', fmtAlt(nav ? nav.value1 : null), 'drone (nav) altitude')
-                + (gps ? ' · target alt ' + sc('target-alt', fmtAlt(step.value1), 'target altitude') + ' · range ' + sc('range', fmtDist(pose.range), 'aim point closer / farther') : ' · look-point ' + sc('range', (function() { const lk = inplaceLook(step); if (lk) { const h = (typeof nav.value1 === 'number' && lk.aim.alt != null) ? nav.value1 - lk.aim.alt : null; return fmtDist(lk.dist) + (h != null ? ' / ' + fmtDist(Math.sqrt(lk.dist * lk.dist + h * h)) + ' LOS' : '') + (lk.aim.capped ? ' (capped)' : ''); } const g = nav && nav.location ? groundAt(nav.location) : null; const lp = (nav && g != null) ? lookPointFor(nav, step, g) : null; return lp ? fmtDist(lp.dist) + (lp.slant != null ? ' / ' + fmtDist(lp.slant) + ' LOS' : '') + (lp.capped ? ' (capped)' : '') : '?'; })(), 'distance from the nav to where the camera points (terrain at the nav) — drag: nav closer / farther along the heading'))
-                + '</div>';
-            if (nav) {
-                html += '<div class="aim-vv-edit__row"><span class="dim">nav ' + esc(stepLabel(nav)) + '</span>'
-                    + btn('nav-move', '▲ N', 'Move the nav ' + sf + ' ft north', 'data-b="0"') + btn('nav-move', '▼ S', 'Move the nav ' + sf + ' ft south', 'data-b="180"')
-                    + btn('nav-move', '◀ W', 'Move the nav ' + sf + ' ft west', 'data-b="270"') + btn('nav-move', 'E ▶', 'Move the nav ' + sf + ' ft east', 'data-b="90"')
-                    + (function() { const o = origOf(nav.id); if (!o || !o.location || !nav.location) return ''; const ns = distM(o.location, { lat: nav.location.lat, lng: o.location.lng }) * (nav.location.lat >= o.location.lat ? 1 : -1); const ew = distM(o.location, { lat: o.location.lat, lng: nav.location.lng }) * (nav.location.lng >= o.location.lng ? 1 : -1); return ' <span class="dim">moved</span> ' + sc('nav-ns', signed(ns * M_TO_FT, ' ft', 0) + ' N', 'north / south from the original nav — drag') + ' ' + sc('nav-ew', signed(ew * M_TO_FT, ' ft', 0) + ' E', 'east / west from the original nav — drag') + ' '; })()
-                    + btn('nav-place', ed.placing ? '📍 click the map… (Esc cancels)' : '📍 Place on map', 'Next click on the map sets this nav\'s position', ed.placing ? 'class="aim-vv-armed"' : '')
-                    + '<input type="text" class="aim-vv-latlng" data-aim-vv-latlng="1" value="' + esc(nav.location ? nav.location.lat.toFixed(6) + ', ' + nav.location.lng.toFixed(6) : '') + '" title="lat, lng — Enter to apply" spellcheck="false">'
-                    + btn('nav-set', 'Set', 'Apply the typed lat, lng')
-                    + '<label class="dim" title="When the nav moves, every in-place snapshot on it re-aims (heading + camera angle) at the ground point it was looking at"><input type="checkbox" data-aim-vv-ed-check="nav-keep-aim" ' + (settings.navKeepAim ? 'checked' : '') + '> keep cameras on their look-points</label></div>';
-            }
-            html += '<div class="aim-vv-edit__row"><span class="dim">from flight</span>'
-                + btn('adopt', 'Adopt actual shot', 'Move the nav to where the drone stood and copy the actual heading / camera angle / altitude into the step')
-                + (gps ? '' : btn('convert', 'Convert → GPS aim point', 'Cast the actual camera ray to the ground (cap ' + (settings.rayCapFt || 500) + ' ft) and make that the aim point'))
-                + '</div>';
-            html += '<div class="aim-vv-edit__row"><span class="dim">steps</span>'
-                + btn('dup', 'Duplicate block after', 'Copy this snapshot and its camera/wait steps right after it')
-                + btn('del', 'Delete block', 'Remove this snapshot and its camera/wait steps', 'class="aim-vv-danger"')
-                + btn('reset-step', 'Reset this step', 'Undo pending changes on this step and its nav') + '</div>';
-        }
-        html += '<div class="aim-vv-edit__row aim-vv-edit__foot">'
-            + (diff.length ? '<b>' + diff.length + ' pending field change' + (diff.length === 1 ? '' : 's') + '</b> <span class="dim">from ' + ed.log.length + ' action' + (ed.log.length === 1 ? '' : 's') + (ed.log.length ? ' (last: ' + esc(ed.log[ed.log.length - 1].what) + (ed.log[ed.log.length - 1].step ? ' ' + esc(ed.log[ed.log.length - 1].step) : '') + ')' : '') + '</span> ' + btn('review', 'Review & Apply…', 'Show the before/after diff, back up the mission, then write') + btn('discard', 'Discard all', 'Drop every pending change') : '<span class="dim">no pending changes</span>')
-            + (isLite() ? ' <span class="warn">Lite mode: writes are blocked</span>' : '')
-            + (!loadShape() ? ' <span class="warn">no learned save shape yet — open any mission in the Mission Bank and Save once</span>' : '')
+        } else html += deckHtml(step, shot);
+        const dk = (act, txt, title, cls) => '<button type="button" class="aim-vv-dk-btn' + (cls ? ' ' + cls : '') + '" data-aim-vv-ed="' + act + '" title="' + esc(title || '') + '">' + txt + '</button>';
+        const last = ed.log.length ? ed.log[ed.log.length - 1] : null;
+        html += '<div class="aim-vv-deck"><div class="aim-vv-dk-bar">'
+            + (diff.length ? '<span title="' + esc(last ? 'last: ' + last.what + (last.step ? ' ' + last.step : '') : '') + '"><b style="color:#5fe3ff">' + diff.length + ' change' + (diff.length === 1 ? '' : 's') + '</b> <span class="dim">pending</span></span>' + dk('review', 'Review &amp; Apply', 'Show the before/after list, back up the mission, then save', 'pri') : '<span class="dim">no pending changes</span>')
+            + (step ? dk('reset-step', 'Reset shot', 'Undo pending changes on this shot and its nav') : '')
+            + (diff.length ? dk('discard', 'Discard all', 'Drop every pending change') : '')
+            + (isLite() ? ' <span class="warn">Lite mode: saving is blocked</span>' : '')
             + (!getCsrf() ? ' <span class="warn">no CSRF token seen yet</span>' : '')
-            + '</div>'
-            + '<div class="aim-vv-edit__row"><span class="dim">restore</span><select class="aim-vv-restore-pick" data-aim-vv-restore-pick="1">' + restoreOptions() + '</select>'
-            + btn('restore', '↩ Load into working copy', 'Load the chosen state into the working copy — then Review & Apply writes it (the saved backups are per mission, newest first)')
-            + btn('restore-file', '📂 From backup file…', 'Load a vv-backup-*.json you downloaded earlier') + '<input type="file" accept=".json,application/json" class="aim-vv-restore-file" data-aim-vv-restore-file="1" style="display:none"></div>';
-        if (el.innerHTML !== html) el.innerHTML = html;
+            + '<span style="flex:1"></span>' + dk('more', ed.more ? 'Less' : 'More', 'Other tools: adopt the actual shot, convert, duplicate / delete, type coordinates, restore')
+            + '</div>';
+        if (ed.more) {
+            const nav = step ? wkNavOf(step) : null;
+            html += '<div class="aim-vv-dk-more">'
+                + (step ? dk('adopt', 'Adopt actual shot', 'Move the nav to where the drone stood and copy the actual heading / camera angle / altitude into the step')
+                    + (isGps(step) ? '' : dk('convert', 'To GPS (actual shot)', 'Cast the ACTUAL camera ray to the ground (cap ' + (settings.rayCapFt || 500) + ' ft) and make that the aim point'))
+                    + dk('dup', 'Duplicate shot', 'Copy this snapshot and its camera/wait steps right after it')
+                    + dk('del', 'Delete shot', 'Remove this snapshot and its camera/wait steps', 'bad') : '')
+                + (nav ? '<input type="text" class="aim-vv-latlng" data-aim-vv-latlng="1" value="' + esc(nav.location ? nav.location.lat.toFixed(6) + ', ' + nav.location.lng.toFixed(6) : '') + '" title="Drone position: lat, lng" spellcheck="false">' + dk('nav-set', 'Set drone position', 'Apply the typed lat, lng')
+                    + '<label class="dim" title="When the drone moves, every in-place snapshot on it re-aims (heading + camera angle) at the ground point it was looking at"><input type="checkbox" data-aim-vv-ed-check="nav-keep-aim" ' + (settings.navKeepAim ? 'checked' : '') + '> camera stays on its target when the drone moves</label>' : '')
+                + '</div><div class="aim-vv-dk-more"><span class="dim">Restore</span><select class="aim-vv-restore-pick" data-aim-vv-restore-pick="1">' + restoreOptions() + '</select>'
+                + dk('restore', 'Load', 'Load the chosen state into the working copy — then Review & Apply saves it')
+                + dk('restore-file', 'From backup file…', 'Load a vv-*.json file this tool downloaded on an earlier Apply') + '<input type="file" accept=".json,application/json" class="aim-vv-restore-file" data-aim-vv-restore-file="1" style="display:none"></div>';
+        }
+        html += '</div>';
+        setPanelHtml(el, html);
+        deckRefresh();
     }
     function backupsFor(mid) { try { return (GM_getValue(BACKUPS_KEY, []) || []).filter(b => String(b.mid) === String(mid)); } catch (e) { return []; } }
     function reportsFor(mid) { try { return (GM_getValue(REPORTS_KEY, []) || []).filter(r => String(r.mid) === String(mid)); } catch (e) { return []; } }
@@ -2132,26 +2419,7 @@
         drawGhosts(); renderEdit();
     }
     // While a drag is in progress only the numbers change — never rebuild the panel (that would replace the elements).
-    function refreshScrubValues() {
-        if (!ed.panelEl) return;
-        const shot = currentShotForEdit();
-        const step = shot && shot.step && shot.step.type_name === 'snapshot' ? wk(shot.step.id) : null;
-        if (!step) return;
-        const pose = wkPose(step), nav = pose.nav;
-        const set = (kind, txt) => { const el = ed.panelEl.querySelector('[data-aim-vv-scrub="' + kind + '"]'); if (el && el.textContent !== txt) el.textContent = txt; };
-        set('heading', pose.heading != null ? pose.heading.toFixed(0) + '°' : '–');
-        set('camera', pose.pitchDeg != null ? pose.pitchDeg.toFixed(0) + '°' : '–');
-        set('alt', fmtAlt(nav ? nav.value1 : null));
-        if (isGps(step)) { set('target-alt', fmtAlt(step.value1)); set('range', fmtDist(pose.range)); }
-        else if (nav && nav.location) { const lk = inplaceLook(step); if (lk) { const h = (typeof nav.value1 === 'number' && lk.aim.alt != null) ? nav.value1 - lk.aim.alt : null; set('range', fmtDist(lk.dist) + (h != null ? ' / ' + fmtDist(Math.sqrt(lk.dist * lk.dist + h * h)) + ' LOS' : '') + (lk.aim.capped ? ' (capped)' : '')); } else set('range', '?'); }
-        const o = nav && origOf(nav.id);
-        if (o && o.location && nav.location) {
-            const ns = distM(o.location, { lat: nav.location.lat, lng: o.location.lng }) * (nav.location.lat >= o.location.lat ? 1 : -1);
-            const ew = distM(o.location, { lat: o.location.lat, lng: nav.location.lng }) * (nav.location.lng >= o.location.lng ? 1 : -1);
-            set('nav-ns', signed(ns * M_TO_FT, ' ft', 0) + ' N'); set('nav-ew', signed(ew * M_TO_FT, ' ft', 0) + ' E');
-            const inp = ed.panelEl.querySelector('[data-aim-vv-latlng]'); if (inp && document.activeElement !== inp) inp.value = nav.location.lat.toFixed(6) + ', ' + nav.location.lng.toFixed(6);
-        }
-    }
+    function refreshScrubValues() { deckRefresh(); }
     function onCopyClick(e) {
         if (!groupHost || !groupHost.classList.contains('aim-vv-split')) return;
         const grid = groupHost.children[1]; if (!grid || !grid.contains(e.target)) return;
@@ -2169,8 +2437,28 @@
         const b = e.target.closest && e.target.closest('[data-aim-vv-ed]');
         if (!b || !model) return;
         e.preventDefault(); e.stopPropagation();
-        if (ed.busy) return;
-        const act = b.dataset.aimVvEd; const mult = e.shiftKey ? 5 : 1; const n = Number(b.dataset.n || 1) * mult;
+        if (b.dataset.rep && Date.now() < holdSuppressUntil) return;   // the click that ends a held press
+        edAct(b, e.shiftKey);
+    }
+    // Hold a dial / altitude button to repeat it.
+    let hold = null, holdSuppressUntil = 0;
+    function onHoldDown(e) {
+        const b = e.target.closest && e.target.closest('[data-aim-vv-ed][data-rep]');
+        if (!b || e.button !== 0 || !model) return;
+        onHoldUp();
+        const h = { b, shift: e.shiftKey, fired: false };
+        h.t = setTimeout(() => { h.iv = setInterval(() => { h.fired = true; try { edAct(h.b, h.shift); } catch (err) { warn('hold repeat failed:', err); onHoldUp(); } }, 90); }, 380);
+        hold = h;
+    }
+    function onHoldUp() {
+        if (!hold) return;
+        clearTimeout(hold.t); clearInterval(hold.iv);
+        if (hold.fired) holdSuppressUntil = Date.now() + 400;
+        hold = null;
+    }
+    function edAct(b, shift) {
+        if (ed.busy || !model) return;
+        const act = b.dataset.aimVvEd; const mult = shift ? 5 : 1; const n = Number(b.dataset.n || 1) * mult;
         const shot = currentShotForEdit();
         const step = shot && shot.step && shot.step.type_name === 'snapshot' ? wk(shot.step.id) : null;
         const sd = Number(settings.stepDeg) || 1, sp = Number(settings.stepPitch) || 1, sf = (Number(settings.stepFt) || 1) * FT, sa = (Number(settings.stepAltFt) || 1) * FT;
@@ -2178,9 +2466,14 @@
             if (act === 'review') { openReview(); return; }
             if (act === 'discard') { edResetWork(); toast('Pending changes discarded', false); return; }
             if (act === 'close') { ed.open = false; ensureEditPanel(); return; }
+            if (act === 'altref') { settings.deckAltRef = b.dataset.v === 'msl' ? 'msl' : 'agl'; saveSettings(); renderEdit(); return; }
+            if (act === 'vkind') { settings.deckKind = ['RGB', 'T', 'G'].includes(b.dataset.v) ? b.dataset.v : 'RGB'; saveSettings(); renderEdit(); return; }
+            if (act === 'view') { settings.deckView = b.dataset.v === 'pr' ? 'pr' : 'vf'; saveSettings(); renderEdit(); return; }
+            if (act === 'more') { ed.more = !ed.more; renderEdit(); return; }
+            if (act === 'aim-place') { if (step) setPlacing(ed.placing && ed.placing.aimId != null ? null : { aimId: step.id }); renderEdit(); return; }
             if (act === 'nav-move' && step) { const nav = wkNavOf(step); if (nav && nav.location) { moveNavKeepAim(nav, moveLL(nav.location, Math.abs(n) * (Number(settings.stepFt) || 1) * FT, Number(b.dataset.b))); edLog('nav ' + ({ 0: 'N', 90: 'E', 180: 'S', 270: 'W' }[b.dataset.b] || b.dataset.b + '°') + ' ' + Math.abs(n * (Number(settings.stepFt) || 1)) + ' ft', nav); } }
             else if (act === 'nav-keep-aim') { settings.navKeepAim = !settings.navKeepAim; saveSettings(); renderEdit(); return; }
-            else if (act === 'nav-place' && step) { setPlacing(ed.placing ? null : { navId: wkNavOf(step) && wkNavOf(step).id }); }
+            else if (act === 'nav-place' && step) { setPlacing(ed.placing && ed.placing.navId != null ? null : { navId: wkNavOf(step) && wkNavOf(step).id }); }
             else if (act === 'nav-set' && step) {
                 const nav = wkNavOf(step); const inp = ed.panelEl && ed.panelEl.querySelector('[data-aim-vv-latlng]');
                 const m = inp && inp.value.match(/(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)/);
@@ -2204,6 +2497,16 @@
             else if (act === 'tilt') { edTilt(step, isGps(step) ? n * sa : n * sp); edLog((n > 0 ? 'up ' : 'down ') + Math.abs(isGps(step) ? n * (Number(settings.stepAltFt) || 1) : n * sp) + (isGps(step) ? ' ft' : '°'), step); }
             else if (act === 'range') { edRange(step, n * sf); edLog((n < 0 ? 'closer ' : 'farther ') + Math.abs(n * (Number(settings.stepFt) || 1)) + ' ft', step); }
             else if (act === 'alt') { edAlt(step, n * sa); edLog('alt ' + (n > 0 ? '+' : '−') + Math.abs(n * (Number(settings.stepAltFt) || 1)) + ' ft', step); }
+            else if (act === 'd-range') { edDroneRange(step, -n * sf); edLog('drone ' + (n > 0 ? 'closer ' : 'farther ') + Math.abs(n * (Number(settings.stepFt) || 1)) + ' ft', step); }
+            else if (act === 'd-slide') { const nav = wkNavOf(step); const h = wkPose(step).heading; if (nav && nav.location && h != null) { moveNavKeepAim(nav, moveLL(nav.location, Math.abs(n) * sf, h + (n > 0 ? 90 : -90))); edLog('drone ' + (n > 0 ? 'right ' : 'left ') + Math.abs(n * (Number(settings.stepFt) || 1)) + ' ft', step); } }
+            else if (act === 'c-tilt') {
+                if (isGps(step)) { edRange(step, n * sf); edLog('aim ' + (n > 0 ? 'farther ' : 'closer ') + Math.abs(n * (Number(settings.stepFt) || 1)) + ' ft', step); }
+                else { edTilt(step, n * sp); edLog((n > 0 ? 'up ' : 'down ') + Math.abs(n * sp) + '°', step); }
+            }
+            else if (act === 't-alt') {
+                if (!isGps(step)) { if (!edConvertPlanned(step)) { toast('Terrain for this shot is not loaded yet — try again in a moment', true); return; } edLog('Convert → GPS aim point', step); toast(stepLabel(step) + ' is now a GPS aim point', false); }
+                step.value1 = +((typeof step.value1 === 'number' ? step.value1 : 0) + n * sa).toFixed(2); edLog('target alt ' + (n > 0 ? '+' : '−') + Math.abs(n * (Number(settings.stepAltFt) || 1)) + ' ft', step);
+            }
             else if (act === 'adopt') { edAdopt(step, shot); delete step._aim; edLog('Adopt actual shot', step); }
             else if (act === 'convert') { ed.busy = true; edConvertGps(step, shot).then(ok => { ed.busy = false; if (ok) edLog('Convert → GPS aim point', step); drawGhosts(); renderEdit(); }); return; }
             else if (act === 'dup') { const c = edDuplicateBlock(step); toast(c ? 'Block duplicated after ' + stepLabel(step) : 'Could not duplicate', !c); if (c) edLog('Duplicate block after', step); }
@@ -2217,7 +2520,7 @@
         ed.placing = p;
         const c = document.querySelector('.leaflet-container');
         if (c) c.classList.toggle('aim-vv-placing', !!p);
-        if (p) toast('Click the map to place the nav · Esc cancels', false);
+        if (p) toast(p.aimId != null ? 'Click the map where the camera should aim · Esc cancels' : 'Click the map to place the drone · Esc cancels', false);
     }
     function onMapPlaceClick(e) {
         if (!ed.placing || !model) return;
@@ -2226,6 +2529,26 @@
         e.preventDefault(); e.stopPropagation();
         let ll = null;
         try { ll = map.mouseEventToLatLng(e); } catch (err) { warn('place: latlng failed:', err); }
+        if (ed.placing.aimId != null) {
+            const st = wk(ed.placing.aimId); const nv = st ? wkNavOf(st) : null;
+            setPlacing(null);
+            if (!ll || !st || !nv || !nv.location) { renderEdit(); return; }
+            if (distM(nv.location, ll) > 2000) { toast('That is ' + fmtDist(distM(nv.location, ll)) + ' from the drone — refusing (>2000 m)', true); renderEdit(); return; }
+            const wasGps = isGps(st), prior = lookOf(st, nv);
+            ed.busy = true;
+            dem(ll).catch(err => { warn('place aim: terrain lookup failed:', err); return null; }).then(g => {
+                ed.busy = false;
+                const alt = wasGps ? st.value1 : (g != null ? g : (prior && prior.alt != null ? prior.alt : null));
+                if (alt == null) { toast('Could not read the terrain there — aim not moved', true); renderEdit(); return; }
+                st.location = { lat: +(+ll.lat).toFixed(8), lng: +(+ll.lng).toFixed(8) }; st.value1 = +(+alt).toFixed(2);
+                if (!wasGps) { const e2 = eo(st); e2.heading = 0; e2.pitch = 2000; }
+                delete st._aim;
+                edLog(wasGps ? 'Aim placed on map' : 'Aim placed on map (converted to GPS aim point)', st);
+                drawGhosts(); renderEdit();
+                toast(stepLabel(st) + ' aim moved — review to apply', false);
+            });
+            return;
+        }
         const nav = ed.placing.navId != null ? wk(ed.placing.navId) : null;
         setPlacing(null);
         if (!ll || !nav) { renderEdit(); return; }
@@ -2235,6 +2558,285 @@
         toast('Nav ' + stepLabel(nav) + ' moved — review to apply', false);
     }
     function onPlaceKey(e) { if (e.key === 'Escape' && ed.placing) { setPlacing(null); renderEdit(); } }
+    // ===============================================================
+    // MICRO / SHARED-PAD SYNC (feature #333, v0.62)
+    // The Mission Bank builds a macro as takeoff + each pad's MICRO body + returnHome, and its ⟳ Re-merge treats the
+    // micro as the source of truth. Edits made HERE land in the macro, so without this the micro (and the other macro
+    // that carries the same pad — the Tattu / Tulip pair) keep the old steps and the next ⟳ would pull them back in.
+    // On Apply we therefore offer to push the edited pad into every mission that shares it. THE MACRO IS THE MASTER.
+    //   pad = a mission whose whole body sits inside this macro as one run (exact step match), or — when it had
+    //         already drifted — the run holding its SNAPSHOTS (snapshots decide which pad a step belongs to; the navs
+    //         before a snapshot travel with it). Never located by navs alone.
+    //   target = that mission (its body is replaced, its own takeoff / returnHome / name / settings stay) or any other
+    //         mission that contains the pad's old steps (only that run is replaced).
+    // Rails: plan is rebuilt from a fresh read at Apply · one backup JSON for every target (Mission Bank ↩ Restore
+    // reads it) · sequential saves · re-read + verify by NAME (every save mints a new id) · every failure is listed.
+    // ===============================================================
+    const SY_NAV = 1, SY_SNAP = 6;
+    function syIns(app) { return ((app && app.instructions) || []).filter(Boolean).slice().sort((a, b) => a.index_in_app - b.index_in_app); }
+    function syBody(ins) { return ins.filter(i => i.type !== 0 && i.type !== 99); }
+    // Tolerant step signature (Mission Bank's re-merge signature + snapshot heading): type, values, position to 6
+    // decimals and only the tuning-relevant extra_options — everything else is save-path churn that never converges.
+    function sySig(st) {
+        const f = (v) => typeof v === 'number' ? v.toFixed(2) : (v == null ? 'null' : String(v));
+        const loc = (st.location && typeof st.location.lat === 'number') ? st.location.lat.toFixed(6) + ',' + st.location.lng.toFixed(6) : '-';
+        const src = st.extra_options || {}; const keep = {};
+        if (st.type === SY_SNAP && src.pitch != null) keep.p = src.pitch;
+        if (st.type === SY_SNAP && typeof src.heading === 'number') keep.h = +src.heading.toFixed(1);
+        if (st.type === SY_NAV && src.shouldUseFreezoneMinAlt != null) keep.f = src.shouldUseFreezoneMinAlt;
+        return st.type + '|' + f(st.value1) + '|' + f(st.value2) + '|' + loc + '|' + JSON.stringify(keep);
+    }
+    function syFindRuns(hay, needle) {
+        const out = []; if (!needle.length || needle.length > hay.length) return out;
+        for (let i = 0; i + needle.length <= hay.length; i++) { let k = 0; while (k < needle.length && hay[i + k] === needle[k]) k++; if (k === needle.length) out.push(i); }
+        return out;
+    }
+    function sySnaps(body) {
+        const out = [];
+        body.forEach((st, i) => { if (st.type !== SY_SNAP) return; let nav = null; for (let k = i - 1; k >= 0; k--) if (body[k].type === SY_NAV) { nav = body[k]; break; } out.push({ i, st, gps: isGps(st), nav }); });
+        return out;
+    }
+    // Same snapshot? GPS snapshots by aim point (5 m). An in-place snapshot has no position of its own, so it is
+    // compared where it is taken from (5 m) + which way it faces (45°).
+    function sySnapNear(a, b) {
+        if (a.gps && b.gps) { const d = distM(a.st.location, b.st.location); return d != null && d <= 5; }
+        const na = a.nav && a.nav.location, nb = b.nav && b.nav.location; const d = (na && nb) ? distM(na, nb) : null;
+        if (d == null || d > 5) return false;
+        if (a.gps || b.gps) return true;
+        const dh = hdgDelta((a.st.extra_options || {}).heading, (b.st.extra_options || {}).heading);
+        return dh == null || Math.abs(dh) <= 45;
+    }
+    // Find the run of `hay` that holds `needle`'s snapshots. full = every snapshot found and no foreign snapshot in the run.
+    function syLocateBySnaps(needle, hay) {
+        const ns = sySnaps(needle), hs = sySnaps(hay);
+        if (!ns.length || !hs.length) return null;
+        const used = {}; const hit = [];
+        ns.forEach(a => { const j = hs.findIndex((b, jj) => !used[jj] && sySnapNear(a, b)); if (j >= 0) { used[j] = true; hit.push(j); } });
+        if (hit.length < Math.max(1, Math.ceil(ns.length * 0.8))) return null;
+        const lo = Math.min.apply(null, hit), hi = Math.max.apply(null, hit);
+        if (hit.length < Math.ceil((hi - lo + 1) * 0.8)) return null;
+        const lead = ns[0].i, trail = needle.length - 1 - ns[ns.length - 1].i;
+        const floor = lo > 0 ? hs[lo - 1].i + 1 : 0, ceil = hi < hs.length - 1 ? hs[hi + 1].i : hay.length;
+        return { s: Math.max(floor, hs[lo].i - lead), e: Math.min(ceil, hs[hi].i + 1 + trail), exact: false, full: hit.length === ns.length && hi - lo + 1 === ns.length, hit: hit.length, of: ns.length };
+    }
+    function syCounts(steps) { return steps.filter(x => x.type === SY_NAV).length + ' nav / ' + steps.filter(x => x.type === SY_SNAP).length + ' snap / ' + steps.length + ' steps'; }
+    // list = the site's missions (fresh) · macroId = the live macro's id in that list · pre = the macro's live steps
+    // (ids = working-copy ids) · work = the edited working copy.
+    function syBuildPlan(list, macroId, pre, work) {
+        const preB = syBody(pre), workB = syBody(work), preSig = preB.map(sySig);
+        const idx = {}; preB.forEach((st, i) => { idx[st.id] = i; });
+        // Which original step does each edited step belong to? A new step (duplicated block) follows its source.
+        let own = -1; const owner = workB.map(w => { if (!w._new && idx[w.id] != null) own = idx[w.id]; return own; });
+        const firstReal = owner.find(o => o >= 0); for (let i = 0; i < owner.length && owner[i] < 0; i++) owner[i] = firstReal != null ? firstReal : 0;
+        const newBlockOf = (s, e) => {
+            const at = []; workB.forEach((w, i) => { if (owner[i] >= s && owner[i] < e) at.push(i); });
+            const contiguous = !at.length || at[at.length - 1] - at[0] + 1 === at.length;
+            return { steps: at.map(i => workB[i]), contiguous };
+        };
+        const others = (list || []).filter(a => a && Number(a.id) !== Number(macroId) && Array.isArray(a.instructions)).map(a => { const ins = syIns(a); const body = syBody(ins); return { app: a, ins, body, sig: body.map(sySig) }; }).filter(o => o.body.length);
+        // 1) units = missions that live inside this macro
+        const units = [];
+        others.forEach(o => {
+            if (o.body.length > preB.length) return;
+            const runs = syFindRuns(preSig, o.sig);
+            if (runs.length === 1) { units.push({ o, s: runs[0], e: runs[0] + o.body.length, exact: true, full: true }); return; }
+            if (runs.length > 1) { units.push({ o, s: runs[0], e: runs[0] + o.body.length, exact: true, full: true, manual: 'its steps appear ' + runs.length + ' times in this macro' }); return; }
+            const loc = syLocateBySnaps(o.body, preB);
+            if (loc && loc.e > loc.s) units.push(Object.assign({ o }, loc));
+        });
+        const inside = (a, b) => a.s >= b.s && a.e <= b.e && (a.e - a.s) < (b.e - b.s);
+        const overlap = (a, b) => a.s < b.e && b.s < a.e;
+        // a snapshot-located mission that CONTAINS another located mission is a macro, not a pad — handled per pad below
+        const demoted = units.filter(u => !u.exact && units.some(v => v !== u && inside(v, u)));
+        const padUnits = units.filter(u => demoted.indexOf(u) < 0);
+        padUnits.filter(u => !u.exact).forEach(u => {
+            padUnits.filter(v => v.exact && overlap(u, v) && !inside(v, u) && !inside(u, v) && !(u.s === v.s && u.e === v.e)).forEach(v => { if (v.s <= u.s) u.s = Math.max(u.s, v.e); else u.e = Math.min(u.e, v.s); });
+            if (u.e <= u.s) u.manual = 'could not tell its steps apart from a neighbouring pad';
+        });
+        padUnits.filter(u => !u.exact && !u.manual).forEach(u => { if (padUnits.some(v => v !== u && !v.exact && !v.manual && overlap(u, v) && !(u.s === v.s && u.e === v.e) && !inside(u, v) && !inside(v, u))) u.manual = 'its snapshots overlap another micro that also differs from this macro'; });
+        // 2) pads + unit targets
+        const pads = {}; const targets = [];
+        padUnits.forEach(u => {
+            const key = u.s + '-' + u.e;
+            const oldBlock = preB.slice(u.s, u.e), nb = newBlockOf(u.s, u.e);
+            const edited = oldBlock.map(stepSig).join('\n') !== nb.steps.map(stepSig).join('\n');
+            if (!edited && u.exact) return;   // in sync and untouched
+            const isPad = !padUnits.some(v => v !== u && inside(v, u));
+            if (!pads[key]) pads[key] = { key, s: u.s, e: u.e, label: u.o.app.name, oldBlock, newBlock: nb.steps, edited, isPad };
+            else if (isPad && u.o.body.length <= oldBlock.length) pads[key].label = pads[key].label || u.o.app.name;
+            const manual = [];
+            if (u.manual) manual.push(u.manual);
+            if (!nb.contiguous) manual.push('its steps are no longer one run in the edited macro');
+            if (!nb.steps.length) manual.push('every step of this pad was deleted in the macro');
+            let drift = '';
+            if (!u.exact) { const os = oldBlock.map(sySig); drift = os.length === u.o.sig.length ? os.filter((g, i) => g !== u.o.sig[i]).length + ' of its ' + os.length + ' steps were already different' : 'It already had ' + u.o.sig.length + ' steps instead of ' + os.length; }
+            const t = { id: u.o.app.id, name: u.o.app.name, app: u.o.app, ins: u.o.ins, kind: isPad ? 'micro' : 'macro', edited, drift, reps: [{ pad: pads[key], ts: 0, te: u.o.body.length, exact: u.exact, full: u.full, hit: u.hit, of: u.of }], manual };
+            targets.push(t);
+        });
+        // 3) other missions that carry an EDITED pad (the Tattu / Tulip twin, a bigger macro, …)
+        const unitIds = {}; padUnits.forEach(u => { unitIds[u.o.app.id] = true; });
+        const editedPads = Object.keys(pads).map(k => pads[k]).filter(p => p.edited && p.newBlock.length).sort((a, b) => (b.e - b.s) - (a.e - a.s));
+        others.forEach(o => {
+            if (unitIds[o.app.id]) return;
+            const reps = [], manual = [];
+            editedPads.forEach(p => {
+                const needle = p.oldBlock.map(sySig);
+                const runs = syFindRuns(o.sig, needle);
+                let r = null;
+                if (runs.length === 1) r = { pad: p, ts: runs[0], te: runs[0] + needle.length, exact: true, full: true };
+                else if (runs.length > 1) { manual.push('"' + p.label + '" appears ' + runs.length + ' times in it'); return; }
+                else { const loc = syLocateBySnaps(p.oldBlock, o.body); if (loc && loc.e > loc.s) r = { pad: p, ts: loc.s, te: loc.e, exact: false, full: loc.full, hit: loc.hit, of: loc.of }; }
+                if (r && !reps.some(x => x.ts < r.te && r.ts < x.te)) reps.push(r);
+            });
+            if (reps.length || manual.length) targets.push({ id: o.app.id, name: o.app.name, app: o.app, ins: o.ins, kind: 'macro', edited: true, reps, manual });
+        });
+        // 4) the steps each target would be saved with
+        targets.forEach(t => {
+            try {
+                const bi = []; t.ins.forEach((st, i) => { if (st.type !== 0 && st.type !== 99) bi.push(i); });
+                if (!bi.length || bi[bi.length - 1] - bi[0] + 1 !== bi.length) throw new Error('it has a takeoff / return-home step in the middle of its steps');
+                const body = t.ins.slice(bi[0], bi[bi.length - 1] + 1);
+                t.reps.slice().sort((a, b) => b.ts - a.ts).forEach(r => { body.splice.apply(body, [r.ts, r.te - r.ts].concat(deepCopy(r.pad.newBlock))); });
+                t.newIns = t.ins.slice(0, bi[0]).concat(body, t.ins.slice(bi[bi.length - 1] + 1));
+                if (!t.reps.length) throw new Error('nothing to replace');
+            } catch (e) { t.manual.push(e.message); }
+            t.loose = t.reps.some(r => !r.exact);
+            t.defaultOn = !t.manual.length && t.edited && t.reps.every(r => r.exact || r.full);
+            t.key = t.id + ':' + (t.newIns ? t.newIns.length : 'x') + ':' + t.reps.map(r => r.ts + '-' + r.te).join(',');
+        });
+        // edited steps that sit in no pad at all (nothing to sync them to)
+        const covered = (i) => padUnits.some(u => i >= u.s && i < u.e);
+        let uncovered = 0;
+        preB.forEach((st, i) => { if (covered(i)) return; const n = workB.find(w => w.id === st.id); if (!n || stepSig(n) !== stepSig(st)) uncovered++; });
+        workB.forEach((w, i) => { if (w._new && !covered(owner[i])) uncovered++; });
+        return { targets, uncovered, missions: others.length };
+    }
+    function syRowText(t) {
+        return t.reps.map(r => {
+            const whole = t.kind === 'micro' || (r.ts === 0 && r.te === syBody(t.ins).length);
+            const was = r.te - r.ts, now = r.pad.newBlock.length;
+            return (whole ? 'all its steps' : 'pad "' + r.pad.label + '"') + ' (' + (was === now ? now + ' steps' : was + ' → ' + now + ' steps') + ')';
+        }).join(' · ');
+    }
+    function syRenderBox(plan, err) {
+        if (err) return '<div class="aim-vv-rv-sec warn">Could not check the micro missions (' + esc(err) + '). Only this mission will be saved.</div>';
+        const row = (t) => {
+            const kind = t.kind === 'micro' ? 'micro' : 'macro';
+            if (t.manual.length) return '<div class="aim-vv-rv-item"><span></span><span><b>' + esc(t.name) + '</b> <span class="dim">' + kind + '</span><div class="warn">Can\'t be updated from here (' + esc(t.manual.join('; ')) + '). Fix it in the Mission Bank.</div></span></div>';
+            return '<label class="aim-vv-rv-item"><input type="checkbox" data-aim-vv-sync="' + esc(t.id) + '" data-aim-vv-synckey="' + esc(t.key) + '" ' + (t.defaultOn ? 'checked' : '') + '><span><b>' + esc(t.name) + '</b> <span class="dim">' + kind + '</span>'
+                + (t.loose ? '<div class="dim">' + esc(t.drift || 'It was already a little different') + '. It will now match this mission.</div>' : '') + '</span></label>';
+        };
+        const mine = plan.targets.filter(t => t.edited), drift = plan.targets.filter(t => !t.edited);
+        let h = '';
+        if (mine.length) h += '<div class="aim-vv-rv-sec"><div class="aim-vv-rv-h">Also update</div><div class="dim">These share the pad you edited. Ticked ones get the same fix.</div>' + mine.map(row).join('') + '</div>';
+        if (plan.uncovered && !mine.length) h += '<div class="aim-vv-rv-sec dim">No micro mission shares the steps you edited, so nothing else needs updating.</div>';
+        if (drift.length) h += '<details class="aim-vv-rv-sec"><summary class="dim">' + drift.length + ' other micro' + (drift.length === 1 ? '' : 's') + ' in this mission ' + (drift.length === 1 ? 'is' : 'are') + ' out of date</summary><div class="dim">You didn\'t edit these here. Tick one to make it match this mission.</div>' + drift.map(row).join('') + '</details>';
+        return h;
+    }
+    // Plain-language lines for the Review window: one per shot, from what the drone / camera will actually do
+    // (a GPS conversion stores placeholder heading 0° / angle 0°, so the raw fields read as nonsense).
+    function rvSummary(diff) {
+        const w = edEnsureWork(); const changed = new Set(diff.map(d => d.id)); const done = new Set(); const lines = [];
+        w.forEach(st => {
+            if (st.type_name !== 'snapshot') return;
+            const nav = wkNavOf(st);
+            if (st._new) { lines.push({ label: 'New shot', text: 'added after ' + (nav ? stepLabel(nav) : 'the previous step') }); return; }
+            if (!changed.has(st.id) && !(nav && changed.has(nav.id))) return;
+            done.add(st.id); if (nav) done.add(nav.id);
+            const oSt = origOf(st.id) || st, oNav = nav ? (origOf(nav.id) || nav) : null;
+            const pose = poseOf(st, nav), oPose = oNav ? poseOf(oSt, oNav) : pose; const cam = [], drone = [];
+            const r0 = (v) => Math.round(v);
+            if (pose.heading != null && oPose.heading != null && r0(hdgDelta(oPose.heading, pose.heading))) cam.push('heading ' + oPose.heading.toFixed(0) + '° → ' + pose.heading.toFixed(0) + '°');
+            if (pose.pitchDeg != null && oPose.pitchDeg != null && r0(pose.pitchDeg - oPose.pitchDeg)) cam.push('angle ' + oPose.pitchDeg.toFixed(0) + '° → ' + pose.pitchDeg.toFixed(0) + '°');
+            if (isGps(st) && !isGps(oSt)) cam.push('now aims at a fixed GPS point (target ' + fmtAlt(st.value1) + ')');
+            else if (isGps(st) && F(st.value1) !== F(oSt.value1)) cam.push('target alt ' + fmtAlt(oSt.value1) + ' → ' + fmtAlt(st.value1));
+            if (nav && oNav && nav.location && oNav.location) { const mv = distM(oNav.location, nav.location); if (mv > 0.15) drone.push('moved ' + fmtDist(mv) + ' ' + compass16(bearingDeg(oNav.location, nav.location))); }
+            if (nav && oNav && typeof nav.value1 === 'number' && typeof oNav.value1 === 'number' && fmtAlt(nav.value1) !== fmtAlt(oNav.value1)) drone.push('altitude ' + fmtAlt(oNav.value1) + ' → ' + fmtAlt(nav.value1));
+            const parts = []; if (cam.length) parts.push('<span class="k">Camera</span> ' + esc(cam.join(', '))); if (drone.length) parts.push('<span class="k">Drone</span> ' + esc(drone.join(', ')));
+            lines.push({ label: stepLabel(st), html: parts.length ? parts.join('<br>') : 'small adjustment' });
+        });
+        diff.filter(d => d.kind === 'deleted' && d.type === 'snapshot').forEach(d => lines.push({ label: d.label, text: 'removed' }));
+        const rest = {}; diff.filter(d => d.kind === 'changed' && !done.has(d.id)).forEach(d => { (rest[d.label] = rest[d.label] || []).push(d.field + ' ' + d.before + ' → ' + d.after); });
+        Object.keys(rest).forEach(k => lines.push({ label: k, text: rest[k].join(', ') }));
+        return lines;
+    }
+    // Fill the review dialog's sync section; Apply stays disabled until the check has finished (or failed).
+    function syFillReview(el) {
+        const host = el.querySelector('[data-aim-vv-syncbox]'), btn = el.querySelector('[data-aim-vv-rv="apply"]');
+        const done = (html) => { if (ed.reviewEl !== el) return; host.innerHTML = html; if (btn && !el.__aimBlocked) btn.disabled = false; };
+        if (el.__aimBlocked) { host.innerHTML = ''; return; }
+        const sid = model.sid, macroId = model.liveApp && model.liveApp.id;
+        getJSON('/available_app/?site_id=' + encodeURIComponent(sid) + '&type=1').then(arr => {
+            const list = Array.isArray(arr) ? arr : (arr && (arr.results || arr.apps)) || [];
+            const plan = syBuildPlan(list, macroId, liveBase(), edEnsureWork());
+            log('sync check: ' + plan.targets.length + ' mission(s) share edited / drifted pads (' + plan.targets.map(t => '"' + t.name + '" ' + t.kind + (t.manual.length ? ' MANUAL: ' + t.manual.join('; ') : (t.loose ? ' loose' : ''))).join(', ') + ') · ' + plan.uncovered + ' edited step(s) outside any micro');
+            done(syRenderBox(plan, null));
+        }).catch(e => { warn('sync check failed:', e); done(syRenderBox(null, e.message)); });
+    }
+    function syReadTicks(el) {
+        const out = {}; if (!el) return out;
+        el.querySelectorAll('input[data-aim-vv-sync]').forEach(c => { if (c.checked) out[c.dataset.aimVvSync] = c.dataset.aimVvSynckey; });
+        return out;
+    }
+    const syWait = (ms) => new Promise(r => setTimeout(r, ms));
+    // Save every ticked target. Never throws: each target reports ok / error.
+    async function sySaveTargets(plan, ticks, sid, shape, csrf, backupInto) {
+        const results = [];
+        const want = Object.keys(ticks);
+        const picked = [];
+        want.forEach(id => {
+            const t = plan.targets.find(x => String(x.id) === String(id));
+            if (!t) { results.push({ id, name: '(mission ' + id + ')', ok: false, error: 'it changed or disappeared between Review and Apply — not touched' }); return; }
+            if (t.key !== ticks[id] || t.manual.length || !t.newIns) { results.push({ id, name: t.name, kind: t.kind, ok: false, error: t.manual.length ? t.manual.join('; ') : 'it changed between Review and Apply — not touched (reopen Review)' }); return; }
+            picked.push(t);
+        });
+        if (!picked.length) return results;
+        status('backing up ' + picked.length + ' linked mission' + (picked.length === 1 ? '' : 's') + '…');
+        picked.forEach(t => backupInto.push(t.app));   // their pre-edit copies ride in the one Apply file
+        for (const t of picked) {
+            const res = { id: t.id, name: t.name, kind: t.kind, ok: false, steps: t.newIns.length, what: syRowText(t) };
+            results.push(res);
+            try {
+                status('updating "' + t.name + '"…');
+                const built = buildBody(t.app, t.newIns, shape);
+                const r = await fetch('/available_app/', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrf }, body: JSON.stringify(built.body) });
+                const txt = await r.text().catch(() => '');
+                if (!r.ok) { warn('sync save of "' + t.name + '" failed HTTP ' + r.status + ': ' + txt.slice(0, 500)); warn('failing body:', built.body); throw new Error('save refused (HTTP ' + r.status + ')' + (txt ? ': ' + txt.replace(/\s+/g, ' ').slice(0, 160) : '')); }
+                res.saved = true;
+            } catch (e) { res.error = e.message; warn('sync of "' + t.name + '" failed:', e); }
+            await syWait(300);
+        }
+        const saved = results.filter(r => r.saved);
+        if (!saved.length) return results;
+        status('verifying linked missions…');
+        try {
+            const arr = await getJSON('/available_app/?site_id=' + encodeURIComponent(sid) + '&type=1');
+            const list = Array.isArray(arr) ? arr : (arr && (arr.results || arr.apps)) || [];
+            saved.forEach(res => {
+                const t = picked.find(x => x.id === res.id);
+                const cands = list.filter(a => a && a.name === t.name);
+                if (!cands.length) { res.error = 'saved, but no mission named "' + t.name + '" was found afterwards'; return; }
+                const exp = t.newIns.map(sySig).join('\n');
+                const hit = cands.find(a => syIns(a).map(sySig).join('\n') === exp);
+                if (!hit) { res.error = 'saved, but it read back different (' + syIns(cands[0]).length + ' steps, expected ' + t.newIns.length + ')'; return; }
+                const rb = JSON.stringify(t.app.robot_type_names || []), ra = JSON.stringify(hit.robot_type_names || []);
+                if (rb !== ra) { res.error = 'steps saved, but its drone types changed ' + rb + ' → ' + ra + ' — re-tick them in the Mission Bank editor'; return; }
+                res.ok = true; res.newId = hit.id;
+            });
+        } catch (e) { warn('sync verify read failed:', e); saved.forEach(res => { res.error = 'saved, but could not be re-read to verify (' + e.message + ')'; }); }
+        return results;
+    }
+    function syShowResults(name, results, note) {
+        const bad = results.filter(r => !r.ok);
+        const el = document.createElement('div'); el.className = 'aim-vv-review';
+        el.innerHTML = '<div class="aim-vv-review__box aim-vv-rv"><div><b>"' + esc(name) + '" saved' + (results.length ? ' — linked missions: ' + (results.length - bad.length) + ' updated' + (bad.length ? ', <span class="warn">' + bad.length + ' FAILED</span>' : '') : '') + '</b></div>'
+            + (note ? '<div class="warn" style="white-space:normal;max-width:860px">' + esc(note) + '</div>' : '')
+            + (results.length ? '<table>' + results.map(r => '<tr><td>' + (r.ok ? '✅' : '🛑') + '</td><td><b>' + esc(r.name) + '</b></td><td>' + esc(r.kind || '') + '</td><td style="white-space:normal;max-width:520px" class="' + (r.ok ? 'dim' : 'warn') + '">' + esc(r.ok ? (r.what || 'updated') + ' · verified' : r.error || 'failed') + '</td></tr>').join('') + '</table>' : '')
+            + (bad.length ? '<div class="warn" style="white-space:normal;max-width:860px">The failed missions still hold their OLD steps. Fix them in the Mission Bank before the next ⟳ Re-merge, or that pad\'s correction can be pulled back out of this macro.</div>' : '')
+            + '<div class="aim-vv-edit__row"><button type="button" data-aim-vv-rv="cancel">Close</button></div></div>';
+        if (ed.reviewEl) ed.reviewEl.remove();
+        document.body.appendChild(el); ed.reviewEl = el;
+    }
     // ---- review + apply ----
     function openReview() {
         const diff = edDiff();
@@ -2249,15 +2851,23 @@
         const shapeNote = '<div class="dim" style="margin:4px 0;color:' + (shape && shape.builtin ? '#ffd45f' : 'inherit') + '">Save shape: ' + esc(shape ? shapeLabel(shape) : 'none') + '</div>';
         const rows = diff.map(d => '<tr><td>' + esc(d.label) + '</td><td>' + esc(d.kind) + (d.field ? ' · ' + esc(d.field) : '') + '</td><td>' + esc(d.before != null ? d.before : '') + '</td><td>' + esc(d.after != null ? d.after : '') + '</td><td class="dim">' + esc(d.note || '') + '</td></tr>').join('');
         const el = document.createElement('div'); el.className = 'aim-vv-review';
-        const actions = ed.log.length ? '<div class="dim" style="margin:4px 0">actions: ' + ed.log.map((a, i) => (i + 1) + '. ' + esc(a.what) + (a.step ? ' <b>' + esc(a.step) + '</b>' : '')).join(' · ') + '</div>' : '';
+        const runs = []; ed.log.forEach(a => { const last = runs[runs.length - 1]; if (last && last.what === a.what && last.step === a.step) last.n++; else runs.push({ what: a.what, step: a.step, n: 1 }); });
+        const actions = runs.length ? '<div class="dim" style="margin:4px 0;white-space:normal">You did: ' + runs.map(a => esc(a.what) + (a.n > 1 ? ' ×' + a.n : '') + (a.step ? ' <b>' + esc(a.step) + '</b>' : '')).join(' · ') + '</div>' : '';
         const grp = model.mission.mission_group_id;
-        el.innerHTML = '<div class="aim-vv-review__box"><div><b>Review changes to mission "' + esc(model.mission.name || model.mission.app_name) + '"</b> <span class="dim">(app ' + esc(model.mission.app && model.mission.app.id) + (grp != null && grp >= 0 ? ' · affects every future flight of group ' + esc(grp) : ' · not part of a mission group') + ')</span></div>' + actions
-            + '<table><tr class="dim"><td>step</td><td>change</td><td>before</td><td>after</td><td></td></tr>' + rows + '</table>'
-            + shapeNote + '<div class="dim" style="margin:6px 0">Rails: the plan is re-read and compared first · a full JSON backup is saved (script storage + download) · ONE save · re-read and verified · a before/after report is saved + downloaded.</div>'
-            + (function() { try { const app = model.liveApp || model.mission.app; const r = resolveSelectedRobot(app, loadShape()); if (!r.value) blockers.push('Cannot resolve selected_robot: ' + r.from); const rep = Array.isArray(app.data_report_object_arr) ? app.data_report_object_arr.map(x => x && (x.name || x.id)).join(', ') : 'none'; return '<div class="dim">will send: name "' + esc(app.name) + '" · type ' + esc(app.type) + ' · site_id ' + esc(app.site) + ' · app_id <b>' + esc(app.id) + '</b>' + (app.__aimVvHow ? ' <span class="dim">(live app, ' + esc(app.__aimVvHow) + ')</span>' : '') + ' · selected_robot <b>' + esc(r.value || '?') + '</b> <span class="dim">(' + esc(r.from) + ')</span> · reports: ' + esc(rep) + ' · ' + edEnsureWork().length + ' instructions</div>'; } catch (e) { blockers.push('preflight failed: ' + e.message); return ''; } })()
-            + (blockers.length ? '<div class="warn">' + blockers.map(esc).join('<br>') + '</div>' : '')
-            + '<div class="aim-vv-edit__row"><button type="button" data-aim-vv-rv="apply" ' + (blockers.length ? 'disabled' : '') + '>Apply ' + diff.length + ' change' + (diff.length === 1 ? '' : 's') + '</button><button type="button" data-aim-vv-rv="cancel">Cancel</button><span class="aim-vv-review__status dim"></span></div></div>';
+        const sendNote = (function() { try { const app = model.liveApp || model.mission.app; const r = resolveSelectedRobot(app, loadShape()); if (!r.value) blockers.push('Cannot resolve selected_robot: ' + r.from); const rep = Array.isArray(app.data_report_object_arr) ? app.data_report_object_arr.map(x => x && (x.name || x.id)).join(', ') : 'none'; return '<div class="dim" style="white-space:normal">will send: name "' + esc(app.name) + '" · type ' + esc(app.type) + ' · site_id ' + esc(app.site) + ' · app_id <b>' + esc(app.id) + '</b>' + (app.__aimVvHow ? ' <span class="dim">(live app, ' + esc(app.__aimVvHow) + ')</span>' : '') + ' · selected_robot <b>' + esc(r.value || '?') + '</b> <span class="dim">(' + esc(r.from) + ')</span> · reports: ' + esc(rep) + ' · ' + edEnsureWork().length + ' instructions</div>'; } catch (e) { blockers.push('preflight failed: ' + e.message); return ''; } })();
+        const lines = rvSummary(diff);
+        el.innerHTML = '<div class="aim-vv-review__box aim-vv-rv"><div class="aim-vv-rv-title">Save changes to ' + esc(model.mission.name || model.mission.app_name) + '</div><div class="dim">' + (grp != null && grp >= 0 ? 'Every future flight of this mission will use them.' : 'This mission is not part of a mission group.') + '</div>'
+            + '<div class="aim-vv-rv-sec"><div class="aim-vv-rv-h">What changes</div>' + lines.map(l => '<div class="aim-vv-rv-line"><b>' + esc(l.label) + '</b><span>' + (l.html || esc(l.text || '')) + '</span></div>').join('') + '</div>'
+            + '<div data-aim-vv-syncbox><div class="aim-vv-rv-sec dim">Checking which micro missions share this pad…</div></div>'
+            + (blockers.length ? '<div class="aim-vv-rv-sec warn">' + blockers.map(esc).join('<br>') + '</div>' : '')
+            + '<div class="aim-vv-rv-foot"><button type="button" class="aim-vv-rv-pri" data-aim-vv-rv="apply" disabled>Save</button><button type="button" data-aim-vv-rv="cancel">Cancel</button><span class="aim-vv-review__status dim"></span></div>'
+            + '<details class="aim-vv-rv-sec"><summary class="dim">Details</summary>' + actions
+            + '<table><tr class="dim"><td>step</td><td>field</td><td>before</td><td>after</td><td></td></tr>' + rows + '</table>'
+            + '<div class="dim">app ' + esc(model.mission.app && model.mission.app.id) + (grp != null && grp >= 0 ? ' · group ' + esc(grp) : '') + '</div>' + shapeNote + sendNote
+            + '<div class="dim" style="white-space:normal">A backup is taken first, the mission is saved once, then re-read and checked. One file downloads at the end with the backup and a before/after report.</div></details></div>';
         document.body.appendChild(el); ed.reviewEl = el;
+        el.__aimBlocked = blockers.length > 0;
+        syFillReview(el);
     }
     function onReviewClick(e) {
         const b = e.target.closest && e.target.closest('[data-aim-vv-rv]'); if (!b) return;
@@ -2320,6 +2930,8 @@
     async function applyChanges() {
         if (ed.busy) return; ed.busy = true;
         const diff = edDiff(); const mid = model.mid, sid = model.sid;
+        const syTicks = syReadTicks(ed.reviewEl);
+        let bundle = null, wrote = false;   // ONE download per Apply: pre-edit mission + pre-edit linked missions + the report
         try {
             const shape = loadShape(), csrf = getCsrf();
             if (isLite() || !shape || !shape.sample || !csrf || !diff.length) throw new Error('blocked (lite / shape / csrf / empty)');
@@ -2334,8 +2946,16 @@
             const at = new Date().toISOString(), stamp = at.replace(/[:.]/g, '-');
             status('backing up…');
             const backup = { at, mid, sid, appId: freshApp.id, name: freshApp.name, app: freshApp };
-            gmPush(BACKUPS_KEY, backup, 20); download('vv-backup-' + mid + '-' + stamp + '.json', backup);
+            gmPush(BACKUPS_KEY, backup, 20);
+            // Shape read by BOTH restore paths: this script's "From backup file" (app.instructions) and the Mission Bank's ↩ Restore (missions[]).
+            bundle = { name: 'vv-' + mid + '-' + stamp + '.json', data: Object.assign({}, backup, { site: sid, savedAt: at, reason: 'vv-apply', missions: [freshApp], report: null }) };
             const fresh = { app: freshApp };
+            // Linked missions: plan from the SAME fresh read the macro was just checked against (before anything is written).
+            let syPlan = null, syNote = '';
+            if (Object.keys(syTicks).length) {
+                try { if (!lastType1 || lastType1.sid !== String(sid)) throw new Error('no fresh mission list'); syPlan = syBuildPlan(lastType1.list, freshApp.id, liveBase(), ed.work); }
+                catch (e) { warn('sync plan failed:', e); syNote = 'The linked missions were NOT updated (' + e.message + ') — only this mission was saved.'; }
+            }
             const built = buildBody(freshApp, ed.work, shape);
             log('save base = live app ' + freshApp.id + ' (' + freshIns.length + ' steps; flown record ' + appId + ')');
             log('save body: ' + built.body.instructions.length + ' instructions · keys ' + Object.keys(built.body).join(',') + (built.fromSample.length ? ' · from learned sample (unchanged): ' + built.fromSample.join(',') : '') + ' · shape: ' + shapeLabel(shape));
@@ -2343,6 +2963,7 @@
             const r = await fetch('/available_app/', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrf }, body: JSON.stringify(built.body) });
             const txt = await r.text().catch(() => '');
             if (!r.ok) { warn('save failed HTTP ' + r.status + ': ' + txt.slice(0, 500)); warn('failing body:', built.body); throw new Error('save HTTP ' + r.status); }
+            wrote = true;
             status('verifying (live mission)…');
             const afterApp = await fetchLiveApp(sid, appId, freshApp.name, model.plan);
             const after = { app: afterApp };
@@ -2354,18 +2975,30 @@
             if (repB !== repA) mism.push('data reports changed: ' + repB + ' → ' + repA);
             if (afterIns.length !== ed.work.length) mism.push('step count ' + afterIns.length + ' ≠ expected ' + ed.work.length);
             ed.work.forEach((w, i) => { const a = afterIns[i]; if (!a) return; const wa = deepCopy(w); delete wa._new; const dd = fieldDiffs(Object.assign({ type_name: w.type_name }, a), Object.assign({ type_name: w.type_name }, wa)); if (a.type !== w.type) mism.push('#' + i + ' type ' + a.type + ' ≠ ' + w.type); dd.forEach(d => mism.push('#' + i + ' ' + d.field + ': server ' + d.before + ' vs sent ' + d.after)); });
-            const report = { at, mid, sid, appId: fresh.app.id, name: fresh.app.name, group: model.mission.mission_group_id, actions: ed.log.map(a => ({ at: new Date(a.at).toISOString(), what: a.what, step: a.step })), changes: diff, verify: { ok: !mism.length, mismatches: mism }, httpStatus: r.status };
-            gmPush(REPORTS_KEY, report, 200); download('vv-correction-' + mid + '-' + stamp + '.json', report);
+            let syResults = [];
+            if (syPlan) {
+                if (afterIns.length !== ed.work.length) syNote = 'This mission read back with a different step count, so the linked missions were NOT updated. Sort this one out first.';
+                else { try { syResults = await sySaveTargets(syPlan, syTicks, sid, shape, csrf, bundle.data.missions); } catch (e) { warn('sync failed:', e); syNote = 'Updating the linked missions stopped early (' + e.message + ') — check each one in the Mission Bank.'; } }
+            }
+            const syBad = syResults.filter(x => !x.ok).length;
+            const report = { at, mid, sid, appId: fresh.app.id, name: fresh.app.name, group: model.mission.mission_group_id, actions: ed.log.map(a => ({ at: new Date(a.at).toISOString(), what: a.what, step: a.step })), changes: diff, verify: { ok: !mism.length, mismatches: mism }, httpStatus: r.status, sync: { asked: Object.keys(syTicks).length, note: syNote, results: syResults.map(x => ({ name: x.name, kind: x.kind, ok: x.ok, error: x.error || null, what: x.what || null, oldId: x.id, newId: x.newId || null })) } };
+            gmPush(REPORTS_KEY, report, 200);
+            bundle.data.report = report; download(bundle.name, bundle.data); bundle = null;
             sessionReports.push(report);
             if (mism.length) { warn('verify mismatches:', mism); toast('Saved, but ' + mism.length + ' field(s) read back differently — see console + report', true); }
-            else toast('✅ Saved ' + diff.length + ' change' + (diff.length === 1 ? '' : 's') + ' · verified · backup + report downloaded', false);
+            else if (syBad || syNote) toast('Saved this mission, but ' + (syBad ? syBad + ' linked mission' + (syBad === 1 ? '' : 's') + ' FAILED to update' : 'the linked missions were not updated') + ' — see the list', true);
+            else toast('✅ Saved ' + diff.length + ' change' + (diff.length === 1 ? '' : 's') + ' · verified' + (syResults.length ? ' · ' + syResults.length + ' linked mission' + (syResults.length === 1 ? '' : 's') + ' updated' : '') + ' · backup + report downloaded as one file', false);
             status(mism.length ? 'saved with ' + mism.length + ' mismatch(es)' : 'saved + verified');
             if (ed.reviewEl) { ed.reviewEl.remove(); ed.reviewEl = null; }
+            if (syResults.length || syNote) syShowResults(fresh.app.name, syResults, syNote);
             ed.work = null; ed.log = []; ed.busy = false;
             reloadModel('after save');
             return;
         } catch (e) {
-            warn('apply failed:', e); toast('🛑 Not applied: ' + e.message, true); status('failed: ' + e.message);
+            warn('apply failed:', e);
+            if (wrote && bundle) { download(bundle.name, bundle.data); toast('🛑 Saved, but a later step failed: ' + e.message + ' — the backup file was downloaded', true); }
+            else toast('🛑 Not applied: ' + e.message, true);
+            status('failed: ' + e.message);
             const b = ed.reviewEl && ed.reviewEl.querySelector('[data-aim-vv-rv="apply"]'); if (b) b.disabled = false;
         }
         ed.busy = false;
@@ -3018,7 +3651,11 @@
         document.addEventListener('click', onLegendToggle, true);
         document.addEventListener('click', onBarClick, true);
         document.addEventListener('click', onEditClick, true);
-        document.addEventListener('change', (e) => { const c = e.target; if (!c || !c.matches) return; if (c.matches('[data-aim-vv-ed-check="nav-keep-aim"]')) { settings.navKeepAim = !!c.checked; saveSettings(); log('nav keep-aim = ' + settings.navKeepAim); } else if (c.matches('[data-aim-vv-restore-file]')) onRestoreFile(e); }, true);
+        document.addEventListener('pointerdown', onHoldDown, true);
+        document.addEventListener('pointerup', onHoldUp, true);
+        document.addEventListener('pointercancel', onHoldUp, true);
+        window.addEventListener('blur', onHoldUp);
+        document.addEventListener('change', (e) => { const c = e.target; if (!c || !c.matches) return; if (c.matches('[data-aim-vv-lens]')) { settings.deckLens = Object.assign({}, settings.deckLens); settings.deckLens[c.dataset.aimVvLens] = c.value; saveSettings(); log('viewfinder lens ' + c.dataset.aimVvLens + ' = ' + c.value); { const n = document.querySelector('[data-aim-vv-lenshow]'); if (n) n.textContent = 'your pick'; } deckRefresh(); } else if (c.matches('[data-aim-vv-ed-check="nav-keep-aim"]')) { settings.navKeepAim = !!c.checked; saveSettings(); log('nav keep-aim = ' + settings.navKeepAim); } else if (c.matches('[data-aim-vv-restore-file]')) onRestoreFile(e); }, true);
         document.addEventListener('click', onMapPlaceClick, true);
         window.addEventListener('keydown', onPlaceKey, true);
         document.addEventListener('keydown', (e) => { const t = e.target; if (t && t.matches && t.matches('[data-aim-vv-latlng]')) { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); const b = ed.panelEl && ed.panelEl.querySelector('[data-aim-vv-ed="nav-set"]'); if (b) b.click(); } } }, true);
