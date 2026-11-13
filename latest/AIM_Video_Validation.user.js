@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.70
+// @version      0.71
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -33,7 +33,7 @@
 
     const SCRIPT_ID = 'aim-video-validation';
     const IS_DEV = (function() { try { return /^Latest - /.test((GM_info && GM_info.script && GM_info.script.name) || ''); } catch (e) { return false; } })();
-    const SCRIPT_VERSION = '0.70';
+    const SCRIPT_VERSION = '0.71';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -2055,8 +2055,10 @@
         const d = model && model.mission && model.mission.drone, ct = d && d.camera_types;
         if (!ct || typeof ct !== 'object') return [];
         return Object.keys(ct).map(k => {
-            const c = ct[k] || {}, h = Number(c.horizontal_fov), v = Number(c.vertical_fov);
-            if (!(h > 1 && h < 180 && v > 1 && v < 180)) return null;
+            const c = ct[k] || {}, a = Number(c.horizontal_fov), b = Number(c.vertical_fov);
+            if (!(a > 1 && a < 180 && b > 1 && b < 180)) return null;
+            // Pictures are landscape, so the wide angle is the horizontal one. Percepto lists the Sony with the two swapped (26.8 / 39.2), seen live 2026-11-13.
+            const h = Math.max(a, b), v = Math.min(a, b);
             return { id: 'drone:' + k, kind: /OGI|VENTUS/i.test(k) ? 'G' : (/THERMAL|BOSON|TAU/i.test(k) ? 'T' : 'RGB'), label: k + ' (this drone)', h, v };
         }).filter(Boolean);
     }
@@ -2064,10 +2066,12 @@
     function dkLens(im) {
         const list = dkLensList(), kind = (im && im.kind) || 'RGB';
         const picked = (settings.deckLens || {})[dkLensKey(im)];
-        if (picked) { const l = list.find(x => x.id === picked); if (l) return l; }
+        if (picked) { const l = list.find(x => x.id === picked); if (l) return Object.assign({ how: 'your pick' }, l); }
         const mine = dkDroneLenses();
         // OGI payload: thermal and GEM pictures come from the same camera, so a thermal picture falls back to the OGI lens.
-        return mine.find(l => l.kind === kind) || (kind === 'T' ? mine.find(l => l.kind === 'G') : null) || DK_LENSES.find(l => l.kind === kind) || DK_LENSES[0];
+        const auto = mine.find(l => l.kind === kind) || (kind === 'T' ? mine.find(l => l.kind === 'G') : null);
+        if (auto) return Object.assign({ how: 'auto: read from the drone that flew this' }, auto);
+        return Object.assign({ how: 'default: this drone lists no cameras' }, DK_LENSES.find(l => l.kind === kind) || DK_LENSES[0]);
     }
 
     const DK_ARROW = { up: 'M5 15l7-7 7 7', down: 'M5 9l7 7 7-7', left: 'M15 5l-7 7 7 7', right: 'M9 5l7 7-7 7', altUp: 'M12 19V5M5 12l7-7 7 7', altDown: 'M12 5v14M5 12l7 7 7-7' };
@@ -2103,7 +2107,7 @@
             + dkRead([['to target', 'dist', 'range'], ['moved', 'moved', ''], ['drone alt', 'dalt', 'alt']]) + '</div>'
             + '<div class="aim-vv-dk-mid"><div class="aim-vv-dk-tabs"><button type="button" class="aim-vv-dk-tab' + (view === 'vf' ? ' on' : '') + '" data-aim-vv-ed="view" data-v="vf">Viewfinder</button><button type="button" class="aim-vv-dk-tab' + (view === 'pr' ? ' on' : '') + '" data-aim-vv-ed="view" data-v="pr">Side profile</button></div>'
             + '<div class="aim-vv-dk-frame" title="Approximate preview. Striped = outside the original picture; dashed = the original frame.">' + (view === 'vf' ? (src ? '<img data-aim-vv-vf="1" alt="" src="' + esc(src) + '">' : '<div class="dim" style="padding:8px">no picture for this shot</div>') + '<span class="ch-v"></span><span class="ch-h"></span>' : '<svg data-aim-vv-pr="1" width="' + DK_W + '" height="' + DK_H + '" viewBox="0 0 ' + DK_W + ' ' + DK_H + '"></svg>') + '</div>'
-            + '<span class="dim" style="font-size:11px">approximate preview · lens <select data-aim-vv-lens="' + esc(dkLensKey(im)) + '" title="Camera that took this picture. Sets how far the preview moves per degree. From the drone that flew this mission when Percepto lists its cameras. Remembered per drone type." style="font:inherit;background:#171b22;color:#cfd8e3;border:1px solid #2a3442;border-radius:6px;padding:1px 4px">' + dkLensList().map(l => '<option value="' + esc(l.id) + '"' + (l.id === dkLens(im).id ? ' selected' : '') + '>' + esc(l.label) + ' · ' + l.h + '° × ' + l.v + '°</option>').join('') + '</select></span></div>'
+            + '<span class="dim" style="font-size:11px">approximate preview · lens <select data-aim-vv-lens="' + esc(dkLensKey(im)) + '" title="Camera that took this picture. Sets how far the preview moves per degree. From the drone that flew this mission when Percepto lists its cameras. Remembered per drone type." style="font:inherit;background:#171b22;color:#cfd8e3;border:1px solid #2a3442;border-radius:6px;padding:1px 4px">' + dkLensList().map(l => '<option value="' + esc(l.id) + '"' + (l.id === dkLens(im).id ? ' selected' : '') + '>' + esc(l.label) + ' · ' + l.h + '° × ' + l.v + '°</option>').join('') + '</select> <span data-aim-vv-lenshow="1">' + esc(dkLens(im).how) + '</span></span></div>'
             + '<div class="aim-vv-dk-card"><div class="aim-vv-dk-title" style="color:' + esc(settings.snapColor) + '">CAMERA</div><div class="aim-vv-dk-ctl">'
             + dkDial([{ act: 'c-tilt', n: 1, title: gps ? 'Aim ' + sf + ' ft farther away (camera tilts up)' : 'Tilt the camera ' + sp + '° up' }, { act: 'turn', n: 1, title: gps ? 'Move the aim point ' + sf + ' ft to the right' : 'Turn the camera ' + sd + '° right' }, { act: 'turn', n: -1, title: gps ? 'Move the aim point ' + sf + ' ft to the left' : 'Turn the camera ' + sd + '° left' }, { act: 'c-tilt', n: -1, title: gps ? 'Aim ' + sf + ' ft closer (camera tilts down)' : 'Tilt the camera ' + sp + '° down' }],
                 { act: 'aim-place', armed: pAim, color: settings.snapColor, icon: camIc, title: 'Place the camera target on the map (click here, then click the map)' + (gps ? '' : ' — converts this shot to a GPS aim point') })
@@ -3566,7 +3570,7 @@
         document.addEventListener('pointerup', onHoldUp, true);
         document.addEventListener('pointercancel', onHoldUp, true);
         window.addEventListener('blur', onHoldUp);
-        document.addEventListener('change', (e) => { const c = e.target; if (!c || !c.matches) return; if (c.matches('[data-aim-vv-lens]')) { settings.deckLens = Object.assign({}, settings.deckLens); settings.deckLens[c.dataset.aimVvLens] = c.value; saveSettings(); log('viewfinder lens ' + c.dataset.aimVvLens + ' = ' + c.value); deckRefresh(); } else if (c.matches('[data-aim-vv-ed-check="nav-keep-aim"]')) { settings.navKeepAim = !!c.checked; saveSettings(); log('nav keep-aim = ' + settings.navKeepAim); } else if (c.matches('[data-aim-vv-restore-file]')) onRestoreFile(e); }, true);
+        document.addEventListener('change', (e) => { const c = e.target; if (!c || !c.matches) return; if (c.matches('[data-aim-vv-lens]')) { settings.deckLens = Object.assign({}, settings.deckLens); settings.deckLens[c.dataset.aimVvLens] = c.value; saveSettings(); log('viewfinder lens ' + c.dataset.aimVvLens + ' = ' + c.value); { const n = document.querySelector('[data-aim-vv-lenshow]'); if (n) n.textContent = 'your pick'; } deckRefresh(); } else if (c.matches('[data-aim-vv-ed-check="nav-keep-aim"]')) { settings.navKeepAim = !!c.checked; saveSettings(); log('nav keep-aim = ' + settings.navKeepAim); } else if (c.matches('[data-aim-vv-restore-file]')) onRestoreFile(e); }, true);
         document.addEventListener('click', onMapPlaceClick, true);
         window.addEventListener('keydown', onPlaceKey, true);
         document.addEventListener('keydown', (e) => { const t = e.target; if (t && t.matches && t.matches('[data-aim-vv-latlng]')) { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); const b = ed.panelEl && ed.panelEl.querySelector('[data-aim-vv-ed="nav-set"]'); if (b) b.click(); } } }, true);

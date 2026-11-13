@@ -64,11 +64,12 @@
 - A site whose read fails is named in an orange warning with a Retry failed button, so a slow mission bank can no longer silently drop a site.
 - Read-only: nothing is written to Percepto.
 
-## 2026-11-12 — 🎞 AIM Video Validation latest v0.70 (latest only) — viewfinder uses the real lens width
+## 2026-11-12 — 🎞 AIM Video Validation latest v0.71 (latest only) — viewfinder uses the real lens width
 
 - The Adjust viewfinder and side profile now use the field of view of the camera that took the picture, instead of one assumed 60° lens: Sony ILX-LR1 50 mm 39.5° × 27°, Blackfly 24 MP 50° × 44°, Boson 640 18 mm 24° × 19° / 14 mm 32° × 26°, Ventus OGI 21.7° × 17.5°.
 - The lens is chosen from the picture kind (RGB / thermal / GEM); a picker under the preview changes it, remembered per drone type.
 - v0.70: the lens now comes from Percepto itself — the camera list (with field of view) of the drone that flew the mission. The built-in table is only a fallback.
+- v0.71: the picker says how the lens was chosen (auto from the drone / your pick / default), and a camera listed with its two angles swapped is corrected.
 
 ## 2026-11-12 — 🎞 AIM Video Validation latest v0.66 (latest only) — Adjust is now a flight deck
 
