@@ -1,9 +1,11 @@
-## 2026-11-13 — Site Setup Tools latest v4.500 (latest only) — 🛗 Elevators: ⬆ Raise existing
+## 2026-11-13 — Site Setup Tools latest v4.501 (latest only) — 🛗 Elevators: ⬆ Raise existing
 
 - **New ⬆ Raise existing button** in the Elevators panel (⊕ Generate → Elevators), with a ft box (default 20) — feature #340. Pilots asked for the bridges 15–20 ft higher: one click raises every elevator already on the site. Bridge bands move up by the step, elevator ceilings follow, elevator floors stay where they are.
-- **Altitudes only.** No vertex moves, no arc is added or removed, no FFZ or GM is touched. Elevators are found from the bridged transmission crossings plus the "Elevator NN" GMs (so manual ones are included). Anything that does not look like a clean staircase is skipped and named.
-- **Same safety as Commit:** Dry run, confirm, backup file + Delete Guard, one flight path at a time with a check after each, stops on the first failure, ↩ Undo last run restores.
-- Flight-path altitudes are whole metres, so 20 ft lands as 20 ft and 15 ft as 16 ft. GM names keep the old height — rename with SUM → Bulk → 🏷 Rename.
+- **Altitudes only.** No vertex moves, no arc is added or removed, no FFZ is touched. Bridge and elevators change in the same save, so a bridge is never above its elevators. Elevators are found from the bridged transmission crossings plus the "Elevator NN" GMs (so manual ones are included). Anything that does not look like a clean staircase is skipped and named.
+- **Same safety as Commit:** Dry run, confirm, backup file + Delete Guard, one flight path at a time with a check after each, ↩ Undo last run restores.
+- **Elevator GMs are renamed** to the new bridge floor AGL ("Elevator 07 - 200ft" → "Elevator 07 - 220ft"); Undo puts the old names back.
+- **A flight path Percepto refuses** (for example a climb that is too steep) is reported and left as it was; the run carries on and lists the failures at the end.
+- Flight-path altitudes are whole metres, so 20 ft lands as 20 ft and 15 ft as 16 ft — a toast says so when you type the number.
 
 ## 2026-11-12 — 🌐 AIM Fleet Tools latest v0.86 (latest only) — 📅 Sweep Scheduler: 📆 Calendar view
 

@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.499
+// @version      4.501
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  v4.498 (#329): SOP check 'FP ⨯ FP crossing' — two flight-path segments that intersect / T / overlap WITHOUT a shared vertex (same or different FPs; the drone's safe-zone recalc thrashes at the crossing); Control Panel ☑ All / ☐ None / ◎ solo on the SOP checks; ?aim-goto=lat,lng,z URL param pans + pulses the Site Setup map on load (Fleet Tools SOP Sweep links). Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -92,7 +92,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.499';
+    const SCRIPT_VERSION = '4.501';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -22543,7 +22543,11 @@
                 <button id="aim-elv-scan" style="${btnCss('255,154,61')}" title="Find every flight path that crosses a red transmission KML line and stage an elevator set at each crossing">🔍 Scan crossings</button>
                 <button id="aim-elv-restage" style="${btnCss('160,160,160')}" title="Re-read the site and rebuild every staged crossing with the current numbers">↻ Re-stage</button>
                 <button id="aim-elv-commit" style="${btnCss('95,255,95')};font-weight:600" title="Write the staged elevators: one POST per flight path (JSON + Delete Guard backups first, verify after, stop on the first failure), then one pole GM per crossing. Honours Dry run.">✓ Commit</button>
-                <button id="aim-elv-undo" style="${btnCss('255,179,71')}" title="Re-POST the flight paths exactly as they were before the last commit on this site and delete the GMs it created">↩ Undo last run</button>
+                <button id="aim-elv-undo" style="${btnCss('255,179,71')}" title="Re-POST the flight paths exactly as they were before the last commit or raise on this site and delete the GMs it created">↩ Undo last run</button>
+                <span style="display:inline-flex;align-items:center;gap:4px;border-left:1px solid rgba(255,255,255,0.15);padding-left:8px">
+                    <button id="aim-elv-raise" style="${btnCss('122,223,230')}" title="Raise the elevators that are ALREADY on the site: every bridge band moves up by this many ft and the elevator ceilings follow (elevator floors stay). Altitudes only — no vertex moves. Finds them by bridged transmission crossings + the Elevator GMs. Honours Dry run; backups + Undo like Commit.">⬆ Raise existing</button>
+                    <input id="aim-elv-raise-ft" type="number" value="20" min="1" max="200" step="1" title="How many ft higher (applied in whole metres: 15 ft → 16 ft, 20 ft → 20 ft)" style="width:46px;background:#1a1d23;border:1px solid rgba(122,223,230,0.4);color:#fff;border-radius:2px;padding:2px 3px;font:inherit;font-size:11px"> <span style="color:#888;font-size:10px">ft</span>
+                </span>
                 <button id="aim-elv-clear" style="${btnCss('255,90,90')}" title="Drop every staged crossing (local only — nothing on the server is touched)">✕ Clear</button>
                 <span style="color:#888;font-size:10px">defaults: bridge ${elvCfg.floorAgl} + ${elvCfg.height} ft AGL · ±${elvCfg.halfFt} ft of the line · elevators ${elvCfg.elevFt} ft · ${elvCfg.overlapFt} ft overlaps (Control Panel → Elevators) · right-click a flight path → 🛗 for a manual crossing</span>
             </div>
@@ -22553,6 +22557,8 @@
         host.querySelector('#aim-elv-restage').onclick = () => elvRestage().catch(e => { console.error(`${TAG} 🛗 re-stage failed:`, e); elvLog(`Re-stage failed: ${elvEsc(e.message || e)}`, '#ff6060'); });
         host.querySelector('#aim-elv-commit').onclick = () => elvCommit().catch(e => { console.error(`${TAG} 🛗 commit failed:`, e); elvLog(`Commit failed: ${elvEsc(e.message || e)}`, '#ff6060'); elv.running = false; elvRenderList(); });
         host.querySelector('#aim-elv-undo').onclick = () => elvUndoLast().catch(e => { console.error(`${TAG} 🛗 undo failed:`, e); elvLog(`Undo failed: ${elvEsc(e.message || e)}`, '#ff6060'); elv.running = false; });
+        host.querySelector('#aim-elv-raise-ft').addEventListener('change', elvRaiseHint);
+        host.querySelector('#aim-elv-raise').onclick = () => elvRaiseExisting().catch(e => { console.error(`${TAG} 🛗 raise failed:`, e); elvLog(`Raise failed: ${elvEsc(e.message || e)}`, '#ff6060'); elv.running = false; elvRenderList(); });
         host.querySelector('#aim-elv-clear').onclick = () => { if (elv.running) return; elv.items = []; elv.writes = []; elvClearLayers(); elvRenderList(); elvSummary(); };
         host.addEventListener('change', (ev) => {
             const inp = ev.target.closest('[data-elv-id][data-elv-field]'); if (!inp || elv.running) return;
@@ -22743,10 +22749,229 @@
                 await new Promise(r => setTimeout(r, ELV_GAP_MS));
             }
         } finally { elv.running = false; }
-        if (!fpFail) { try { localStorage.removeItem(ELV_LAST_KEY(sid)); } catch (e) {} }
+        // a raise renamed Elevator GMs — put the old names back (name-only, same rail as the rename)
+        let rnOk = 0, rnFail = 0;
+        if (!fpFail && Array.isArray(rec.gmRenames) && rec.gmRenames.length) {
+            // one fresh read up front: every POST wipes the entity cache, so the loop works from this snapshot
+            try { await fetchMapObjects(sid, true); } catch (e) { console.warn(`${TAG} 🛗 undo refetch failed:`, e); }
+            const liveNow = elvLiveEntities(sid).slice();
+            for (const orig of rec.gmRenames) {
+                try {
+                    const cur = liveNow.find(e => e && e.id === orig.id);
+                    if (!cur) throw new Error('GM no longer on the site');
+                    if (cur.name !== orig.name) await elvRenameGm(cur, orig.name, sid, csrf);
+                    rnOk++;
+                } catch (e) { rnFail++; console.warn(`${TAG} 🛗 undo — GM "${orig.name}" rename back failed:`, e.message); }
+                await new Promise(r => setTimeout(r, ELV_GAP_MS));
+            }
+        }
+        if (!fpFail && !rnFail) { try { localStorage.removeItem(ELV_LAST_KEY(sid)); } catch (e) {} }
+        if (rnOk || rnFail) console.log(`${TAG} 🛗 undo: ${rnOk} GM name(s) restored${rnFail ? `, ${rnFail} FAILED` : ''}`);
+        if (rnFail) showToast(`Elevators undo: ${rnFail} GM name(s) could not be restored — see console`, 'rgba(255,96,96,0.55)');
         elv.items.forEach(it => { if (it.status === 'done') it.status = 'stage'; });
         elvLog(`Undo: ${fpOk} flight path(s) restored${fpFail ? `, <b style="color:#ff6060">1 FAILED</b> (backup JSON still has the originals)` : ''} · ${gmOk} GM(s) deleted${gmFail ? `, ${gmFail} failed` : ''} · ↻ Re-stage to rebuild`, fpFail || gmFail ? '#ffb347' : '#5fff5f');
         showToast(fpFail ? 'Elevators undo stopped on a failure' : `↩ ${fpOk} flight path(s) restored`, fpFail ? 'rgba(255,96,96,0.55)' : undefined);
+    }
+
+    // ---- ⬆ Raise existing (v4.500, feature #340) — pilots asked for the bridges 15–20 ft higher ----
+    // Altitude-only edit of staircases that are ALREADY on the site: every bridge arc's band moves up
+    // by the step, and every elevator arc's CEILING follows it (its floor stays on the neighbour).
+    // No vertex moves, no arc is added or removed, every arc keeps its id. Anchors = transmission
+    // crossings the scan reports as already bridged + the "Elevator NN - …" pole GMs (manual ones).
+    // A staircase is only touched when its shape is unambiguous: bridge run = the arcs around the
+    // anchor sharing its band; each side must then carry an elevator-shaped run (floor below the
+    // bridge floor, ceiling inside the bridge band). Anything else is skipped and named.
+    // Same rails as Commit: dry run, confirm, JSON + Delete Guard backups, one POST per FP (type 15
+    // only), verify by refetch, stop on the first failure, ↩ Undo last run restores.
+    function elvStairAt(live, arcIdx) {
+        const ch = elvChain(live, arcIdx);
+        const n = ch.legs.length, pos = ch.legs.findIndex(l => l.i === arcIdx);
+        const band = (k) => { const a = ch.arcs[ch.legs[k].i]; return { min: a.min_alt, max: a.max_alt }; };
+        const same = (x, y) => x.min === y.min && x.max === y.max;
+        const lenOf = (k0, k1) => ch.cum[k1 + 1] - ch.cum[k0];
+        const B = band(pos);
+        if (typeof B.min !== 'number' || typeof B.max !== 'number') return { fail: 'the crossed arc has no altitude band' };
+        let lo = pos, hi = pos;
+        while (lo > 0 && same(band(lo - 1), B)) lo--;
+        while (hi < n - 1 && same(band(hi + 1), B)) hi++;
+        const side = (dir) => {
+            let k = dir < 0 ? lo - 1 : hi + 1;
+            const nm = dir < 0 ? 'behind' : 'ahead of';
+            if (k < 0 || k >= n) return { fail: `the bridge band runs to the path end / a branch ${nm} the crossing with no elevator arc` };
+            const E = band(k);
+            if (!(typeof E.min === 'number' && typeof E.max === 'number' && E.min < B.min && E.max > B.min && E.max <= B.max)) return { fail: `the arc ${nm} the bridge (${elvFt(E.min)}–${elvFt(E.max)} ft MSL) is not elevator-shaped against the bridge (${elvFt(B.min)}–${elvFt(B.max)} ft MSL)` };
+            let k0 = k, k1 = k;
+            if (dir < 0) { while (k0 > 0 && same(band(k0 - 1), E)) k0--; } else { while (k1 < n - 1 && same(band(k1 + 1), E)) k1++; }
+            const idx = []; for (let q = k0; q <= k1; q++) idx.push(ch.legs[q].i);
+            return { idx, E, lenM: lenOf(k0, k1) };
+        };
+        const s1 = side(-1), s2 = side(1);
+        if (s1.fail || s2.fail) return { fail: s1.fail || s2.fail };
+        const bridge = []; for (let q = lo; q <= hi; q++) bridge.push(ch.legs[q].i);
+        return { B, bridge, bridgeLenM: lenOf(lo, hi), e1: s1, e2: s2 };
+    }
+    // plan: one write per flight path. dM = whole metres (FP arc bands are integer metres).
+    function elvRaisePlan(sid, anchors, dM) {
+        const byFp = new Map(), skipped = [], seen = new Map();
+        anchors.forEach(an => {
+            const live = elvLiveFp(sid, an.fpId);
+            if (!live || !Array.isArray(live.arcs)) { skipped.push({ an, why: 'flight path no longer on the site' }); return; }
+            const arcs = live.arcs.filter(a => a && a.point_a && a.point_b);
+            let best = { d: Infinity, i: -1 };
+            arcs.forEach((a, i) => { const pr = elvProj(an.ll, a.point_a, a.point_b); if (pr.d < best.d) best = { d: pr.d, i }; });
+            if (best.i < 0 || best.d > an.tolM) { skipped.push({ an, why: 'anchor is off the live path' }); return; }
+            const st = elvStairAt(live, best.i);
+            if (st.fail) { skipped.push({ an, why: st.fail }); return; }
+            const key = `${live.id}:${st.bridge.slice().sort((a, b) => a - b).join(',')}`;
+            if (seen.has(key)) { if (an.gm && !seen.get(key).gms.some(g => g.id === an.gm.id)) seen.get(key).gms.push(an.gm); return; }   // parallel circuits / GM + crossing = the same staircase
+            if (!byFp.has(live.id)) byFp.set(live.id, { fpId: live.id, fp: live, arcs, stairs: [], role: new Map(), fail: [], done: false });
+            const w = byFp.get(live.id);
+            const stair = Object.assign({ an, gms: an.gm ? [an.gm] : [] }, st);
+            seen.set(key, stair);
+            w.stairs.push(stair);
+        });
+        const writes = [];
+        byFp.forEach(w => {
+            // roles are SET, never accumulated: an elevator shared by two back-to-back staircases rises once
+            w.stairs.forEach(st => st.bridge.forEach(i => w.role.set(i, 'bridge')));
+            w.stairs.forEach(st => [st.e1, st.e2].forEach(E => E.idx.forEach(i => { if (w.role.get(i) === 'bridge') w.fail.push('an arc is both a bridge and an elevator of two staircases — raise this path by hand'); else w.role.set(i, 'elev'); })));
+            w.out = w.arcs.map((a, i) => {
+                const r = w.role.get(i), o = Object.assign({}, a);
+                if (r === 'bridge') { o.min_alt = fpArcAltMeters(a.min_alt + dM); o.max_alt = fpArcAltMeters(a.max_alt + dM); o._ch = true; }
+                else if (r === 'elev') { o.max_alt = fpArcAltMeters(a.max_alt + dM); o._ch = true; }
+                return o;
+            });
+            // strictly-positive band overlap at every shared vertex (server rule), inverted bands
+            const byV = new Map();
+            w.out.forEach((a, i) => [elvVk(a.point_a), elvVk(a.point_b)].forEach(k => { if (!byV.has(k)) byV.set(k, []); byV.get(k).push(i); }));
+            const bad = [];
+            byV.forEach(list => { for (let x = 0; x < list.length; x++) for (let y = x + 1; y < list.length; y++) { const P = w.out[list[x]], Q = w.out[list[y]]; if (!(P.max_alt > Q.min_alt && Q.max_alt > P.min_alt)) bad.push(`#${list[x] + 1}↔#${list[y] + 1} (${elvFt(P.min_alt)}–${elvFt(P.max_alt)} vs ${elvFt(Q.min_alt)}–${elvFt(Q.max_alt)} ft MSL)`); } });
+            if (bad.length) w.fail.push(`connected arcs would lose their altitude overlap: ${bad.slice(0, 4).join(', ')}`);
+            if (w.out.some(a => !(a.max_alt > a.min_alt))) w.fail.push('a band would be inverted');
+            if (!w.out.some(a => a._ch)) w.fail.push('nothing changes on this path');
+            writes.push(w);
+        });
+        return { writes, skipped };
+    }
+    // "Elevator 07 - 200ft" → "Elevator 07 - 220ft": the number is the bridge FLOOR AGL, so it moves by the step
+    function elvRaisedGmName(name, stepFt) {
+        const m = /^(Elevator\s+\d+\s*-\s*)(\d+(?:\.\d+)?)(\s*ft.*)$/i.exec(String(name || ''));
+        return m ? `${m[1]}${Math.round(Number(m[2]) + stepFt)}${m[3]}` : null;
+    }
+    // NAME-ONLY write of one Elevator GM (the only non-flight-path write this module makes besides creating them)
+    async function elvRenameGm(gm, newName, sid, csrf) {
+        if (!gm || gm.type === 15 || gm.type === 16 || !/^Elevator\s+\d+\s*-/i.test(String(gm.name || ''))) throw new Error('refusing to rename an entity that is not an Elevator GM');
+        if (!sciBankToGuard(gm, sid)) throw new Error('Delete Guard bank failed — not renaming');
+        const body = buildWriteBody(gm, elv.siteCfg);
+        body.name = newName;
+        return sciPostMapObject(body, csrf);
+    }
+    function elvRaiseHint() {
+        const inp = document.getElementById('aim-elv-raise-ft');
+        const ft = Number(inp && inp.value);
+        if (!isFinite(ft) || ft <= 0) return;
+        const dM = Math.round(ft * GEN_FT_TO_M);
+        showToast(dM < 1 ? `${ft} ft rounds to 0 m — flight-path altitudes are whole metres, use 2 ft or more` : `Flight-path altitudes are whole metres: ${ft} ft will be applied as ${dM} m = ${elvFt(dM)} ft`, elvFt(dM) === Math.round(ft) ? undefined : 'rgba(255,180,0,0.6)');
+    }
+    async function elvRaiseExisting() {
+        if (elv.running) return;
+        if (liteBlockedWrite('raise elevators')) return;
+        const inp = document.getElementById('aim-elv-raise-ft');
+        const ft = Number(inp && inp.value);
+        if (!isFinite(ft) || ft <= 0 || ft > 200) { elvLog('Raise: enter a step between 1 and 200 ft', '#ffb347'); return; }
+        const dM = Math.round(ft * GEN_FT_TO_M);
+        if (dM < 1) { elvLog('Raise: the step rounds to 0 m (flight-path bands are whole metres) — use 2 ft or more', '#ffb347'); return; }
+        const sid = await elvEnsureSite(); if (!sid) return;
+        // the scan refetches the site and marks the bridged crossings ("present"); without KMLs only the GMs anchor
+        await elvScan();
+        const anchors = [];
+        elv.items.filter(it => it.status === 'present' || it.status === 'done').forEach(it => anchors.push({ fpId: it.fpId, ll: it.X, tolM: 1.5, label: `crossing #${it.id} on "${it.fpName}"` }));
+        const fps = elvLiveEntities(sid).filter(e => e && e.type === 15 && Array.isArray(e.arcs));
+        elvLiveEntities(sid).filter(e => e && e.type !== 15 && e.type !== 16 && /^Elevator\s+\d+\s*-/i.test(String(e.name || ''))).forEach(gm => {
+            const c = entityCoords(gm); const ll = c && c[0];
+            if (!ll || !isFinite(ll.lat) || !isFinite(ll.lng)) return;
+            let best = { d: Infinity, fp: null };
+            fps.forEach(fp => fp.arcs.forEach(a => { if (!a || !a.point_a || !a.point_b) return; const pr = elvProj(ll, a.point_a, a.point_b); if (pr.d < best.d) best = { d: pr.d, fp }; }));
+            const tol = (ELV_GM_OFFSET_FT + 10) * GEN_FT_TO_M;
+            if (best.fp && best.d <= tol) anchors.push({ fpId: best.fp.id, ll, tolM: tol, label: `GM "${gm.name}"`, gm });
+        });
+        if (!anchors.length) { elvLog('Raise: no existing elevators found — no bridged transmission crossing and no "Elevator NN - …" GM beside a flight path', '#ffb347'); return; }
+        const { writes, skipped } = elvRaisePlan(sid, anchors, dM);
+        const todo = writes.filter(w => !w.fail.length), blocked = writes.filter(w => w.fail.length);
+        const stairN = todo.reduce((n, w) => n + w.stairs.length, 0);
+        const unbridged = elv.items.filter(it => it.status === 'stage').length;
+        const steep = []; todo.forEach(w => w.stairs.forEach(st => [st.e1, st.e2].forEach(E => { if (E.lenM < 50 * GEN_FT_TO_M) steep.push(`"${w.fp.name}" ${elvFt(E.lenM)} ft elevator → ${elvFt(st.B.min + dM - E.E.min)} ft of climb`); })));
+        const realFt = elvFt(dM);
+        // GM renames: the name carries the bridge floor AGL
+        const usedNames = gmtUsedNames(sid);
+        let gmPlanN = 0, gmNoName = 0;
+        todo.forEach(w => w.stairs.forEach(st => st.gms.forEach(gm => {
+            const nn = elvRaisedGmName(gm.name, realFt);
+            if (!nn || usedNames.has(nn.toLowerCase())) { gmNoName++; console.warn(`${TAG} 🛗 raise — GM "${gm.name}" not renamed: ${nn ? `"${nn}" is already taken` : 'name has no "- NNNft" part'}`); return; }
+            usedNames.add(nn.toLowerCase()); gm._newName = nn; gmPlanN++;
+        })));
+        console.log(`${TAG} 🛗 raise plan (+${dM} m = ${realFt} ft):`, todo.map(w => ({ fp: w.fp.name, id: w.fpId, stairs: w.stairs.map(st => ({ from: st.an.label, bridge: `${elvFt(st.B.min)}–${elvFt(st.B.max)} → ${elvFt(st.B.min + dM)}–${elvFt(st.B.max + dM)} ft MSL`, bridgeArcs: st.bridge.length, e1: `${elvFt(st.e1.E.min)}–${elvFt(st.e1.E.max)} → –${elvFt(st.e1.E.max + dM)}`, e2: `${elvFt(st.e2.E.min)}–${elvFt(st.e2.E.max)} → –${elvFt(st.e2.E.max + dM)}` })) })));
+        if (skipped.length || blocked.length) console.warn(`${TAG} 🛗 raise — not touched:`, skipped.map(x => `${x.an.label}: ${x.why}`), blocked.map(w => `FP "${w.fp.name}": ${w.fail.join('; ')}`));
+        const notes = `${skipped.length ? ` · <b style="color:#ffb347">${skipped.length} anchor(s) skipped</b> (${elvEsc(skipped.slice(0, 3).map(x => `${x.an.label}: ${x.why}`).join(' | '))}${skipped.length > 3 ? ' … see console' : ''})` : ''}${blocked.length ? ` · <b style="color:#ff6060">${blocked.length} path(s) blocked</b> (${elvEsc(blocked.slice(0, 2).map(w => `"${w.fp.name}": ${w.fail[0]}`).join(' | '))})` : ''}${steep.length ? ` · ⚠ ${steep.length} short elevator(s) get steeper (${elvEsc(steep.slice(0, 2).join(' | '))}${steep.length > 2 ? ' …' : ''})` : ''}${unbridged ? ` · ${unbridged} crossing(s) have no bridge yet (staged above, not part of the raise)` : ''}`;
+        if (!todo.length) { elvLog(`Raise: nothing to write${notes}`, '#ffb347'); return; }
+        const head = `${stairN} staircase(s) on ${todo.length} flight path(s): bridges +${realFt} ft (${dM} m, floor-to-ceiling unchanged), elevator ceilings +${realFt} ft, elevator floors unchanged · ${gmPlanN} GM(s) renamed to the new floor AGL${gmNoName ? ` (${gmNoName} GM(s) can't be renamed — see console)` : ''}`;
+        if (sciDry()) { elvLog(`DRY RUN — would raise ${head}${notes}. Untick Dry run (Commit section) to write.`, '#ffe14d'); return; }
+        const csrf = getCsrfToken();
+        if (!csrf) { elvLog('No CSRF token — make one native save anywhere in Percepto first, then retry', '#ff6060'); return; }
+        if (!elv.siteCfg) { try { elv.siteCfg = await fetchSiteConfig(sid, true); } catch (e) { elvLog('Site config fetch failed — refusing to write (mountain_terrain flag unknown)', '#ff6060'); return; } }
+        if (!confirm(`Raise ${stairN} existing elevator staircase(s) on ${todo.length} flight path(s) of site ${sid} by ${realFt} ft (${dM} m)?\n\nBridge bands move up (same floor-to-ceiling height); elevator ceilings follow in the same save; elevator floors stay. No vertex moves, no FFZ is touched. ${gmPlanN} Elevator GM(s) are renamed to the new floor AGL.${skipped.length || blocked.length ? `\n\nNOT touched: ${skipped.length} anchor(s) skipped, ${blocked.length} path(s) blocked — see the panel / console.` : ''}${steep.length ? `\n\n${steep.length} short elevator(s) get steeper.` : ''}\n\nA path the server refuses (e.g. too steep) is reported and skipped — the run carries on.\n\nEach path is backed up first (JSON download + Delete Guard ring). ↩ Undo last run restores.`)) return;
+        const rec = { at: new Date().toISOString(), sid, origin: location.origin, kind: 'raise', fps: todo.map(w => JSON.parse(JSON.stringify(w.fp))), gms: [], gmRenames: [] };
+        try { localStorage.setItem(ELV_LAST_KEY(sid), JSON.stringify(rec)); } catch (e) { console.warn(`${TAG} 🛗 last-run stash failed:`, e); }
+        if (!downloadJSONFile(`elevators-raise-backup-${sid}-${Date.now()}.json`, JSON.stringify({ site: sid, at: rec.at, raiseM: dM, flightPaths: rec.fps }, null, 1))) { elvLog('Backup download failed — refusing to write', '#ff6060'); return; }
+        elv.running = true; elvRenderList();
+        let ok = 0, gmOk = 0, gmFail = 0, aborted = '';
+        const failed = [];
+        try {
+            for (let i = 0; i < todo.length; i++) {
+                const w = todo[i];
+                const label = `FP ${i + 1}/${todo.length} "${elvEsc(w.fp.name)}" (#${w.fp.id})`;
+                try {
+                    if (!sciBankToGuard(w.fp, sid)) throw new Error('Delete Guard bank failed — not writing');
+                    const body = buildWriteBody(w.fp, elv.siteCfg);
+                    body.arcs = w.out.map(a => { const o = Object.assign({}, a); delete o._ch; o.points = [{ lat: o.point_a.lat, lng: o.point_a.lng }, { lat: o.point_b.lat, lng: o.point_b.lng }]; return o; });
+                    const pts = []; body.arcs.forEach(a => [a.point_a, a.point_b].forEach(p => { if (!pts.some(q => elvSame(q, p))) pts.push({ lat: p.lat, lng: p.lng }); }));
+                    body.points = pts;
+                    await elvPostFp(body, csrf);
+                    try { await fetchMapObjects(sid, true); } catch (e) { console.warn(`${TAG} 🛗 refetch after save failed:`, e); }
+                    const live = elvLiveFp(sid, w.fp.id);
+                    if (!live || !Array.isArray(live.arcs)) throw new Error('flight path missing after save');
+                    const have = live.arcs.filter(a => a && a.point_a && a.point_b);
+                    if (have.length !== body.arcs.length) throw new Error(`arc count ${have.length} ≠ expected ${body.arcs.length} after save`);
+                    const off = body.arcs.filter(a => { const h = have.find(h => (elvSame(h.point_a, a.point_a) && elvSame(h.point_b, a.point_b)) || (elvSame(h.point_a, a.point_b) && elvSame(h.point_b, a.point_a))); return !h || Math.abs(h.min_alt - a.min_alt) > 0.6 || Math.abs(h.max_alt - a.max_alt) > 0.6; });
+                    if (off.length) throw new Error(`${off.length} arc(s) missing or with a different band after save`);
+                    w.done = true; ok++;
+                    elvLog(`${label} raised + verified (${w.stairs.length} staircase(s))`);
+                    for (const st of w.stairs) for (const gm of st.gms) {
+                        if (!gm._newName) continue;
+                        try {
+                            const orig = JSON.parse(JSON.stringify(gm)); delete orig._newName;
+                            await elvRenameGm(orig, gm._newName, sid, csrf);
+                            rec.gmRenames.push(orig); gmOk++;
+                        } catch (e) { gmFail++; console.warn(`${TAG} 🛗 raise — GM "${gm.name}" rename failed:`, e.message); if (e.fatal) throw e; }
+                        await new Promise(r => setTimeout(r, ELV_GAP_MS));
+                    }
+                    try { localStorage.setItem(ELV_LAST_KEY(sid), JSON.stringify(rec)); } catch (e) { console.warn(`${TAG} 🛗 last-run stash failed:`, e); }
+                } catch (e) {
+                    // a refused path (e.g. climb too steep for Percepto) is reported and the run moves on; only a lost permission stops it
+                    console.warn(`${TAG} 🛗 raise ${label.replace(/<[^>]*>/g, '')} FAILED:`, e.message);
+                    if (!w.done) failed.push({ name: w.fp.name, id: w.fp.id, why: e.message });
+                    elvLog(`${label} FAILED: ${elvEsc(e.message)} — moving on`, '#ff6060');
+                    if (e.fatal) { aborted = e.message; break; }
+                }
+                await new Promise(r => setTimeout(r, ELV_GAP_MS));
+            }
+        } finally { elv.running = false; }
+        try { await fetchMapObjects(sid, true); await elvStageAll(sid); } catch (e) { console.warn(`${TAG} 🛗 re-stage after raise failed:`, e); elvRenderList(); }
+        const left = todo.length - ok - failed.length;
+        const failHtml = failed.length ? `<b style="color:#ff6060">${failed.length} flight path(s) FAILED — fix by hand:</b><br>${failed.map(f => `✕ "${elvEsc(f.name)}" (#${f.id}): ${elvEsc(f.why)}`).join('<br>')}<br>` : '';
+        elvLog(`${aborted ? `<b style="color:#ff6060">ABORTED: ${elvEsc(aborted)}</b><br>` : ''}${failHtml}Raise +${realFt} ft: ${ok} flight path(s) written + verified${failed.length ? `, <b style="color:#ff6060">${failed.length} FAILED</b>` : ''}${left > 0 ? ` · ${left} not attempted` : ''} · ${gmOk} GM(s) renamed${gmFail ? `, <b style="color:#ff6060">${gmFail} GM rename(s) failed</b>` : ''}${notes} · backups: JSON download + Delete Guard ring · ↩ Undo last run restores · refresh to see it natively`, failed.length || gmFail || skipped.length || blocked.length ? '#ffb347' : '#5fff5f');
+        showToast(failed.length ? `Elevators raise: ${ok} FP ok, ${failed.length} FAILED — see the Elevators panel` : `✓ ${ok} flight path(s) raised ${realFt} ft, ${gmOk} GM(s) renamed`, failed.length ? 'rgba(255,96,96,0.55)' : undefined);
+        if (failed.length) alert(`Elevators raise: ${failed.length} flight path(s) were refused and left as they were:\n\n${failed.slice(0, 12).map(f => `• ${f.name}: ${f.why}`).join('\n')}${failed.length > 12 ? '\n…' : ''}\n\nThe other ${ok} were raised.`);
     }
 
     // ============================================================
