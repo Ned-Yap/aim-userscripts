@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.68
+// @version      0.69
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -33,7 +33,7 @@
 
     const SCRIPT_ID = 'aim-video-validation';
     const IS_DEV = (function() { try { return /^Latest - /.test((GM_info && GM_info.script && GM_info.script.name) || ''); } catch (e) { return false; } })();
-    const SCRIPT_VERSION = '0.68';
+    const SCRIPT_VERSION = '0.69';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -2046,15 +2046,19 @@
         { id: 'bfly24', kind: 'RGB', label: 'Blackfly 24 MP 16 mm (RGB)', h: 50, v: 44 },
         { id: 'boson18', kind: 'T', label: 'Boson 640 18 mm (thermal)', h: 24, v: 19 },
         { id: 'boson14', kind: 'T', label: 'Boson 640 14 mm (thermal)', h: 32, v: 26 },
-        { id: 'ventus25', kind: 'G', label: 'Ventus OGI 25 mm (GEM)', h: 21.7, v: 17.5 },
+        { id: 'ventus25', kind: 'G', label: 'Ventus OGI 25 mm (thermal + GEM)', h: 21.7, v: 17.5 },
+        { id: 'tau2', kind: 'T', label: 'Tau 2 (thermal, estimated)', h: 45, v: 37 },   // not on the spec sheet: derived from "Boson 14 mm = 1.45x zoom vs Tau 2"
     ];
     function dkLensKey(im) { const d = model && model.mission && model.mission.drone; return String((d && d.robot_type_name) || '?') + '|' + ((im && im.kind) || 'RGB'); }
     function dkLens(im) {
         const picked = (settings.deckLens || {})[dkLensKey(im)];
         if (picked) { const l = DK_LENSES.find(x => x.id === picked); if (l) return l; }
-        // Default from the drone type that flew it (ASSUMED mapping, the picker overrides): *_POWERTRAIN = newer payload (Sony + Boson), the rest = Blackfly.
+        // Default from the payload of the drone type that flew it (user, 2026-11-13; the picker overrides):
+        //   3.0 Sparrow = Blackfly RGB + thermal · 4.0 Sony = Sony RGB + Boson thermal · OGI = RGB + ONE Ventus camera for both thermal and GEM.
         const kind = (im && im.kind) || 'RGB', d = model && model.mission && model.mission.drone, type = String((d && d.robot_type_name) || '');
-        const id = kind === 'G' ? 'ventus25' : kind === 'T' ? 'boson18' : (type && !/POWERTRAIN/.test(type) ? 'bfly24' : 'sony50');
+        const id = /OGI/.test(type) ? (kind === 'RGB' ? 'sony50' : 'ventus25')
+            : /SPARROW/.test(type) ? (kind === 'RGB' ? 'bfly24' : kind === 'G' ? 'ventus25' : 'tau2')
+            : (kind === 'RGB' ? 'sony50' : kind === 'G' ? 'ventus25' : 'boson18');
         return DK_LENSES.find(l => l.id === id) || DK_LENSES[0];
     }
     const DK_ARROW = { up: 'M5 15l7-7 7 7', down: 'M5 9l7 7 7-7', left: 'M15 5l-7 7 7 7', right: 'M9 5l7 7-7 7', altUp: 'M12 19V5M5 12l7-7 7 7', altDown: 'M12 5v14M5 12l7 7 7-7' };
