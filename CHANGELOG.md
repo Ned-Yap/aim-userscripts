@@ -1,3 +1,9 @@
+## 2026-11-13 — AIM Fleet Tools latest v0.89 (latest only) — Findings Report remembers its last run (#341)
+
+- **The last finished 📈 Findings Report run is kept in the browser.** After a page reload or a script update it comes back on its own, marked "saved run", so the filters, the report period, 📰 Report, 📊 Dashboard and both CSVs all work without reading the sites again.
+- Run it again only when you want fresh data. A saved run more than a day old is marked in orange, because the report's "last 7 days" counts back from the day it was run.
+- ✕ Clear forgets the saved run. An aborted run never replaces a saved one.
+
 ## 2026-11-13 — AIM Fleet Tools latest v0.88 (latest only) — 📰 Findings Report you can hand to the customer (#341)
 
 - **New 📰 Report button in 📈 Findings Report.** It makes a print-ready page for the last 7, 14 or 30 days: a summary in plain words, one card per asset that had findings (with how often that asset has been flagged in the last 12 months), the assets that keep coming back, the 12-month trend, and a by-site table. Open it and click **Print / Save as PDF**.
