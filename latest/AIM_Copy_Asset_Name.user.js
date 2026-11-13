@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.501
+// @version      4.502
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  v4.498 (#329): SOP check 'FP ⨯ FP crossing' — two flight-path segments that intersect / T / overlap WITHOUT a shared vertex (same or different FPs; the drone's safe-zone recalc thrashes at the crossing); Control Panel ☑ All / ☐ None / ◎ solo on the SOP checks; ?aim-goto=lat,lng,z URL param pans + pulses the Site Setup map on load (Fleet Tools SOP Sweep links). Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -92,7 +92,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.501';
+    const SCRIPT_VERSION = '4.502';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -22779,8 +22779,9 @@
     // No vertex moves, no arc is added or removed, every arc keeps its id. Anchors = transmission
     // crossings the scan reports as already bridged + the "Elevator NN - …" pole GMs (manual ones).
     // A staircase is only touched when its shape is unambiguous: bridge run = the arcs around the
-    // anchor sharing its band; each side must then carry an elevator-shaped run (floor below the
-    // bridge floor, ceiling inside the bridge band). Anything else is skipped and named.
+    // anchor sharing its band; each side must then carry an elevator-shaped run (ceiling inside the
+    // bridge band — its floor follows the neighbour, so on rising ground it can sit level with or
+    // above the bridge floor; v4.502). Anything else is skipped and named.
     // Same rails as Commit: dry run, confirm, JSON + Delete Guard backups, one POST per FP (type 15
     // only), verify by refetch, stop on the first failure, ↩ Undo last run restores.
     function elvStairAt(live, arcIdx) {
@@ -22799,7 +22800,7 @@
             const nm = dir < 0 ? 'behind' : 'ahead of';
             if (k < 0 || k >= n) return { fail: `the bridge band runs to the path end / a branch ${nm} the crossing with no elevator arc` };
             const E = band(k);
-            if (!(typeof E.min === 'number' && typeof E.max === 'number' && E.min < B.min && E.max > B.min && E.max <= B.max)) return { fail: `the arc ${nm} the bridge (${elvFt(E.min)}–${elvFt(E.max)} ft MSL) is not elevator-shaped against the bridge (${elvFt(B.min)}–${elvFt(B.max)} ft MSL)` };
+            if (!(typeof E.min === 'number' && typeof E.max === 'number' && E.max > E.min && E.max > B.min && E.max <= B.max)) return { fail: `the arc ${nm} the bridge (${elvFt(E.min)}–${elvFt(E.max)} ft MSL) is not elevator-shaped against the bridge (${elvFt(B.min)}–${elvFt(B.max)} ft MSL)` };
             let k0 = k, k1 = k;
             if (dir < 0) { while (k0 > 0 && same(band(k0 - 1), E)) k0--; } else { while (k1 < n - 1 && same(band(k1 + 1), E)) k1++; }
             const idx = []; for (let q = k0; q <= k1; q++) idx.push(ch.legs[q].i);

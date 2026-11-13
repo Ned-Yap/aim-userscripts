@@ -1,3 +1,7 @@
+## 2026-11-13 — Site Setup Tools latest v4.502 (latest only) — 🛗 Raise existing: elevators on rising ground
+
+- **⬆ Raise existing skipped elevators whose floor sits level with or above the bridge floor** (the ground rises on that side). They are now recognised and raised like the rest.
+
 ## 2026-11-13 — Site Setup Tools latest v4.501 (latest only) — 🛗 Elevators: ⬆ Raise existing
 
 - **New ⬆ Raise existing button** in the Elevators panel (⊕ Generate → Elevators), with a ft box (default 20) — feature #340. Pilots asked for the bridges 15–20 ft higher: one click raises every elevator already on the site. Bridge bands move up by the step, elevator ceilings follow, elevator floors stay where they are.
