@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.73
+// @version      0.74
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -33,7 +33,7 @@
 
     const SCRIPT_ID = 'aim-video-validation';
     const IS_DEV = (function() { try { return /^Latest - /.test((GM_info && GM_info.script && GM_info.script.name) || ''); } catch (e) { return false; } })();
-    const SCRIPT_VERSION = '0.73';
+    const SCRIPT_VERSION = '0.74';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -95,6 +95,7 @@
         liveColor: '#ffe95f',
         navKeepAim: true,      // moving a nav re-aims its in-place snapshots at their look-points
         deckLens: {},          // viewfinder lens picked per '<drone type>|<picture kind>' (empty = default for the picture kind)
+        deckAltRef: 'agl',     // deck altitudes: 'agl' above the ground / 'msl' above sea level
         deckKind: 'RGB',       // which picture of the shot the viewfinder shows: 'RGB' / 'T' thermal / 'G' GEM
         deckView: 'vf',        // Adjust deck centre: 'vf' viewfinder preview / 'pr' side profile
         navColor: '#5fa8ff', snapColor: '#ff7ad9', actualColor: '#5fe3ff',
@@ -1913,7 +1914,7 @@
         if (typeof im.alt === 'number') setNavAlt(nav, im.alt);
         if (!isGps(step)) { const e = eo(step); if (typeof im.drone_heading === 'number') e.heading = im.drone_heading; if (typeof im.camera_pitch === 'number') e.pitch = gimbalFromDeg(im.camera_pitch); }
     }
-    function dem(ll) { return getJSON('/location_altitude/?location=' + encodeURIComponent(JSON.stringify({ lat: ll.lat, lng: ll.lng }))).then(j => (j && typeof j.altitude === 'number') ? j.altitude : null); }
+    function dem(ll) { return getJSON('/location_altitude/?location=' + encodeURIComponent(JSON.stringify({ lat: ll.lat, lng: ll.lng }))).then(j => { const a = j == null ? NaN : Number(j.altitude); if (isFinite(a) && j.altitude !== null && j.altitude !== '') return a; warn('terrain lookup gave no altitude at ' + (+ll.lat).toFixed(5) + ',' + (+ll.lng).toFixed(5) + ':', JSON.stringify(j).slice(0, 200)); return null; }); }
     // Convert an in-place snapshot to a GPS aim point by casting the ACTUAL camera ray to the ground (cap = rayCapFt).
     function edConvertGps(step, shot) {
         const im = shot.primary; if (!im || !im.location || typeof im.drone_heading !== 'number' || typeof im.camera_pitch !== 'number') { toast('Convert needs the actual shot pose (position, heading, camera angle)', true); return Promise.resolve(false); }
@@ -2053,6 +2054,24 @@
     ];
     // The picture the viewfinder shows: the shot's picture of the chosen kind, else its main one.
     function dkImg(shot) { if (!shot) return null; return (shot.images || []).find(i => i.kind === settings.deckKind) || shot.primary; }
+    // Terrain the deck needs (under the drone, at the target). Debounced: a held arrow moves the point every 90 ms.
+    const dkWant = {}; let dkWantTimer = 0;
+    function dkWantTerrain(role, ll) {
+        if (!ll || typeof ll.lat !== 'number' && isNaN(+ll.lat)) return;
+        if (demCache[(+ll.lat).toFixed(5) + ',' + (+ll.lng).toFixed(5)] !== undefined) { delete dkWant[role]; return; }
+        dkWant[role] = { lat: +ll.lat, lng: +ll.lng };
+        clearTimeout(dkWantTimer);
+        dkWantTimer = setTimeout(() => {
+            const list = Object.keys(dkWant).map(k => dkWant[k]); Object.keys(dkWant).forEach(k => delete dkWant[k]);
+            if (!list.length) return;
+            Promise.all(list.map(x => demCached(x))).then(vs => { log('deck terrain: ' + vs.map(v => v == null ? 'none' : fmtAlt(v)).join(', ')); deckRefresh(); });
+        }, 350);
+    }
+    // Deck altitude text: above ground when the ground is known (default), else above sea level.
+    function dkAltTxt(m, ground) {
+        if (m == null || !isFinite(m)) return '–';
+        return (settings.deckAltRef !== 'msl' && ground != null) ? fmtDist(m - ground) + ' AGL' : fmtAlt(m) + ' MSL';
+    }
     function dkLensKey(im) { const d = model && model.mission && model.mission.drone; return String((d && d.robot_type_name) || '?') + '|' + ((im && im.kind) || 'RGB'); }
     // Percepto states each camera's field of view on the drone that flew the mission: mission.drone.camera_types = { KEY: { horizontal_fov, vertical_fov } }.
     // The robot type name does NOT identify the payload (AIRMAX_POWERTRAIN drones carry either the Sony or the 24 MP payload).
@@ -2105,6 +2124,7 @@
         const view = settings.deckView === 'pr' ? 'pr' : 'vf';
         return '<div class="aim-vv-deck"><div class="aim-vv-dk-head"><b>Adjust ' + esc(stepLabel(step)) + '</b><span class="dim">' + (gps ? 'GPS aim point' : 'in-place') + ' · nav ' + (nav ? esc(stepLabel(nav)) : '–') + '</span>'
             + '<span class="aim-vv-dk-hint">' + (pNav ? 'Click the map where the drone should be · Esc cancels' : (pAim ? 'Click the map where the camera should aim · Esc cancels' : '')) + '</span>'
+            + '<span class="aim-vv-dk-tabs" title="Altitudes above the ground (AGL) or above sea level (MSL)">' + ['agl', 'msl'].map(k => '<button type="button" class="aim-vv-dk-tab' + ((settings.deckAltRef === 'msl' ? 'msl' : 'agl') === k ? ' on' : '') + '" data-aim-vv-ed="altref" data-v="' + k + '">' + k.toUpperCase() + '</button>').join('') + '</span>'
             + '<span class="dim">click = 1 step · Shift ×5 · hold repeats</span></div>'
             + '<div class="aim-vv-dk-grid">'
             + '<div class="aim-vv-dk-card"><div class="aim-vv-dk-title" style="color:' + esc(settings.navColor) + '">DRONE</div><div class="aim-vv-dk-ctl">'
@@ -2114,6 +2134,7 @@
             + dkRead([['ground dist', 'dist', 'range'], ['moved', 'moved', ''], ['drone alt', 'dalt', 'alt']]) + '</div>'
             + '<div class="aim-vv-dk-mid"><div class="aim-vv-dk-tabs"><button type="button" class="aim-vv-dk-tab' + (view === 'vf' ? ' on' : '') + '" data-aim-vv-ed="view" data-v="vf">Viewfinder</button><button type="button" class="aim-vv-dk-tab' + (view === 'pr' ? ' on' : '') + '" data-aim-vv-ed="view" data-v="pr">Side profile</button>' + kindTabs + '</div>'
             + '<div class="aim-vv-dk-frame" title="Approximate preview. Striped = outside the original picture; dashed = the original frame.">' + (view === 'vf' ? (src ? '<img data-aim-vv-vf="1" alt="" src="' + esc(src) + '">' : '<div class="dim" style="padding:8px">no picture for this shot</div>') + '<span class="ch-v"></span><span class="ch-h"></span>' : '<svg data-aim-vv-pr="1" width="' + DK_W + '" height="' + DK_H + '" viewBox="0 0 ' + DK_W + ' ' + DK_H + '"></svg>') + '</div>'
+            + '<div data-aim-vv-val="foot" style="width:330px;font-size:11px;line-height:1.35;color:#aeb8c5;min-height:30px"></div>'
             + '<span class="dim" style="font-size:11px">approximate preview · lens <select data-aim-vv-lens="' + esc(dkLensKey(im)) + '" title="Camera that took this picture. Sets how far the preview moves per degree. From the drone that flew this mission when Percepto lists its cameras. Remembered per drone type." style="font:inherit;background:#171b22;color:#cfd8e3;border:1px solid #2a3442;border-radius:6px;padding:1px 4px">' + dkLensList().map(l => '<option value="' + esc(l.id) + '"' + (l.id === dkLens(im).id ? ' selected' : '') + '>' + esc(l.label) + ' · ' + l.h + '° × ' + l.v + '°</option>').join('') + '</select> <span data-aim-vv-lenshow="1">' + esc(dkLens(im).how) + '</span></span></div>'
             + '<div class="aim-vv-dk-card"><div class="aim-vv-dk-title" style="color:' + esc(settings.snapColor) + '">CAMERA</div><div class="aim-vv-dk-ctl">'
             + dkDial([{ act: 'c-tilt', n: 1, title: gps ? 'Aim ' + sf + ' ft farther away (camera tilts up)' : 'Tilt the camera ' + sp + '° up' }, { act: 'turn', n: 1, title: gps ? 'Move the aim point ' + sf + ' ft to the right' : 'Turn the camera ' + sd + '° right' }, { act: 'turn', n: -1, title: gps ? 'Move the aim point ' + sf + ' ft to the left' : 'Turn the camera ' + sd + '° left' }, { act: 'c-tilt', n: -1, title: gps ? 'Aim ' + sf + ' ft closer (camera tilts down)' : 'Tilt the camera ' + sp + '° down' }],
@@ -2131,20 +2152,35 @@
         const nav = wkNavOf(step), gps = isGps(step);
         const oStep = origOf(step.id) || step, oNav = nav ? (origOf(nav.id) || nav) : null;
         // Terrain under the drone drives every distance here. The map only loads it with look-points on, so load it for this shot.
-        [nav, oNav].forEach(n => { if (n && n.location && demCache[(+n.location.lat).toFixed(5) + ',' + (+n.location.lng).toFixed(5)] === undefined) demCached(n.location).then(() => deckRefresh()); });
-        const noGround = !!(nav && nav.location && groundAt(nav.location) == null);
+        if (nav && nav.location) dkWantTerrain('nav', nav.location);
+        const gNav = nav && nav.location ? groundAt(nav.location) : null;
+        const noGround = !!(nav && nav.location && gNav == null);
         const pose = poseOf(step, nav), oPose = oNav ? poseOf(oStep, oNav) : pose;
         const look = lookOf(step, nav), oLook = lookOf(oStep, oNav);
+        if (look && look.ll) dkWantTerrain('tgt', look.ll);
+        const gTgt = look && look.ll ? groundAt(look.ll) : null;
         const set = (k, txt, on) => { const n = el.querySelector('[data-aim-vv-val="' + k + '"]'); if (!n) return; if (n.textContent !== txt) n.textContent = txt; if (on !== undefined) n.classList.toggle('on', !!on); };
         const dFt = (m) => { if (m == null || !isFinite(m)) return ['—', false]; const v = Math.round(settings.units === 'm' ? m : m * M_TO_FT); return v ? [(v > 0 ? '+' : '−') + Math.abs(v) + (settings.units === 'm' ? ' m' : ' ft'), true] : ['—', false]; };
         const dDeg = (d) => { if (d == null || !isFinite(d)) return ['—', false]; const v = Math.round(d); return v ? [(v > 0 ? '+' : '−') + Math.abs(v) + '°', true] : ['—', false]; };
         set('dist', (noGround && !gps) ? 'terrain loading' : (look ? fmtDist(look.dist) + (look.capped ? ' (far)' : '') : '?')); { const d = dFt(look && oLook ? look.dist - oLook.dist : null); set('dist-d', d[0], d[1]); }
         const mv = (nav && oNav && nav.location && oNav.location) ? distM(oNav.location, nav.location) : null;
         set('moved', mv != null && mv > 0.15 ? fmtDist(mv) + ' ' + compass16(bearingDeg(oNav.location, nav.location)) : 'not moved'); set('moved-d', '', false);
-        set('dalt', fmtAlt(nav ? nav.value1 : null)); { const d = dFt(nav && oNav && typeof nav.value1 === 'number' && typeof oNav.value1 === 'number' ? nav.value1 - oNav.value1 : null); set('dalt-d', d[0], d[1]); }
+        set('dalt', dkAltTxt(nav ? nav.value1 : null, gNav)); { const d = dFt(nav && oNav && typeof nav.value1 === 'number' && typeof oNav.value1 === 'number' ? nav.value1 - oNav.value1 : null); set('dalt-d', d[0], d[1]); }
         set('hdg', pose.heading != null ? pose.heading.toFixed(0) + '°' : '–'); { const d = dDeg(pose.heading != null && oPose.heading != null ? hdgDelta(oPose.heading, pose.heading) : null); set('hdg-d', d[0], d[1]); }
         set('ang', pose.pitchDeg != null ? pose.pitchDeg.toFixed(0) + '°' : '–'); { const d = dDeg(pose.pitchDeg != null && oPose.pitchDeg != null ? pose.pitchDeg - oPose.pitchDeg : null); set('ang-d', d[0], d[1]); }
-        set('talt', gps ? fmtAlt(step.value1) : (noGround ? 'terrain loading' : (look && look.alt != null ? fmtAlt(look.alt) + (look.capped ? ' (far)' : ' (ground)') : 'ground'))); { const d = dFt(gps && oLook && oLook.alt != null ? step.value1 - oLook.alt : null); set('talt-d', d[0], d[1]); }
+        set('talt', gps ? dkAltTxt(step.value1, gTgt) : (noGround ? 'terrain loading' : (look && look.alt != null ? fmtAlt(look.alt) + (look.capped ? ' (far)' : ' (ground)') : 'ground'))); { const d = dFt(gps && oLook && oLook.alt != null ? step.value1 - oLook.alt : null); set('talt-d', d[0], d[1]); }
+        // What the picture covers on the ground (flat ground at the target's height; approximate).
+        {
+            const lens = dkLens(dkImg(shot)); let txt = '';
+            if (nav && typeof nav.value1 === 'number' && look && look.alt != null && nav.value1 - look.alt > 0.5) {
+                const H = nav.value1 - look.alt, D = Math.max(0.5, look.dist), ang = Math.atan2(H, D), half = lens.v / 2 * RAD;
+                const near = ang + half < Math.PI / 2 - 0.01 ? H / Math.tan(ang + half) : 0, far = ang - half > 0.03 ? H / Math.tan(ang - half) : Infinity;
+                const wide = 2 * Math.hypot(D, H) * Math.tan(lens.h / 2 * RAD);
+                txt = 'Picture covers ' + fmtDist(near) + ' to ' + (isFinite(far) ? fmtDist(far) : 'the horizon') + ' from the drone' + (isFinite(far) ? ' (' + fmtDist(far - near) + ' deep)' : '') + ', about ' + fmtDist(wide) + ' wide at the target.'
+                    + (gNav != null ? ' Ground ' + fmtAlt(gNav) + ' MSL.' : ' Ground height not loaded.');
+            }
+            set('foot', txt);
+        }
         // Viewfinder: where does the ORIGINAL look-point sit in the frame of the pose as edited?
         const img = el.querySelector('[data-aim-vv-vf]');
         if (img) {
@@ -2165,7 +2201,7 @@
         if (svg) {
             let h = '';
             if (nav && typeof nav.value1 === 'number' && look && look.alt != null) {
-                const g = nav.location ? groundAt(nav.location) : null;
+                const g = gNav;
                 const base = Math.min(g != null ? g : look.alt, look.alt), D = Math.max(1, look.dist), up = Math.max(3, nav.value1 - base);
                 const s = Math.min(250 / D, 150 / up), X0 = 36, GY = 196;
                 const Y = (a) => GY - (a - base) * s, dx = X0, dy = Y(nav.value1), tx = X0 + D * s, ty = Y(look.alt), gy = Y(g != null ? g : look.alt);
@@ -2173,16 +2209,18 @@
                 const edge = (a) => { const len = a > 0.03 ? Math.min(360, (gy - dy) / Math.sin(a)) : 360; return '<line x1="' + dx + '" y1="' + dy.toFixed(1) + '" x2="' + (dx + Math.cos(a) * len).toFixed(1) + '" y2="' + (dy + Math.sin(a) * len).toFixed(1) + '" stroke="' + esc(settings.snapColor) + '" stroke-opacity=".4"></line>'; };
                 const tAnchor = tx > 250 ? 'end' : 'start';
                 h = '<rect x="0" y="' + gy.toFixed(1) + '" width="' + DK_W + '" height="' + (DK_H - gy + 1).toFixed(1) + '" fill="#3a2f24"></rect>'
-                    + '<text x="6" y="' + Math.min(DK_H - 4, gy + 12).toFixed(1) + '" fill="#d8c8b0" font-size="10">' + (g != null ? 'ground ' + esc(fmtAlt(g)) : 'terrain not loaded') + '</text>'
+                    + '<text x="6" y="' + Math.min(DK_H - 4, gy + 12).toFixed(1) + '" fill="#d8c8b0" font-size="10" text-anchor="middle">' + '</text>'
+                    + '<line x1="' + dx + '" y1="' + (gy + 5).toFixed(1) + '" x2="' + tx.toFixed(1) + '" y2="' + (gy + 5).toFixed(1) + '" stroke="#d8c8b0" stroke-opacity=".7"></line>'
+                    + '<text x="' + ((dx + tx) / 2).toFixed(1) + '" y="' + Math.min(DK_H - 3, gy + 17).toFixed(1) + '" fill="#d8c8b0" font-size="10" text-anchor="middle">' + esc(fmtDist(D)) + ' along the ground</text>'
                     + edge(ang - half) + edge(ang + half)
                     + '<line x1="' + dx + '" y1="' + dy.toFixed(1) + '" x2="' + (dx + 70) + '" y2="' + dy.toFixed(1) + '" stroke="#9aa4b2" stroke-dasharray="3 3"></line>'
                     + '<line x1="' + dx + '" y1="' + dy.toFixed(1) + '" x2="' + dx + '" y2="' + gy.toFixed(1) + '" stroke="' + esc(settings.navColor) + '" stroke-dasharray="3 3"></line>'
                     + '<line x1="' + dx + '" y1="' + dy.toFixed(1) + '" x2="' + tx.toFixed(1) + '" y2="' + ty.toFixed(1) + '" stroke="' + esc(settings.snapColor) + '" stroke-width="2"></line>'
                     + '<rect x="' + (dx - 9) + '" y="' + (dy - 4).toFixed(1) + '" width="18" height="8" rx="2" fill="' + esc(settings.navColor) + '"></rect>'
-                    + '<text x="' + (dx + 14) + '" y="' + Math.max(11, dy - 8).toFixed(1) + '" fill="' + esc(settings.navColor) + '" font-size="10">drone ' + esc(fmtAlt(nav.value1)) + (g != null ? ' · ' + esc(fmtDist(nav.value1 - g)) + ' above ground' : '') + '</text>'
+                    + '<text x="' + (dx + 14) + '" y="' + Math.max(11, dy - 8).toFixed(1) + '" fill="' + esc(settings.navColor) + '" font-size="10">drone ' + esc(dkAltTxt(nav.value1, g)) + '</text>'
                     + '<text x="' + (dx + 74) + '" y="' + (dy + 12).toFixed(1) + '" fill="' + esc(settings.snapColor) + '" font-size="10">' + (pose.pitchDeg != null ? pose.pitchDeg.toFixed(0) + '°' : '') + ' · ' + esc(fmtDist(Math.hypot(D, nav.value1 - look.alt))) + ' camera to target</text>'
                     + '<rect x="' + (tx - 5).toFixed(1) + '" y="' + (ty - 5).toFixed(1) + '" width="10" height="10" fill="' + esc(settings.snapColor) + '" stroke="#fff"></rect>'
-                    + '<text x="' + tx.toFixed(1) + '" y="' + (ty - 9).toFixed(1) + '" text-anchor="' + tAnchor + '" fill="' + esc(settings.snapColor) + '" font-size="10">target ' + esc(fmtAlt(look.alt)) + '</text>';
+                    + '<text x="' + tx.toFixed(1) + '" y="' + (ty - 9).toFixed(1) + '" text-anchor="' + tAnchor + '" fill="' + esc(settings.snapColor) + '" font-size="10">target ' + esc(dkAltTxt(look.alt, gTgt)) + '</text>';
             } else h = '<text x="12" y="24" fill="#9aa4b2" font-size="11">Terrain for this shot is not loaded yet.</text>';
             if (svg.__aimH !== h) { svg.innerHTML = h; svg.__aimH = h; }
         }
@@ -2393,6 +2431,7 @@
             if (act === 'review') { openReview(); return; }
             if (act === 'discard') { edResetWork(); toast('Pending changes discarded', false); return; }
             if (act === 'close') { ed.open = false; ensureEditPanel(); return; }
+            if (act === 'altref') { settings.deckAltRef = b.dataset.v === 'msl' ? 'msl' : 'agl'; saveSettings(); renderEdit(); return; }
             if (act === 'vkind') { settings.deckKind = ['RGB', 'T', 'G'].includes(b.dataset.v) ? b.dataset.v : 'RGB'; saveSettings(); renderEdit(); return; }
             if (act === 'view') { settings.deckView = b.dataset.v === 'pr' ? 'pr' : 'vf'; saveSettings(); renderEdit(); return; }
             if (act === 'more') { ed.more = !ed.more; renderEdit(); return; }

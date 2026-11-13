@@ -64,7 +64,7 @@
 - A site whose read fails is named in an orange warning with a Retry failed button, so a slow mission bank can no longer silently drop a site.
 - Read-only: nothing is written to Percepto.
 
-## 2026-11-12 — 🎞 AIM Video Validation latest v0.73 (latest only) — viewfinder uses the real lens width
+## 2026-11-12 — 🎞 AIM Video Validation latest v0.74 (latest only) — viewfinder uses the real lens width
 
 - The Adjust viewfinder and side profile now use the field of view of the camera that took the picture, instead of one assumed 60° lens: Sony ILX-LR1 50 mm 39.5° × 27°, Blackfly 24 MP 50° × 44°, Boson 640 18 mm 24° × 19° / 14 mm 32° × 26°, Ventus OGI 21.7° × 17.5°.
 - The lens is chosen from the picture kind (RGB / thermal / GEM); a picker under the preview changes it, remembered per drone type.
@@ -72,6 +72,7 @@
 - v0.71: the picker says how the lens was chosen (auto from the drone / your pick / default), and a camera listed with its two angles swapped is corrected.
 - v0.72: RGB / Thermal / GEM switch on the viewfinder — shows that picture of the shot and uses that camera's lens.
 - v0.73 fix: the deck loads the terrain under the drone itself. Without it an in-place shot's target was placed 500 ft out and far below ground, and a conversion to a GPS aim point kept that false point. Conversion now waits for terrain.
+- v0.74: deck altitudes read above ground (AGL) by default, with an AGL / MSL switch. The profile shows the distance along the ground, and a line under the preview says how much ground the picture covers (near edge, far edge, depth, width at the target).
 
 ## 2026-11-12 — 🎞 AIM Video Validation latest v0.66 (latest only) — Adjust is now a flight deck
 
