@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.69
+// @version      0.70
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -33,7 +33,7 @@
 
     const SCRIPT_ID = 'aim-video-validation';
     const IS_DEV = (function() { try { return /^Latest - /.test((GM_info && GM_info.script && GM_info.script.name) || ''); } catch (e) { return false; } })();
-    const SCRIPT_VERSION = '0.69';
+    const SCRIPT_VERSION = '0.70';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -2040,27 +2040,36 @@
         return { ll: lp.ll, alt, dist: lp.dist, capped: lp.capped };
     }
     const DK_W = 330, DK_H = 220;   // viewfinder box
-    // Lens field of view per camera (degrees, horizontal × vertical) — payload spec sheets, 2026-11-12. First of a kind = default for that picture kind.
+    // FALLBACK lens table (payload spec sheets, 2026-11-12) — used only when the mission's drone carries no camera list. First of a kind = default for that picture kind.
     const DK_LENSES = [
         { id: 'sony50', kind: 'RGB', label: 'Sony ILX-LR1 50 mm (RGB)', h: 39.5, v: 27 },
         { id: 'bfly24', kind: 'RGB', label: 'Blackfly 24 MP 16 mm (RGB)', h: 50, v: 44 },
         { id: 'boson18', kind: 'T', label: 'Boson 640 18 mm (thermal)', h: 24, v: 19 },
         { id: 'boson14', kind: 'T', label: 'Boson 640 14 mm (thermal)', h: 32, v: 26 },
         { id: 'ventus25', kind: 'G', label: 'Ventus OGI 25 mm (thermal + GEM)', h: 21.7, v: 17.5 },
-        { id: 'tau2', kind: 'T', label: 'Tau 2 (thermal, estimated)', h: 45, v: 37 },   // not on the spec sheet: derived from "Boson 14 mm = 1.45x zoom vs Tau 2"
     ];
     function dkLensKey(im) { const d = model && model.mission && model.mission.drone; return String((d && d.robot_type_name) || '?') + '|' + ((im && im.kind) || 'RGB'); }
-    function dkLens(im) {
-        const picked = (settings.deckLens || {})[dkLensKey(im)];
-        if (picked) { const l = DK_LENSES.find(x => x.id === picked); if (l) return l; }
-        // Default from the payload of the drone type that flew it (user, 2026-11-13; the picker overrides):
-        //   3.0 Sparrow = Blackfly RGB + thermal · 4.0 Sony = Sony RGB + Boson thermal · OGI = RGB + ONE Ventus camera for both thermal and GEM.
-        const kind = (im && im.kind) || 'RGB', d = model && model.mission && model.mission.drone, type = String((d && d.robot_type_name) || '');
-        const id = /OGI/.test(type) ? (kind === 'RGB' ? 'sony50' : 'ventus25')
-            : /SPARROW/.test(type) ? (kind === 'RGB' ? 'bfly24' : kind === 'G' ? 'ventus25' : 'tau2')
-            : (kind === 'RGB' ? 'sony50' : kind === 'G' ? 'ventus25' : 'boson18');
-        return DK_LENSES.find(l => l.id === id) || DK_LENSES[0];
+    // Percepto states each camera's field of view on the drone that flew the mission: mission.drone.camera_types = { KEY: { horizontal_fov, vertical_fov } }.
+    // The robot type name does NOT identify the payload (AIRMAX_POWERTRAIN drones carry either the Sony or the 24 MP payload).
+    function dkDroneLenses() {
+        const d = model && model.mission && model.mission.drone, ct = d && d.camera_types;
+        if (!ct || typeof ct !== 'object') return [];
+        return Object.keys(ct).map(k => {
+            const c = ct[k] || {}, h = Number(c.horizontal_fov), v = Number(c.vertical_fov);
+            if (!(h > 1 && h < 180 && v > 1 && v < 180)) return null;
+            return { id: 'drone:' + k, kind: /OGI|VENTUS/i.test(k) ? 'G' : (/THERMAL|BOSON|TAU/i.test(k) ? 'T' : 'RGB'), label: k + ' (this drone)', h, v };
+        }).filter(Boolean);
     }
+    function dkLensList() { return dkDroneLenses().concat(DK_LENSES); }
+    function dkLens(im) {
+        const list = dkLensList(), kind = (im && im.kind) || 'RGB';
+        const picked = (settings.deckLens || {})[dkLensKey(im)];
+        if (picked) { const l = list.find(x => x.id === picked); if (l) return l; }
+        const mine = dkDroneLenses();
+        // OGI payload: thermal and GEM pictures come from the same camera, so a thermal picture falls back to the OGI lens.
+        return mine.find(l => l.kind === kind) || (kind === 'T' ? mine.find(l => l.kind === 'G') : null) || DK_LENSES.find(l => l.kind === kind) || DK_LENSES[0];
+    }
+
     const DK_ARROW = { up: 'M5 15l7-7 7 7', down: 'M5 9l7 7 7-7', left: 'M15 5l-7 7 7 7', right: 'M9 5l7 7-7 7', altUp: 'M12 19V5M5 12l7-7 7 7', altDown: 'M12 5v14M5 12l7 7 7-7' };
     const dkSvg = (d, cls, style) => '<svg aria-hidden="true" class="' + (cls || '') + '" style="' + (style || '') + '" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="' + d + '"></path></svg>';
     function dkDial(segs, centre) {
@@ -2094,7 +2103,7 @@
             + dkRead([['to target', 'dist', 'range'], ['moved', 'moved', ''], ['drone alt', 'dalt', 'alt']]) + '</div>'
             + '<div class="aim-vv-dk-mid"><div class="aim-vv-dk-tabs"><button type="button" class="aim-vv-dk-tab' + (view === 'vf' ? ' on' : '') + '" data-aim-vv-ed="view" data-v="vf">Viewfinder</button><button type="button" class="aim-vv-dk-tab' + (view === 'pr' ? ' on' : '') + '" data-aim-vv-ed="view" data-v="pr">Side profile</button></div>'
             + '<div class="aim-vv-dk-frame" title="Approximate preview. Striped = outside the original picture; dashed = the original frame.">' + (view === 'vf' ? (src ? '<img data-aim-vv-vf="1" alt="" src="' + esc(src) + '">' : '<div class="dim" style="padding:8px">no picture for this shot</div>') + '<span class="ch-v"></span><span class="ch-h"></span>' : '<svg data-aim-vv-pr="1" width="' + DK_W + '" height="' + DK_H + '" viewBox="0 0 ' + DK_W + ' ' + DK_H + '"></svg>') + '</div>'
-            + '<span class="dim" style="font-size:11px">approximate preview · lens <select data-aim-vv-lens="' + esc(dkLensKey(im)) + '" title="Camera that took this picture. Sets how far the preview moves per degree. Remembered per drone type." style="font:inherit;background:#171b22;color:#cfd8e3;border:1px solid #2a3442;border-radius:6px;padding:1px 4px">' + DK_LENSES.map(l => '<option value="' + l.id + '"' + (l.id === dkLens(im).id ? ' selected' : '') + '>' + esc(l.label) + ' · ' + l.h + '° × ' + l.v + '°</option>').join('') + '</select></span></div>'
+            + '<span class="dim" style="font-size:11px">approximate preview · lens <select data-aim-vv-lens="' + esc(dkLensKey(im)) + '" title="Camera that took this picture. Sets how far the preview moves per degree. From the drone that flew this mission when Percepto lists its cameras. Remembered per drone type." style="font:inherit;background:#171b22;color:#cfd8e3;border:1px solid #2a3442;border-radius:6px;padding:1px 4px">' + dkLensList().map(l => '<option value="' + esc(l.id) + '"' + (l.id === dkLens(im).id ? ' selected' : '') + '>' + esc(l.label) + ' · ' + l.h + '° × ' + l.v + '°</option>').join('') + '</select></span></div>'
             + '<div class="aim-vv-dk-card"><div class="aim-vv-dk-title" style="color:' + esc(settings.snapColor) + '">CAMERA</div><div class="aim-vv-dk-ctl">'
             + dkDial([{ act: 'c-tilt', n: 1, title: gps ? 'Aim ' + sf + ' ft farther away (camera tilts up)' : 'Tilt the camera ' + sp + '° up' }, { act: 'turn', n: 1, title: gps ? 'Move the aim point ' + sf + ' ft to the right' : 'Turn the camera ' + sd + '° right' }, { act: 'turn', n: -1, title: gps ? 'Move the aim point ' + sf + ' ft to the left' : 'Turn the camera ' + sd + '° left' }, { act: 'c-tilt', n: -1, title: gps ? 'Aim ' + sf + ' ft closer (camera tilts down)' : 'Tilt the camera ' + sp + '° down' }],
                 { act: 'aim-place', armed: pAim, color: settings.snapColor, icon: camIc, title: 'Place the camera target on the map (click here, then click the map)' + (gps ? '' : ' — converts this shot to a GPS aim point') })
