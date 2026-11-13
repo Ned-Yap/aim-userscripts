@@ -1,3 +1,10 @@
+## 2026-11-12 — 🌐 AIM Fleet Tools latest v0.86 (latest only) — 📅 Sweep Scheduler: 📆 Calendar view
+
+- **New ☰ Table / 📆 Calendar switch** in the Sweep Scheduler (feature #339, extends #335). The calendar is the forecast day by day, in Mon–Fri weeks: which missions to fly on which day and how many flights, grouped by site. ✓ marks the day a mission's sweep finishes; colours match the table (age limit / not swept this cycle / oldest first).
+- **It is a forecast, not a commitment.** It uses the usual pace from the last 8 weeks of the log, oldest poles first, sites rotated, holidays skipped — and it is rebuilt from what was really flown every time the scheduler runs.
+- **Show 2 / 4 / 6 / 8 / 13 weeks or the whole plan.** While the calendar is open, Copy → Sheets and CSV export it as one line per day and mission, and Copy for Slack gives the next 5 working days.
+- No new reads; nothing is written to Percepto.
+
 ## 2026-11-13 — Map Styler latest v34.174 (latest only) — flight-path vertex dots work again
 
 - **Show / size / colour of flight-path vertex dots did nothing.** Percepto changed how it draws the dots; the Styler now handles the new dots as well as the old ones. Size is a scale of Percepto's own dot (10 px = unchanged).
@@ -44,10 +51,11 @@
 - A site whose read fails is named in an orange warning with a Retry failed button, so a slow mission bank can no longer silently drop a site.
 - Read-only: nothing is written to Percepto.
 
-## 2026-11-12 — 🎞 AIM Video Validation latest v0.67 (latest only) — viewfinder uses the real lens width
+## 2026-11-12 — 🎞 AIM Video Validation latest v0.68 (latest only) — viewfinder uses the real lens width
 
 - The Adjust viewfinder and side profile now use the field of view of the camera that took the picture, instead of one assumed 60° lens: Sony ILX-LR1 50 mm 39.5° × 27°, Blackfly 24 MP 50° × 44°, Boson 640 18 mm 24° × 19° / 14 mm 32° × 26°, Ventus OGI 21.7° × 17.5°.
 - The lens is chosen from the picture kind (RGB / thermal / GEM); a picker under the preview changes it, remembered per drone type.
+- v0.68: the default also follows the drone type that flew the mission — a `…_POWERTRAIN` drone uses the Sony lens for RGB, other types the Blackfly.
 
 ## 2026-11-12 — 🎞 AIM Video Validation latest v0.66 (latest only) — Adjust is now a flight deck
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.67
+// @version      0.68
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -33,7 +33,7 @@
 
     const SCRIPT_ID = 'aim-video-validation';
     const IS_DEV = (function() { try { return /^Latest - /.test((GM_info && GM_info.script && GM_info.script.name) || ''); } catch (e) { return false; } })();
-    const SCRIPT_VERSION = '0.67';
+    const SCRIPT_VERSION = '0.68';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -2051,7 +2051,11 @@
     function dkLensKey(im) { const d = model && model.mission && model.mission.drone; return String((d && d.robot_type_name) || '?') + '|' + ((im && im.kind) || 'RGB'); }
     function dkLens(im) {
         const picked = (settings.deckLens || {})[dkLensKey(im)];
-        return DK_LENSES.find(l => l.id === picked) || DK_LENSES.find(l => l.kind === ((im && im.kind) || 'RGB')) || DK_LENSES[0];
+        if (picked) { const l = DK_LENSES.find(x => x.id === picked); if (l) return l; }
+        // Default from the drone type that flew it (ASSUMED mapping, the picker overrides): *_POWERTRAIN = newer payload (Sony + Boson), the rest = Blackfly.
+        const kind = (im && im.kind) || 'RGB', d = model && model.mission && model.mission.drone, type = String((d && d.robot_type_name) || '');
+        const id = kind === 'G' ? 'ventus25' : kind === 'T' ? 'boson18' : (type && !/POWERTRAIN/.test(type) ? 'bfly24' : 'sony50');
+        return DK_LENSES.find(l => l.id === id) || DK_LENSES[0];
     }
     const DK_ARROW = { up: 'M5 15l7-7 7 7', down: 'M5 9l7 7 7-7', left: 'M15 5l-7 7 7 7', right: 'M9 5l7 7-7 7', altUp: 'M12 19V5M5 12l7-7 7 7', altDown: 'M12 5v14M5 12l7 7 7-7' };
     const dkSvg = (d, cls, style) => '<svg aria-hidden="true" class="' + (cls || '') + '" style="' + (style || '') + '" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="' + d + '"></path></svg>';
