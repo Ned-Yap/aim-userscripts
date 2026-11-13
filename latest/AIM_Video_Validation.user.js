@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Video Validation
 // @namespace    http://tampermonkey.net/
-// @version      0.74
+// @version      0.75
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Video_Validation.user.js
 // @description  Mission Playback helpers for first-flight video validation: snapshot strip in flight order with S# badges, click a snapshot to seek the video to its shutter time, playhead highlights the current shot, shot card with planned-vs-actual heading / camera angle / altitude. Read-only (Phase 1). Design: ShortKeys/AIM_Video_Validation_Design.md.
@@ -33,7 +33,7 @@
 
     const SCRIPT_ID = 'aim-video-validation';
     const IS_DEV = (function() { try { return /^Latest - /.test((GM_info && GM_info.script && GM_info.script.name) || ''); } catch (e) { return false; } })();
-    const SCRIPT_VERSION = '0.74';
+    const SCRIPT_VERSION = '0.75';
     const TAG = '[AIM VV]';
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -1473,10 +1473,45 @@
     // Planned look-point of an in-place snapshot: from the nav (planned altitude above the terrain under it),
     // at the planned heading and camera angle, down to the ground (cap = rayCapFt). Terrain via /location_altitude/, cached.
     const demCache = {};
+    // /location_altitude/ rate-limits (HTTP 429 when ~35 lookups went out at once on load, 2026-11-13 — every one failed and stayed failed).
+    // So: 2 at a time, a short gap between, back off and retry on 429, share one request per point, reuse a known height within 15 m,
+    // and forget a failure after a minute so a later draw asks again.
+    const demInflight = {}, demQueue = [];
+    let demActive = 0, demPauseUntil = 0, demTimer = 0;
     function demCached(ll) {
         const k = (+ll.lat).toFixed(5) + ',' + (+ll.lng).toFixed(5);
         if (demCache[k] !== undefined) return Promise.resolve(demCache[k]);
-        return dem(ll).then(v => { demCache[k] = v; return v; }).catch(e => { warn('dem:', e.message); demCache[k] = null; return null; });
+        const keys = Object.keys(demCache);
+        for (let i = 0; i < keys.length; i++) {
+            const g = demCache[keys[i]]; if (g == null) continue;
+            const c = keys[i].split(',');
+            if (distM(ll, { lat: +c[0], lng: +c[1] }) < 15) { demCache[k] = g; return Promise.resolve(g); }
+        }
+        if (demInflight[k]) return demInflight[k];
+        const p = new Promise(res => { demQueue.push({ ll: { lat: +ll.lat, lng: +ll.lng }, k, res, tries: 0 }); });
+        demInflight[k] = p; demPump();
+        return p;
+    }
+    function demDone(job, v) {
+        demCache[job.k] = v; delete demInflight[job.k];
+        if (v == null) setTimeout(() => { if (demCache[job.k] === null) delete demCache[job.k]; }, 60000);
+        demActive--; job.res(v);
+        setTimeout(demPump, 120);
+    }
+    function demPump() {
+        if (demActive >= 2 || !demQueue.length) return;
+        const wait = demPauseUntil - Date.now();
+        if (wait > 0) { if (!demTimer) demTimer = setTimeout(() => { demTimer = 0; demPump(); }, wait + 20); return; }
+        const job = demQueue.shift(); demActive++;
+        dem(job.ll).then(v => demDone(job, v), e => {
+            const msg = String(e && e.message || e);
+            if (/HTTP 429/.test(msg) && job.tries < 5) {
+                job.tries++; demPauseUntil = Date.now() + 1500 * job.tries; demQueue.unshift(job); demActive--;
+                if (job.tries === 1) log('terrain lookups are being rate-limited — slowing down and retrying');
+                demPump(); return;
+            }
+            warn('dem:', msg); demDone(job, null);
+        });
     }
     function lookPointFor(nav, step, ground) {
         const e = step.extra_options || {};
