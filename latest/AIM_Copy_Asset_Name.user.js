@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.498
+// @version      4.499
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  v4.498 (#329): SOP check 'FP ⨯ FP crossing' — two flight-path segments that intersect / T / overlap WITHOUT a shared vertex (same or different FPs; the drone's safe-zone recalc thrashes at the crossing); Control Panel ☑ All / ☐ None / ◎ solo on the SOP checks; ?aim-goto=lat,lng,z URL param pans + pulses the Site Setup map on load (Fleet Tools SOP Sweep links). Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -92,7 +92,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.498';
+    const SCRIPT_VERSION = '4.499';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -7736,11 +7736,23 @@
                 try { console.log(TAG, 'RC', ...args); } catch (e) {}
             }
         }
-        window.addEventListener('contextmenu', (e) => {
+        // v4.499 — flight pages keep Percepto's own right-click (send drone to /
+        // look at / jump to). The inspector owns M2 only on the planning pages
+        // below; everywhere else (live map, live mission, remote ops, anything
+        // new) M2 is left alone and the MIDDLE button (M3) opens the inspector.
+        // Allow-list on purpose: an unknown page can never lose its right-click.
+        const RC_OWNED_RE = /#\/site\/\d+\/(control-panel\/(site-setup|mission-bank|past-mission)|data_view\/)/;
+        const inspectorOwnsRightClick = () => {
+            let h = '';
+            try { h = window.top.location.hash || ''; } catch (err) { h = location.hash || ''; }
+            return RC_OWNED_RE.test(h);
+        };
+        const onInspect = (e, viaMiddle) => {
             if (!masterEnabled) {
                 if (e.isTrusted) dbg('bail: master OFF');
                 return;
             }
+            if (!viaMiddle && !inspectorOwnsRightClick()) { dbg('bail: flight page — M2 left to Percepto (M3 opens the inspector)'); return; }
             // Skip synthetic events (e.isTrusted=false). The Altitude and
             // Ruler scripts dispatch synthetic 'contextmenu' as part of
             // their Pin & Clean cleanup pattern — those are meant for
@@ -7912,6 +7924,13 @@
             } catch (err) {
                 dbg('showInspectorPopup threw', err);
             }
+        };
+        window.addEventListener('contextmenu', (e) => onInspect(e, false), true);
+        // M3 (middle button) = the inspector on pages where M2 belongs to Percepto.
+        // Only there, so M3 gestures of other tools on the planning pages are untouched.
+        window.addEventListener('mousedown', (e) => {
+            if (e.button !== 1 || !e.isTrusted || inspectorOwnsRightClick()) return;
+            try { onInspect(e, true); } catch (err) { console.warn(TAG, 'M3 inspector failed:', err); }
         }, true);
     }
 

@@ -1,3 +1,26 @@
+## 2026-11-12 — Control Panel latest v1.50 · Map Styler latest v34.172 · Site Setup Tools latest v4.499 (latest only) — profiles, favorites, flying fixes
+
+**Control Panel v1.50 — profiles (feature #336)**
+- **Profile picker at the top of the panel.** A profile sets what is on and off; you can still change every setting afterwards. Presets: **🚁 RO (flying)** — everything off except Issues, power lines, map nav and AIM defaults — **📋 Regulations**, **📦 AIM defaults**, plus **👤 My settings**.
+- **Nothing is lost by switching.** Your own settings are kept as My settings; if you change a preset, your changed copy is kept too and comes back when you pick that preset again. ↺ puts a preset back to the published version.
+- **First time on a computer the panel opens by itself and asks which profile to start with** ("Keep what I have now" changes nothing).
+- **⋯ next to the picker:** 💾 Save as… (your own named profiles), 📋 Copy / 📥 Import (send a profile to a coworker as one line of text), ⏻ All off (turns every tool's main switch off so you can tick on only what a profile needs).
+- **FDE only: ⬆ Publish to team** — publishes the current settings as the team's RO / Regulations / a new preset. Everyone on that preset who has not changed it gets the new version on their next page load.
+- The Lite / Full label now reads **Lite / FDE**. Profiles are not permissions: Lite users can use every profile.
+
+**Control Panel v1.50 — ★ Favorites (feature #337)**
+- Click the ☆ next to any setting (or a Map Display category) to pin it in a **★ Favorites** block at the top of the panel — for the things you flip all day, like line thickness or the basemap.
+
+**Control Panel v1.50 — gear on Live Map**
+- Site pages whose map has no toolbar (Live Map) now get a floating ⚙ at the top right.
+
+**Site Setup Tools v4.499 — right-click while flying (feature #338)**
+- The inspector no longer takes over right-click outside Site Setup, Mission Bank, Mission Playback and Data View. On Live Map / a live mission, right-click is Percepto's own menu again (send drone to / look at). The inspector is on the **middle mouse button** there.
+
+**Map Styler v34.172**
+- **The live drone track stays white.** It was being recoloured with the asset line colour and flashing (#338).
+- **New "Keep native dashed line" option** under Flight Path and Free Fly Zone: shows validated / unvalidated dashes without the native gradient or buffers.
+
 ## 2026-11-12 — 🌐 AIM Fleet Tools latest v0.85 (latest only) — 📅 Sweep Scheduler
 
 - **New Fleet Tools section: 📅 Sweep Scheduler.** One click reads the mission bank, the flown log and the docked drone of every FPL site, then lists each feeder mission by how old its oldest pole is and what to fly next. It replaces the manual export → spreadsheet step (feature #335).

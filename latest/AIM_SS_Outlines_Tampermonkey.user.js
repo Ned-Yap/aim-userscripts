@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.171
+// @version      34.172
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -69,7 +69,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.171';
+    const SCRIPT_VERSION = '34.172';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -310,6 +310,8 @@
                 { id: 'fp.violation-distance', label: 'Violation distance', type: 'number',
                   min: 1, max: 100, step: 1, default: 15, unit: 'ft' },
                 { id: 'fp.hide-native', label: 'Hide native (blue gradient / dashed FP)', type: 'boolean', default: true },
+                // v34.172: pilots want the native dashed line (validated vs not) without the gradient.
+                { id: 'fp.keep-dashed', label: 'Keep native dashed line (shows validated / unvalidated)', type: 'boolean', default: false },
             ],
         },
         {
@@ -335,6 +337,7 @@
                 { id: 'ffz.violation-distance', label: 'Violation distance', type: 'number',
                   min: 1, max: 100, step: 1, default: 15, unit: 'ft' },
                 { id: 'ffz.hide-native', label: 'Hide native (green / dashed FFZ)', type: 'boolean', default: true },
+                { id: 'ffz.keep-dashed', label: 'Keep native dashed line (shows validated / unvalidated)', type: 'boolean', default: false },
             ],
         },
         {
@@ -904,6 +907,15 @@
         'path.leaflet-interactive[stroke="red"][stroke-opacity="1"]',
     ].join(', ');
 
+    // v34.172 — a white OPEN polyline is not an asset. Percepto draws the live
+    // drone trail (and other tracks) as a white Polyline; the asset pipeline
+    // matched it by stroke, recoloured it with the asset line colour and
+    // re-did so on every redraw (pink, flashing). Asset polygons always close
+    // with "z"; a bare "M0 0" (off-screen layer) is left to the old path.
+    function isOpenWhiteLine(el) {
+        const d = el.getAttribute('d') || '';
+        return d.indexOf('L') !== -1 && !/z/i.test(d);
+    }
     const ALL_TARGETS_SELECTOR = `${SOLID_GREEN_SELECTOR}, ${WHITE_ASSET_SELECTOR}, ${BLUE_FLIGHT_PATH_SELECTOR}, ${NFZ_SOLID_SELECTOR}, ${EDIT_MODE_SELECTOR}, ${DV_ASSET_SELECTOR}`;
     const CUSTOM_BUFFER_ATTR = 'data-custom-buffer-v24';
 
@@ -1217,10 +1229,14 @@
         const ffzHide = (toggleState['ffz.show'] && toggleState['ffz.hide-native']) ? 'none' : '';
         const fpHide = (toggleState['fp.show'] && toggleState['fp.hide-native']) ? 'none' : '';
         const setDisp = (el, v) => { if (el.style.display !== v) el.style.display = v; };   // v34.152: write-free when already right
-        document.querySelectorAll(BLACK_DASHED_FFZ_SELECTOR).forEach(el => setDisp(el, ffzHide));
+        // v34.172: keep-dashed leaves Percepto's dashed line (validation state)
+        // visible while the gradient / native buffer stays hidden.
+        const ffzDashHide = toggleState['ffz.keep-dashed'] ? '' : ffzHide;
+        const fpDashHide = toggleState['fp.keep-dashed'] ? '' : fpHide;
+        document.querySelectorAll(BLACK_DASHED_FFZ_SELECTOR).forEach(el => setDisp(el, ffzDashHide));
         nativeBuffers.forEach(el => setDisp(el, ffzHide)); // collected greens
         document.querySelectorAll(ORIGINAL_BLUE_BUFFER_SELECTOR).forEach(el => setDisp(el, fpHide));
-        document.querySelectorAll(BLACK_DASHED_FP_SELECTOR).forEach(el => setDisp(el, fpHide));
+        document.querySelectorAll(BLACK_DASHED_FP_SELECTOR).forEach(el => setDisp(el, fpDashHide));
 
         // 3b. ASSET STATE — lazy-fetch entity data + tag each white asset
         // path with its state so the per-line loop can style it per-state.
@@ -1255,6 +1271,7 @@
                 document.querySelectorAll(`${WHITE_ASSET_SELECTOR}, ${DV_ASSET_SELECTOR}`).forEach(p => {
                     if (p.hasAttribute(CUSTOM_BUFFER_ATTR)) return; // never tag our own clones
                     const dNow = p.getAttribute('d') || '';
+                    if (p.matches(WHITE_ASSET_SELECTOR) && isOpenWhiteLine(p)) return; // live drone trail, not an asset
                     let memo = _assetMatchMemo.get(p);
                     if (!memo || memo.d !== dNow || memo.rev !== assetStateData.polys.length) {
                         memo = { d: dNow, rev: assetStateData.polys.length, a: matchPathAsset(p, stMap) };
@@ -1306,6 +1323,8 @@
             const isNfz = line.matches(NFZ_SOLID_SELECTOR);
             // v34.123: DV entity boxes count as asset-class lines — all the
             // asset.* toggles (color, buffer, thickness, fill) capture them.
+            // v34.172: white open polyline (live drone trail) — never styled.
+            if (line.matches(WHITE_ASSET_SELECTOR) && isOpenWhiteLine(line)) return;
             const isWhiteAsset = line.matches(WHITE_ASSET_SELECTOR) || line.matches(DV_ASSET_SELECTOR);
             const isBlueFlight = line.matches(BLUE_FLIGHT_PATH_SELECTOR);
             const isEditMode = line.matches(EDIT_MODE_SELECTOR);
@@ -10864,7 +10883,7 @@
         if (!svg) return;
         const g = svg.querySelector('g');
         if (!g) return;
-        const assetEls = document.querySelectorAll(WHITE_ASSET_SELECTOR);
+        const assetEls = [...document.querySelectorAll(WHITE_ASSET_SELECTOR)].filter(el => !isOpenWhiteLine(el));
         if (!assetEls.length) return;
 
         const baseW = globalBaseWidth || (lineThickness * standardRatio);

@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.49
+// @version      1.50
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
-// @description  v1.49 (#329): check groups — a header toggle with soloGroup renders ☑ All / ☐ None over every boolean toggle sharing that soloGroup, and each such toggle gets a ◎ solo button (only this one on). Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
+// @description  v1.50 (#336): profiles (My settings / RO / Regulations / saved, team presets from the data repo, first-run picker, builder: all-off / save-as / copy / import / publish), ★ favorites, FDE label, fallback gear on site pages without .map-tools. v1.49 (#329): check groups — a header toggle with soloGroup renders ☑ All / ☐ None over every boolean toggle sharing that soloGroup, and each such toggle gets a ◎ solo button (only this one on). Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        *://qa.percepto.app/*
@@ -58,7 +58,7 @@
     // ============================================================
     // 1. CONSTANTS
     // ============================================================
-    const VERSION = '1.49';
+    const VERSION = '1.50';
     const IS_TOP = window === window.top;
     const TAG = `[AIM CONTROL ${IS_TOP ? 'TOP' : 'IF'}]`;
     const CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -82,6 +82,14 @@
     const MODE_CSM_KEY = 'aim-is-csm';      // '1' if whitelist-resolved as a CSM (UI: show Lite/Full toggle)
     const MODE_LOGIN_KEY = 'aim-mode-login'; // cached resolved GitHub login (display only)
     const CSM_WHITELIST_PATH = 'csm-whitelist.json'; // in KMLS_REPO (private data repo)
+    // v1.50 — PROFILES are presets of toggle values, NOT a permission tier
+    // (the only gate stays Lite vs FDE above). See section 3c.
+    const PROFILE_STATE_KEY = 'aim-control-profile';        // { active, dirty, chosen, rev, base, keep, done }
+    const PROFILE_SLOTS_KEY = 'aim-control-profile-slots';  // { my: snapshot, <presetId>: your tweaked copy }
+    const USER_PROFILES_KEY = 'aim-control-user-profiles';  // [ profile ] saved on this machine
+    const TEAM_PROFILES_KEY = 'aim-control-team-profiles';  // { at, profiles } cache of the data-repo file
+    const TEAM_PROFILES_PATH = 'cp-profiles.json';          // in KMLS_REPO
+    const FAVS_KEY = 'aim-control-favs';                    // [ "scriptId|toggleId" ]
     // Scripts allowed in LITE mode (everyone). Everything NOT listed is a
     // CSM-only building tool that stays inert unless aim-mode==='full'. Used to
     // hide CSM sections from the panel in Lite (defense for un-guarded installs).
@@ -269,7 +277,7 @@
     // across prod/QA origins, so a wiped origin restores the settings last
     // saved on EITHER — acceptable (same user, same preferences).
     const GM_LS_BACKUP_PREFIX = 'aim-cp-ls-backup:';
-    const MIRRORED_LS_KEYS = [PREFS_KEY, HOTKEYS_KEY, PANEL_UI_KEY, MODE_KEY, MODE_CSM_KEY, MODE_LOGIN_KEY];
+    const MIRRORED_LS_KEYS = [PREFS_KEY, HOTKEYS_KEY, PANEL_UI_KEY, MODE_KEY, MODE_CSM_KEY, MODE_LOGIN_KEY, PROFILE_STATE_KEY, PROFILE_SLOTS_KEY, USER_PROFILES_KEY, FAVS_KEY];
     function lsSetMirrored(key, value) {
         try { localStorage.setItem(key, value); } catch (e) {}
         gmSet(GM_LS_BACKUP_PREFIX + key, String(value));
@@ -399,6 +407,7 @@
     // SET_TOGGLE broadcast with the default value notifies the owning
     // script — its internal toggleState updates and it can re-render.
     function resetToggleToDefault(scriptId, toggleId, def) {
+        markProfileDirty();
         if (state.prefs[scriptId] && Object.prototype.hasOwnProperty.call(state.prefs[scriptId], toggleId)) {
             delete state.prefs[scriptId][toggleId];
             savePrefs();
@@ -431,6 +440,402 @@
         if (combo == null) delete state.hotkeys[scriptId][hotkeyId];
         else state.hotkeys[scriptId][hotkeyId] = combo;
         savePrefs();
+    }
+
+
+    // ============================================================
+    // 3c. PROFILES + FAVORITES (v1.50, #336)
+    //
+    // A profile = a preset of toggle values: { id, name, desc, base, keep,
+    // prefs, rev }. base 'defaults' = anything not in prefs sits at its
+    // schema default; base 'all-off' = every script NOT in keep gets its
+    // master toggles (and category masters) forced off unless prefs says
+    // otherwise. All-off is applied LAZILY per script (materialiseScript)
+    // because scripts register at different times / on different pages.
+    //
+    // Live settings are always state.prefs. Leaving "My settings", or a
+    // preset you changed, stashes the live state in a slot, so switching
+    // back restores it — nothing is ever lost by trying another profile.
+    // Sources: built-in fallbacks < team file in the data repo (same id
+    // overrides) + profiles saved on this machine.
+    // ============================================================
+    const BUILTIN_PROFILES = [
+        { id: 'ro', name: '🚁 RO (flying)', rev: 1, base: 'all-off',
+          desc: 'For flying: everything off except Issues, power lines, map nav and AIM defaults. Turn on what you need.',
+          keep: ['aim-issues', 'aim-defaults', 'aim-map-nav'],
+          prefs: { 'aim-styler': { 'master': true, 'distro.show': true, 'trans.show': true } } },
+        { id: 'regs', name: '📋 Regulations', rev: 1, base: 'defaults', keep: [], prefs: {},
+          desc: 'Regulations view (AIM defaults until the team preset is published).' },
+        { id: 'stock', name: '📦 AIM defaults', rev: 1, base: 'defaults', keep: [], prefs: {},
+          desc: 'Every setting as shipped.' },
+    ];
+    function lsJson(key, def) {
+        try { const v = JSON.parse(localStorage.getItem(key) || 'null'); return v == null ? def : v; }
+        catch (e) { console.warn(`${TAG} unreadable JSON in ${key} — using default:`, e); return def; }
+    }
+    function deepCopy(o) { return JSON.parse(JSON.stringify(o || {})); }
+    function getProfState() {
+        const r = lsJson(PROFILE_STATE_KEY, {}) || {};
+        return {
+            active: typeof r.active === 'string' ? r.active : 'my',
+            dirty: !!r.dirty, chosen: !!r.chosen, rev: r.rev == null ? null : r.rev,
+            base: r.base === 'all-off' ? 'all-off' : 'defaults',
+            keep: Array.isArray(r.keep) ? r.keep : [],
+            done: (r.done && typeof r.done === 'object') ? r.done : {},
+        };
+    }
+    function setProfState(ps) { lsSetMirrored(PROFILE_STATE_KEY, JSON.stringify(ps)); }
+    function markProfileDirty() {
+        const ps = getProfState();
+        if (ps.active === 'my' || ps.dirty) return;
+        ps.dirty = true;
+        setProfState(ps);
+        scheduleRender();
+    }
+    function validProfile(p) {
+        return !!(p && typeof p.id === 'string' && p.id && typeof p.name === 'string' && p.prefs && typeof p.prefs === 'object');
+    }
+    function teamProfiles() {
+        const c = lsJson(TEAM_PROFILES_KEY, null);
+        return (c && Array.isArray(c.profiles)) ? c.profiles.filter(validProfile) : [];
+    }
+    function userProfiles() {
+        const a = lsJson(USER_PROFILES_KEY, []);
+        return Array.isArray(a) ? a.filter(validProfile) : [];
+    }
+    function allProfiles() {
+        const out = [], seen = new Set();
+        const add = (p, src) => { if (seen.has(p.id)) return; seen.add(p.id); out.push({ ...p, src }); };
+        const team = teamProfiles();
+        BUILTIN_PROFILES.forEach(b => { const t = team.find(x => x.id === b.id); add(t || b, t ? 'team' : 'builtin'); });
+        team.forEach(t => add(t, 'team'));
+        userProfiles().forEach(u => add(u, 'user'));
+        return out;
+    }
+    // Master-ish toggle ids of a script: `master:true` booleans + category masters.
+    function masterToggleIds(toggles) {
+        const ids = [];
+        const leaf = (c) => { if (c && c.master === true && c.id && (c.type || 'boolean') === 'boolean') ids.push(c.id); };
+        (toggles || []).forEach(t => {
+            if (!t) return;
+            if (t.type === 'category' || t.type === 'advanced') {
+                if (t.type === 'category' && t.master && t.master.id) ids.push(t.master.id);
+                (t.children || []).forEach(leaf);
+            } else leaf(t);
+        });
+        return ids;
+    }
+    function postToggle(scriptId, toggleId, value) {
+        if (state.channel) state.channel.postMessage({ type: 'SET_TOGGLE', scriptId, toggleId, value, enabled: !!value });
+    }
+    // All-off base: force this script's masters off once (unless kept / explicitly set).
+    function materialiseScript(script) {
+        if (!script || !script.scriptId) return;
+        const ps = getProfState();
+        const sid = script.scriptId;
+        if (ps.base !== 'all-off' || ps.done[sid] || ps.keep.includes(sid)) return;
+        const ids = masterToggleIds(script.toggles);
+        let n = 0;
+        ids.forEach(id => {
+            if (state.prefs[sid] && Object.prototype.hasOwnProperty.call(state.prefs[sid], id)) return;
+            if (!state.prefs[sid]) state.prefs[sid] = {};
+            state.prefs[sid][id] = false;
+            postToggle(sid, id, false);
+            n++;
+        });
+        if (n) savePrefs();   // one write per script, not per toggle (GM storage rewrites its whole blob)
+        ps.done[sid] = 1;
+        setProfState(ps);
+        if (!ids.length) console.warn(`${TAG} profile all-off: ${sid} exposes no master toggle — left as is`);
+        else if (n) console.log(`${TAG} profile all-off: ${sid} — ${n} master toggle(s) turned off`);
+    }
+    function echoAllToggles(script) {
+        if (!script || !Array.isArray(script.toggles)) return;
+        flattenToggles(script.toggles).forEach(t => postToggle(script.scriptId, t.id, getToggle(script.scriptId, t.id, t.default)));
+    }
+    function snapshotLive() {
+        const ps = getProfState();
+        return { prefs: deepCopy(state.prefs), base: ps.base, keep: ps.keep.slice(), done: deepCopy(ps.done) };
+    }
+    // Replace the live settings with `data` and tell every script + every other
+    // Control Panel instance (TOP / iframe / other tabs keep their own copy).
+    function loadLive(data, next) {
+        state.prefs = deepCopy(data.prefs);
+        savePrefs();
+        setProfState({
+            active: next.active, dirty: !!next.dirty, chosen: true, rev: next.rev == null ? null : next.rev,
+            base: data.base === 'all-off' ? 'all-off' : 'defaults',
+            keep: Array.isArray(data.keep) ? data.keep.slice() : [],
+            done: deepCopy(data.done),
+        });
+        if (state.channel) state.channel.postMessage({ type: 'PREFS_REPLACED' });
+        state.registry.forEach(script => { materialiseScript(script); echoAllToggles(script); });
+        console.log(`${TAG} profile → ${next.active}${next.dirty ? ' (your modified copy)' : ''}`);
+    }
+    function stockData(p) { return { prefs: p.prefs, base: p.base, keep: p.keep || [], done: {} }; }
+    function switchProfile(id) {
+        const ps = getProfState();
+        if (id === ps.active) { if (!ps.chosen) { ps.chosen = true; setProfState(ps); } return; }
+        const slots = lsJson(PROFILE_SLOTS_KEY, {}) || {};
+        // Stash what we're leaving: My settings always; a preset only if changed.
+        if (ps.active === 'my' || ps.dirty) slots[ps.active] = snapshotLive();
+        let data = null, next = { active: id, dirty: false, rev: null };
+        if (slots[id] && slots[id].prefs) {
+            data = slots[id];
+            next.dirty = id !== 'my';
+            next.rev = ps.rev;
+        } else if (id !== 'my') {
+            const p = allProfiles().find(x => x.id === id);
+            if (!p) { console.warn(`${TAG} profile "${id}" not found — staying on ${ps.active}`); return; }
+            data = stockData(p);
+            next.rev = p.rev == null ? null : p.rev;
+        }
+        lsSetMirrored(PROFILE_SLOTS_KEY, JSON.stringify(slots));
+        if (data) loadLive(data, next);
+        else setProfState({ ...ps, active: 'my', dirty: false, chosen: true, rev: null });   // first "My settings": start from what is live
+        state.profileSwitched = true;
+    }
+    // ↺ on a modified preset: drop your copy, back to the preset as published.
+    function resetProfileToStock() {
+        const ps = getProfState();
+        const p = allProfiles().find(x => x.id === ps.active);
+        if (!p) return;
+        const slots = lsJson(PROFILE_SLOTS_KEY, {}) || {};
+        delete slots[p.id];
+        lsSetMirrored(PROFILE_SLOTS_KEY, JSON.stringify(slots));
+        loadLive(stockData(p), { active: p.id, dirty: false, rev: p.rev });
+        state.profileSwitched = true;
+    }
+    // Builder: every registered script's masters off NOW, and later-registering
+    // scripts follow (base all-off). Then tick on what the profile should keep.
+    function allOffNow() {
+        if (!confirm('Turn EVERYTHING off?\n\nEvery tool\'s master switch (and every Map Display category) goes off. Your current settings are kept under the profile you are leaving — switch back any time.\n\nThen turn on only what this profile should have and use 💾 Save as…')) return;
+        const ps0 = getProfState();
+        if (ps0.active === 'my') {   // keep the pre-wipe state recoverable
+            const slots = lsJson(PROFILE_SLOTS_KEY, {}) || {};
+            slots['my-before-all-off'] = snapshotLive();
+            lsSetMirrored(PROFILE_SLOTS_KEY, JSON.stringify(slots));
+        }
+        markProfileDirty();
+        const ps = getProfState();
+        ps.base = 'all-off'; ps.keep = []; ps.done = {};
+        let n = 0;
+        state.registry.forEach(script => {
+            masterToggleIds(script.toggles).forEach(id => {
+                if (!state.prefs[script.scriptId]) state.prefs[script.scriptId] = {};
+                state.prefs[script.scriptId][id] = false;
+                postToggle(script.scriptId, id, false);
+                n++;
+            });
+            ps.done[script.scriptId] = 1;
+        });
+        savePrefs();
+        setProfState(ps);
+        if (state.channel) state.channel.postMessage({ type: 'PREFS_REPLACED' });
+        state.profileSwitched = true;
+        console.log(`${TAG} all off — ${n} master toggle(s) across ${state.registry.size} script(s)`);
+    }
+    function slugify(s) { return String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 30) || 'profile'; }
+    function saveUserProfiles(list) { lsSetMirrored(USER_PROFILES_KEY, JSON.stringify(list)); }
+    function saveProfileAs() {
+        const name = (prompt('Save the current settings as a profile.\n\nName:') || '').trim();
+        if (!name) return;
+        const list = userProfiles();
+        const existing = list.find(p => p.name.toLowerCase() === name.toLowerCase());
+        if (existing && !confirm(`Replace your saved profile "${existing.name}"?`)) return;
+        const snap = snapshotLive();
+        const prof = { id: existing ? existing.id : `u-${slugify(name)}-${Date.now().toString(36)}`, name, desc: '', base: snap.base, keep: snap.keep, prefs: snap.prefs, rev: Date.now() };
+        saveUserProfiles(existing ? list.map(p => p.id === existing.id ? prof : p) : list.concat([prof]));
+        const ps = getProfState();
+        const slots = lsJson(PROFILE_SLOTS_KEY, {}) || {};
+        if (ps.active === 'my') slots.my = snap;
+        delete slots[prof.id];
+        lsSetMirrored(PROFILE_SLOTS_KEY, JSON.stringify(slots));
+        setProfState({ ...ps, active: prof.id, dirty: false, chosen: true, rev: prof.rev });
+        console.log(`${TAG} profile saved: ${name}`);
+    }
+    function deleteActiveUserProfile() {
+        const ps = getProfState();
+        const list = userProfiles();
+        const p = list.find(x => x.id === ps.active);
+        if (!p) return;
+        if (!confirm(`Delete your saved profile "${p.name}"?\n\nYour current settings stay as they are (they become "My settings").`)) return;
+        saveUserProfiles(list.filter(x => x.id !== p.id));
+        const slots = lsJson(PROFILE_SLOTS_KEY, {}) || {};
+        delete slots[p.id];
+        lsSetMirrored(PROFILE_SLOTS_KEY, JSON.stringify(slots));
+        setProfState({ ...ps, active: 'my', dirty: false, rev: null });
+    }
+    // Copy / import: a profile travels as one line of text (chat, email).
+    const PROFILE_CODE_PREFIX = 'AIMPROFILE1:';
+    function b64enc(str) { return btoa(unescape(encodeURIComponent(str))); }
+    function b64dec(b64) { return decodeURIComponent(escape(atob(String(b64).replace(/\s+/g, '')))); }
+    function activeProfileName() {
+        const ps = getProfState();
+        if (ps.active === 'my') return 'My settings';
+        const p = allProfiles().find(x => x.id === ps.active);
+        return p ? p.name : 'Profile';
+    }
+    function copyText(text) {
+        const fallback = () => {
+            try {
+                const ta = document.createElement('textarea');
+                ta.value = text; ta.style.cssText = 'position:fixed;left:-9999px;top:0';
+                document.body.appendChild(ta); ta.select();
+                const ok = document.execCommand('copy');
+                ta.remove();
+                if (!ok) throw new Error('execCommand copy refused');
+                return true;
+            } catch (e) {
+                console.warn(`${TAG} clipboard unavailable — showing the text instead:`, e);
+                prompt('Copy this (Ctrl+C):', text);
+                return false;
+            }
+        };
+        try {
+            if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(text).catch(fallback); return; }
+        } catch (e) { /* fall through */ }
+        fallback();
+    }
+    function exportProfileCode() {
+        const snap = snapshotLive();
+        const who = getModeLogin();
+        const obj = { name: `${activeProfileName()}${who ? ` (${who})` : ''}`, base: snap.base, keep: snap.keep, prefs: snap.prefs };
+        copyText(PROFILE_CODE_PREFIX + b64enc(JSON.stringify(obj)));
+        alert('Profile copied.\n\nSend that text to a coworker — they open ⚙ → Profile ⋯ → 📥 Import and paste it.');
+    }
+    function importProfileCode() {
+        const raw = (prompt('Paste the profile text a coworker sent you:') || '').trim();
+        if (!raw) return;
+        let obj = null;
+        try {
+            if (raw.indexOf(PROFILE_CODE_PREFIX) !== 0) throw new Error('not an AIM profile (missing prefix)');
+            obj = JSON.parse(b64dec(raw.slice(PROFILE_CODE_PREFIX.length)));
+            if (!obj || typeof obj.prefs !== 'object' || !obj.prefs) throw new Error('no settings inside');
+        } catch (e) {
+            console.error(`${TAG} profile import failed:`, e);
+            alert(`That text is not a valid AIM profile (${e.message}). Ask them to copy it again.`);
+            return;
+        }
+        const name = (prompt('Name for this profile:', String(obj.name || 'Imported profile')) || '').trim();
+        if (!name) return;
+        const prof = { id: `u-${slugify(name)}-${Date.now().toString(36)}`, name, desc: 'imported', base: obj.base === 'all-off' ? 'all-off' : 'defaults', keep: Array.isArray(obj.keep) ? obj.keep : [], prefs: obj.prefs, rev: Date.now() };
+        saveUserProfiles(userProfiles().concat([prof]));
+        switchProfile(prof.id);
+    }
+    // Team presets live in the private data repo (same PAT as the KMLs).
+    function ghRequest(method, url, token, body, cb) {
+        try {
+            GM_xmlhttpRequest({
+                method, url,
+                headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'Content-Type': 'application/json' },
+                data: body ? JSON.stringify(body) : undefined,
+                onload: (resp) => { let data = null; try { data = JSON.parse(resp.responseText); } catch (e) {} cb(resp.status, data); },
+                onerror: () => cb(0, null),
+                ontimeout: () => cb(0, null),
+                timeout: 15000,
+            });
+        } catch (e) { console.error(`${TAG} ${method} ${url} threw:`, e); cb(0, null); }
+    }
+    const TEAM_PROFILES_URL = `https://api.github.com/repos/${KMLS_REPO}/contents/${TEAM_PROFILES_PATH}`;
+    let teamFetchDone = false;
+    function fetchTeamProfiles(force) {
+        const token = getToken();
+        if (!token || typeof GM_xmlhttpRequest !== 'function' || (teamFetchDone && !force)) return;
+        teamFetchDone = true;
+        ghRequest('GET', `${TEAM_PROFILES_URL}?ref=${KMLS_BRANCH}`, token, null, (status, file) => {
+            if (status === 404) { console.log(`${TAG} no team profiles published yet (${TEAM_PROFILES_PATH}) — using built-in RO / Regulations`); return; }
+            if (status < 200 || status >= 300 || !file || !file.content) { console.warn(`${TAG} team profiles fetch failed (HTTP ${status}) — keeping the cached copy`); return; }
+            try {
+                const parsed = JSON.parse(b64dec(file.content));
+                const list = (parsed && Array.isArray(parsed.profiles)) ? parsed.profiles.filter(validProfile) : null;
+                if (!list) throw new Error('no profiles array');
+                try { localStorage.setItem(TEAM_PROFILES_KEY, JSON.stringify({ at: Date.now(), profiles: list })); } catch (e) { console.warn(`${TAG} could not cache team profiles:`, e); }
+                console.log(`${TAG} team profiles: ${list.map(p => p.name).join(', ') || '(none)'}`);
+                refreshActiveTeamProfile();
+                scheduleRender();
+            } catch (e) { console.warn(`${TAG} team profiles file unreadable:`, e); }
+        });
+    }
+    // On an UNMODIFIED team preset, pick up a newer published version automatically.
+    function refreshActiveTeamProfile() {
+        const ps = getProfState();
+        if (ps.active === 'my' || ps.dirty) return;
+        const p = allProfiles().find(x => x.id === ps.active);
+        if (!p || p.src === 'user' || p.rev == null || p.rev === ps.rev) return;
+        console.log(`${TAG} profile "${p.name}" was updated by the team — applying the new version`);
+        loadLive(stockData(p), { active: p.id, dirty: false, rev: p.rev });
+    }
+    function publishTeamProfile() {
+        if (!isFull()) return;
+        const token = getToken();
+        if (!token) { alert('No GitHub token saved — set it in GitHub Connection first.'); return; }
+        const ps = getProfState();
+        const cur = allProfiles().find(x => x.id === ps.active);
+        const ans = (prompt('Publish your CURRENT settings as a team profile (everyone gets it on their next page load).\n\nType  ro  or  regs  to replace that preset, or a new name to add one:', cur && cur.src !== 'user' ? cur.id : '') || '').trim();
+        if (!ans) return;
+        const low = ans.toLowerCase();
+        const builtin = BUILTIN_PROFILES.find(b => b.id === low && b.id !== 'stock');
+        const id = builtin ? builtin.id : `t-${slugify(ans)}`;
+        const name = builtin ? builtin.name : ans;
+        const snap = snapshotLive();
+        const prof = { id, name, desc: builtin ? builtin.desc : '', base: snap.base, keep: snap.keep, prefs: snap.prefs, rev: Date.now(), by: getModeLogin() || '' };
+        if (!confirm(`Publish "${name}" to the whole team?\n\nIt replaces the team's current "${name}" preset. People who changed their copy keep their changes.`)) return;
+        ghRequest('GET', `${TEAM_PROFILES_URL}?ref=${KMLS_BRANCH}`, token, null, (status, file) => {
+            let list = [], sha;
+            if (status === 200 && file && file.content) {
+                sha = file.sha;
+                try { const parsed = JSON.parse(b64dec(file.content)); if (parsed && Array.isArray(parsed.profiles)) list = parsed.profiles.filter(validProfile); }
+                catch (e) { console.error(`${TAG} publish: existing ${TEAM_PROFILES_PATH} unreadable:`, e); alert('Publish stopped: the existing team profile file could not be read (see console). Nothing was changed.'); return; }
+            } else if (status !== 404) {
+                console.error(`${TAG} publish: GET failed HTTP ${status}`);
+                alert(`Publish failed: could not read the team file (HTTP ${status}). Nothing was changed.`);
+                return;
+            }
+            list = list.filter(p => p.id !== id).concat([prof]);
+            const body = { message: `cp-profiles: ${name} (by ${prof.by || 'unknown'})`, branch: KMLS_BRANCH, content: b64enc(JSON.stringify({ profiles: list }, null, 1)) };
+            if (sha) body.sha = sha;
+            ghRequest('PUT', TEAM_PROFILES_URL, token, body, (st2) => {
+                if (st2 < 200 || st2 >= 300) {
+                    console.error(`${TAG} publish: PUT failed HTTP ${st2}`);
+                    alert(`Publish failed (HTTP ${st2}). ${st2 === 403 || st2 === 404 ? 'Your token needs Contents: Read and write on the data repo.' : 'Nothing was changed.'}`);
+                    return;
+                }
+                try { localStorage.setItem(TEAM_PROFILES_KEY, JSON.stringify({ at: Date.now(), profiles: list })); } catch (e) { console.warn(`${TAG} could not cache team profiles:`, e); }
+                const slots = lsJson(PROFILE_SLOTS_KEY, {}) || {};
+                if (getProfState().active === 'my') slots.my = snapshotLive();
+                delete slots[id];
+                lsSetMirrored(PROFILE_SLOTS_KEY, JSON.stringify(slots));
+                setProfState({ ...getProfState(), active: id, dirty: false, chosen: true, rev: prof.rev });
+                console.log(`${TAG} published team profile ${id}`);
+                alert(`Published "${name}". Coworkers get it on their next page load.`);
+                if (state.panelOpen) renderPanel();
+            });
+        });
+    }
+    // ---- favorites ----
+    function getFavs() { const a = lsJson(FAVS_KEY, []); return Array.isArray(a) ? a.filter(x => typeof x === 'string') : []; }
+    function toggleFav(key) {
+        const a = getFavs();
+        const i = a.indexOf(key);
+        if (i === -1) a.push(key); else a.splice(i, 1);
+        lsSetMirrored(FAVS_KEY, JSON.stringify(a));
+    }
+    // Find a toggle (or a category master) inside a script's schema, with its parent label.
+    function findToggleCtx(toggles, id) {
+        for (const t of (toggles || [])) {
+            if (!t) continue;
+            if (t.type === 'category' || t.type === 'advanced') {
+                if (t.type === 'category' && t.master && t.master.id === id) return { t: { id, type: 'boolean', default: t.master.default, label: t.label || id }, parent: '' };
+                for (const c of (t.children || [])) { if (c && c.id === id && c.type !== 'header') return { t: c, parent: t.label || '' }; }
+            } else if (t.id === id && t.type !== 'header') return { t, parent: '' };
+        }
+        return null;
+    }
+    function favStarHtml(scriptId, toggleId) {
+        const key = `${scriptId}|${toggleId}`;
+        const on = !!(state._favSet && state._favSet.has(key));
+        return `<button data-fav="${escapeAttr(key)}" title="${on ? 'Remove from Favorites' : 'Add to Favorites (pinned at the top of the panel)'}" style="background:transparent;border:none;cursor:pointer;padding:0 2px;font-size:12px;line-height:1;color:${on ? '#ffd24a' : 'rgba(255,255,255,0.22)'}">${on ? '★' : '☆'}</button>`;
     }
 
     // ============================================================
@@ -470,6 +875,7 @@
         modeResolving = false;
         modeResolveDone = false;
         if (value) resolveMode();
+        if (value) fetchTeamProfiles(true);
     }
     // Verifies the PAT by hitting the contents API for the KMLs repo root.
     // Uses GM_xmlhttpRequest so the request bypasses page CORS rules.
@@ -547,6 +953,12 @@
             const changed = prev !== v;
             setToggle(msg.scriptId, msg.toggleId, v);
             if (changed && state.panelOpen) scheduleRender();
+        } else if (msg.type === 'PREFS_REPLACED') {
+            // v1.50 — another Control Panel instance (other frame / tab) swapped
+            // the whole settings set (profile switch). Re-read, or our stale copy
+            // would be written back on the next save.
+            loadPrefs();
+            scheduleRender();
         } else if (msg.type === 'REQUEST_TOKEN') {
             const token = getToken();
             if (token && state.channel) {
@@ -624,6 +1036,8 @@
         const sig = registrationSignature(msg);
         const isIdentical = prev && prev.__sig === sig;
         state.registry.set(msg.scriptId, { ...msg, lastSeen: Date.now(), __sig: sig });
+        // v1.50 — an "all off" profile reaches a script the first time it registers.
+        materialiseScript(msg);
         // Echo back the current value for each registered setting. Carries
         // both `value` (typed) and `enabled` (bool) — scripts can read whichever
         // they're built for. Saves each script from doing its own localStorage.
@@ -651,6 +1065,7 @@
     }
 
     function broadcastToggle(scriptId, toggleId, value) {
+        markProfileDirty();   // v1.50: every user-made change goes through here
         setToggle(scriptId, toggleId, value);
         if (state.channel) {
             // Send both `value` (any type) and `enabled` (bool) for compatibility
@@ -879,6 +1294,8 @@
         const tools = findToolsBar();
         if (!tools) return false;
         if (state.buttonEl && tools.contains(state.buttonEl)) return true;
+        // v1.50 — a fallback floating gear (page looked toolbar-less) yields to the real one.
+        if (state.buttonEl && state.buttonEl.classList.contains('aim-control-button--floating')) removeFloatingButton();
         ensureGearStyles(document);
         // Match the existing .map-tools__button look. Use the same classes
         // the host app's other tools use so styling comes for free.
@@ -899,6 +1316,7 @@
             togglePanel();
         });
         console.log(`${TAG} button injected into .map-tools`);
+        maybeAutoOpenPicker();
         return true;
     }
 
@@ -935,6 +1353,7 @@
             togglePanel();
         });
         console.log(`${TAG} floating button injected (${state.urlScope} page)`);
+        maybeAutoOpenPicker();
         return true;
     }
 
@@ -982,13 +1401,54 @@
             togglePanel();
         });
         console.log(`${TAG} gear docked into .map-group-buttons-container (Data View)`);
+        maybeAutoOpenPicker();
         return true;
+    }
+
+    // v1.50 — first run: nobody has picked a profile on this machine yet → open
+    // the panel once (it shows the profile picker) so a new install never sits
+    // on the heavy defaults just because the gear was never clicked.
+    let pickerAutoOpened = false;
+    function maybeAutoOpenPicker() {
+        if (pickerAutoOpened || getProfState().chosen) return;
+        pickerAutoOpened = true;
+        setTimeout(() => {
+            try { if (!getProfState().chosen && !state.panelOpen && state.buttonEl) setPanelOpen(true); }
+            catch (e) { console.warn(`${TAG} profile picker auto-open failed:`, e); }
+        }, 1500);
+    }
+
+    // v1.50 — fallback gear: a site page whose map frame has NO .map-tools bar
+    // (Live Map — reported 2026-11-12: "you cannot see the control panel"). Any
+    // frame that holds a real map on an un-scoped /#/site/<id>/ page gets the
+    // floating gear; it steps aside the moment a .map-tools bar exists.
+    function wantFallbackGear() {
+        if (state.urlScope !== 'other') return false;
+        let h = '';
+        try { h = window.top.location.hash || ''; } catch (e) { h = location.hash || ''; }
+        if (!/#\/site\/\d+\//.test(h)) return false;
+        if (document.querySelector('.map-tools')) return false;
+        const m = document.querySelector('.leaflet-container');
+        if (!m) return false;
+        const r = m.getBoundingClientRect();
+        return r.width > 300 && r.height > 200;
     }
 
     // Called at start, on every scope change, and on a slow interval
     // (Angular can rebuild large chunks of the live page under us).
     function syncFloatingButton() {
-        if (!IS_TOP) return;
+        if (!IS_TOP) {
+            // Map iframe: docked gear when .map-tools exists, else the fallback.
+            const floating = !!(state.buttonEl && state.buttonEl.classList.contains('aim-control-button--floating'));
+            if (document.querySelector('.map-tools')) {
+                if (floating) removeFloatingButton();
+                if (!state.buttonEl) injectButton();
+            } else if (wantFallbackGear()) {
+                if (state.buttonEl && !document.body.contains(state.buttonEl)) state.buttonEl = null;
+                if (!state.buttonEl) injectFloatingButton();
+            } else if (floating) removeFloatingButton();
+            return;
+        }
         if (state.urlScope === 'live-drone') { injectFloatingButton(); return; }
         if (state.urlScope === 'data-view') {
             // Angular wiped our button? Reset so we rebuild below.
@@ -1007,6 +1467,11 @@
             if (state.buttonEl) return;
             if (injectDockedButton()) return;
             injectFloatingButton();   // fallback — header not rendered (yet)
+            return;
+        }
+        if (wantFallbackGear()) {
+            if (state.buttonEl && !document.body.contains(state.buttonEl)) state.buttonEl = null;
+            if (!state.buttonEl) injectFloatingButton();
             return;
         }
         removeFloatingButton();
@@ -1169,6 +1634,11 @@
         panel.addEventListener('change', (e) => {
             const t = e.target;
             if (!t || !t.dataset) return;
+            if (t.hasAttribute && t.hasAttribute('data-profile-select')) {
+                try { switchProfile(t.value); } catch (err) { console.error(`${TAG} profile switch failed:`, err); }
+                renderPanel();
+                return;
+            }
             const ctrl = t.dataset.control;
             if (ctrl === 'boolean') {
                 broadcastToggle(t.dataset.script, t.dataset.toggle, t.checked);
@@ -1200,6 +1670,49 @@
             // For pointerdown, only process LEFT button (button 0). Avoids
             // accidental dismissals on right-click context-menu attempts.
             if (e.type === 'pointerdown' && e.button !== 0) return;
+            // v1.50 — ★ favorite star (sits inside labels / category headers, so it
+            // must win before those handlers and must not flip the checkbox).
+            const favBtn = t.closest && t.closest('[data-fav]');
+            if (favBtn) {
+                e.stopPropagation(); e.preventDefault();
+                const now = Date.now();
+                if (now - lastHandled < 250) return;
+                lastHandled = now;
+                toggleFav(favBtn.getAttribute('data-fav'));
+                renderPanel();
+                return;
+            }
+            // v1.50 — profile bar: picker cards, ↺ stock, ⋯ tools, builder actions.
+            const profBtn = t.closest && t.closest('[data-profile-pick],[data-profile-reset],[data-profile-tools],[data-profile-act],[data-profile-reload]');
+            if (profBtn) {
+                e.stopPropagation(); e.preventDefault();
+                const now = Date.now();
+                if (now - lastHandled < 250) return;
+                lastHandled = now;
+                try {
+                    if (profBtn.hasAttribute('data-profile-reload')) { location.reload(); return; }
+                    if (profBtn.hasAttribute('data-profile-pick')) {
+                        const id = profBtn.getAttribute('data-profile-pick');
+                        const ps = getProfState();
+                        if (id === ps.active) setProfState({ ...ps, chosen: true });
+                        else switchProfile(id);
+                    } else if (profBtn.hasAttribute('data-profile-reset')) {
+                        if (confirm(`Reset "${activeProfileName()}" to the published version?\n\nThe changes you made on top of it are dropped.`)) resetProfileToStock();
+                    } else if (profBtn.hasAttribute('data-profile-tools')) {
+                        state.profileToolsOpen = !state.profileToolsOpen;
+                    } else {
+                        const act = profBtn.getAttribute('data-profile-act');
+                        if (act === 'save') saveProfileAs();
+                        else if (act === 'alloff') allOffNow();
+                        else if (act === 'copy') exportProfileCode();
+                        else if (act === 'import') importProfileCode();
+                        else if (act === 'delete') deleteActiveUserProfile();
+                        else if (act === 'publish') publishTeamProfile();
+                    }
+                } catch (err) { console.error(`${TAG} profile action failed:`, err); alert(`Profile action failed: ${err.message || err}`); }
+                renderPanel();
+                return;
+            }
             // Action buttons (validator run/clear etc.)
             if (t.dataset && t.dataset.control === 'button') {
                 const now = Date.now();
@@ -1274,7 +1787,7 @@
                 setMode(goFull ? 'full' : 'lite');
                 renderPanel();
                 const msg = goFull
-                    ? 'Switching to FULL (CSM) mode — building tools (SUM / SOP / bulk / macros / editors) will be enabled.'
+                    ? 'Switching to FDE mode — building tools (SUM / SOP / bulk / macros / editors) will be enabled.'
                     : 'Switching to LITE mode — you will see what a reg / pilot sees: building tools hidden, QoL + viewing tools stay.';
                 if (confirm(`${msg}\n\nReload the page now to apply?`)) {
                     location.reload();
@@ -1740,6 +2253,7 @@
                     <div data-cattoggle="${escapeAttr(expandKey)}" style="display:flex;align-items:center;padding:4px 10px;cursor:pointer;background:rgba(255,255,255,0.02);user-select:none">
                         ${headerCheckbox}
                         <span style="flex:1;color:#e6e6e6">${escapeHtml(t.label || t.id)}${metaHtml}</span>
+                        ${(t.master && t.master.id) ? favStarHtml(scriptId, t.master.id) : ''}
                         <span style="color:#bbb;width:14px;text-align:right">${expanded ? '▾' : '▸'}</span>
                     </div>
                     ${expanded ? `<div style="padding:3px 0 5px 18px;background:rgba(0,0,0,0.12);border-top:1px dashed rgba(255,255,255,0.06)">${childrenHtml}</div>` : ''}
@@ -1773,6 +2287,7 @@
                     <span style="flex:1">${escapeHtml(t.label || t.id)}</span>
                     <select data-control="select" data-script="${escapeAttr(scriptId)}" data-toggle="${escapeAttr(t.id)}"
                             style="background:#1f2228;color:#e6e6e6;color-scheme:dark;border:1px solid rgba(255,255,255,0.18);border-radius:3px;padding:2px 6px;cursor:pointer;font:inherit">${opts}</select>
+                    ${favStarHtml(scriptId, t.id)}
                     ${resetIconHtml(scriptId, t, value)}
                 </div>
             `;
@@ -1786,6 +2301,7 @@
                     <input type="color" value="${escapeAttr(String(v))}"
                            data-control="color" data-script="${escapeAttr(scriptId)}" data-toggle="${escapeAttr(t.id)}"
                            style="width:42px;height:24px;cursor:pointer;border:1px solid rgba(255,255,255,0.18);border-radius:3px;padding:0;background:transparent"/>
+                    ${favStarHtml(scriptId, t.id)}
                     ${resetIconHtml(scriptId, t, value)}
                 </div>
             `;
@@ -1795,13 +2311,14 @@
             // Action button — broadcasts TRIGGER_ACTION (actionId from t.action
             // or t.id). The owning script listens and runs whatever is wired up.
             return `
-                <div style="padding:4px 10px">
+                <div style="padding:4px 10px;display:flex;align-items:center;gap:4px">
                     <button data-control="button"
                             data-script="${escapeAttr(scriptId)}"
                             data-action="${escapeAttr(t.action || t.id)}"
-                            style="width:100%;background:rgba(20,210,220,0.18);border:1px solid rgba(20,210,220,0.5);color:rgb(20,210,220);padding:4px 8px;border-radius:3px;font:inherit;cursor:pointer">
+                            style="flex:1;background:rgba(20,210,220,0.18);border:1px solid rgba(20,210,220,0.5);color:rgb(20,210,220);padding:4px 8px;border-radius:3px;font:inherit;cursor:pointer">
                         ${escapeHtml(t.label || t.id)}
                     </button>
+                    ${t.id ? favStarHtml(scriptId, t.id) : ''}
                 </div>
             `;
         }
@@ -1818,6 +2335,7 @@
                            data-control="number" data-script="${escapeAttr(scriptId)}" data-toggle="${escapeAttr(t.id)}"
                            style="width:70px;background:#1f2228;color:#e6e6e6;border:1px solid rgba(255,255,255,0.18);border-radius:3px;padding:2px 6px;font:inherit"/>
                     ${t.unit ? `<span style="color:#888;font-size:11px">${escapeHtml(t.unit)}</span>` : ''}
+                    ${favStarHtml(scriptId, t.id)}
                     ${resetIconHtml(scriptId, t, value)}
                 </div>
             `;
@@ -1834,6 +2352,7 @@
                        style="cursor:pointer;accent-color:rgb(20,210,220)" />
                 <span style="flex:1">${escapeHtml(t.label || t.id)}</span>
                 ${t.soloGroup ? `<button data-solo="${escapeAttr(t.soloGroup)}" data-script="${escapeAttr(scriptId)}" data-toggle="${escapeAttr(t.id)}" title="Solo — only this check on, every other check in the group off" style="background:transparent;border:1px solid rgba(255,255,255,0.18);color:#bbb;border-radius:3px;padding:0 4px;cursor:pointer;font:inherit;font-size:10px;line-height:14px">◎</button>` : ''}
+                ${favStarHtml(scriptId, t.id)}
                 ${resetIconHtml(scriptId, t, value)}
             </label>
         `;
@@ -1887,6 +2406,7 @@
         // and everything is force-expanded so results are visible.
         const q = (state.search || '').trim().toLowerCase();
         const searching = q.length > 0;
+        state._favSet = new Set(getFavs());   // v1.50: read once per render (stars + Favorites section)
 
         // v1.40 — title row is the drag handle; 🔒 keeps the panel open (and
         // z-boosted) through outside clicks; ↺ appears once dragged/resized.
@@ -2296,9 +2816,9 @@
         const full = ACTIVE_MODE === 'full';
         const login = getModeLogin();
         const pending = getMode() !== ACTIVE_MODE; // resolved differs from what's running
-        const modeLabel = full ? '🛠️ Full (CSM)' : '🪶 Lite';
+        const modeLabel = full ? '🛠️ FDE' : '🪶 Lite';
         const sub = login
-            ? `${escapeHtml(login)}${isCsmUser() ? ' · CSM' : ''}`
+            ? `${escapeHtml(login)}${isCsmUser() ? ' · FDE' : ''}`
             : (isFull() ? '' : 'building tools hidden');
         const pilotHtml = `
             <div style="padding:7px 10px;border-bottom:1px solid rgba(255,255,255,0.10);background:${full ? 'rgba(120,90,200,0.20)' : 'rgba(20,120,180,0.18)'};display:flex;align-items:center;gap:8px">
@@ -2307,7 +2827,80 @@
                     <div style="font-size:10px;color:#888;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${sub}</div>
                 </div>
                 ${pending ? `<button data-reload-mode title="Reload to apply the resolved mode" style="cursor:pointer;font-size:11px;font-weight:700;padding:3px 10px;border-radius:4px;border:1px solid #ffd591;background:rgba(173,104,0,0.25);color:#ffd591">reload</button>` : ''}
-                ${isCsmUser() ? `<button data-mode-toggle title="Switch between Full (CSM) and Lite (what regs/pilots see). Reloads to apply." style="cursor:pointer;font-size:11px;font-weight:700;padding:3px 12px;border-radius:4px;border:1px solid ${full ? '#cdbcff' : 'rgba(255,255,255,0.25)'};background:${full ? 'rgba(120,90,200,0.30)' : 'rgba(255,255,255,0.06)'};color:${full ? '#e6dcff' : '#bbb'}">${full ? 'Full' : 'Lite'}</button>` : ''}
+                ${isCsmUser() ? `<button data-mode-toggle title="Switch between FDE (building tools) and Lite (what regs/pilots see). Reloads to apply." style="cursor:pointer;font-size:11px;font-weight:700;padding:3px 12px;border-radius:4px;border:1px solid ${full ? '#cdbcff' : 'rgba(255,255,255,0.25)'};background:${full ? 'rgba(120,90,200,0.30)' : 'rgba(255,255,255,0.06)'};color:${full ? '#e6dcff' : '#bbb'}">${full ? 'FDE' : 'Lite'}</button>` : ''}
+            </div>
+        `;
+
+
+        // v1.50 — PROFILE BAR. Presets of settings, not permissions: anyone can
+        // pick any profile and still change every setting afterwards.
+        let ps = getProfState();
+        const profs = allProfiles();
+        if (ps.active !== 'my' && !profs.some(p => p.id === ps.active)) {   // preset was removed → your live settings become My settings
+            ps = { ...ps, active: 'my', dirty: false, rev: null };
+            setProfState(ps);
+        }
+        const profOpt = (id, label) => `<option value="${escapeAttr(id)}" ${ps.active === id ? 'selected' : ''}>${escapeHtml(label)}${ps.active === id && ps.dirty ? ' — modified' : ''}</option>`;
+        const presetOpts = profs.filter(p => p.src !== 'user').map(p => profOpt(p.id, p.name)).join('');
+        const userOpts = profs.filter(p => p.src === 'user').map(p => profOpt(p.id, p.name)).join('');
+        const activeProf = profs.find(p => p.id === ps.active);
+        const pbBtn = 'cursor:pointer;font-size:11px;padding:2px 7px;border-radius:4px;border:1px solid rgba(255,255,255,0.2);background:rgba(255,255,255,0.06);color:#ddd;font:inherit;font-size:11px';
+        const toolsHtml = state.profileToolsOpen ? `
+                <div style="display:flex;flex-wrap:wrap;gap:4px;padding:5px 10px 7px">
+                    <button data-profile-act="save" title="Save the current settings as a named profile on this machine" style="${pbBtn}">💾 Save as…</button>
+                    <button data-profile-act="alloff" title="Builder: turn every tool's master switch off, then tick on only what a profile should have" style="${pbBtn}">⏻ All off</button>
+                    <button data-profile-act="copy" title="Copy the current settings as text to send to a coworker" style="${pbBtn}">📋 Copy</button>
+                    <button data-profile-act="import" title="Paste a profile a coworker sent you" style="${pbBtn}">📥 Import</button>
+                    ${activeProf && activeProf.src === 'user' ? `<button data-profile-act="delete" title="Delete this saved profile" style="${pbBtn};border-color:rgba(255,96,96,0.5);color:#ff8f8f">🗑 Delete</button>` : ''}
+                    ${isFull() ? `<button data-profile-act="publish" title="FDE: publish the current settings as a team preset (RO / Regulations / new) — everyone gets it" style="${pbBtn};border-color:#cdbcff;color:#e6dcff">⬆ Publish to team</button>` : ''}
+                </div>` : '';
+        const profileHtml = `
+            <div style="border-bottom:1px solid rgba(255,255,255,0.10);background:rgba(255,255,255,0.03)">
+                <div style="display:flex;align-items:center;gap:6px;padding:6px 10px">
+                    <span style="color:#9fb3c8;font-size:11px;font-weight:600">Profile</span>
+                    <select data-profile-select title="${escapeAttr(activeProf && activeProf.desc ? activeProf.desc : 'Presets of settings. Switching keeps your previous settings — switch back any time.')}"
+                            style="flex:1;min-width:0;background:#1f2228;color:#e6e6e6;color-scheme:dark;border:1px solid rgba(255,255,255,0.18);border-radius:3px;padding:2px 6px;cursor:pointer;font:inherit">
+                        ${profOpt('my', '👤 My settings')}
+                        <optgroup label="Presets">${presetOpts}</optgroup>
+                        ${userOpts ? `<optgroup label="Saved on this computer">${userOpts}</optgroup>` : ''}
+                    </select>
+                    ${ps.active !== 'my' && ps.dirty && activeProf && activeProf.src !== 'user' ? `<button data-profile-reset title="Drop your changes — back to this preset as published" style="${pbBtn}">↺</button>` : ''}
+                    ${state.profileSwitched ? `<button data-profile-reload title="Some tools only fully pick up a profile after a reload" style="${pbBtn};border-color:#ffd591;color:#ffd591">reload</button>` : ''}
+                    <button data-profile-tools title="Save / copy / import profiles" style="${pbBtn}">${state.profileToolsOpen ? '▴' : '⋯'}</button>
+                </div>
+                ${toolsHtml}
+            </div>
+        `;
+        // First run on this machine: ask which profile to start from.
+        const pickCard = (id, title, desc) => `
+                <button data-profile-pick="${escapeAttr(id)}" style="display:block;width:100%;text-align:left;margin:0 0 6px;padding:7px 9px;border-radius:5px;border:1px solid rgba(20,210,220,0.45);background:rgba(20,210,220,0.10);color:#e6e6e6;cursor:pointer;font:inherit">
+                    <div style="font-weight:700;color:#7adfe6">${escapeHtml(title)}</div>
+                    <div style="font-size:11px;color:#aab">${escapeHtml(desc)}</div>
+                </button>`;
+        const pickerHtml = ps.chosen ? '' : `
+            <div style="padding:10px;border-bottom:1px solid rgba(255,255,255,0.12);background:rgba(20,210,220,0.05)">
+                <div style="font-weight:700;color:#fff;margin-bottom:2px">Pick a profile to start with</div>
+                <div style="font-size:11px;color:#9aa;margin-bottom:8px">A profile just sets what is on and off. You can change any setting afterwards and switch profiles any time — your own settings are kept.</div>
+                ${profs.filter(p => p.src !== 'user' && p.id !== 'stock').map(p => pickCard(p.id, p.name, p.desc || '')).join('')}
+                ${pickCard(ps.active, '👤 Keep what I have now', 'No changes — stay on the settings this computer already has.')}
+            </div>
+        `;
+        // ★ Favorites — starred settings pinned above the sections.
+        const favRows = [];
+        state._favSet.forEach(key => {
+            const cut = key.indexOf('|');
+            const sid = key.slice(0, cut), tid = key.slice(cut + 1);
+            const sc = visibleScripts.find(x => x.scriptId === sid);
+            if (!sc) return;   // tool not on this page (or hidden in Lite)
+            const ctx = findToggleCtx(sc.toggles, tid);
+            if (!ctx) return;
+            const lbl = ctx.parent ? `${ctx.parent} › ${ctx.t.label || ctx.t.id}` : (ctx.t.label || ctx.t.id);
+            favRows.push(renderControl(sid, { ...ctx.t, label: lbl, soloGroup: undefined, master: false }));
+        });
+        const favHtml = searching ? '' : `
+            <div style="border-bottom:1px solid rgba(255,255,255,0.12)">
+                <div style="padding:4px 10px;background:rgb(36,36,36);color:#ffd24a;font-size:12px;font-weight:700">★ Favorites</div>
+                ${favRows.length ? favRows.join('') : `<div style="padding:4px 10px 6px;color:#888;font-size:11px">Click the ☆ next to any setting to pin it here.</div>`}
             </div>
         `;
 
@@ -2316,7 +2909,7 @@
         // putting it at the bottom keeps active controls front-and-center.
         // v1.40 — content renders into the inner scroller so the panel's own
         // box (and the corner resize grip) stay fixed while content scrolls.
-        state.scrollEl.innerHTML = headerHtml + pilotHtml + errorHtml + emptyHtml + sectionsHtml + tokenHtml;
+        state.scrollEl.innerHTML = headerHtml + pilotHtml + profileHtml + pickerHtml + errorHtml + favHtml + emptyHtml + sectionsHtml + tokenHtml;
         wireTokenSection();
         // NOTE: per-element click/change listeners moved to delegated
         // handlers in createPanel() — see panel.addEventListener calls
@@ -2337,6 +2930,8 @@
         // v1.31 — if a token is already cached, resolve CSM status now so the
         // mode is fresh for the NEXT reload (guards read aim-mode at init).
         if (getToken()) resolveMode();
+        // v1.50 — team presets (RO / Regulations / …) from the data repo.
+        if (getToken()) fetchTeamProfiles();
         installHotkeyRouter();
         installScopeWatcher();
         const start = () => {
@@ -2354,6 +2949,7 @@
                 setInterval(syncFloatingButton, 2000);
             } else {
                 ensureButton();
+                setInterval(syncFloatingButton, 2000);   // v1.50: fallback gear on toolbar-less map pages
             }
             requestRegistrations();
         };
