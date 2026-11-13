@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.173
+// @version      34.174
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -69,7 +69,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.173';
+    const SCRIPT_VERSION = '34.174';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -4533,6 +4533,17 @@
     // inline styles do). One style tag per page; content updated as the
     // user changes the FP vertex toggles.
     const FP_VERTEX_STYLE_ID = 'aim-fp-vertex-style';
+    // v34.174: Percepto now draws vertex dots as SVG circle paths in the
+    // marker pane (stroke / fill = var(--map-vertex-…)) instead of the old
+    // <div class="map-marker__flight-path-vertex">, so the show / size / colour
+    // settings silently did nothing. Both shapes are handled. SVG circles can
+    // only be resized by scaling (their radius lives in the path `d`); 10 px
+    // is treated as Percepto's native dot size. "middle" rings keep their own
+    // colour so the dot keeps its light centre.
+    const VERTEX_SVG_BASE = '.leaflet-marker-pane svg path.leaflet-interactive';
+    const VERTEX_SVG_SEL = `${VERTEX_SVG_BASE}:is([stroke^="var(--map-vertex"], [fill^="var(--map-vertex"])`;
+    const VERTEX_SVG_KEEP = ['error', 'disconnect', 'invalid', 'warning'].map(w => `:not([stroke*="${w}"]):not([fill*="${w}"])`).join('');
+    const VERTEX_NATIVE_PX = 10;
     function applyVertexStyle() {
         let el = document.getElementById(FP_VERTEX_STYLE_ID);
         if (!el) {
@@ -4542,8 +4553,9 @@
         }
         const masterOn = toggleState['fp.show'] !== false;
         const verts = document.querySelectorAll('.map-marker__flight-path-vertex');
+        const setCss = (css) => { if (el.textContent !== css) el.textContent = css; };   // write-free when unchanged
         if (!masterOn) {
-            el.textContent = '';
+            setCss('');
             // Restore any inline display we forced
             verts.forEach(d => d.style.removeProperty('display'));
             return;
@@ -4568,7 +4580,8 @@
             // CSS is enough here because we're not trying to override anything
             // critical — Percepto's defaults give visible dots, we just tweak
             // size/color on top.
-            el.textContent = `
+            const k = Math.round((size / VERTEX_NATIVE_PX) * 100) / 100;
+            setCss(`
                 .map-marker__flight-path-vertex {
                     width: ${size}px !important;
                     height: ${size}px !important;
@@ -4576,7 +4589,14 @@
                     margin-top: -${margin}px !important;
                     background-color: ${color} !important;
                 }
-            `;
+                ${VERTEX_SVG_SEL} {
+                    transform-box: fill-box !important;
+                    transform-origin: center !important;
+                    transform: scale(${k}) !important;
+                }
+                ${VERTEX_SVG_BASE}[stroke^="var(--map-vertex"]:not([stroke*="middle"]) { stroke: ${color} !important; }
+                ${VERTEX_SVG_BASE}[fill^="var(--map-vertex"]:not([fill*="middle"]) { fill: ${color} !important; }
+            `);
             verts.forEach(d => d.style.removeProperty('display'));
         } else {
             // HIDE PATH — bulletproof. Class-selector CSS was losing the
@@ -4586,7 +4606,8 @@
             // with !important priority. Inline style beats any class selector,
             // period. Keeps red/disconnect/error variants visible via the
             // attribute-substring check on className.
-            el.textContent = ''; // class-selector CSS no longer needed for hide
+            // SVG dots (v34.174) hide by stylesheet — no per-element writes needed.
+            setCss(`${VERTEX_SVG_SEL}${VERTEX_SVG_KEEP} { display: none !important; }`);
             verts.forEach(d => {
                 const cls = (typeof d.className === 'string') ? d.className
                     : (d.className && d.className.baseVal) || '';

@@ -1,3 +1,7 @@
+## 2026-11-13 — Map Styler latest v34.174 (latest only) — flight-path vertex dots work again
+
+- **Show / size / colour of flight-path vertex dots did nothing.** Percepto changed how it draws the dots; the Styler now handles the new dots as well as the old ones. Size is a scale of Percepto's own dot (10 px = unchanged).
+
 ## 2026-11-13 — Control Panel latest v1.51 · Map Styler latest v34.173 (latest only) — profile builder + line thickness fixes
 
 - **⏻ All off no longer overwrites My settings.** It now starts a separate **🆕 New profile (not saved yet)** with everything off; the profile you were on is left exactly as it was. Turn on what the profile needs, then 💾 Save as… or ⬆ Publish to team.
