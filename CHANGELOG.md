@@ -1,3 +1,9 @@
+## 2026-11-13 — AIM Fleet Tools latest v0.90 (latest only) — Findings Report cards show 12 / 6 / 3 months (#341)
+
+- **📰 Report cards no longer show "days flagged".** Each asset card now shows that asset's findings in the last 12, 6 and 3 months, with a one-word cue: rising, steady or falling (the last 3 months against the 3 before), or "new this period" when the asset has no earlier finding.
+- Cards are ordered by findings in the last 12 months. The separate-days count stays in the text of the "Assets that keep coming back" cards and in the dashboard.
+- Works on a saved run. No re-run needed.
+
 ## 2026-11-13 — AIM Fleet Tools latest v0.89 (latest only) — Findings Report remembers its last run (#341)
 
 - **The last finished 📈 Findings Report run is kept in the browser.** After a page reload or a script update it comes back on its own, marked "saved run", so the filters, the report period, 📰 Report, 📊 Dashboard and both CSVs all work without reading the sites again.
