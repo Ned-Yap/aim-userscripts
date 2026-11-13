@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.47
+// @version      1.48
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -78,7 +78,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.47';
+    const SCRIPT_VERSION = '1.48';
 
     // Server model (v1.36): prod and QA are separate databases — the same
     // numeric site ID is two different sites. QA issues live in their own
@@ -3400,9 +3400,13 @@
         return m ? { sid: m[1], droneId: m[2] } : null;
     }
     function scrapeLiveDom() {
-        const out = { mid: '', groupId: '', rec: '' };
-        const ours = (el) => !!(el && el.closest && el.closest('[id^="aim-"], [class*="aim-"]'));
-        // the text may sit in one node or be split across sibling spans
+        // v1.48: probe of the live page (2026-11-13) — the header is
+        // <div class="mission-info"><…name…><span class="mission-info__mission-id">ID: 245797 / 24532</span>…
+        // The v1.47 "skip our own elements" filter matched EVERYTHING here (a
+        // Percepto ancestor carries an "aim-" class), so nothing was captured.
+        // Now: Percepto's own element first, then a plain text match. Neither
+        // pattern can match AIM-script UI, so no ownership filter is needed.
+        const out = { mid: '', groupId: '', rec: '', name: '' };
         const near = (node, rx) => {
             const el = node.parentElement;
             const cands = [node.nodeValue, el && el.textContent, el && el.parentElement && el.parentElement.textContent];
@@ -3410,16 +3414,31 @@
             return null;
         };
         for (const doc of playbackDocs()) {
-            let walker;
-            try { walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT); }
-            catch (e) { console.warn(`${TAG} live scrape: no tree walker:`, e); continue; }
-            let node;
-            while ((node = walker.nextNode())) {
-                const txt = node.nodeValue;
-                if (!txt || txt.length > 40 || !node.parentElement || ours(node.parentElement)) continue;
-                if (!out.mid && /ID|\d{4,}/.test(txt)) { const m = near(node, LIVE_ID_RX); if (m) { out.mid = m[1]; out.groupId = m[2] || ''; } }
-                if (!out.rec && /REC|\d:\d\d/.test(txt)) { const m = near(node, LIVE_REC_RX); if (m) out.rec = m[1]; }
+            const idEl = doc.querySelector('.mission-info__mission-id');
+            if (idEl && !out.mid) {
+                const m = (idEl.textContent || '').match(LIVE_ID_RX);
+                if (m) {
+                    out.mid = m[1]; out.groupId = m[2] || '';
+                    const first = idEl.parentElement && idEl.parentElement.firstElementChild;
+                    const nm = (first && first !== idEl) ? (first.textContent || '').trim() : '';
+                    if (nm && nm.length <= 80) out.name = nm;
+                }
+            }
+            // REC lives on the video; search that container first, then the page.
+            const roots = [doc.querySelector('.live-video-container'), doc.body].filter(Boolean);
+            for (const root of roots) {
                 if (out.mid && out.rec) break;
+                let walker;
+                try { walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT); }
+                catch (e) { console.warn(`${TAG} live scrape: no tree walker:`, e); continue; }
+                let node;
+                while ((node = walker.nextNode())) {
+                    const txt = node.nodeValue;
+                    if (!txt || txt.length > 40 || !node.parentElement) continue;
+                    if (!out.mid && /ID/i.test(txt)) { const m = near(node, LIVE_ID_RX); if (m) { out.mid = m[1]; out.groupId = m[2] || ''; } }
+                    if (!out.rec && /REC|\d:\d\d/i.test(txt)) { const m = near(node, LIVE_REC_RX); if (m) out.rec = m[1]; }
+                    if (out.mid && out.rec) break;
+                }
             }
             if (out.mid && out.rec) break;
         }
@@ -3440,7 +3459,7 @@
             id: dom.mid, live: true, at0: Date.now(),
             videoSec: recSec, videoDur: null,
             shown: recSec != null ? fmtClock(recSec) : '', shownDur: '', domRpic: '',
-            domGroupId: dom.groupId,
+            domGroupId: dom.groupId, domName: dom.name,
             metaPromise: fetchMissionMeta(dom.mid),
         };
         console.log(`${TAG} live context: mission ${ctx.id}${dom.groupId ? ' / group ' + dom.groupId : ''} · REC ${ctx.shown || '(not recording / not found on screen)'}`);
@@ -3463,6 +3482,7 @@
             }
             const rec = { id: String(ctx.id) };
             if (meta.name) rec.name = meta.name;
+            else if (ctx.domName) rec.name = String(ctx.domName);
             if (meta.groupId) rec.groupId = meta.groupId;
             else if (ctx.domGroupId) rec.groupId = String(ctx.domGroupId);
             if (shown) rec.shown = shown;
@@ -3751,7 +3771,7 @@
                 if (noteModalEl !== overlay) return;   // modal already closed
                 const nameEl = card.querySelector('#aim-issues-mission-name');
                 const rpicEl = card.querySelector('#aim-issues-mission-rpic');
-                if (nameEl && meta && meta.name) nameEl.textContent = ` · ${meta.name}`;
+                if (nameEl && ((meta && meta.name) || pbCtx.domName)) nameEl.textContent = ` · ${(meta && meta.name) || pbCtx.domName}`;
                 if (rpicEl) rpicEl.textContent = (meta && meta.rpic) || pbCtx.domRpic || 'unknown';
             });
         }
