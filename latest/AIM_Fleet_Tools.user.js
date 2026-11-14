@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.90
+// @version      0.91
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.90 (#341): 📰 Report cards show each asset's findings in the last 12 / 6 / 3 months with a rising / steady / falling cue (the 'days flagged' number is gone from the cards). v0.89 (#341): 📈 Findings Report keeps its last finished run (browser IndexedDB) — it is back after a reload, so filters, the report period and every export work without re-running; ✕ Clear forgets it. v0.88 (#341): 📈 Findings Report gains 📰 Report — a print-ready (Save as PDF) narrative for the last 7 / 14 / 30 days: one card per asset with its 12-month history, assets that keep coming back, trend, by site; the earlier HTML is now 📊 Dashboard; finding types that differ only by capitalisation are merged. v0.87 (#341): 📈 Findings Report — the Data View Issues tab (emissions and every other finding type) across the picked sites: findings per month and per 100 flights, assets flagged on 2+ days, by type / component / site, rejected + status + type filters, issues CSV, site×month CSV and a self-contained HTML report whose rows link to the site and the issue. v0.86: 📅 Sweep Scheduler gains a 📆 Calendar view (the forecast day by day, Mon–Fri weeks, exports). v0.85 (#335): 📅 Sweep Scheduler — for a client's recurring inspection missions (first profile: FPL feeder poles) it reads the live mission bank, the flown log and each base's docked drone, works out how old each mission's oldest pole is (count-back to 90 % of a full sweep), and lists what to fly next in order with flights planned per month, flights per sweep, payload (4.0 / 3.0 / none), per-site schedule switches, mission holds, Sheets / CSV / Slack text. v0.84 (#334): ⚙ ESC Sweep — for every flown flight of the picked sites × date window, download the log archive (in memory only), read the ESC telemetry and list each flight where the drone raised the ESC ratio alarm (false alarm vs real) plus long takeoff spikes; capped per run with Continue, Pause / Stop, gentle mode, finished flights remembered, Sheets / CSV, each row links to the full Mission Logs card. v0.82 (#331): 🎬 Mission Review — sweep the mission log of the picked sites (or every site) for flagged flights; checks are a registry (first: flew but NO video; also no images / fewer images than planned / landing failed); per-site counts, every flight a link to its Mission Playback, Copy → Sheets / CSV. v0.79 (#329): 🚩 SOP Sweep — run Site-Setup SOP checks across the picked sites (or every site) from LIVE /map_objects/; first check = FP ⨯ FP crossing (segments that cross / T / overlap with no shared vertex); per-site rows, 🎯 fly-to on the landing map, ↗ opens the site in a NEW tab and jumps to the spot (?aim-goto deep link, Site Setup Tools v4.498+), Copy → Sheets / CSV. v0.78 (#318): 🖼 Map Export — renders what the landing map shows (KML layers, cross-ref bands, site setups, site names) on its own canvas at print size with basemap tiles, legend, scale bar, north arrow, title and a dead-space trim (transparent outside the content); preview modal with toggles; ⬇ PNG poster or 🌐 self-contained interactive HTML (small, zooms forever). v0.77: Site setups scope — draw the FFZs / flight paths / assets of ONLY the sites matching a names box or the 📦 Fleet Data pick (independent of the label filter, "= labels" copies it) so another client's setup never shows on a shared map. v0.76: site labels "Only matching / picked" mode (names box or the 📦 Fleet Data pick keep their label, every other site name hidden), 🗺 on-map legend (cross-ref bands + numbers, shown KML layers, site-setup colours) and 📷 Client view (names hidden, legend on, panel + button tucked away for a screenshot; ↩ Exit restores). v0.75: 📊 Fleet Metrics follows the 📦 Fleet Data pick ("picked only" checkbox, on by default; nothing picked → every site) — table, totals, Sheets / CSV and 🛂 Approval FPs. v0.67 (#285): 📡 Coverage — radius circles on the landing map (any Ø, drag centre / edge, live count of sites inside under a fully-inside / centre-inside rule, KML export), footprint of the picked sites (span, convex hull, smallest enclosing circle, site extents + FFZ acreage), 🧠 Best spot (centre covering the MOST sites at a Ø — exact candidate search) + 🗂 Plan all (greedy: how many circles cover every site), 📏 two-click ruler. v0.57 (#274): data check shows whether the skipped no-duration rows carry images / videos (+ first video object), and 🔎 probes one /missions/ page without the field filter to list every server field (hunting an abort / end-reason field). v0.56 (#274): 📋 Copy check button on the data check. v0.55 (#276): Utilization lenses — 🧑‍✈️ Pilots / 🛸 Drones / 📍 Sites / 🏢 Clients (sites + clients: flights, drone-hrs, air, flyable drone-hrs, util %, coverage, sites never flown, incomplete, capture %, gaps); Drones gain flyable hrs + util %. v0.54 (#274): Incomplete flights + Capture % from planned-vs-actual image counts (Pilots / Pilot-days / Flights), raw state codes + mission_data_reports sample in the data check. v0.53 (#274): ⚙ Site rules is a real button. v0.52 (#274): Pilot Utilization hides all-zero / blank columns (panel + Sheets + CSV) with a 'hidden:' note and a checkbox to show them. v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
@@ -46,7 +46,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.90';
+    const SCRIPT_VERSION = '0.91';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -9175,6 +9175,17 @@
         });
         return out;
     }
+    // → { childName: rootPadName } for nested assets only (#273: parent_asset_name is the parent's NAME; chains allowed).
+    // The 📰 report counts anomalies per PAD, so a finding tagged on a child rolls up to the pad it sits on.
+    function fiRootMap(entities) {
+        const par = {};
+        (entities || []).forEach(e => {
+            if (e && e.type === 3 && e.name && typeof e.parent_asset_name === 'string' && e.parent_asset_name.trim()) par[String(e.name).trim()] = e.parent_asset_name.trim();
+        });
+        const out = {};
+        Object.keys(par).forEach(n => { let r = n, hops = 0; while (par[r] && hops++ < 20) r = par[r]; if (r !== n) out[n] = r; });
+        return out;
+    }
     // → { name, how }: 'text' (the analyst's description names a site asset) · 'inside' (issue point inside the polygon;
     // a pad wins over its nested child, then the smallest) · 'near' (closest polygon EDGE within FI_NEAR_M) · 'none'
     function fiMatchAsset(idx, lat, lng, text) {
@@ -9282,7 +9293,7 @@
             while (cursor < ids.length) {
                 if (isDead()) return;
                 const sid = ids[cursor++];
-                const rec = { name: siteName(sid), client: clientOf(siteName(sid)), status: siteStatus(sid), issues: [], allTime: 0, flights: null, recent: null, partial: false, err: null, flightsErr: null, assetsErr: null };
+                const rec = { name: siteName(sid), client: clientOf(siteName(sid)), status: siteStatus(sid), issues: [], allTime: 0, flights: null, recent: null, roots: null, partial: false, err: null, flightsErr: null, assetsErr: null };
                 try {
                     const got = await fiFetchIssues(sid, isDead);
                     rec.partial = got.partial; rec.allTime = got.rows.length;
@@ -9293,9 +9304,9 @@
                             .catch(e => console.warn(`${TAG} findings: status-counts probe failed (informational only):`, e));
                     }
                     let idx = null;
-                    if (got.rows.some(a => !(Array.isArray(a.assets) && a.assets.length))) {
-                        try { idx = fiAssetIndex((await fdFetchSetup(sid, false)).entities); }
-                        catch (e) { rec.assetsErr = (e && e.message) || String(e); console.warn(`${TAG} findings: site ${sid} setup read failed — untagged issues stay without an asset:`, e); }
+                    if (got.rows.length) {
+                        try { const ents = (await fdFetchSetup(sid, false)).entities; idx = fiAssetIndex(ents); rec.roots = fiRootMap(ents); }
+                        catch (e) { rec.assetsErr = (e && e.message) || String(e); console.warn(`${TAG} findings: site ${sid} setup read failed — untagged issues stay without an asset, nested assets do not roll up to their pad:`, e); }
                     }
                     rec.issues = got.rows.map(a => fiShape(a, sid, idx));
                     try { rec.flights = await fiFetchFlights(sid, months, isDead); rec.recent = await fiFetchRecent(sid, day0, isDead); }
@@ -9381,11 +9392,11 @@
         if (fiV) return fiV;
         const S = fiSweep;
         const v = { n: 0, inWindow: 0, rejected: 0, flights: 0, flightsKnown: true, sitesHit: 0, failed: 0, partial: 0, noFlights: 0, noAssetSites: 0,
-            statuses: {}, typesAll: {}, types: {}, comps: {}, how: {}, months: [], sites: [], issues: [], assets: [], repeats: [], trend: null };
+            statuses: {}, typesAll: {}, types: {}, comps: {}, how: {}, months: [], sites: [], issues: [], assets: [], pads: [], repeats: [], trend: null };
         if (!S) return v;
         const t0 = S.months[0].a, t1 = S.months[S.months.length - 1].b;
         const mk = {}; S.months.forEach(m => { mk[m.key] = { m, n: 0, by: {}, flights: 0 }; });
-        const amap = new Map();
+        const amap = new Map(), pmap = new Map();
         Object.keys(S.sites).forEach(sid => {
             const r = S.sites[sid];
             if (r.err) v.failed++; if (r.partial) v.partial++; if (r.assetsErr) v.noAssetSites++;
@@ -9404,6 +9415,13 @@
                 const ck = `${x.type} · ${x.comp || '(no component)'}`; v.comps[ck] = (v.comps[ck] || 0) + 1;
                 v.how[x.how] = (v.how[x.how] || 0) + 1;
                 if (mk[key]) { mk[key].n++; mk[key].by[x.type] = (mk[key].by[x.type] || 0) + 1; }
+                x.pad = x.asset ? ((r.roots && r.roots[String(x.asset).trim()]) || x.asset) : '';   // derived each build; saved runs older than v0.91 have no roots → pad = asset
+                if (x.pad) {
+                    const pk = `${sid}|${x.pad}`;
+                    let p = pmap.get(pk);
+                    if (!p) { p = { sid, site: r.name, pad: x.pad, n: 0, first: x.t, last: x.t, issues: [] }; pmap.set(pk, p); }
+                    p.n++; if (x.t < p.first) p.first = x.t; if (x.t > p.last) p.last = x.t; p.issues.push(x);
+                }
                 if (x.asset) {
                     const ak = `${sid}|${x.asset}`;
                     let a = amap.get(ak);
@@ -9423,7 +9441,8 @@
         const rep = new Set(v.repeats.map(a => `${a.sid}|${a.asset}`));
         v.sites.forEach(row => { row.repeats = v.repeats.filter(a => a.sid === row.sid).length; });
         v.isRepeat = (x) => !!x.asset && rep.has(`${x.sid}|${x.asset}`);
-        v.assetRec = (sid, asset) => amap.get(`${sid}|${asset}`) || null;
+        v.pads = Array.from(pmap.values()).sort((a, b) => (b.n - a.n) || (b.last - a.last) || a.pad.localeCompare(b.pad));
+        v.padRec = (sid, pad) => pmap.get(`${sid}|${pad}`) || null;
         v.assetN = (x) => { const a = x.asset && amap.get(`${x.sid}|${x.asset}`); return a ? a.n : ''; };
         v.sites.sort((a, b) => (b.n - a.n) || a.r.name.localeCompare(b.r.name));
         v.issues.sort((p, q) => q.t - p.t);
@@ -9619,32 +9638,37 @@
     const fiNice = (t) => new Date(t).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
     const fiNiceShort = (t) => new Date(t).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
     function fiRecentDays() { const d = Number(ftCfg.fi.recentDays); return FI_RECENT_OPTS.indexOf(d) !== -1 ? d : 7; }
-    // → the last N UTC days (today included) of the sweep, under the current filters, grouped per asset
+    // → the last N UTC days (today included) of the sweep, under the current filters, grouped per PAD.
+    // other6 / other12 = that pad's anomalies BEFORE this period, in the last 6 months / in the whole window.
     function fiRecent(v) {
         const days = fiRecentDays(); const DAY = 86400000;
         const a = fiSweep.day0 - (days - 1) * DAY, b = fiSweep.day0 + DAY;
         const issues = v.issues.filter(x => x.t >= a && x.t < b);
         let flights = 0, known = true;
         v.sites.forEach(s => { if (s.r.err) return; if (s.r.recent && typeof s.r.recent[days] === 'number') flights += s.r.recent[days]; else known = false; });
-        const gm = new Map(); const dayA = new Date(a).toISOString().slice(0, 10);
+        const gm = new Map();
         issues.forEach(x => {
-            const k = x.asset ? `${x.sid}|${x.asset}` : `#${x.id}`;
+            const k = x.pad ? `${x.sid}|${x.pad}` : `#${x.id}`;
             let g = gm.get(k);
-            if (!g) { g = { sid: x.sid, asset: x.asset, issues: [], sev: -1, prevDays: 0, firstEver: null, allDays: 0, win: null }; gm.set(k, g); }
+            if (!g) { g = { sid: x.sid, pad: x.pad, issues: [], sev: -1, other6: 0, other12: 0, win: null }; gm.set(k, g); }
             g.issues.push(x); if (typeof x.sev === 'number' && x.sev > g.sev) g.sev = x.sev;
         });
         const groups = Array.from(gm.values());
         groups.forEach(g => {
-            const rec = g.asset ? v.assetRec(g.sid, g.asset) : null;
-            if (rec) { g.prevDays = Array.from(rec.days).filter(d => d < dayA).length; g.firstEver = rec.first; g.allDays = rec.days.size; g.win = fiAssetWin(rec); }
+            const rec = g.pad ? v.padRec(g.sid, g.pad) : null;
+            if (rec) {
+                g.other12 = rec.issues.filter(x => x.t < a).length;
+                g.other6 = rec.issues.filter(x => x.t < a && x.t >= b - 182 * DAY).length;
+                g.win = fiAssetWin(rec);
+            }
             g.issues.sort((p, q) => q.t - p.t);
         });
-        groups.sort((p, q) => ((q.win ? q.win.m12 : 0) - (p.win ? p.win.m12 : 0)) || (q.sev - p.sev) || (q.issues.length - p.issues.length) || String(p.asset).localeCompare(String(q.asset)));
+        groups.sort((p, q) => ((q.win ? q.win.m12 : 0) - (p.win ? p.win.m12 : 0)) || (q.sev - p.sev) || (q.issues.length - p.issues.length) || String(p.pad).localeCompare(String(q.pad)));
         return { days, a, b, issues, flights, known, groups, sitesHit: new Set(issues.map(x => x.sid)).size,
-            assets: groups.filter(g => g.asset).length, returning: groups.filter(g => g.prevDays > 0).length };
+            pads: groups.filter(g => g.pad).length, returning: groups.filter(g => g.other12 > 0).length };
     }
-    // An asset's findings in the last 12 / 6 / 3 months (rolling, ending the day of the run) + the direction of travel:
-    // the last 3 months against the 3 months before them.
+    // A pad's (or asset's) anomalies in the last 12 / 6 / 3 months (rolling, ending the day of the run) + the direction of
+    // travel: the last 3 months against the 3 months before them.
     function fiAssetWin(rec) {
         const DAY = 86400000, end = fiSweep.day0 + DAY;
         const cnt = (d) => rec.issues.filter(x => x.t >= end - d * DAY).length;
@@ -9653,7 +9677,7 @@
     }
     function fiStatBlock(w, isNew) {
         const dir = isNew ? ['●', 'new this period'] : { up: ['▲', 'rising'], down: ['▼', 'falling'], flat: ['■', 'steady'] }[w.dir];
-        return `<div class="cstat" data-tip="Findings on this asset in the last 12, 6 and 3 months. ${isNew ? 'No earlier finding in the last 12 months.' : `${dir[1]}: ${w.m3} in the last 3 months, ${w.prev3} in the 3 months before.`}"><div class="chd">Findings on this asset</div>`
+        return `<div class="cstat" data-tip="All anomalies at this pad in the last 12, 6 and 3 months, this period included. ${isNew ? 'No earlier anomaly in the last 12 months.' : `${dir[1]}: ${w.m3} in the last 3 months, ${w.prev3} in the 3 months before.`}"><div class="chd">Anomalies at this pad</div>`
             + `<div class="crow"><div><b>${w.m12}</b><span>12 mo</span></div><div><b>${w.m6}</b><span>6 mo</span></div><div><b>${w.m3}</b><span>3 mo</span></div></div>`
             + `<div class="cdir ${isNew ? 'new' : w.dir}">${dir[0]} ${dir[1]}</div></div>`;
     }
@@ -9701,78 +9725,80 @@
             + 'td{border-bottom:1px solid var(--line);padding:7px 8px;vertical-align:top}td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}a{color:#8fc0ff}.note{color:var(--mute);font-size:12px;margin-top:8px}'
             + '.flag{border:1px solid var(--acc);border-radius:4px;padding:8px 12px;margin:14px 0;font-size:14px}.printbtn{position:fixed;right:16px;top:16px;background:var(--acc);color:#fff;border:0;border-radius:4px;padding:8px 14px;font:600 14px system-ui;cursor:pointer}'
             + '#tip{position:absolute;display:none;pointer-events:none;background:#fff;color:#111;font-size:12px;padding:5px 8px;border-radius:4px;max-width:300px;z-index:9}'
+            + '.bar{background:var(--bg);border-radius:3px;height:12px;min-width:120px}.bar i{display:block;height:12px;border-radius:0 3px 3px 0;background:var(--s1)}td.rk{color:var(--mute);width:34px}tr.tot td{font-weight:600;border-top:2px solid var(--line)}td.big{font:700 20px/1.1 "Barlow Condensed","Roboto Condensed","Arial Narrow",sans-serif}'
             + '@media (max-width:640px){.card{padding-right:18px}.cnum,.cstat{position:static;text-align:left;margin-top:10px}h1{font-size:36px}}'
             + '@page{size:letter;margin:0}@media print{.printbtn,#tip{display:none!important}.wrap{max-width:none;padding:13mm 14mm}section{margin-top:26px}a{color:var(--ink);text-decoration:none}}';
         const h = [];
-        h.push(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Inspection Findings — ${e(fiScopeTitle(v))} — ${e(period)}</title>`
+        const AN = (n) => fiPl(n, 'anomaly', 'anomalies');
+        const win = S.months.length;   // months in the run (12 by default)
+        h.push(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Inspection Anomalies — ${e(fiScopeTitle(v))} — ${e(period)}</title>`
             + '<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;600&display=swap">'
             + `<style>${css}</style></head><body><button class="printbtn" onclick="window.print()">Print / Save as PDF</button><div class="wrap">`);
-        h.push(`<div class="eyebrow">${e(fiScopeTitle(v))} · Drone inspection findings · ${e(period)}</div><h1>Inspection Findings</h1>`);
+        h.push(`<div class="eyebrow">${e(fiScopeTitle(v))} · Drone inspection anomalies · ${e(period)}</div><h1>Inspection Anomalies</h1>`);
         const lede = [];
-        lede.push(`${R.known ? `<b>${fiPl(R.flights, 'flight')}</b>` : 'Flights'} across ${fiPl(v.sites.length, 'site')} in the last ${R.days} days recorded <b>${fiPl(R.issues.length, 'finding')}</b>${R.issues.length && leadN ? ` (${leadN.toLocaleString()} ${e(leadType.toLowerCase())})` : ''} on ${fiPl(R.assets, 'asset')}.`);
-        if (R.returning) lede.push(`<b>${fiPl(R.returning, 'of those assets has', 'of those assets have')}</b> been flagged before in the last 12 months.`);
-        lede.push(`Over 12 months: ${v.flightsKnown ? fiPl(v.flights, 'flight') + ', ' : ''}${fiPl(v.n, 'finding')}, ${fiPl(v.repeats.length, 'asset')} flagged on more than one day.`);
+        lede.push(`${R.known ? `<b>${fiPl(R.flights, 'flight')}</b>` : 'Flights'} across ${fiPl(v.sites.length, 'site')} in the last ${R.days} days detected <b>${AN(R.issues.length)}</b>${R.issues.length && leadN ? ` (${leadN.toLocaleString()} ${e(leadType.toLowerCase())})` : ''} at ${fiPl(R.pads, 'pad')}.`);
+        if (R.returning) lede.push(`<b>${fiPl(R.returning, 'of those pads has', 'of those pads have')}</b> had other anomalies in the last ${win} months.`);
+        lede.push(`Over ${win} months: ${v.flightsKnown ? fiPl(v.flights, 'flight') + ', ' : ''}${AN(v.n)} at ${fiPl(v.pads.length, 'pad')}.`);
         h.push(`<p class="lede">${lede.join(' ')}</p>`);
-        if (internal) h.push('<div class="flag"><b>Internal copy.</b> Rejected / false findings are included. Untick "show rejected" before exporting a customer copy.</div>');
+        if (internal) h.push('<div class="flag"><b>Internal copy.</b> Rejected / false anomalies are included. Untick "show rejected" before exporting a customer copy.</div>');
         h.push('<div class="tiles">'
-            + `<div class="tile"><b>${R.issues.length.toLocaleString()}</b><span>findings, last ${R.days} days</span></div>`
+            + `<div class="tile"><b>${R.issues.length.toLocaleString()}</b><span>anomalies, last ${R.days} days</span></div>`
             + `<div class="tile"><b>${R.known ? R.flights.toLocaleString() : '—'}</b><span>flights, last ${R.days} days</span></div>`
-            + `<div class="tile"><b>${R.returning}</b><span>assets flagged again</span></div>`
-            + `<div class="tile"><b>${v.flightsKnown ? fiRateTxt(v.n, v.flights) : '—'}</b><span>findings per 100 flights, 12 months</span></div></div>`);
-        h.push('<div class="toc"><a href="#s1">1 This period</a><a href="#s2">2 Repeat assets</a><a href="#s3">3 Trend</a><a href="#s4">4 By site</a><a href="#s5">5 What was found</a><a href="#s6">Method</a></div>');
+            + `<div class="tile"><b>${R.returning}</b><span>pads with earlier anomalies</span></div>`
+            + `<div class="tile"><b>${v.flightsKnown ? fiRateTxt(v.n, v.flights) : '—'}</b><span>anomalies per 100 flights, ${win} months</span></div></div>`);
+        h.push(`<div class="toc"><a href="#s1">1 Last ${R.days} days</a><a href="#s2">2 By type</a><a href="#s3">3 Top 10 pads</a><a href="#s4">4 Trend</a><a href="#s5">5 By site</a><a href="#s6">Method</a></div>`);
 
-        // 01 — this period, one card per asset
-        h.push(`<section id="s1"><div class="num">01</div><h2>Found in the last ${R.days} days</h2><p class="sub">One card per asset. The numbers on the right are that asset's findings in the last 12, 6 and 3 months, this period included. Assets with the most findings come first.</p>`);
-        if (!R.groups.length) h.push('<div class="box">No findings were recorded in this period.</div>');
-        const CARD_CAP = 40;
-        R.groups.slice(0, CARD_CAP).forEach(g => {
+        // 01 — every anomaly of the period, one card per pad (no cap)
+        h.push(`<section id="s1"><div class="num">01</div><h2>Anomalies detected in the last ${R.days} days</h2><p class="sub">Every anomaly of the period, one card per pad. The History line counts that pad's other anomalies before this period. The numbers on the right are all anomalies at the pad in the last 12, 6 and 3 months, this period included.</p>`);
+        if (!R.groups.length) h.push('<div class="box">No anomalies were detected in this period.</div>');
+        R.groups.forEach(g => {
             const site = S.sites[g.sid].name;
             const tc = fiCount(g.issues, x => x.type), cc = fiCount(g.issues, x => x.comp);
             const desc = (g.issues.find(x => x.desc) || {}).desc || '';
-            const what = `${tc.map(t => `${t[1] > 1 ? t[1] + ' × ' : ''}${t[0]}`).join(', ')}${cc.length ? ` — ${cc.map(c => c[0]).join(', ')}` : ''}`;
+            const kids = Array.from(new Set(g.issues.map(x => x.asset).filter(n => n && n !== g.pad)));
+            const what = `${tc.map(t => `${t[1] > 1 ? t[1] + ' × ' : ''}${t[0]}`).join(', ')}${cc.length ? ` — ${cc.map(c => c[0]).join(', ')}` : ''}${kids.length ? ` (${kids.join(', ')})` : ''}`;
             const dates = Array.from(new Set(g.issues.map(x => fiNiceShort(x.t)))).reverse().join(', ');
-            h.push(`<div class="card ${sevCls(g.sev)}"><div class="chead">${pill(g.sev)}<span class="ctitle">${e(g.asset || 'Asset not identified')}</span><span class="cmeta">${e(dates)}</span></div>`
+            const hist = !g.pad ? 'location not matched to a pad, so no history.'
+                : (g.other12 ? `<b>${AN(g.other6).replace(/ /, ' other ')}</b> at this pad in the last 6 months · <b>${g.other12.toLocaleString()}</b> in the last ${win} months.`
+                    : `no other anomalies at this pad in the last ${win} months.`);
+            h.push(`<div class="card ${sevCls(g.sev)}"><div class="chead">${pill(g.sev)}<span class="ctitle">${e(g.pad || 'Pad not identified')}</span><span class="cmeta">${e(dates)}</span></div>`
                 + `<div class="cbody">${e(what)}.${desc ? ` <span style="color:var(--ink2)">${e(desc.replace(/\s+/g, ' ').slice(0, 220))}${desc.length > 220 ? '…' : ''}</span>` : ''}</div>`
-                + `<div class="cline"><b>History:</b> ${g.prevDays ? `first found ${fiNice(g.firstEver)}.` : (g.asset ? 'first finding on this asset in the last 12 months.' : 'no asset match, so no history.')}</div>`
-                + `<div class="cline"><b>Site:</b> ${a(fiSiteUrl(g.sid), site)} · <b>Open:</b> ${g.issues.slice(0, 6).map(x => a(fiIssueUrl(x), `#${x.id}`)).join(', ')}${g.issues.length > 6 ? ` +${g.issues.length - 6}` : ''}</div>`
-                + (g.win ? fiStatBlock(g.win, !g.prevDays) : '') + '</div>');
+                + `<div class="cline"><b>History:</b> ${hist}</div>`
+                + `<div class="cline"><b>Site:</b> ${a(fiSiteUrl(g.sid), site)} · <b>Open:</b> ${g.issues.map(x => a(fiIssueUrl(x), `#${x.id}`)).join(', ')}</div>`
+                + (g.win ? fiStatBlock(g.win, !g.other12) : '') + '</div>');
         });
-        if (R.groups.length > CARD_CAP) h.push(`<div class="note">${R.groups.length - CARD_CAP} more asset(s) had findings in this period; they are in the issues CSV.</div>`);
         h.push('</section>');
 
-        // 02 — repeat assets
-        h.push('<section id="s2"><div class="num">02</div><h2>Assets that keep coming back</h2><p class="sub">Assets with findings on two or more separate days in the last 12 months, most findings first.</p>');
-        if (!v.repeats.length) h.push('<div class="box">No asset was flagged on more than one day.</div>');
-        const REP_CAP = 12;
-        v.repeats.slice().sort((p, q) => (q.n - p.n) || (q.days.size - p.days.size)).slice(0, REP_CAP).forEach(r => {
-            const cc = fiCount(r.issues, x => x.comp).slice(0, 4);
-            const inPeriod = r.last >= R.a;
-            h.push(`<div class="card rep"><div class="chead"><span class="pill rep"><i></i>${inPeriod ? 'FLAGGED THIS PERIOD' : 'REPEAT'}</span><span class="ctitle">${e(r.asset)}</span><span class="cmeta">${e(fiNice(r.first))} → ${e(fiNice(r.last))}</span></div>`
-                + `<div class="cbody">${fiPl(r.n, 'finding')} across ${fiPl(r.days.size, 'separate day')} in ${fiPl(r.months.size, 'month')}: ${e(Array.from(r.types).join(', '))}.</div>`
-                + (cc.length ? `<div class="cline"><b>Most often:</b> ${e(cc.map(c => `${c[0]} (${c[1]})`).join(', '))}</div>` : '')
-                + `<div class="cline"><b>Site:</b> ${a(fiSiteUrl(r.sid), r.site)} · <b>Latest:</b> ${r.issues.slice().sort((p, q) => q.t - p.t).slice(0, 4).map(x => a(fiIssueUrl(x), fiNiceShort(x.t))).join(', ')}</div>`
-                + fiStatBlock(fiAssetWin(r)) + '</div>');
-        });
-        if (v.repeats.length > REP_CAP) h.push(`<div class="note">Top ${REP_CAP} of ${v.repeats.length} repeat assets. The full list is in the dashboard and the issues CSV.</div>`);
-        h.push('</section>');
+        // 02 — running tally per type, last 6 calendar months, ALL anomalies
+        const m6 = v.months.slice(-6);
+        const t6 = {}; m6.forEach(x => Object.keys(x.by).forEach(t => { t6[t] = (t6[t] || 0) + x.by[t]; }));
+        const types6 = Object.keys(t6).sort((p, q) => (t6[q] - t6[p]) || p.localeCompare(q));
+        const sum6 = m6.reduce((n, x) => n + x.n, 0);
+        h.push(`<section id="s2"><div class="num">02</div><h2>Anomalies by type, last ${m6.length} months</h2><p class="sub">Every anomaly detected across all sites, not only this period's, counted per type and month.</p><div class="box">`
+            + (types6.length ? `<table><tr><th>Type</th>${m6.map(x => `<th class="n">${e(x.m.label)}${x.m.partial ? '*' : ''}</th>`).join('')}<th class="n">Total</th></tr>`
+                + types6.map(t => `<tr><td>${e(t)}</td>${m6.map(x => `<td class="n">${x.by[t] || ''}</td>`).join('')}<td class="n big">${t6[t].toLocaleString()}</td></tr>`).join('')
+                + `<tr class="tot"><td>All types</td>${m6.map(x => `<td class="n">${x.n || ''}</td>`).join('')}<td class="n big">${sum6.toLocaleString()}</td></tr></table><div class="note">* current month, to date.</div>`
+                : 'No anomalies were detected in these months.')
+            + '</div></section>');
 
-        // 03 — trend
-        h.push(`<section id="s3"><div class="num">03</div><h2>Twelve-month trend</h2><p class="sub">${e(fiTrendText(v))}${v.trend ? '.' : ''} Bars are findings per calendar month by type; the line is the same months per 100 flights.</p>`
+        // 03 — top 10 pads over the whole window
+        const top10 = v.pads.slice(0, 10); const maxPad = top10.length ? top10[0].n : 1;
+        h.push(`<section id="s3"><div class="num">03</div><h2>Top 10 pads, last ${win} months</h2><p class="sub">The pads with the most anomalies in the last ${win} months.</p><div class="box">`
+            + (top10.length ? '<table><tr><th></th><th>Pad</th><th>Site</th><th></th><th class="n">Anomalies</th></tr>'
+                + top10.map((p, i) => `<tr><td class="rk mono">${i + 1}</td><td><b>${e(p.pad)}</b></td><td>${a(fiSiteUrl(p.sid), p.site)}</td><td><div class="bar" data-tip="${e(p.pad)}: ${AN(p.n)}, ${e(fiNiceShort(p.first))} to ${e(fiNice(p.last))}"><i style="width:${Math.max(2, p.n / maxPad * 100).toFixed(1)}%"></i></div></td><td class="n big">${p.n.toLocaleString()}</td></tr>`).join('')
+                + '</table>' : 'No anomaly could be matched to a pad.')
+            + '</div></section>');
+
+        // 04 — trend
+        h.push(`<section id="s4"><div class="num">04</div><h2>Trend, last ${win} months</h2><p class="sub">${e(fiTrendText(v).replace(/findings/g, 'anomalies'))}${v.trend ? '.' : ''} Bars are anomalies per calendar month by type; the line is the same months per 100 flights.</p>`
             + `<div class="box"><div class="legend">${top.map((t, k) => `<span><i style="background:var(--s${k + 1})"></i>${e(t)}</span>`).join('')}${types.length > 3 ? '<span><i style="background:var(--so)"></i>All other types</span>' : ''}</div>${fiChartBars(v, top)}<div class="note">* current month, to date.</div></div>`
-            + (v.flights > 0 ? `<div class="box"><div class="legend"><span>Findings per 100 flights</span></div>${fiChartRate(v)}</div>` : '') + '</section>');
+            + (v.flights > 0 ? `<div class="box"><div class="legend"><span>Anomalies per 100 flights</span></div>${fiChartRate(v)}</div>` : '') + '</section>');
 
-        // 04 — by site
+        // 05 — by site
         const recBySite = {}; R.issues.forEach(x => { recBySite[x.sid] = (recBySite[x.sid] || 0) + 1; });
         const siteRows = v.sites.filter(s => !s.r.err).slice().sort((p, q) => ((recBySite[q.sid] || 0) - (recBySite[p.sid] || 0)) || (q.n - p.n));
-        h.push(`<section id="s4"><div class="num">04</div><h2>By site</h2><p class="sub">Sites with findings in the last ${R.days} days first.</p><div class="box"><table><tr><th>Site</th><th class="n">Last ${R.days} days</th><th class="n">12 months</th><th class="n">Flights</th><th class="n">Per 100 flights</th><th class="n">Repeat assets</th></tr>`
-            + siteRows.map(s => `<tr><td>${a(fiSiteUrl(s.sid), s.r.name)}</td><td class="n">${recBySite[s.sid] || ''}</td><td class="n">${s.n}</td><td class="n">${s.flightsKnown ? s.flights.toLocaleString() : '—'}</td><td class="n">${s.flightsKnown ? fiRateTxt(s.n, s.flights) : '—'}</td><td class="n">${s.repeats || ''}</td></tr>`).join('')
-            + '</table></div></section>');
-
-        // 05 — what
-        const comps = Object.keys(v.comps).sort((p, q) => v.comps[q] - v.comps[p]);
-        h.push('<section id="s5"><div class="num">05</div><h2>What was found</h2><p class="sub">Finding type and the equipment it was recorded against, last 12 months.</p><div class="box"><table><tr><th>Type · equipment</th><th class="n">Findings</th><th class="n">Share</th></tr>'
-            + comps.slice(0, 15).map(k => `<tr><td>${e(k)}</td><td class="n">${v.comps[k]}</td><td class="n">${(v.comps[k] / v.n * 100).toFixed(0)}%</td></tr>`).join('')
-            + (comps.length > 15 ? `<tr><td>${comps.length - 15} other combinations</td><td class="n">${comps.slice(15).reduce((s, k) => s + v.comps[k], 0)}</td><td class="n">${(comps.slice(15).reduce((s, k) => s + v.comps[k], 0) / v.n * 100).toFixed(0)}%</td></tr>` : '')
+        h.push(`<section id="s5"><div class="num">05</div><h2>By site</h2><p class="sub">Sites with anomalies in the last ${R.days} days first.</p><div class="box"><table><tr><th>Site</th><th class="n">Last ${R.days} days</th><th class="n">${win} months</th><th class="n">Flights</th><th class="n">Per 100 flights</th></tr>`
+            + siteRows.map(s => `<tr><td>${a(fiSiteUrl(s.sid), s.r.name)}</td><td class="n">${recBySite[s.sid] || ''}</td><td class="n">${s.n}</td><td class="n">${s.flightsKnown ? s.flights.toLocaleString() : '—'}</td><td class="n">${s.flightsKnown ? fiRateTxt(s.n, s.flights) : '—'}</td></tr>`).join('')
             + '</table></div></section>');
 
         const caveats = [];
@@ -9780,9 +9806,9 @@
         if (v.partial) caveats.push(`${fiPl(v.partial, 'site')} returned a partial list.`);
         if (!v.flightsKnown || !R.known) caveats.push('Flight counts were unavailable for some sites; their flights are left out of the totals and rates.');
         const noAsset = v.issues.filter(x => !x.asset).length;
-        h.push(`<section id="s6"><div class="num">METHOD</div><p class="sub">Findings are the issues recorded in the platform's Data Map for each site, dated by the flight that captured them (UTC). Flights are every flown mission in the same period. `
-            + `A finding with no asset tag is assigned to the asset named in the analyst's note, or the asset boundary its map point falls in, or the nearest boundary within ${Math.round(FI_NEAR_M * 3.28084)} ft.`
-            + `${noAsset ? ` ${fiPl(noAsset, 'finding')} could not be assigned and ${noAsset === 1 ? 'is' : 'are'} left out of the repeat list.` : ''}${caveats.length ? ' ' + e(caveats.join(' ')) : ''}</p>`
+        h.push(`<section id="s6"><div class="num">METHOD</div><p class="sub">Anomalies are the issues recorded in the platform's Data Map for each site, dated by the flight that captured them (UTC). Flights are every flown mission in the same period. `
+            + `Anomalies are counted per pad; one recorded on equipment inside a pad counts for that pad. An anomaly with no asset tag is assigned to the pad named in the analyst's note, or the pad boundary its map point falls in, or the nearest boundary within ${Math.round(FI_NEAR_M * 3.28084)} ft.`
+            + `${noAsset ? ` ${AN(noAsset)} could not be assigned and ${noAsset === 1 ? 'is' : 'are'} left out of the pad counts.` : ''}${caveats.length ? ' ' + e(caveats.join(' ')) : ''}</p>`
             + `<div class="note">Generated ${e(fiNice(Date.now()))}.</div></section></div><div id="tip"></div>`);
         h.push('<script>(function(){var t=document.getElementById("tip");document.addEventListener("mousemove",function(ev){var el=ev.target.closest?ev.target.closest("[data-tip]"):null;if(!el){t.style.display="none";return;}t.textContent=el.getAttribute("data-tip");t.style.display="block";var w=t.offsetWidth;t.style.left=Math.max(4,Math.min(ev.pageX+12,window.scrollX+document.documentElement.clientWidth-w-8))+"px";t.style.top=(ev.pageY+16)+"px";});})();<\/script></body></html>');
         return h.join('');
@@ -9792,8 +9818,8 @@
         const v = fiView();
         if (!v.n) { setStatus('Findings: nothing to report under the current filters'); return; }
         const R = fiRecent(v);
-        fdDownload(new Blob([fiPeriodHtml()], { type: 'text/html;charset=utf-8' }), `Inspection_Findings_Report_${fdSafe(fiScopeTitle(v)).replace(/\s+/g, '_')}_${new Date(R.b - 86400000).toISOString().slice(0, 10)}_last${R.days}d.html`);
-        setStatus(`Findings report downloaded — last ${R.days} days: ${R.issues.length} finding(s) on ${R.assets} asset(s) · open it and use "Print / Save as PDF"${ftCfg.fi.showRejected ? ' · INTERNAL copy' : ''}`);
+        fdDownload(new Blob([fiPeriodHtml()], { type: 'text/html;charset=utf-8' }), `Inspection_Anomalies_Report_${fdSafe(fiScopeTitle(v)).replace(/\s+/g, '_')}_${new Date(R.b - 86400000).toISOString().slice(0, 10)}_last${R.days}d.html`);
+        setStatus(`Anomaly report downloaded — last ${R.days} days: ${R.issues.length} anomaly(ies) at ${R.pads} pad(s) · open it and use "Print / Save as PDF"${ftCfg.fi.showRejected ? ' · INTERNAL copy' : ''}`);
     }
 
     // ---- panel ----

@@ -1,3 +1,12 @@
+## 2026-11-14 — AIM Fleet Tools latest v0.91 (latest only) — 📰 Report rebuilt to Chris's layout: anomalies, per pad (#341)
+
+- **The 📰 Report now says "anomalies"** and counts them per pad (an anomaly on equipment nested inside a pad counts for the pad).
+- **01 Last 7 days:** every anomaly of the period, one card per pad, no cap. The History line shows that pad's other anomalies in the last 6 and 12 months.
+- **02 By type:** every anomaly type, month by month for the last 6 months, with totals. Covers everything, not only this period.
+- **03 Top 10 pads:** pad name and total anomalies over the last 12 months.
+- Trend and By site follow. "Assets that keep coming back" and "What was found" are replaced by the two new sections.
+- Works on a saved run. Nested-asset roll-up to the pad needs one fresh run; until then pad = the tagged asset.
+
 ## 2026-11-13 — AIM Fleet Tools latest v0.90 (latest only) — Findings Report cards show 12 / 6 / 3 months (#341)
 
 - **📰 Report cards no longer show "days flagged".** Each asset card now shows that asset's findings in the last 12, 6 and 3 months, with a one-word cue: rising, steady or falling (the last 3 months against the 3 before), or "new this period" when the asset has no earlier finding.
