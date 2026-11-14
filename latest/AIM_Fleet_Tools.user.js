@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.91
+// @version      0.92
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.90 (#341): 📰 Report cards show each asset's findings in the last 12 / 6 / 3 months with a rising / steady / falling cue (the 'days flagged' number is gone from the cards). v0.89 (#341): 📈 Findings Report keeps its last finished run (browser IndexedDB) — it is back after a reload, so filters, the report period and every export work without re-running; ✕ Clear forgets it. v0.88 (#341): 📈 Findings Report gains 📰 Report — a print-ready (Save as PDF) narrative for the last 7 / 14 / 30 days: one card per asset with its 12-month history, assets that keep coming back, trend, by site; the earlier HTML is now 📊 Dashboard; finding types that differ only by capitalisation are merged. v0.87 (#341): 📈 Findings Report — the Data View Issues tab (emissions and every other finding type) across the picked sites: findings per month and per 100 flights, assets flagged on 2+ days, by type / component / site, rejected + status + type filters, issues CSV, site×month CSV and a self-contained HTML report whose rows link to the site and the issue. v0.86: 📅 Sweep Scheduler gains a 📆 Calendar view (the forecast day by day, Mon–Fri weeks, exports). v0.85 (#335): 📅 Sweep Scheduler — for a client's recurring inspection missions (first profile: FPL feeder poles) it reads the live mission bank, the flown log and each base's docked drone, works out how old each mission's oldest pole is (count-back to 90 % of a full sweep), and lists what to fly next in order with flights planned per month, flights per sweep, payload (4.0 / 3.0 / none), per-site schedule switches, mission holds, Sheets / CSV / Slack text. v0.84 (#334): ⚙ ESC Sweep — for every flown flight of the picked sites × date window, download the log archive (in memory only), read the ESC telemetry and list each flight where the drone raised the ESC ratio alarm (false alarm vs real) plus long takeoff spikes; capped per run with Continue, Pause / Stop, gentle mode, finished flights remembered, Sheets / CSV, each row links to the full Mission Logs card. v0.82 (#331): 🎬 Mission Review — sweep the mission log of the picked sites (or every site) for flagged flights; checks are a registry (first: flew but NO video; also no images / fewer images than planned / landing failed); per-site counts, every flight a link to its Mission Playback, Copy → Sheets / CSV. v0.79 (#329): 🚩 SOP Sweep — run Site-Setup SOP checks across the picked sites (or every site) from LIVE /map_objects/; first check = FP ⨯ FP crossing (segments that cross / T / overlap with no shared vertex); per-site rows, 🎯 fly-to on the landing map, ↗ opens the site in a NEW tab and jumps to the spot (?aim-goto deep link, Site Setup Tools v4.498+), Copy → Sheets / CSV. v0.78 (#318): 🖼 Map Export — renders what the landing map shows (KML layers, cross-ref bands, site setups, site names) on its own canvas at print size with basemap tiles, legend, scale bar, north arrow, title and a dead-space trim (transparent outside the content); preview modal with toggles; ⬇ PNG poster or 🌐 self-contained interactive HTML (small, zooms forever). v0.77: Site setups scope — draw the FFZs / flight paths / assets of ONLY the sites matching a names box or the 📦 Fleet Data pick (independent of the label filter, "= labels" copies it) so another client's setup never shows on a shared map. v0.76: site labels "Only matching / picked" mode (names box or the 📦 Fleet Data pick keep their label, every other site name hidden), 🗺 on-map legend (cross-ref bands + numbers, shown KML layers, site-setup colours) and 📷 Client view (names hidden, legend on, panel + button tucked away for a screenshot; ↩ Exit restores). v0.75: 📊 Fleet Metrics follows the 📦 Fleet Data pick ("picked only" checkbox, on by default; nothing picked → every site) — table, totals, Sheets / CSV and 🛂 Approval FPs. v0.67 (#285): 📡 Coverage — radius circles on the landing map (any Ø, drag centre / edge, live count of sites inside under a fully-inside / centre-inside rule, KML export), footprint of the picked sites (span, convex hull, smallest enclosing circle, site extents + FFZ acreage), 🧠 Best spot (centre covering the MOST sites at a Ø — exact candidate search) + 🗂 Plan all (greedy: how many circles cover every site), 📏 two-click ruler. v0.57 (#274): data check shows whether the skipped no-duration rows carry images / videos (+ first video object), and 🔎 probes one /missions/ page without the field filter to list every server field (hunting an abort / end-reason field). v0.56 (#274): 📋 Copy check button on the data check. v0.55 (#276): Utilization lenses — 🧑‍✈️ Pilots / 🛸 Drones / 📍 Sites / 🏢 Clients (sites + clients: flights, drone-hrs, air, flyable drone-hrs, util %, coverage, sites never flown, incomplete, capture %, gaps); Drones gain flyable hrs + util %. v0.54 (#274): Incomplete flights + Capture % from planned-vs-actual image counts (Pilots / Pilot-days / Flights), raw state codes + mission_data_reports sample in the data check. v0.53 (#274): ⚙ Site rules is a real button. v0.52 (#274): Pilot Utilization hides all-zero / blank columns (panel + Sheets + CSV) with a 'hidden:' note and a checkbox to show them. v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, Exxon-style "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
@@ -46,7 +46,7 @@
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.91';
+    const SCRIPT_VERSION = '0.92';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -9176,7 +9176,7 @@
         return out;
     }
     // → { childName: rootPadName } for nested assets only (#273: parent_asset_name is the parent's NAME; chains allowed).
-    // The 📰 report counts anomalies per PAD, so a finding tagged on a child rolls up to the pad it sits on.
+    // The 📰 report counts anomalies per PAD, so an anomaly tagged on a child rolls up to the pad it sits on.
     function fiRootMap(entities) {
         const par = {};
         (entities || []).forEach(e => {
@@ -9235,7 +9235,7 @@
         try { return await fdGetJson(url, ms); }
         catch (e) {
             if (/401\/403|login page/.test(String(e && e.message))) throw e;
-            console.warn(`${TAG} findings: ${url} failed (${e && e.message || e}) — retrying once`);
+            console.warn(`${TAG} anomalies: ${url} failed (${e && e.message || e}) — retrying once`);
             return await fdGetJson(url, ms * 2);
         }
     }
@@ -9276,9 +9276,9 @@
     }
     async function fiRunSweep() {
         if (fiSweep && fiSweep.running) return;
-        try { await fetchRawSites(false); } catch (e) { console.warn(`${TAG} findings: /sites/ failed:`, e); setStatus(`Findings: /sites/ failed — ${e.message}`); return; }
+        try { await fetchRawSites(false); } catch (e) { console.warn(`${TAG} anomalies: /sites/ failed:`, e); setStatus(`Anomalies: /sites/ failed — ${e.message}`); return; }
         const ids = fiScopeIds();
-        if (!ids.length) { setStatus('Findings: no sites in scope (pick sites in 📦 Fleet Data, or clear the name filter / "picked only")'); return; }
+        if (!ids.length) { setStatus('Anomalies: no sites in scope (pick sites in 📦 Fleet Data, or clear the name filter / "picked only")'); return; }
         const seq = ++fiSweepSeq;
         const months = fiMonths(Number(ftCfg.fi.months) > 0 ? Number(ftCfg.fi.months) : 12);
         fiSweep = { at: Date.now(), running: true, seq, scope: `${(ftCfg.fi.picked && fdSelected.size) ? 'picked' : 'all'}${String(ftCfg.fi.name || '').trim() ? ` · name ~ ${String(ftCfg.fi.name).trim()}` : ''} (${ids.length})`,
@@ -9286,7 +9286,7 @@
         const day0 = fiSweep.day0;
         fiOpenSite = null; fiV = null;
         renderPanel();
-        console.log(`${TAG} findings ${seq}: ${ids.length} site(s), ${months[0].key} → ${months[months.length - 1].key}`);
+        console.log(`${TAG} anomalies ${seq}: ${ids.length} site(s), ${months[0].key} → ${months[months.length - 1].key}`);
         let cursor = 0;
         const isDead = () => fiSweepSeq !== seq || fiSweep.aborted;
         const worker = async () => {
@@ -9300,30 +9300,30 @@
                     if (!fiVocabLogged && got.rows.length) {
                         fiVocabLogged = true;
                         fdGetJson(`/annotations/status-counts/?site=${encodeURIComponent(sid)}&usage_type=issue`, 30000)
-                            .then(j => console.log(`${TAG} findings: /annotations/status-counts/ for site ${sid} (status vocabulary):`, j))
-                            .catch(e => console.warn(`${TAG} findings: status-counts probe failed (informational only):`, e));
+                            .then(j => console.log(`${TAG} anomalies: /annotations/status-counts/ for site ${sid} (status vocabulary):`, j))
+                            .catch(e => console.warn(`${TAG} anomalies: status-counts probe failed (informational only):`, e));
                     }
                     let idx = null;
                     if (got.rows.length) {
                         try { const ents = (await fdFetchSetup(sid, false)).entities; idx = fiAssetIndex(ents); rec.roots = fiRootMap(ents); }
-                        catch (e) { rec.assetsErr = (e && e.message) || String(e); console.warn(`${TAG} findings: site ${sid} setup read failed — untagged issues stay without an asset, nested assets do not roll up to their pad:`, e); }
+                        catch (e) { rec.assetsErr = (e && e.message) || String(e); console.warn(`${TAG} anomalies: site ${sid} setup read failed — untagged issues stay without an asset, nested assets do not roll up to their pad:`, e); }
                     }
                     rec.issues = got.rows.map(a => fiShape(a, sid, idx));
                     try { rec.flights = await fiFetchFlights(sid, months, isDead); rec.recent = await fiFetchRecent(sid, day0, isDead); }
                     catch (e) {
                         if (e && e.message === 'aborted') return;
                         rec.flightsErr = (e && e.message) || String(e);
-                        console.warn(`${TAG} findings: site ${sid} flight counts failed — rate not available for it:`, e);
+                        console.warn(`${TAG} anomalies: site ${sid} flight counts failed — rate not available for it:`, e);
                     }
                 } catch (e) {
                     if (fiSweepSeq !== seq) return;
                     if (e && e.message === 'aborted') return;
                     rec.err = (e && e.message) || String(e);
-                    console.warn(`${TAG} findings: site ${sid} failed:`, e);
+                    console.warn(`${TAG} anomalies: site ${sid} failed:`, e);
                 }
                 if (fiSweepSeq !== seq) return;
                 fiSweep.sites[sid] = rec; fiSweep.done++; fiV = null;
-                setStatus(`Findings… ${fiSweep.done}/${fiSweep.total} · ${rec.name}${rec.err ? ' → FAILED' : ` → ${rec.allTime} issue(s) all time`}`);
+                setStatus(`Anomalies… ${fiSweep.done}/${fiSweep.total} · ${rec.name}${rec.err ? ' → FAILED' : ` → ${rec.allTime} issue(s) all time`}`);
                 if (fiSweep.done % 3 === 0 || fiSweep.done === fiSweep.total) fdRenderKeepScroll();
             }
         };
@@ -9332,8 +9332,8 @@
         fiSweep.running = false; fiV = null;
         fiSaveRun();
         const v = fiView();
-        setStatus(`Findings done — ${v.n} issue(s) on ${v.sitesHit} of ${fiSweep.done} site(s), ${v.flightsKnown ? `${v.flights.toLocaleString()} flights` : 'flights unknown'}, ${v.repeats.length} repeat asset(s)${v.failed ? ` · ${v.failed} site(s) FAILED` : ''}${fiSweep.aborted ? ' · ABORTED' : ''}`);
-        console.log(`${TAG} findings ${seq}: done — ${v.n} shown of ${v.inWindow} in window, statuses`, v.statuses, 'types', v.typesAll, 'asset match', v.how);
+        setStatus(`Anomalies done — ${v.n} issue(s) on ${v.sitesHit} of ${fiSweep.done} site(s), ${v.flightsKnown ? `${v.flights.toLocaleString()} flights` : 'flights unknown'}, ${v.repeats.length} repeat asset(s)${v.failed ? ` · ${v.failed} site(s) FAILED` : ''}${fiSweep.aborted ? ' · ABORTED' : ''}`);
+        console.log(`${TAG} anomalies ${seq}: done — ${v.n} shown of ${v.inWindow} in window, statuses`, v.statuses, 'types', v.typesAll, 'asset match', v.how);
         renderPanel();
     }
 
@@ -9363,25 +9363,25 @@
         if (!Object.values(fiSweep.sites).some(r => !r.err)) return;   // nothing readable → keep the previous saved run
         const copy = Object.assign({}, fiSweep, { running: false, saved: false });
         fiDbOp('readwrite', st => st.put({ v: FI_RUN_V, sweep: copy }, FI_RUN_KEY))
-            .then(() => console.log(`${TAG} findings: run saved (${Object.keys(copy.sites).length} site(s)) — it will be back after a reload`))
-            .catch(e => { console.warn(`${TAG} findings: could not save the run — it will be lost on reload:`, e); setStatus(`Findings: could not save this run for later (${e && e.message || e}) — exports still work now`); });
+            .then(() => console.log(`${TAG} anomalies: run saved (${Object.keys(copy.sites).length} site(s)) — it will be back after a reload`))
+            .catch(e => { console.warn(`${TAG} anomalies: could not save the run — it will be lost on reload:`, e); setStatus(`Anomalies: could not save this run for later (${e && e.message || e}) — exports still work now`); });
     }
     function fiLoadRun() {
         fiDbOp('readonly', st => st.get(FI_RUN_KEY)).then(rec => {
             if (!rec || fiSweep) return;                           // nothing saved, or a run already started this session
             const sw = rec.sweep;
             if (rec.v !== FI_RUN_V || !sw || !Array.isArray(sw.months) || !sw.months.length || !sw.sites || typeof sw.sites !== 'object' || typeof sw.day0 !== 'number') {
-                console.warn(`${TAG} findings: saved run has an old / unexpected shape — ignored (run the report again)`);
+                console.warn(`${TAG} anomalies: saved run has an old / unexpected shape — ignored (run the report again)`);
                 return;
             }
             sw.running = false; sw.saved = true; sw.seq = ++fiSweepSeq;
             fiSweep = sw; fiV = null; fiOpenSite = null;
-            console.log(`${TAG} findings: restored the saved run of ${new Date(sw.at).toLocaleString()} (${Object.keys(sw.sites).length} site(s))`);
+            console.log(`${TAG} anomalies: restored the saved run of ${new Date(sw.at).toLocaleString()} (${Object.keys(sw.sites).length} site(s))`);
             if (panelEl) renderPanel();
-        }).catch(e => console.warn(`${TAG} findings: could not read the saved run:`, e));
+        }).catch(e => console.warn(`${TAG} anomalies: could not read the saved run:`, e));
     }
     function fiForgetRun() {
-        fiDbOp('readwrite', st => st.delete(FI_RUN_KEY)).catch(e => console.warn(`${TAG} findings: could not delete the saved run:`, e));
+        fiDbOp('readwrite', st => st.delete(FI_RUN_KEY)).catch(e => console.warn(`${TAG} anomalies: could not delete the saved run:`, e));
     }
 
     // ---- view: the sweep under the current filters ----
@@ -9461,7 +9461,7 @@
     function fiTrendText(v) {
         const t = v.trend;
         if (!t) return '';
-        const unit = t.useRate ? 'findings per 100 flights' : 'findings';
+        const unit = t.useRate ? 'anomalies per 100 flights' : 'anomalies';
         const f = (x) => t.useRate ? x.toFixed(x < 10 ? 1 : 0) : String(x);
         if (t.pct == null) return `${f(t.b)} ${unit} in ${t.to} (none in ${t.from})`;
         if (Math.abs(t.pct) < 5) return `Flat: ${f(t.b)} ${unit} in ${t.to} vs ${f(t.a)} in ${t.from}`;
@@ -9480,22 +9480,22 @@
     // ---- CSV ----
     const fiQ = (val) => `"${String(val == null ? '' : val).replace(/"/g, '""')}"`;
     function fiDownloadCsv() {
-        if (!fiSweep) { setStatus('Findings: run the report first'); return; }
+        if (!fiSweep) { setStatus('Anomalies: run the report first'); return; }
         const v = fiView();
-        if (!v.issues.length) { setStatus('Findings: nothing to export under the current filters'); return; }
+        if (!v.issues.length) { setStatus('Anomalies: nothing to export under the current filters'); return; }
         const cols = ['Site ID', 'Site', 'Client', 'Issue ID', 'Flight date (UTC)', 'Flight time (CT)', 'Month', 'Type', 'Component', 'Title', 'Description', 'Severity', 'Status', 'Rejected', 'Rejection reason', 'Source', 'Customer validated',
-            'Asset', 'Asset match', 'Repeat asset', 'Asset findings in window', 'Mission ID', 'Video ID', 'Image ID', 'Lat', 'Lng', 'Created by', 'Site link', 'Issue link'];
+            'Asset', 'Asset match', 'Repeat asset', 'Asset anomalies in window', 'Mission ID', 'Video ID', 'Image ID', 'Lat', 'Lng', 'Created by', 'Site link', 'Issue link'];
         const rows = v.issues.map(x => { const r = fiSweep.sites[x.sid]; return [x.sid, r.name, r.client, x.id, fiDay(x.t), fdWhenCT(x.when), new Date(x.t).toISOString().slice(0, 7), x.type, x.comp, x.title, x.desc, fiSevTxt(x.sev), x.status, x.rejected ? 'yes' : '', x.rejReason,
             x.ai ? 'AI' : 'Insights', x.cust ? 'yes' : '', x.asset, x.how, v.isRepeat(x) ? 'yes' : '', v.assetN(x), x.mission, x.video == null ? '' : x.video, x.image == null ? '' : x.image, isFinite(x.lat) ? x.lat : '', isFinite(x.lng) ? x.lng : '', x.by, fiSiteUrl(x.sid), fiIssueUrl(x)]; });
         const csv = [cols.map(fiQ).join(',')].concat(rows.map(r => r.map(fiQ).join(','))).join('\r\n');
-        fdDownload(new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' }), `AIM_Findings_${fiSweep.months[0].key}_to_${fiSweep.months[fiSweep.months.length - 1].key}.csv`);
-        setStatus(`Findings CSV — ${rows.length} issue(s)`);
+        fdDownload(new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' }), `AIM_Anomalies_${fiSweep.months[0].key}_to_${fiSweep.months[fiSweep.months.length - 1].key}.csv`);
+        setStatus(`Anomalies CSV — ${rows.length} issue(s)`);
     }
     function fiDownloadMonthlyCsv() {
-        if (!fiSweep) { setStatus('Findings: run the report first'); return; }
+        if (!fiSweep) { setStatus('Anomalies: run the report first'); return; }
         const v = fiView();
         const types = Object.keys(v.types).sort((a, b) => v.types[b] - v.types[a]);
-        const cols = ['Site ID', 'Site', 'Client', 'Month', 'Month complete', 'Flights', 'Findings', 'Findings per 100 flights'].concat(types);
+        const cols = ['Site ID', 'Site', 'Client', 'Month', 'Month complete', 'Flights', 'Anomalies', 'Anomalies per 100 flights'].concat(types);
         const rows = [];
         v.sites.forEach(row => fiSweep.months.forEach(m => {
             const by = {}; let n = 0;
@@ -9504,8 +9504,8 @@
             rows.push([row.sid, row.r.name, row.r.client, m.key, m.partial ? 'no' : 'yes', f, n, f === '' ? '' : (fiRate(n, f) == null ? '' : fiRate(n, f).toFixed(2))].concat(types.map(t => by[t] || 0)));
         }));
         const csv = [cols.map(fiQ).join(',')].concat(rows.map(r => r.map(fiQ).join(','))).join('\r\n');
-        fdDownload(new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' }), `AIM_Findings_Monthly_${fiSweep.months[0].key}_to_${fiSweep.months[fiSweep.months.length - 1].key}.csv`);
-        setStatus(`Findings monthly CSV — ${rows.length} site-month row(s)`);
+        fdDownload(new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' }), `AIM_Anomalies_Monthly_${fiSweep.months[0].key}_to_${fiSweep.months[fiSweep.months.length - 1].key}.csv`);
+        setStatus(`Anomalies monthly CSV — ${rows.length} site-month row(s)`);
     }
 
     // ---- HTML report (self-contained file; the customer-facing piece) ----
@@ -9518,14 +9518,14 @@
         const yMax = Math.ceil(max / step) * step;
         const slot = (W - L - R) / v.months.length; const bw = Math.min(34, slot * 0.6);
         const y = (n) => T + (H - T - B) * (1 - n / yMax);
-        const out = [`<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Findings per month by type" style="width:100%;height:auto;display:block">`];
+        const out = [`<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Anomalies per month by type" style="width:100%;height:auto;display:block">`];
         for (let g = 0; g <= yMax + 1e-9; g += step) out.push(`<line x1="${L}" x2="${W - R}" y1="${y(g).toFixed(1)}" y2="${y(g).toFixed(1)}" class="grid"/><text x="${L - 6}" y="${(y(g) + 4).toFixed(1)}" text-anchor="end" class="ax">${Math.round(g * 10) / 10}</text>`);
         v.months.forEach((mo, i) => {
             const cx = L + slot * i + slot / 2; let acc = 0;
             const parts = top.map((t, k) => ({ cls: `s${k + 1}`, name: t, n: mo.by[t] || 0 }));
             const other = mo.n - parts.reduce((s, p) => s + p.n, 0);
             if (other > 0) parts.push({ cls: 'so', name: 'All other types', n: other });
-            const tip = `${mo.m.label}${mo.m.partial ? ' (month to date)' : ''}: ${fiPl(mo.n, 'finding')}${parts.filter(p => p.n).map(p => ` · ${p.name} ${p.n}`).join('')}${mo.flights ? ` · ${mo.flights.toLocaleString()} flights` : ''}`;
+            const tip = `${mo.m.label}${mo.m.partial ? ' (month to date)' : ''}: ${fiPl(mo.n, 'anomaly', 'anomalies')}${parts.filter(p => p.n).map(p => ` · ${p.name} ${p.n}`).join('')}${mo.flights ? ` · ${mo.flights.toLocaleString()} flights` : ''}`;
             parts.forEach(p => {
                 if (!p.n) return;
                 const y1 = y(acc + p.n), y0 = y(acc); acc += p.n;
@@ -9545,7 +9545,7 @@
         const yMax = max <= 1 ? Math.ceil(max * 10) / 10 : Math.ceil(max);
         const slot = (W - L - R) / v.months.length;
         const x = (i) => L + slot * i + slot / 2; const y = (n) => T + (H - T - B) * (1 - n / yMax);
-        const out = [`<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Findings per 100 flights by month" style="width:100%;height:auto;display:block">`];
+        const out = [`<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Anomalies per 100 flights by month" style="width:100%;height:auto;display:block">`];
         [0, yMax / 2, yMax].forEach(g => out.push(`<line x1="${L}" x2="${W - R}" y1="${y(g).toFixed(1)}" y2="${y(g).toFixed(1)}" class="grid"/><text x="${L - 6}" y="${(y(g) + 4).toFixed(1)}" text-anchor="end" class="ax">${Math.round(g * 100) / 100}</text>`));
         let d = ''; let pen = false;
         pts.forEach(p => { if (p.r == null) { pen = false; return; } d += `${pen ? 'L' : 'M'}${x(p.i).toFixed(1)} ${y(p.r).toFixed(1)} `; pen = true; });
@@ -9554,7 +9554,7 @@
             out.push(`<text x="${x(p.i).toFixed(1)}" y="${H - 14}" text-anchor="middle" class="ax">${escapeHtml(p.mo.m.label)}${p.mo.m.partial ? '*' : ''}</text>`);
             if (p.r == null) return;
             out.push(`<circle cx="${x(p.i).toFixed(1)}" cy="${y(p.r).toFixed(1)}" r="4" class="dot"/>`);
-            out.push(`<rect x="${(x(p.i) - slot / 2).toFixed(1)}" y="${T}" width="${slot.toFixed(1)}" height="${H - T - B}" fill="transparent" data-tip="${escapeHtml(`${p.mo.m.label}${p.mo.m.partial ? ' (month to date)' : ''}: ${p.r.toFixed(2)} per 100 flights · ${fiPl(p.mo.n, 'finding')} on ${fiPl(p.mo.flights, 'flight')}`)}"/>`);
+            out.push(`<rect x="${(x(p.i) - slot / 2).toFixed(1)}" y="${T}" width="${slot.toFixed(1)}" height="${H - T - B}" fill="transparent" data-tip="${escapeHtml(`${p.mo.m.label}${p.mo.m.partial ? ' (month to date)' : ''}: ${p.r.toFixed(2)} per 100 flights · ${fiPl(p.mo.n, 'anomaly', 'anomalies')} on ${fiPl(p.mo.flights, 'flight')}`)}"/>`);
         });
         out.push('</svg>');
         return out.join('');
@@ -9573,7 +9573,7 @@
         if (v.failed) caveats.push(`${v.failed} site(s) could not be read and are not counted.`);
         if (v.partial) caveats.push(`${v.partial} site(s) returned a partial issue list.`);
         if (v.noFlights) caveats.push(`Flight counts were unavailable for ${v.noFlights} site(s); rates leave those sites' flights out.`);
-        if (v.noAssetSites) caveats.push(`Asset boundaries were unavailable for ${v.noAssetSites} site(s); their findings carry no asset unless tagged.`);
+        if (v.noAssetSites) caveats.push(`Asset boundaries were unavailable for ${v.noAssetSites} site(s); their anomalies carry no asset unless tagged.`);
         const noAsset = v.issues.filter(x => !x.asset).length;
         const css = ':root{--bg:#fcfcfb;--card:#f4f3f0;--line:#dddcd6;--ink:#0b0b0b;--ink2:#52514e;--s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a;--so:#eda100;--accent:#2a78d6}'
             + '@media (prefers-color-scheme:dark){:root{--bg:#1a1a19;--card:#232322;--line:#383835;--ink:#f0efec;--ink2:#c3c2b7;--s1:#3987e5;--s2:#d95926;--s3:#199e70;--so:#c98500;--accent:#6da7ec}}'
@@ -9592,45 +9592,45 @@
             + '#tip{position:absolute;display:none;pointer-events:none;background:var(--ink);color:var(--bg);font-size:12px;padding:5px 8px;border-radius:4px;max-width:300px;z-index:9}'
             + 'details summary{cursor:pointer;color:var(--accent);margin:8px 0}';
         const h = [];
-        h.push(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Inspection Findings — ${e(fiScopeTitle(v))}</title><style>${css}</style></head><body><div class="wrap">`);
-        h.push(`<div class="eyebrow">${e(fiScopeTitle(v))} · drone inspection findings · ${e(range)}</div><h1>Inspection Findings</h1>`);
-        h.push(`<p class="sub">${v.flightsKnown ? fiPl(v.flights, 'flight') : 'Flights'} across ${fiPl(v.sites.length, 'site')} produced ${fiPl(v.n, 'finding')}, ${lead} among them. ${fiPl(v.repeats.length, 'asset was', 'assets were')} flagged on more than one day. ${e(fiTrendText(v))}${v.trend ? '.' : ''}</p>`);
-        if (internal) h.push('<div class="flag"><b>Internal copy.</b> Rejected / false findings are included. Untick "show rejected" before exporting a customer copy.</div>');
+        h.push(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Inspection Anomalies — ${e(fiScopeTitle(v))}</title><style>${css}</style></head><body><div class="wrap">`);
+        h.push(`<div class="eyebrow">${e(fiScopeTitle(v))} · drone inspection anomalies · ${e(range)}</div><h1>Inspection Anomalies</h1>`);
+        h.push(`<p class="sub">${v.flightsKnown ? fiPl(v.flights, 'flight') : 'Flights'} across ${fiPl(v.sites.length, 'site')} produced ${fiPl(v.n, 'anomaly', 'anomalies')}, ${lead} among them. ${fiPl(v.repeats.length, 'asset was', 'assets were')} flagged on more than one day. ${e(fiTrendText(v))}${v.trend ? '.' : ''}</p>`);
+        if (internal) h.push('<div class="flag"><b>Internal copy.</b> Rejected / false anomalies are included. Untick "show rejected" before exporting a customer copy.</div>');
         h.push('<div class="tiles">'
-            + `<div class="tile"><b>${v.n.toLocaleString()}</b><span>findings on ${v.sitesHit} of ${v.sites.length} sites</span></div>`
+            + `<div class="tile"><b>${v.n.toLocaleString()}</b><span>anomalies on ${v.sitesHit} of ${v.sites.length} sites</span></div>`
             + `<div class="tile"><b>${v.flightsKnown ? v.flights.toLocaleString() : '—'}</b><span>flights flown</span></div>`
-            + `<div class="tile"><b>${v.flightsKnown ? fiRateTxt(v.n, v.flights) : '—'}</b><span>findings per 100 flights</span></div>`
+            + `<div class="tile"><b>${v.flightsKnown ? fiRateTxt(v.n, v.flights) : '—'}</b><span>anomalies per 100 flights</span></div>`
             + `<div class="tile"><b>${v.repeats.length}</b><span>assets flagged on 2+ days</span></div></div>`);
-        h.push('<h2>Findings by month</h2><p class="sub">Each bar is one calendar month, split by finding type. Hover a month for the numbers.</p><div class="card">'
+        h.push('<h2>Anomalies by month</h2><p class="sub">Each bar is one calendar month, split by anomaly type. Hover a month for the numbers.</p><div class="card">'
             + `<div class="legend">${top.map((t, k) => `<span><i style="background:var(--s${k + 1})"></i>${e(t)}</span>`).join('')}${types.length > 3 ? '<span><i style="background:var(--so)"></i>All other types</span>' : ''}</div>`
             + fiChartBars(v, top) + '<div class="note">* current month, to date. Months are UTC.</div></div>');
-        if (v.flights > 0) h.push('<h2>Findings per 100 flights</h2><p class="sub">The same months divided by how much was flown, so a busy month does not read as a bad one.</p><div class="card">' + fiChartRate(v) + '<div class="note">* current month, to date.</div></div>');
-        h.push('<h2>Assets flagged more than once</h2><p class="sub">An asset appears here when findings were recorded on two or more different days. One flight that finds several things on the same asset is not a repeat.</p>');
+        if (v.flights > 0) h.push('<h2>Anomalies per 100 flights</h2><p class="sub">The same months divided by how much was flown, so a busy month does not read as a bad one.</p><div class="card">' + fiChartRate(v) + '<div class="note">* current month, to date.</div></div>');
+        h.push('<h2>Assets flagged more than once</h2><p class="sub">An asset appears here when anomalies were recorded on two or more different days. One flight that finds several things on the same asset is not a repeat.</p>');
         if (!v.repeats.length) h.push('<div class="card">No asset was flagged on more than one day in this period.</div>');
-        else h.push('<div class="card scroll"><table><tr><th>Asset</th><th>Site</th><th class="n">Days flagged</th><th class="n">Findings</th><th>What</th><th>First</th><th>Latest</th><th>Findings</th></tr>'
+        else h.push('<div class="card scroll"><table><tr><th>Asset</th><th>Site</th><th class="n">Days flagged</th><th class="n">Anomalies</th><th>What</th><th>First</th><th>Latest</th><th>Anomalies</th></tr>'
             + v.repeats.map(r => `<tr><td><b>${e(r.asset)}</b></td><td>${a(fiSiteUrl(r.sid), r.site)}</td><td class="n">${r.days.size}</td><td class="n">${r.n}</td><td>${e(Array.from(r.types).join(', '))}${r.comps.size ? `<div class="note">${e(Array.from(r.comps).join(' · '))}</div>` : ''}</td><td>${fiDay(r.first)}</td><td>${fiDay(r.last)}</td>`
                 + `<td>${r.issues.slice().sort((p, q) => q.t - p.t).slice(0, 8).map(x => a(fiIssueUrl(x), fiDay(x.t))).join(', ')}${r.issues.length > 8 ? ` +${r.issues.length - 8}` : ''}</td></tr>`).join('') + '</table></div>');
-        h.push('<h2>What was found</h2><p class="sub">Finding type and the equipment it was recorded against.</p><div class="card scroll"><table><tr><th>Type · component</th><th class="n">Findings</th><th class="n">Share</th></tr>'
+        h.push('<h2>What was found</h2><p class="sub">Anomaly type and the equipment it was recorded against.</p><div class="card scroll"><table><tr><th>Type · component</th><th class="n">Anomalies</th><th class="n">Share</th></tr>'
             + comps.map(k => `<tr><td>${e(k)}</td><td class="n">${v.comps[k]}</td><td class="n">${(v.comps[k] / v.n * 100).toFixed(0)}%</td></tr>`).join('') + '</table></div>');
-        h.push('<h2>By site</h2><div class="card scroll"><table><tr><th>Site</th><th class="n">Flights</th><th class="n">Findings</th><th class="n">Per 100 flights</th><th class="n">Repeat assets</th><th>Types</th></tr>'
+        h.push('<h2>By site</h2><div class="card scroll"><table><tr><th>Site</th><th class="n">Flights</th><th class="n">Anomalies</th><th class="n">Per 100 flights</th><th class="n">Repeat assets</th><th>Types</th></tr>'
             + v.sites.map(s => `<tr><td>${a(fiSiteUrl(s.sid), s.r.name)}${s.r.err ? ' <span class="note">(could not be read)</span>' : ''}</td><td class="n">${s.flightsKnown ? s.flights.toLocaleString() : '—'}</td><td class="n">${s.n}</td><td class="n">${s.flightsKnown ? fiRateTxt(s.n, s.flights) : '—'}</td><td class="n">${s.repeats || ''}</td>`
                 + `<td>${e(Object.keys(s.by).sort((p, q) => s.by[q] - s.by[p]).map(t => `${t} ${s.by[t]}`).join(' · '))}</td></tr>`).join('') + '</table></div>');
-        h.push(`<h2>Every finding</h2><details><summary>Show all ${v.issues.length.toLocaleString()} findings</summary><div class="card scroll"><table><tr><th>Date</th><th>Site</th><th>Asset</th><th>Type</th><th>Component</th><th>Severity</th>${internal ? '<th>Status</th>' : ''}<th>Finding</th></tr>`
+        h.push(`<h2>Every anomaly</h2><details><summary>Show all ${v.issues.length.toLocaleString()} anomalies</summary><div class="card scroll"><table><tr><th>Date</th><th>Site</th><th>Asset</th><th>Type</th><th>Component</th><th>Severity</th>${internal ? '<th>Status</th>' : ''}<th>Anomaly</th></tr>`
             + v.issues.map(x => `<tr><td>${fiDay(x.t)}</td><td>${a(fiSiteUrl(x.sid), S.sites[x.sid].name)}</td><td>${e(x.asset || '—')}</td><td>${e(x.type)}</td><td>${e(x.comp)}</td><td>${e(fiSevTxt(x.sev))}</td>${internal ? `<td>${e(x.status)}${x.rejected ? ' · rejected' : ''}</td>` : ''}<td>${a(fiIssueUrl(x), `#${x.id}`)}</td></tr>`).join('')
             + '</table></div></details>');
-        h.push(`<h2>Method</h2><p class="sub">Findings are the issues recorded in the platform's Data Map for each site, dated by the flight that captured them. Flights are every flown mission in the same months. `
-            + `Findings recorded on video carry a map point, not an asset tag; each was assigned to the asset named in the analyst's note, or the asset boundary the point falls in, or the nearest boundary within ${Math.round(FI_NEAR_M * 3.28084)} ft.`
-            + `${noAsset ? ` ${fiPl(noAsset, 'finding')} could not be assigned to an asset and ${noAsset === 1 ? 'is' : 'are'} left out of the repeat list.` : ''}${caveats.length ? ' ' + e(caveats.join(' ')) : ''}</p>`);
+        h.push(`<h2>Method</h2><p class="sub">Anomalies are the issues recorded in the platform's Data Map for each site, dated by the flight that captured them. Flights are every flown mission in the same months. `
+            + `Anomalies recorded on video carry a map point, not an asset tag; each was assigned to the asset named in the analyst's note, or the asset boundary the point falls in, or the nearest boundary within ${Math.round(FI_NEAR_M * 3.28084)} ft.`
+            + `${noAsset ? ` ${fiPl(noAsset, 'anomaly', 'anomalies')} could not be assigned to an asset and ${noAsset === 1 ? 'is' : 'are'} left out of the repeat list.` : ''}${caveats.length ? ' ' + e(caveats.join(' ')) : ''}</p>`);
         h.push(`<div class="note">Generated ${e(new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' }))}.</div></div><div id="tip"></div>`);
         h.push('<script>(function(){var t=document.getElementById("tip");document.addEventListener("mousemove",function(ev){var el=ev.target.closest?ev.target.closest("[data-tip]"):null;if(!el){t.style.display="none";return;}t.textContent=el.getAttribute("data-tip");t.style.display="block";var w=t.offsetWidth;t.style.left=Math.max(4,Math.min(ev.pageX+12,window.scrollX+document.documentElement.clientWidth-w-8))+"px";t.style.top=(ev.pageY+16)+"px";});})();<\/script></body></html>');
         return h.join('');
     }
     function fiDownloadHtml() {
-        if (!fiSweep || fiSweep.running) { setStatus('Findings: run the report first (and let it finish)'); return; }
+        if (!fiSweep || fiSweep.running) { setStatus('Anomalies: run the report first (and let it finish)'); return; }
         const v = fiView();
-        if (!v.n) { setStatus('Findings: nothing to report under the current filters'); return; }
-        fdDownload(new Blob([fiReportHtml()], { type: 'text/html;charset=utf-8' }), `Inspection_Findings_${fdSafe(fiScopeTitle(v)).replace(/\s+/g, '_')}_${fiSweep.months[0].key}_to_${fiSweep.months[fiSweep.months.length - 1].key}.html`);
-        setStatus(`Findings report downloaded — ${v.n} finding(s)${ftCfg.fi.showRejected ? ' · INTERNAL copy (rejected shown)' : ''}`);
+        if (!v.n) { setStatus('Anomalies: nothing to report under the current filters'); return; }
+        fdDownload(new Blob([fiReportHtml()], { type: 'text/html;charset=utf-8' }), `Inspection_Anomalies_${fdSafe(fiScopeTitle(v)).replace(/\s+/g, '_')}_${fiSweep.months[0].key}_to_${fiSweep.months[fiSweep.months.length - 1].key}.html`);
+        setStatus(`Anomaly report downloaded — ${v.n} anomalies${ftCfg.fi.showRejected ? ' · INTERNAL copy (rejected shown)' : ''}`);
     }
 
     // ---- 📰 period report (v0.88): the Diamondback-style narrative — what the last N days found, which assets keep
@@ -9689,7 +9689,7 @@
         const internal = !!ftCfg.fi.showRejected;
         const types = Object.keys(v.types).sort((p, q) => v.types[q] - v.types[p]);
         const top = types.slice(0, 3);
-        const leadType = types[0] || 'finding';
+        const leadType = types[0] || 'anomaly';
         const leadN = R.issues.filter(x => x.type === leadType).length;
         const period = `${fiNiceShort(R.a)} – ${fiNice(R.b - 86400000)}`;
         const SEV = { 3: ['high', 'HIGH'], 2: ['med', 'MEDIUM'], 1: ['low', 'LOW'] };
@@ -9790,7 +9790,7 @@
             + '</div></section>');
 
         // 04 — trend
-        h.push(`<section id="s4"><div class="num">04</div><h2>Trend, last ${win} months</h2><p class="sub">${e(fiTrendText(v).replace(/findings/g, 'anomalies'))}${v.trend ? '.' : ''} Bars are anomalies per calendar month by type; the line is the same months per 100 flights.</p>`
+        h.push(`<section id="s4"><div class="num">04</div><h2>Trend, last ${win} months</h2><p class="sub">${e(fiTrendText(v))}${v.trend ? '.' : ''} Bars are anomalies per calendar month by type; the line is the same months per 100 flights.</p>`
             + `<div class="box"><div class="legend">${top.map((t, k) => `<span><i style="background:var(--s${k + 1})"></i>${e(t)}</span>`).join('')}${types.length > 3 ? '<span><i style="background:var(--so)"></i>All other types</span>' : ''}</div>${fiChartBars(v, top)}<div class="note">* current month, to date.</div></div>`
             + (v.flights > 0 ? `<div class="box"><div class="legend"><span>Anomalies per 100 flights</span></div>${fiChartRate(v)}</div>` : '') + '</section>');
 
@@ -9814,9 +9814,9 @@
         return h.join('');
     }
     function fiDownloadPeriod() {
-        if (!fiSweep || fiSweep.running) { setStatus('Findings: run the report first (and let it finish)'); return; }
+        if (!fiSweep || fiSweep.running) { setStatus('Anomalies: run the report first (and let it finish)'); return; }
         const v = fiView();
-        if (!v.n) { setStatus('Findings: nothing to report under the current filters'); return; }
+        if (!v.n) { setStatus('Anomalies: nothing to report under the current filters'); return; }
         const R = fiRecent(v);
         fdDownload(new Blob([fiPeriodHtml()], { type: 'text/html;charset=utf-8' }), `Inspection_Anomalies_Report_${fdSafe(fiScopeTitle(v)).replace(/\s+/g, '_')}_${new Date(R.b - 86400000).toISOString().slice(0, 10)}_last${R.days}d.html`);
         setStatus(`Anomaly report downloaded — last ${R.days} days: ${R.issues.length} anomaly(ies) at ${R.pads} pad(s) · open it and use "Print / Save as PDF"${ftCfg.fi.showRejected ? ' · INTERNAL copy' : ''}`);
@@ -9825,7 +9825,7 @@
     // ---- panel ----
     function fiOpt(t) {
         const k = t.getAttribute('data-fi-opt');
-        if (k === 'months') { const n = Number(t.value); if (FI_MONTH_OPTS.indexOf(n) !== -1) { ftCfg.fi.months = n; saveCfg(); setStatus(`Findings: ${n} months — takes effect on the next run`); } return; }
+        if (k === 'months') { const n = Number(t.value); if (FI_MONTH_OPTS.indexOf(n) !== -1) { ftCfg.fi.months = n; saveCfg(); setStatus(`Anomalies: ${n} months — takes effect on the next run`); } return; }
         if (k === 'recentDays') { const n = Number(t.value); if (FI_RECENT_OPTS.indexOf(n) !== -1) { ftCfg.fi.recentDays = n; saveCfg(); fdRenderKeepScroll(); } return; }
         if (k === 'name') { ftCfg.fi.name = String(t.value || '').trim().slice(0, 120); saveCfg(); renderPanel(); return; }
         if (k === 'picked' || k === 'prodOnly') { ftCfg.fi[k] = !!t.checked; saveCfg(); renderPanel(); return; }
@@ -9835,7 +9835,7 @@
             if (t.checked) delete map[name]; else map[name] = true;
             saveCfg(); fiV = null; fdRenderKeepScroll(); return;
         }
-        console.warn(`${TAG} findings: unknown option "${k}"`);
+        console.warn(`${TAG} anomalies: unknown option "${k}"`);
     }
     function renderFiSection() {
         if (!openSections.fi) return '';
@@ -9855,36 +9855,36 @@
         h.push('<div style="padding:6px 10px;display:flex;gap:14px;flex-wrap:wrap;border-bottom:1px solid #222834;">'
             + (running
                 ? `<span data-ft="fi-abort" style="cursor:pointer;color:#ff5252;font-weight:bold">■ Abort (${fiSweep.done}/${fiSweep.total})</span>`
-                : '<span data-ft="fi-run" style="cursor:pointer;color:#5fff5f;font-weight:bold">▶ Run findings report</span>')
+                : '<span data-ft="fi-run" style="cursor:pointer;color:#5fff5f;font-weight:bold">▶ Run anomaly report</span>')
             + `<span style="display:inline-flex;align-items:center;gap:5px"><span data-ft="fi-report" style="cursor:pointer;color:#ffd27a;font-weight:bold" title="The customer report: what the chosen period found (one card per asset, with its 12-month history), assets that keep coming back, trend, by site. Opens as a page with a Print / Save as PDF button. Uses the filters below.">📰 Report</span>`
             + `<select data-fi-opt="recentDays" title="Period the 📰 Report covers (days ending today, UTC). No re-run needed." style="${selCss}">${FI_RECENT_OPTS.map(n => `<option value="${n}" ${fiRecentDays() === n ? 'selected' : ''}>last ${n} days</option>`).join('')}</select></span>`
-            + '<span data-ft="fi-html" style="cursor:pointer;color:#7adfe6" title="The 12-month dashboard as a self-contained HTML page (charts, repeat assets, by site, every finding) — every row links to the site and to the issue. Uses the filters below.">📊 Dashboard</span>'
-            + '<span data-ft="fi-csv" style="cursor:pointer;color:#7adfe6" title="One row per finding, with site + issue links. Uses the filters below.">⬇ Issues CSV</span>'
-            + '<span data-ft="fi-csvm" style="cursor:pointer;color:#7adfe6" title="One row per site per month: flights, findings, rate, findings per type">⬇ Monthly CSV</span>'
+            + '<span data-ft="fi-html" style="cursor:pointer;color:#7adfe6" title="The 12-month dashboard as a self-contained HTML page (charts, repeat assets, by site, every anomaly) — every row links to the site and to the issue. Uses the filters below.">📊 Dashboard</span>'
+            + '<span data-ft="fi-csv" style="cursor:pointer;color:#7adfe6" title="One row per anomaly, with site + issue links. Uses the filters below.">⬇ Issues CSV</span>'
+            + '<span data-ft="fi-csvm" style="cursor:pointer;color:#7adfe6" title="One row per site per month: flights, anomalies, rate, anomalies per type">⬇ Monthly CSV</span>'
             + (fiSweep && !running ? '<span data-ft="fi-clear" style="cursor:pointer;color:#888">✕ Clear</span>' : '')
             + '</div>');
-        if (!fiSweep) { h.push('<div style="padding:8px 10px;color:#888">No report run yet. Reads the Data View Issues tab (emissions and every other finding type) of each site in scope, plus flights flown per month. Read-only.</div>'); return h.join(''); }
+        if (!fiSweep) { h.push('<div style="padding:8px 10px;color:#888">No report run yet. Reads the Data View Issues tab (emissions and every other anomaly type) of each site in scope, plus flights flown per month. Read-only.</div>'); return h.join(''); }
         const v = fiView();
         const chip = (kind, name, n, off, color) => `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;color:${color}" title="Applies instantly — no re-run"><input type="checkbox" data-fi-opt="${kind}" data-fi-val="${escapeHtml(name)}" ${off ? '' : 'checked'}> ${escapeHtml(name)} <span style="color:#888">${n}</span></label>`;
         h.push('<div style="padding:4px 10px;display:flex;gap:12px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;"><span style="color:#7adfe6">Type:</span>'
             + Object.keys(v.typesAll).sort((a, b) => v.typesAll[b] - v.typesAll[a]).map(t => chip('type', t, v.typesAll[t], ftCfg.fi.typeOff[t], '#ddd')).join('') + '</div>');
         h.push('<div style="padding:4px 10px;display:flex;gap:12px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;"><span style="color:#7adfe6">Status:</span>'
             + Object.keys(v.statuses).sort((a, b) => v.statuses[b] - v.statuses[a]).map(s => chip('status', s, v.statuses[s], ftCfg.fi.statusOff[s], FI_REJECT_RE.test(s) ? '#ffa030' : '#ddd')).join('')
-            + `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;color:#ffa030" title="INTERNAL: include findings marked false / rejected / duplicate. Leave OFF for anything that goes to the customer — the HTML report labels itself Internal when this is on."><input type="checkbox" data-fi-opt="showRejected" ${ftCfg.fi.showRejected ? 'checked' : ''}> show rejected <span style="color:#888">${v.rejected}</span></label>`
+            + `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;color:#ffa030" title="INTERNAL: include anomalies marked false / rejected / duplicate. Leave OFF for anything that goes to the customer — the HTML report labels itself Internal when this is on."><input type="checkbox" data-fi-opt="showRejected" ${ftCfg.fi.showRejected ? 'checked' : ''}> show rejected <span style="color:#888">${v.rejected}</span></label>`
             + '</div>');
         h.push(`<div style="padding:4px 10px;color:#aaa;border-bottom:1px solid #222834;">${running ? `Running… ${fiSweep.done}/${fiSweep.total}` : `Ran ${new Date(fiSweep.at).toLocaleString()}${fiSweep.saved ? ` <span style="color:${Date.now() - fiSweep.at > 86400000 ? '#ffa030' : '#5fff5f'}" title="Restored from this browser — filters, the report period and every export work without re-running. The data and the report's \'last N days\' are as of the run time; ▶ Run again for fresh data.">· saved run${Date.now() - fiSweep.at > 86400000 ? ` (${Math.floor((Date.now() - fiSweep.at) / 86400000)} d old)` : ''}</span>` : ''} · ${escapeHtml(fiSweep.scope)}${fiSweep.aborted ? ' · <span style="color:#ff5252">ABORTED</span>' : ''}`} · ${escapeHtml(fiSweep.months[0].label)} → ${escapeHtml(fiSweep.months[fiSweep.months.length - 1].label)}`
-            + ` → <span style="color:#fff;font-weight:bold">${v.n} finding(s)</span> on ${v.sitesHit} site(s) · ${v.flightsKnown ? `${v.flights.toLocaleString()} flights · ${fiRateTxt(v.n, v.flights)} per 100` : 'flights unknown'}`
+            + ` → <span style="color:#fff;font-weight:bold">${v.n} anomalies</span> on ${v.sitesHit} site(s) · ${v.flightsKnown ? `${v.flights.toLocaleString()} flights · ${fiRateTxt(v.n, v.flights)} per 100` : 'flights unknown'}`
             + ` · <span style="color:#ffd27a">${v.repeats.length} repeat asset(s)</span>`
             + (v.trend ? ` · ${escapeHtml(fiTrendText(v))}` : '')
             + (v.failed ? ` · <span style="color:#ffa030">${v.failed} site(s) FAILED — not counted</span>` : '')
             + (v.partial ? ` · <span style="color:#ffa030">${v.partial} site(s) partial</span>` : '')
             + (v.noFlights ? ` · <span style="color:#ffa030" title="the flight-count read failed — rates leave these sites out">${v.noFlights} site(s) without flight counts</span>` : '')
             + (v.noAssetSites ? ` · <span style="color:#ffa030">${v.noAssetSites} site(s) without asset boundaries</span>` : '')
-            + `<div style="color:#888;font-size:11px" title="how each shown finding got its asset">asset match: ${['tagged', 'text', 'inside', 'near', 'none'].filter(k => v.how[k]).map(k => `${k} ${v.how[k]}`).join(' · ') || '—'}</div>`
+            + `<div style="color:#888;font-size:11px" title="how each shown anomaly got its asset">asset match: ${['tagged', 'text', 'inside', 'near', 'none'].filter(k => v.how[k]).map(k => `${k} ${v.how[k]}`).join(' · ') || '—'}</div>`
             + '</div>');
         const mMax = Math.max(1, ...v.months.map(x => x.n));
         h.push('<div style="padding:6px 10px;display:flex;gap:3px;align-items:flex-end;height:64px;border-bottom:1px solid #222834;">'
-            + v.months.map(mo => `<div title="${escapeHtml(`${mo.m.label}${mo.m.partial ? ' (to date)' : ''}: ${mo.n} finding(s) · ${mo.flights.toLocaleString()} flights · ${fiRateTxt(mo.n, mo.flights)} per 100`)}" style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%;font-size:9px;color:#888">`
+            + v.months.map(mo => `<div title="${escapeHtml(`${mo.m.label}${mo.m.partial ? ' (to date)' : ''}: ${mo.n} anomalies · ${mo.flights.toLocaleString()} flights · ${fiRateTxt(mo.n, mo.flights)} per 100`)}" style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%;font-size:9px;color:#888">`
                 + `<div style="width:70%;max-width:22px;height:${Math.round(mo.n / mMax * 38)}px;min-height:${mo.n ? 2 : 0}px;background:#3987e5;border-radius:2px 2px 0 0"></div><div>${escapeHtml(mo.m.label.slice(0, 3))}</div></div>`).join('')
             + '</div>');
         if (v.repeats.length) {
@@ -9892,11 +9892,11 @@
             v.repeats.slice(0, 12).forEach(r => h.push('<div style="padding:3px 10px;display:flex;gap:8px;align-items:center;font-size:11px;border-top:1px dashed #1e2430">'
                 + `<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(`${r.asset} · ${Array.from(r.comps).join(' · ')}`)}"><b>${escapeHtml(r.asset)}</b> <span style="color:#888">· ${escapeHtml(r.site)}</span></span>`
                 + `<span style="white-space:nowrap"><span style="color:#ffd27a;font-weight:bold">${r.days.size} days</span> <span style="color:#888">· ${r.n} · ${fiDay(r.first)} → ${fiDay(r.last)}</span></span>`
-                + `<a href="${fiIssueUrl(r.issues.slice().sort((p, q) => q.t - p.t)[0])}" target="_blank" rel="noopener" title="Open the latest finding in a new tab" style="color:#7adfe6;text-decoration:none">↗</a></div>`));
+                + `<a href="${fiIssueUrl(r.issues.slice().sort((p, q) => q.t - p.t)[0])}" target="_blank" rel="noopener" title="Open the latest anomaly in a new tab" style="color:#7adfe6;text-decoration:none">↗</a></div>`));
             h.push('</div>');
         }
         const shown = v.sites.filter(s => s.n || s.r.err || s.r.partial || s.r.flightsErr);
-        if (!shown.length) { h.push(`<div style="padding:8px 10px;color:#5fff5f">${fiSweep.done ? 'No finding on the swept sites under the current filters.' : 'waiting for the first site…'}</div>`); return h.join(''); }
+        if (!shown.length) { h.push(`<div style="padding:8px 10px;color:#5fff5f">${fiSweep.done ? 'No anomaly on the swept sites under the current filters.' : 'waiting for the first site…'}</div>`); return h.join(''); }
         h.push('<div style="max-height:420px;overflow:auto">');
         shown.forEach(s => {
             const r = s.r; const open = fiOpenSite === s.sid;
@@ -10551,7 +10551,7 @@
             + renderSopSection()
             + sectionHeader('nv', '🎬', 'Mission Review', nvSweep ? `${nvTotals().hits} of ${nvTotals().flown} flown flight(s) flagged${nvSweep.running ? ` · running ${nvSweep.done}/${nvSweep.total}` : ''}` : 'flag flown flights across sites — no video, images, landing — links to Mission Playback')
             + renderNvSection()
-            + sectionHeader('fi', '📈', 'Findings Report', fiSweep ? `${fiView().n} finding(s) on ${fiView().sitesHit} site(s) · ${fiView().repeats.length} repeat asset(s)${fiSweep.running ? ` · running ${fiSweep.done}/${fiSweep.total}` : ''}` : 'Data View issues (emissions + more) across sites — trends, repeat assets, HTML report + CSV')
+            + sectionHeader('fi', '📈', 'Anomaly Report', fiSweep ? `${fiView().n} anomalies on ${fiView().sitesHit} site(s) · ${fiView().repeats.length} repeat asset(s)${fiSweep.running ? ` · running ${fiSweep.done}/${fiSweep.total}` : ''}` : 'Data View issues (emissions + more) across sites — trends, repeat assets, HTML report + CSV')
             + renderFiSection()
             + sectionHeader('es', '⚙', 'ESC Sweep', esSweep ? `${esTotals().scanned} of ${esTotals().flown} flight(s) checked · ${esTotals().alarms} alarm(s)${esSweep.running ? ' · running' : ''}` : 'ESC ratio alarms across sites — false alarm vs real, from each flight\'s logs')
             + renderEsSection()
@@ -10670,13 +10670,13 @@
                     else if (cmd === 'nv-sheets') nvCopySheets();
                     else if (cmd === 'nv-csv') nvDownloadCsv();
                     else if (cmd === 'nv-clear') { nvSweepSeq++; nvSweep = null; nvOpenSite = null; renderPanel(); }
-                    else if (cmd === 'fi-run') fiRunSweep().catch(e => { console.warn(`${TAG} findings report threw:`, e); setStatus(`Findings report failed — ${e.message}`); if (fiSweep) fiSweep.running = false; fiV = null; renderPanel(); });
-                    else if (cmd === 'fi-abort') { if (fiSweep) fiSweep.aborted = true; setStatus('Findings report aborting after the in-flight sites…'); }
-                    else if (cmd === 'fi-html') { try { fiDownloadHtml(); } catch (e) { console.warn(`${TAG} findings HTML report threw:`, e); setStatus(`Findings HTML report failed — ${e.message}`); } }
-                    else if (cmd === 'fi-report') { try { fiDownloadPeriod(); } catch (e) { console.warn(`${TAG} findings period report threw:`, e); setStatus(`Findings report failed — ${e.message}`); } }
+                    else if (cmd === 'fi-run') fiRunSweep().catch(e => { console.warn(`${TAG} anomaly report threw:`, e); setStatus(`Anomaly report failed — ${e.message}`); if (fiSweep) fiSweep.running = false; fiV = null; renderPanel(); });
+                    else if (cmd === 'fi-abort') { if (fiSweep) fiSweep.aborted = true; setStatus('Anomaly report aborting after the in-flight sites…'); }
+                    else if (cmd === 'fi-html') { try { fiDownloadHtml(); } catch (e) { console.warn(`${TAG} anomalies HTML report threw:`, e); setStatus(`Anomalies HTML report failed — ${e.message}`); } }
+                    else if (cmd === 'fi-report') { try { fiDownloadPeriod(); } catch (e) { console.warn(`${TAG} anomalies period report threw:`, e); setStatus(`Anomaly report failed — ${e.message}`); } }
                     else if (cmd === 'fi-csv') fiDownloadCsv();
                     else if (cmd === 'fi-csvm') fiDownloadMonthlyCsv();
-                    else if (cmd === 'fi-exxon') { if (fiSweep && fiSweep.running) setStatus('Findings: wait for the run to finish'); else { ftCfg.fi.name = FI_EXXON_RE; saveCfg(); renderPanel(); setStatus('Findings: name filter = Exxon + number'); } }
+                    else if (cmd === 'fi-exxon') { if (fiSweep && fiSweep.running) setStatus('Anomalies: wait for the run to finish'); else { ftCfg.fi.name = FI_EXXON_RE; saveCfg(); renderPanel(); setStatus('Anomalies: name filter = Exxon + number'); } }
                     else if (cmd === 'fi-clear') { fiSweepSeq++; fiSweep = null; fiOpenSite = null; fiV = null; fiForgetRun(); renderPanel(); }
                     else if (cmd === 'es-run' || cmd === 'es-continue') esRun(cmd === 'es-continue').catch(e => { console.warn(`${TAG} ESC sweep threw:`, e); setStatus(`ESC sweep failed — ${e.message}`); if (esSweep) { esSweep.running = false; esSweep.listing = false; } renderPanel(); });
                     else if (cmd === 'es-pause') { if (esSweep && esSweep.running) { esSweep.paused = !esSweep.paused; setStatus(esSweep.paused ? 'ESC sweep paused — downloads already started will finish' : 'ESC sweep resumed'); esRerender(true); } }

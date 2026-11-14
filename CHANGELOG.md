@@ -1,3 +1,9 @@
+## 2026-11-14 — AIM Fleet Tools latest v0.92 (latest only) — "anomalies" everywhere in the report tool (#341)
+
+- **📊 Dashboard, both CSVs, the panel and status messages now say "anomalies"**, matching the 📰 Report. The panel section is now "📈 Anomaly Report".
+- Download names changed: `AIM_Anomalies_…csv`, `AIM_Anomalies_Monthly_…csv`, `Inspection_Anomalies_…html`.
+- Wording only. The saved run still loads.
+
 ## 2026-11-14 — AIM Fleet Tools latest v0.91 (latest only) — 📰 Report rebuilt to Chris's layout: anomalies, per pad (#341)
 
 - **The 📰 Report now says "anomalies"** and counts them per pad (an anomaly on equipment nested inside a pad counts for the pad).
