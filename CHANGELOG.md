@@ -1,3 +1,8 @@
+## 2026-11-14 — AIM Fleet Tools latest v0.97 (latest only) — 📰 Report files are named by time and build (#341)
+
+- Each 📰 Report download now has its own name ending in the time and script version, for example `…_last7d_2231_v0.97.html`, so a new report can't be mistaken for an older copy.
+- The last line of the report says which build made it.
+
 ## 2026-11-14 — AIM Fleet Tools latest v0.96 (latest only) — 📰 Report: "trending up / down", Data index, section order (#341)
 
 - The cue on each card now reads **trending up** / **trending down** (was rising / falling).
