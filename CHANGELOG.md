@@ -1,3 +1,7 @@
+## 2026-11-14 — AIM Fleet Tools latest v0.95 (latest only) — 📰 Report carries the Percepto logo (#341)
+
+- The Percepto logo sits at the top left of the 📰 Report, above the title. It is built into the file, so it shows offline and in the saved PDF.
+
 ## 2026-11-14 — AIM Fleet Tools latest v0.94 (latest only) — 📰 Report: pad-over-time numbers bold and red (#341)
 
 - The block on each card is now titled **"Anomalies at this pad over time"**. Its three numbers are larger, bold and red, labelled "12 months / 6 months / 3 months" in full.
