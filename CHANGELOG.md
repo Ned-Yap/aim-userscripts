@@ -1,3 +1,9 @@
+## 2026-11-14 — AIM Fleet Tools latest v0.94 (latest only) — 📰 Report: pad-over-time numbers bold and red (#341)
+
+- The block on each card is now titled **"Anomalies at this pad over time"**. Its three numbers are larger, bold and red, labelled "12 months / 6 months / 3 months" in full.
+- The rising / falling / steady / new cue is bold and larger.
+- Works on a saved run.
+
 ## 2026-11-14 — AIM Fleet Tools latest v0.93 (latest only) — 📰 Report section 02 breaks anomalies down by equipment (#341)
 
 - **Section 02 is now "Anomalies by type and equipment".** Each row is a type plus the equipment it was logged against (Emission · Thief Hatch, Emission · Compressors, …), month by month for the last 6 months, with totals.
