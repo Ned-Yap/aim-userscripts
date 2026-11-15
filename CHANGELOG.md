@@ -1,3 +1,10 @@
+## 2026-11-14 — AIM Fleet Tools latest v0.96 (latest only) — 📰 Report: "trending up / down", Data index, section order (#341)
+
+- The cue on each card now reads **trending up** / **trending down** (was rising / falling).
+- A bold **Data index** title sits above the section links.
+- **By type and equipment** moved to the end: 1 Last 7 days · 2 Top 10 pads · 3 Trend · 4 By site · 5 By type and equipment.
+- Works on a saved run.
+
 ## 2026-11-14 — AIM Fleet Tools latest v0.95 (latest only) — 📰 Report carries the Percepto logo (#341)
 
 - The Percepto logo sits at the top left of the 📰 Report, above the title. It is built into the file, so it shows offline and in the saved PDF.
