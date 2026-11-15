@@ -1,3 +1,9 @@
+## 2026-11-14 — AIM Fleet Tools latest v0.93 (latest only) — 📰 Report section 02 breaks anomalies down by equipment (#341)
+
+- **Section 02 is now "Anomalies by type and equipment".** Each row is a type plus the equipment it was logged against (Emission · Thief Hatch, Emission · Compressors, …), month by month for the last 6 months, with totals.
+- Anomalies logged without an equipment tag get their own row, "equipment not recorded", and the note under the table says how many.
+- Works on a saved run.
+
 ## 2026-11-14 — AIM Fleet Tools latest v0.92 (latest only) — "anomalies" everywhere in the report tool (#341)
 
 - **📊 Dashboard, both CSVs, the panel and status messages now say "anomalies"**, matching the 📰 Report. The panel section is now "📈 Anomaly Report".
