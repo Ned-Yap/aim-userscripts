@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.176
+// @version      34.177
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -69,7 +69,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.176';
+    const SCRIPT_VERSION = '34.177';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -2076,7 +2076,10 @@
         const map = getLeafletMap();
         if (!map || typeof map.addLayer !== 'function') return;
         try {
-            const enabled = toggleState['basemap.enabled'] !== false && !isRemoteOpsPage();   // Remote Ops keeps Percepto's base map
+            // Remote Ops keeps Percepto's base map. Hide satellite base tiles (Perf
+            // Shield) means NO base imagery at all — it takes our replacement
+            // basemap down too, not only Percepto's (pilot request 2026-11-17).
+            const enabled = toggleState['basemap.enabled'] !== false && !isRemoteOpsPage() && perfHideSatellite !== true;
             const source = String(toggleState['basemap.source'] || 'percepto');
             if (!enabled || source === 'percepto') {
                 basemapOverrideActive = false;
@@ -4492,6 +4495,7 @@
     // its own restore branch, so it's safe to call from here AND from
     // runUpdate. This is what lets the perf toggles work when Outlines is off.
     function applyPerfMapSettings() {
+        try { applyBasemapLayer(); } catch (e) { console.warn(`${TAG} basemap re-apply on perf toggle failed:`, e); }   // hide-satellite also drops / restores our basemap
         try { applyMapBackgroundVisibility(); } catch (e) {}
         try { applyOrthoSettings(); } catch (e) {}
         try { applyOrthoVisibility(); } catch (e) {}

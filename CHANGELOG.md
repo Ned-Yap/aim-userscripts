@@ -1,3 +1,7 @@
+## 2026-11-17 — PROD: Map Styler v34.156 (latest 34.177) — Hide satellite hides every base map
+
+- **"Hide satellite base tiles" now hides the base imagery whichever one is showing** — Percepto's own or the replacement picked under Basemap. Turn it off and the basemap you had comes back. (Before, it only hid Percepto's, so with a Basemap on nothing changed.)
+
 ## 2026-11-17 — PROD: Control Panel v1.58 (latest 1.58) — gear sits below the map buttons
 
 - **On Remote Ops the gear overlapped the layers button.** On pages where the gear floats (Remote Ops, Live Map, live video) it now sits at the bottom of the map's button column instead of the top.
