@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.48
+// @version      1.49
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -78,7 +78,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.48';
+    const SCRIPT_VERSION = '1.49';
 
     // Server model (v1.36): prod and QA are separate databases — the same
     // numeric site ID is two different sites. QA issues live in their own
@@ -337,7 +337,42 @@
     }
     function isUnshielded(issue) { return issueCategory(issue) === 'unshielded'; }
     function isObstacle(issue) { return issueCategory(issue) === 'obstacle'; }
-    function catMetaOf(issue) { return CATEGORY_META[issueCategory(issue)] || null; }
+    // v1.49: obstacle STAGE — the rig & crane watch (laptop agent, `by: 'AIM-Agent'`) stamps
+    // each Obstacle issue with where it stands, as a history entry { kind:'obstage', toStage }.
+    // The stage recolours the derrick, the area and the chip so a site with several obstacles
+    // shows which one needs work first:
+    //   orange = on site / starting within 24 h, NO no-fly zone   → act now
+    //   yellow = on site, a no-fly zone covers it                  → handled, still there
+    //   green  = reported gone, NFZ still up or no pilot check yet → clean up
+    // 'complete' arrives together with status 'resolved', so it takes the normal dimmed look.
+    // No stage (hand-filed, not yet seen by the watch) = the original obstacle orange.
+    const OBSTACLE_STAGE = {
+        orange: { color: '#ff7a00', fg: '#2a1200', text: 'OBSTACLE · ACTIVE · NO NFZ', short: 'Active · no NFZ' },
+        yellow: { color: '#ffd60a', fg: '#2a2400', text: 'OBSTACLE · PROTECTED · NFZ IN PLACE', short: 'Protected' },
+        green:  { color: '#3ddc5a', fg: '#06250d', text: 'OBSTACLE · GONE · CLEAN UP', short: 'Gone · clean up' },
+    };
+    // Derived from the (union-merged) history — latest obstage entry wins — so it survives
+    // sync in any tab order, same rule as category / reshape / deleted.
+    function obstacleStageFromHistory(history, fallback) {
+        let best = null, bestAt = -Infinity;
+        (history || []).forEach(h => {
+            if (!h || h.kind !== 'obstage') return;
+            const t = new Date(h.at).getTime();
+            const at = isNaN(t) ? 0 : t;
+            if (at >= bestAt) { bestAt = at; best = h; }
+        });
+        return best ? (best.toStage || undefined) : fallback;
+    }
+    function obstacleStageOf(issue) {
+        if (!isObstacle(issue)) return null;
+        const st = obstacleStageFromHistory(issue.history, issue.obstacleStage);
+        return OBSTACLE_STAGE[st] ? st : null;
+    }
+    function catMetaOf(issue) {
+        const base = CATEGORY_META[issueCategory(issue)] || null;
+        const st = base && obstacleStageOf(issue);
+        return st ? { ...base, ...OBSTACLE_STAGE[st] } : base;
+    }
     // Chip label for a category-change history entry (Slack plain / HTML).
     function categoryVerb(to) { return CATEGORY_META[to] ? CATEGORY_META[to].verb : 'converted to normal issue'; }
     function categoryVerbIcon(to) { return to === 'unshielded' ? '🛡' : to === 'obstacle' ? '🏗' : '🚩'; }
@@ -1415,6 +1450,7 @@
         if (h.kind === 'reshape') return `${by} reshaped the area${h.note ? ` — ${slackEsc(h.note.slice(0, 80))}` : ''}`;
         if (h.kind === 'markermove') return h.markerPos ? `${by} moved the map icon` : `${by} reset the map icon position`;
         if (h.kind === 'category') return `${by} ${categoryVerb(h.toCategory)}`;
+        if (h.kind === 'obstage') return `${by} set the obstacle stage → ${slackEsc((OBSTACLE_STAGE[h.toStage] || { short: h.toStage || '?' }).short)}`;
         if (h.kind === 'comment' || (h.fromStatus && h.fromStatus === h.toStatus)) return `${by} commented: ${slackEsc((h.note || '').slice(0, 80))}`;
         if (!h.fromStatus) return `${by} created`;
         const f = (STATUS_LABEL[h.fromStatus] || { text: h.fromStatus }).text;
@@ -1727,6 +1763,9 @@
         // v1.31: category mutates via the convert action — same derive-from-
         // history rule so a conversion survives sync in any tab order.
         merged.category = categoryFromHistory(history, a.category || b.category);
+        // v1.49: obstacle stage — same derive-from-history rule.
+        const obStage = obstacleStageFromHistory(history, a.obstacleStage || b.obstacleStage);
+        if (obStage) merged.obstacleStage = obStage;
         // v1.37: custom marker position — same derive-from-history rule
         // (latest markermove wins; a newer reshape resets it to auto).
         merged.markerPos = markerPosFromHistory(history, a.markerPos || b.markerPos);
@@ -4833,7 +4872,7 @@
             // v1.44: obstacle = orange while live; resolved/ignored fall back
             // to the normal dimmed status look (equipment gone = background).
             if (issue.status === 'resolved' || issue.status === 'ignored') return styleForStatus(issue.status);
-            const c = CATEGORY_META.obstacle.color;
+            const c = catMetaOf(issue).color;   // v1.49: stage colour (orange / yellow / green)
             return { color: c, fill: c, fillOpacity: 0.18, dashArray: '10,6', weight: 3 };
         }
         if (!isUnshielded(issue)) return styleForStatus(issue.status);
@@ -4855,7 +4894,7 @@
             if (!live) return { glyphHtml: st.glyph, color: st.color };
             // v1.45: the marker IS a drilling derrick silhouette (orange, dark
             // outline, cross-braced) — no disc, same treatment as the shield.
-            const c = CATEGORY_META.obstacle.color;
+            const c = catMetaOf(issue).color;   // v1.49: stage colour
             const glyphHtml = `
             <svg viewBox="0 0 24 24" style="width:100%;height:100%;display:block;filter:drop-shadow(0 1px 2px rgba(0,0,0,0.9))">
                 <path d="M5 23 H19 L14.6 2.2 H9.4 Z" fill="${c}" stroke="#14171b" stroke-width="1.6" stroke-linejoin="round"/>

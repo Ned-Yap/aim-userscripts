@@ -1,3 +1,9 @@
+## 2026-11-17 — AIM Issues latest v1.49 (latest only) — rig & crane colours on Obstacle issues (#342)
+
+- An Obstacle issue's derrick, area and chip now take a colour for where it stands: **orange** = on site or starting within 24 h with no no-fly zone, **yellow** = on site with a no-fly zone in place, **green** = reported gone, but the no-fly zone is still up or no pilot has confirmed it.
+- The colour is set by the rig & crane watch (shown as `AIM-Agent` in the history). An Obstacle issue it has not looked at yet keeps the original orange.
+- When the no-fly zone is gone and a pilot has confirmed the pad is clear, the watch closes the issue.
+
 ## 2026-11-14 — AIM Fleet Tools latest v0.97 (latest only) — 📰 Report files are named by time and build (#341)
 
 - Each 📰 Report download now has its own name ending in the time and script version, for example `…_last7d_2231_v0.97.html`, so a new report can't be mistaken for an older copy.
