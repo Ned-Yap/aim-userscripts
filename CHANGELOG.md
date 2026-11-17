@@ -1,3 +1,7 @@
+## 2026-11-17 — PROD: Map Styler v34.157 (latest 34.178) — Hide satellite works on Remote Ops
+
+- **"Hide satellite base tiles" now also works on the Remote Ops page.** The Basemap replacement is still skipped there (Percepto's own base map shows unless you hide it).
+
 ## 2026-11-17 — PROD: Map Styler v34.156 (latest 34.177) — Hide satellite hides every base map
 
 - **"Hide satellite base tiles" now hides the base imagery whichever one is showing** — Percepto's own or the replacement picked under Basemap. Turn it off and the basemap you had comes back. (Before, it only hid Percepto's, so with a Basemap on nothing changed.)

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.177
+// @version      34.178
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -69,7 +69,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.177';
+    const SCRIPT_VERSION = '34.178';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -1801,7 +1801,7 @@
     // Remote Ops (/#/remote-ops) is the fleet overview — a world-zoom map with
     // no site. A replacement basemap / hide-satellite left it BLANK there until
     // the pilot zoomed in (2026-11-17, RO profile has the Esri basemap on), so
-    // on that page Percepto's own base map is always left alone.
+    // on that page the basemap replacement is skipped. Hide satellite still works.
     function isRemoteOpsPage() {
         let h = '';
         try { h = window.top.location.hash || ''; } catch (e) { h = location.hash || ''; }
@@ -1810,7 +1810,9 @@
     function applyMapBackgroundVisibility() {
         // Hide the HERE base when the Perf Shield toggle says so OR when a
         // replacement basemap is active (both restore through _aimHidden).
-        const hide = !isRemoteOpsPage() && (perfHideSatellite === true || basemapOverrideActive === true || basemapPreviewActive === true);
+        // Hide satellite is the pilot's explicit choice — honoured on Remote Ops too.
+        // Only the basemap REPLACEMENT is skipped there (it left the map blank).
+        const hide = perfHideSatellite === true || (!isRemoteOpsPage() && (basemapOverrideActive === true || basemapPreviewActive === true));
         const map = getLeafletMap();
         if (!map || typeof map.eachLayer !== 'function') return;
         try {
