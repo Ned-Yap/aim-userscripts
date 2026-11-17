@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.55
+// @version      1.56
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
-// @description  v1.55: floating gear joins the top of a native button column instead of covering it (Live Map). v1.53: Data View gear sits on the map, under the asset-creation button. v1.51: ⏻ All off starts a separate "New profile" (never overwrites My settings); favorites are per profile and travel with saved / published profiles. v1.50 (#336): profiles (My settings / RO / Regulations / saved, team presets from the data repo, first-run picker, builder: all-off / save-as / copy / import / publish), ★ favorites, FDE label, fallback gear on site pages without .map-tools. v1.49 (#329): check groups — a header toggle with soloGroup renders ☑ All / ☐ None over every boolean toggle sharing that soloGroup, and each such toggle gets a ◎ solo button (only this one on). Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
+// @description  v1.56: My settings can no longer inherit the all-off base (tools were switching themselves off). v1.55: floating gear joins the top of a native button column instead of covering it (Live Map). v1.53: Data View gear sits on the map, under the asset-creation button. v1.51: ⏻ All off starts a separate "New profile" (never overwrites My settings); favorites are per profile and travel with saved / published profiles. v1.50 (#336): profiles (My settings / RO / Regulations / saved, team presets from the data repo, first-run picker, builder: all-off / save-as / copy / import / publish), ★ favorites, FDE label, fallback gear on site pages without .map-tools. v1.49 (#329): check groups — a header toggle with soloGroup renders ☑ All / ☐ None over every boolean toggle sharing that soloGroup, and each such toggle gets a ◎ solo button (only this one on). Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        *://qa.percepto.app/*
@@ -58,7 +58,7 @@
     // ============================================================
     // 1. CONSTANTS
     // ============================================================
-    const VERSION = '1.55';
+    const VERSION = '1.56';
     const IS_TOP = window === window.top;
     const TAG = `[AIM CONTROL ${IS_TOP ? 'TOP' : 'IF'}]`;
     const CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -478,10 +478,15 @@
     function deepCopy(o) { return JSON.parse(JSON.stringify(o || {})); }
     function getProfState() {
         const r = lsJson(PROFILE_STATE_KEY, {}) || {};
+        const active = typeof r.active === 'string' ? r.active : 'my';
         return {
-            active: typeof r.active === 'string' ? r.active : 'my',
+            active,
             dirty: !!r.dirty, chosen: !!r.chosen, rev: r.rev == null ? null : r.rev,
-            base: r.base === 'all-off' ? 'all-off' : 'defaults',
+            // v1.56 — My settings is NEVER an all-off profile. v1.50's ⏻ All off
+            // stamped base 'all-off' onto it, and from then on every tool that
+            // registered later had its Enable switched off behind the user's back
+            // (right-click inspector died on My settings, 2026-11-17).
+            base: (r.base === 'all-off' && active !== 'my') ? 'all-off' : 'defaults',
             keep: Array.isArray(r.keep) ? r.keep : [],
             done: (r.done && typeof r.done === 'object') ? r.done : {},
         };

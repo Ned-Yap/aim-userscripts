@@ -1,3 +1,7 @@
+## 2026-11-17 — AIM Control Panel latest v1.56 (latest only) — My settings stops switching tools off
+
+- **Tools were turning themselves off on My settings** for anyone who pressed ⏻ All off on v1.50 (the right-click inspector was one of them). My settings can no longer carry that "everything off" rule. Tools it already switched off stay off until you turn their Enable back on.
+
 ## 2026-11-17 — AIM Site Setup Tools latest v4.503 (latest only) — right-click inspector back on every normal screen
 
 - **Right-click opens the inspector everywhere again.** Only the live video page keeps Percepto's own right-click; there the middle mouse button opens the inspector. (v4.499 had limited right-click to a short list of planning pages.)
