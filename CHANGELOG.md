@@ -1,3 +1,8 @@
+## 2026-11-17 — PROD: Map Styler v34.155 · Control Panel v1.57 (latest 34.176 / 1.57) — Remote Ops page
+
+- **Remote Ops map no longer goes blank.** With a replacement basemap turned on (the RO profile has one), the Remote Ops map was white until you zoomed in. That page now always keeps Percepto's own base map.
+- **The gear now shows on the Remote Ops page.**
+
 ## 2026-11-17 — PROD: Control Panel v1.56 · Map Styler v34.154 · Site Setup Tools v4.405 · AIM Issues v1.48 — profiles, favorites, flying fixes
 
 Features [#336], [#337], [#338], [#330]. Control Panel is a full promote. Map Styler and Site Setup Tools are **backports — only the changes below, nothing else from latest ships**. AIM Issues is promoted up to v1.48 (v1.49 stays in latest).

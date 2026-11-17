@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.154
+// @version      34.155
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -69,7 +69,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.154';
+    const SCRIPT_VERSION = '34.155';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -1756,10 +1756,19 @@
     // Tracks URLs we've already logged so the per-runUpdate sweep doesn't
     // spam the console with the same diagnostic line every tick.
     const _seenTileLayerUrls = new Set();
+    // Remote Ops (/#/remote-ops) is the fleet overview — a world-zoom map with
+    // no site. A replacement basemap / hide-satellite left it BLANK there until
+    // the pilot zoomed in (2026-11-17, RO profile has the Esri basemap on), so
+    // on that page Percepto's own base map is always left alone.
+    function isRemoteOpsPage() {
+        let h = '';
+        try { h = window.top.location.hash || ''; } catch (e) { h = location.hash || ''; }
+        return /^#\/remote-ops(\/|\?|$)/.test(h);
+    }
     function applyMapBackgroundVisibility() {
         // Hide the HERE base when the Perf Shield toggle says so OR when a
         // replacement basemap is active (both restore through _aimHidden).
-        const hide = perfHideSatellite === true || basemapOverrideActive === true || basemapPreviewActive === true;
+        const hide = !isRemoteOpsPage() && (perfHideSatellite === true || basemapOverrideActive === true || basemapPreviewActive === true);
         const map = getLeafletMap();
         if (!map || typeof map.eachLayer !== 'function') return;
         try {
@@ -2025,7 +2034,7 @@
         const map = getLeafletMap();
         if (!map || typeof map.addLayer !== 'function') return;
         try {
-            const enabled = toggleState['basemap.enabled'] !== false;
+            const enabled = toggleState['basemap.enabled'] !== false && !isRemoteOpsPage();   // Remote Ops keeps Percepto's base map
             const source = String(toggleState['basemap.source'] || 'percepto');
             if (!enabled || source === 'percepto') {
                 basemapOverrideActive = false;

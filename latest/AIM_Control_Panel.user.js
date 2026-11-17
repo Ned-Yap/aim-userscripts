@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.56
+// @version      1.57
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
 // @description  v1.56: My settings can no longer inherit the all-off base (tools were switching themselves off). v1.55: floating gear joins the top of a native button column instead of covering it (Live Map). v1.53: Data View gear sits on the map, under the asset-creation button. v1.51: ⏻ All off starts a separate "New profile" (never overwrites My settings); favorites are per profile and travel with saved / published profiles. v1.50 (#336): profiles (My settings / RO / Regulations / saved, team presets from the data repo, first-run picker, builder: all-off / save-as / copy / import / publish), ★ favorites, FDE label, fallback gear on site pages without .map-tools. v1.49 (#329): check groups — a header toggle with soloGroup renders ☑ All / ☐ None over every boolean toggle sharing that soloGroup, and each such toggle gets a ◎ solo button (only this one on). Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
@@ -58,7 +58,7 @@
     // ============================================================
     // 1. CONSTANTS
     // ============================================================
-    const VERSION = '1.56';
+    const VERSION = '1.57';
     const IS_TOP = window === window.top;
     const TAG = `[AIM CONTROL ${IS_TOP ? 'TOP' : 'IF'}]`;
     const CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -1549,7 +1549,7 @@
         if (state.urlScope !== 'other') return false;
         let h = '';
         try { h = window.top.location.hash || ''; } catch (e) { h = location.hash || ''; }
-        if (!/#\/site\/\d+\//.test(h)) return false;
+        if (!/#\/(site\/\d+\/|remote-ops(\/|\?|$))/.test(h)) return false;   // v1.57: Remote Ops has a map and no gear
         if (document.querySelector('.map-tools')) return false;
         const m = document.querySelector('.leaflet-container');
         if (!m) return false;
