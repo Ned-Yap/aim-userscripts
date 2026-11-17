@@ -1,3 +1,7 @@
+## 2026-11-17 — AIM Site Setup Tools latest v4.503 (latest only) — right-click inspector back on every normal screen
+
+- **Right-click opens the inspector everywhere again.** Only the live video page keeps Percepto's own right-click; there the middle mouse button opens the inspector. (v4.499 had limited right-click to a short list of planning pages.)
+
 ## 2026-11-17 — AIM Site Watch latest v0.35 (latest — personal) — "I ran" status file
 
 - Site Watch only saved to the data repo when a site changed, so a quiet fleet looked the same as a watcher that was not running. The leader tab now writes `site-watch/status.json` at most every 6 hours with the last check time for every site.
