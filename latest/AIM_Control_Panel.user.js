@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.57
+// @version      1.58
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
 // @description  v1.56: My settings can no longer inherit the all-off base (tools were switching themselves off). v1.55: floating gear joins the top of a native button column instead of covering it (Live Map). v1.53: Data View gear sits on the map, under the asset-creation button. v1.51: ⏻ All off starts a separate "New profile" (never overwrites My settings); favorites are per profile and travel with saved / published profiles. v1.50 (#336): profiles (My settings / RO / Regulations / saved, team presets from the data repo, first-run picker, builder: all-off / save-as / copy / import / publish), ★ favorites, FDE label, fallback gear on site pages without .map-tools. v1.49 (#329): check groups — a header toggle with soloGroup renders ☑ All / ☐ None over every boolean toggle sharing that soloGroup, and each such toggle gets a ◎ solo button (only this one on). Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
@@ -58,7 +58,7 @@
     // ============================================================
     // 1. CONSTANTS
     // ============================================================
-    const VERSION = '1.57';
+    const VERSION = '1.58';
     const IS_TOP = window === window.top;
     const TAG = `[AIM CONTROL ${IS_TOP ? 'TOP' : 'IF'}]`;
     const CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -1391,17 +1391,24 @@
             }
             let top = FLOAT_TOP, right = FLOAT_HOME_RIGHT;
             if (hit) {
-                // v1.55 — join the column: walk up to its top button and sit above
-                // it, centred on the column. No room above → sit left of it (v1.54).
+                // v1.58 — join the column at its BOTTOM: walk down past every
+                // button (bridging gaps up to ~40 px, so the spot under the last
+                // one is really free) and sit below it, centred on the column.
+                // v1.55 sat above the top button, which on Remote Ops was on top
+                // of the layers button. No room below → sit left of it (v1.54).
                 const cx = hit.left + hit.width / 2;
-                let colTop = hit.top;
-                for (let n = 0; n < 12; n++) {
-                    const up = controlAt(cx, colTop - 10);
-                    if (!up || up.top >= colTop) break;
-                    colTop = up.top;
+                let colBottom = hit.bottom;
+                for (let n = 0; n < 20; n++) {
+                    let next = null;
+                    for (const gap of [8, 20, 32, 40]) {
+                        const r = controlAt(cx, colBottom + gap);
+                        if (r && r.bottom > colBottom) { next = r; break; }
+                    }
+                    if (!next) break;
+                    colBottom = next.bottom;
                 }
-                const above = Math.round(colTop - FLOAT_SIZE - 6);
-                if (above >= 4) { top = above; right = Math.round(window.innerWidth - cx - FLOAT_SIZE / 2); }
+                const below = Math.round(colBottom + 6);
+                if (below + FLOAT_SIZE <= window.innerHeight - 4) { top = below; right = Math.round(window.innerWidth - cx - FLOAT_SIZE / 2); }
                 else right = Math.round(window.innerWidth - hit.left + 8);
             }
             const t = top + 'px', r = Math.max(0, right) + 'px';

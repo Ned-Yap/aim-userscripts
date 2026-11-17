@@ -1,3 +1,7 @@
+## 2026-11-17 — PROD: Control Panel v1.58 (latest 1.58) — gear sits below the map buttons
+
+- **On Remote Ops the gear overlapped the layers button.** On pages where the gear floats (Remote Ops, Live Map, live video) it now sits at the bottom of the map's button column instead of the top.
+
 ## 2026-11-17 — PROD: Map Styler v34.155 · Control Panel v1.57 (latest 34.176 / 1.57) — Remote Ops page
 
 - **Remote Ops map no longer goes blank.** With a replacement basemap turned on (the RO profile has one), the Remote Ops map was white until you zoomed in. That page now always keeps Percepto's own base map.
