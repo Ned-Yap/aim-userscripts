@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Site Watch
 // @namespace    http://tampermonkey.net/
-// @version      0.34
+// @version      0.35
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @description  Personal background auditor. Polls every Percepto site's setup JSON (and optionally its missions) on an ADAPTIVE schedule (daily when quiet, every few hours after a change) and records what changed: a running field-level diff CSV plus a rotating gzip snapshot history, committed to the private aim-userscripts-data repo. Daily Slack digest. Configurable in the AIM Control Panel ("Site Watch").
@@ -98,7 +98,7 @@
 
     // ---- identity / channel ----
     const SCRIPT_ID = 'aim-site-watch';
-    const SCRIPT_VERSION = '0.34';
+    const SCRIPT_VERSION = '0.35';
 
     // Server model (v0.21): prod and QA are separate databases with their own
     // site lists — the same numeric ID is two different sites. A QA leader
@@ -1298,6 +1298,37 @@
     }
     function errText(e) { return String(e && e.message || e).slice(0, 300); }
 
+    // v0.35: "I ran" marker. Commits only happen when a site CHANGES, so a quiet fleet looked
+    // the same as a watcher that is not running. The leader writes site-watch/status.json at
+    // most every STATUS_MS with the last check time per site; the laptop agents read it to say
+    // whether the no-fly-zone picture they report from is current.
+    const STATUS_PATH = `${WATCH_DIR}/status.json`;
+    const STATUS_MS = 6 * 3600e3;
+    const STATUS_KEY = 'aim-site-watch-status-at' + ENV_SFX;
+    let statusBusy = false;
+    async function maybeWriteStatus() {
+        if (statusBusy || !amLeader || pausedForAuth || !lastCycleAt) return;
+        if (Date.now() - Number(gmGet(STATUS_KEY, 0) || 0) < STATUS_MS) return;
+        statusBusy = true;
+        try {
+            const sites = {};
+            for (const id of Object.keys(state.sites || {})) {
+                const st = state.sites[id];
+                if (st && st.lastCheckAt) sites[id] = new Date(st.lastCheckAt).toISOString();
+            }
+            const body = { at: new Date().toISOString(), version: SCRIPT_VERSION, host: location.hostname,
+                lastCycleAt: new Date(lastCycleAt).toISOString(), sites };
+            await ghPut(STATUS_PATH, textToB64(JSON.stringify(body, null, 1) + '\n'), '[site-watch] status', await safeGetSha(STATUS_PATH));
+            gmSet(STATUS_KEY, Date.now());
+            console.log(`${TAG} status written (${Object.keys(sites).length} sites)`);
+        } catch (e) {
+            console.error(TAG, 'status write failed', e);
+            gmSet(STATUS_KEY, Date.now() - STATUS_MS + 30 * 60e3);     // retry in 30 min, not every heartbeat
+        } finally {
+            statusBusy = false;
+        }
+    }
+
     // ---- PT clock (DST-correct via Intl) ----
     function ptParts() {
         const now = new Date();
@@ -2190,6 +2221,7 @@
         if (amLeader) renewLeader();
         else claimLeader();
         // v0.34: no tab-side daily digest (cloud daily-digest job owns it).
+        maybeWriteStatus();
         // v0.25 watchdog: this tab is leader, logged in, and hasn't started a
         // cycle in STALL_MS although runCycle fires every WAKE_MS → the
         // scheduler is wedged (the v0.3 lease-deadlock class). Shout.

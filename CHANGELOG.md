@@ -1,3 +1,8 @@
+## 2026-11-17 — AIM Site Watch latest v0.35 (latest — personal) — "I ran" status file
+
+- Site Watch only saved to the data repo when a site changed, so a quiet fleet looked the same as a watcher that was not running. The leader tab now writes `site-watch/status.json` at most every 6 hours with the last check time for every site.
+- The rig & crane report reads it to say whether the no-fly zones it reports from are current.
+
 ## 2026-11-17 — AIM Issues latest v1.49 (latest only) — rig & crane colours on Obstacle issues (#342)
 
 - An Obstacle issue's derrick, area and chip now take a colour for where it stands: **orange** = on site or starting within 24 h with no no-fly zone, **yellow** = on site with a no-fly zone in place, **green** = reported gone, but the no-fly zone is still up or no pilot has confirmed it.
