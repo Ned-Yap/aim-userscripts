@@ -1,3 +1,16 @@
+## 2026-11-17 — PROD: Control Panel v1.56 · Map Styler v34.154 · Site Setup Tools v4.405 · AIM Issues v1.48 — profiles, favorites, flying fixes
+
+Features [#336], [#337], [#338], [#330]. Control Panel is a full promote. Map Styler and Site Setup Tools are **backports — only the changes below, nothing else from latest ships**. AIM Issues is promoted up to v1.48 (v1.49 stays in latest).
+
+- **Profiles.** The first time you open the Control Panel it asks which profile you want: RO (flying), Regulations, AIM defaults, or keep what you have. Switch any time from the top of the panel; your own settings are kept separately and come back when you switch back.
+- **Favorites.** Star any setting to pin it at the top of the panel. Each profile has its own stars.
+- **Build your own profile.** ⏻ All off starts a new profile with everything off; turn on what you want and Save as. Copy / Import to pass one to a coworker.
+- **Flying: right-click belongs to Percepto on the live video page.** Send-drone / look-at work as normal there; the middle mouse button opens the inspector. Every other screen keeps the right-click inspector.
+- **Flying: the live drone track stays its own colour** (it was turning pink and flashing).
+- **Gear on every map page.** Live Map and the live video page get the gear; on Data View it sits with the map's buttons.
+- **Issues filed during a live flight or from Mission Playback record the mission and the video time automatically.** The issue's mission link opens Playback at that moment.
+- **Flight path / free fly zone lines:** Force line thickness now switches off properly; vertex dot show / size / colour work again; new "Keep native dashed line" option.
+
 ## 2026-11-17 — AIM Control Panel latest v1.56 (latest only) — My settings stops switching tools off
 
 - **Tools were turning themselves off on My settings** for anyone who pressed ⏻ All off on v1.50 (the right-click inspector was one of them). My settings can no longer carry that "everything off" rule. Tools it already switched off stay off until you turn their Enable back on.
