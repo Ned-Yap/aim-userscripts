@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.99
+// @version      1.00
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
-// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v0.90 (#341): 📰 Report cards show each asset's findings in the last 12 / 6 / 3 months with a rising / steady / falling cue (the 'days flagged' number is gone from the cards). v0.89 (#341): 📈 Findings Report keeps its last finished run (browser IndexedDB) — it is back after a reload, so filters, the report period and every export work without re-running; ✕ Clear forgets it. v0.88 (#341): 📈 Findings Report gains 📰 Report — a print-ready (Save as PDF) narrative for the last 7 / 14 / 30 days: one card per asset with its 12-month history, assets that keep coming back, trend, by site; the earlier HTML is now 📊 Dashboard; finding types that differ only by capitalisation are merged. v0.87 (#341): 📈 Findings Report — the Data View Issues tab (emissions and every other finding type) across the picked sites: findings per month and per 100 flights, assets flagged on 2+ days, by type / component / site, rejected + status + type filters, issues CSV, site×month CSV and a self-contained HTML report whose rows link to the site and the issue. v0.86: 📅 Sweep Scheduler gains a 📆 Calendar view (the forecast day by day, Mon–Fri weeks, exports). v0.85 (#335): 📅 Sweep Scheduler — for a client's recurring inspection missions (first profile: Client C feeder poles) it reads the live mission bank, the flown log and each base's docked drone, works out how old each mission's oldest pole is (count-back to 90 % of a full sweep), and lists what to fly next in order with flights planned per month, flights per sweep, payload (4.0 / 3.0 / none), per-site schedule switches, mission holds, Sheets / CSV / Slack text. v0.84 (#334): ⚙ ESC Sweep — for every flown flight of the picked sites × date window, download the log archive (in memory only), read the ESC telemetry and list each flight where the drone raised the ESC ratio alarm (false alarm vs real) plus long takeoff spikes; capped per run with Continue, Pause / Stop, gentle mode, finished flights remembered, Sheets / CSV, each row links to the full Mission Logs card. v0.82 (#331): 🎬 Mission Review — sweep the mission log of the picked sites (or every site) for flagged flights; checks are a registry (first: flew but NO video; also no images / fewer images than planned / landing failed); per-site counts, every flight a link to its Mission Playback, Copy → Sheets / CSV. v0.79 (#329): 🚩 SOP Sweep — run Site-Setup SOP checks across the picked sites (or every site) from LIVE /map_objects/; first check = FP ⨯ FP crossing (segments that cross / T / overlap with no shared vertex); per-site rows, 🎯 fly-to on the landing map, ↗ opens the site in a NEW tab and jumps to the spot (?aim-goto deep link, Site Setup Tools v4.498+), Copy → Sheets / CSV. v0.78 (#318): 🖼 Map Export — renders what the landing map shows (KML layers, cross-ref bands, site setups, site names) on its own canvas at print size with basemap tiles, legend, scale bar, north arrow, title and a dead-space trim (transparent outside the content); preview modal with toggles; ⬇ PNG poster or 🌐 self-contained interactive HTML (small, zooms forever). v0.77: Site setups scope — draw the FFZs / flight paths / assets of ONLY the sites matching a names box or the 📦 Fleet Data pick (independent of the label filter, "= labels" copies it) so another client's setup never shows on a shared map. v0.76: site labels "Only matching / picked" mode (names box or the 📦 Fleet Data pick keep their label, every other site name hidden), 🗺 on-map legend (cross-ref bands + numbers, shown KML layers, site-setup colours) and 📷 Client view (names hidden, legend on, panel + button tucked away for a screenshot; ↩ Exit restores). v0.75: 📊 Fleet Metrics follows the 📦 Fleet Data pick ("picked only" checkbox, on by default; nothing picked → every site) — table, totals, Sheets / CSV and 🛂 Approval FPs. v0.67 (#285): 📡 Coverage — radius circles on the landing map (any Ø, drag centre / edge, live count of sites inside under a fully-inside / centre-inside rule, KML export), footprint of the picked sites (span, convex hull, smallest enclosing circle, site extents + FFZ acreage), 🧠 Best spot (centre covering the MOST sites at a Ø — exact candidate search) + 🗂 Plan all (greedy: how many circles cover every site), 📏 two-click ruler. v0.57 (#274): data check shows whether the skipped no-duration rows carry images / videos (+ first video object), and 🔎 probes one /missions/ page without the field filter to list every server field (hunting an abort / end-reason field). v0.56 (#274): 📋 Copy check button on the data check. v0.55 (#276): Utilization lenses — 🧑‍✈️ Pilots / 🛸 Drones / 📍 Sites / 🏢 Clients (sites + clients: flights, drone-hrs, air, flyable drone-hrs, util %, coverage, sites never flown, incomplete, capture %, gaps); Drones gain flyable hrs + util %. v0.54 (#274): Incomplete flights + Capture % from planned-vs-actual image counts (Pilots / Pilot-days / Flights), raw state codes + mission_data_reports sample in the data check. v0.53 (#274): ⚙ Site rules is a real button. v0.52 (#274): Pilot Utilization hides all-zero / blank columns (panel + Sheets + CSV) with a 'hidden:' note and a checkbox to show them. v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
+// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v1.00 (#343): 🔋 Sweep Scheduler shows each site's battery type and usage, read from the Pulse maintenance dashboard table while that page is open in another tab (the tab reloads itself every 10 h). v0.90 (#341): 📰 Report cards show each asset's findings in the last 12 / 6 / 3 months with a rising / steady / falling cue (the 'days flagged' number is gone from the cards). v0.89 (#341): 📈 Findings Report keeps its last finished run (browser IndexedDB) — it is back after a reload, so filters, the report period and every export work without re-running; ✕ Clear forgets it. v0.88 (#341): 📈 Findings Report gains 📰 Report — a print-ready (Save as PDF) narrative for the last 7 / 14 / 30 days: one card per asset with its 12-month history, assets that keep coming back, trend, by site; the earlier HTML is now 📊 Dashboard; finding types that differ only by capitalisation are merged. v0.87 (#341): 📈 Findings Report — the Data View Issues tab (emissions and every other finding type) across the picked sites: findings per month and per 100 flights, assets flagged on 2+ days, by type / component / site, rejected + status + type filters, issues CSV, site×month CSV and a self-contained HTML report whose rows link to the site and the issue. v0.86: 📅 Sweep Scheduler gains a 📆 Calendar view (the forecast day by day, Mon–Fri weeks, exports). v0.85 (#335): 📅 Sweep Scheduler — for a client's recurring inspection missions (first profile: Client C feeder poles) it reads the live mission bank, the flown log and each base's docked drone, works out how old each mission's oldest pole is (count-back to 90 % of a full sweep), and lists what to fly next in order with flights planned per month, flights per sweep, payload (4.0 / 3.0 / none), per-site schedule switches, mission holds, Sheets / CSV / Slack text. v0.84 (#334): ⚙ ESC Sweep — for every flown flight of the picked sites × date window, download the log archive (in memory only), read the ESC telemetry and list each flight where the drone raised the ESC ratio alarm (false alarm vs real) plus long takeoff spikes; capped per run with Continue, Pause / Stop, gentle mode, finished flights remembered, Sheets / CSV, each row links to the full Mission Logs card. v0.82 (#331): 🎬 Mission Review — sweep the mission log of the picked sites (or every site) for flagged flights; checks are a registry (first: flew but NO video; also no images / fewer images than planned / landing failed); per-site counts, every flight a link to its Mission Playback, Copy → Sheets / CSV. v0.79 (#329): 🚩 SOP Sweep — run Site-Setup SOP checks across the picked sites (or every site) from LIVE /map_objects/; first check = FP ⨯ FP crossing (segments that cross / T / overlap with no shared vertex); per-site rows, 🎯 fly-to on the landing map, ↗ opens the site in a NEW tab and jumps to the spot (?aim-goto deep link, Site Setup Tools v4.498+), Copy → Sheets / CSV. v0.78 (#318): 🖼 Map Export — renders what the landing map shows (KML layers, cross-ref bands, site setups, site names) on its own canvas at print size with basemap tiles, legend, scale bar, north arrow, title and a dead-space trim (transparent outside the content); preview modal with toggles; ⬇ PNG poster or 🌐 self-contained interactive HTML (small, zooms forever). v0.77: Site setups scope — draw the FFZs / flight paths / assets of ONLY the sites matching a names box or the 📦 Fleet Data pick (independent of the label filter, "= labels" copies it) so another client's setup never shows on a shared map. v0.76: site labels "Only matching / picked" mode (names box or the 📦 Fleet Data pick keep their label, every other site name hidden), 🗺 on-map legend (cross-ref bands + numbers, shown KML layers, site-setup colours) and 📷 Client view (names hidden, legend on, panel + button tucked away for a screenshot; ↩ Exit restores). v0.75: 📊 Fleet Metrics follows the 📦 Fleet Data pick ("picked only" checkbox, on by default; nothing picked → every site) — table, totals, Sheets / CSV and 🛂 Approval FPs. v0.67 (#285): 📡 Coverage — radius circles on the landing map (any Ø, drag centre / edge, live count of sites inside under a fully-inside / centre-inside rule, KML export), footprint of the picked sites (span, convex hull, smallest enclosing circle, site extents + FFZ acreage), 🧠 Best spot (centre covering the MOST sites at a Ø — exact candidate search) + 🗂 Plan all (greedy: how many circles cover every site), 📏 two-click ruler. v0.57 (#274): data check shows whether the skipped no-duration rows carry images / videos (+ first video object), and 🔎 probes one /missions/ page without the field filter to list every server field (hunting an abort / end-reason field). v0.56 (#274): 📋 Copy check button on the data check. v0.55 (#276): Utilization lenses — 🧑‍✈️ Pilots / 🛸 Drones / 📍 Sites / 🏢 Clients (sites + clients: flights, drone-hrs, air, flyable drone-hrs, util %, coverage, sites never flown, incomplete, capture %, gaps); Drones gain flyable hrs + util %. v0.54 (#274): Incomplete flights + Capture % from planned-vs-actual image counts (Pilots / Pilot-days / Flights), raw state codes + mission_data_reports sample in the data check. v0.53 (#274): ⚙ Site rules is a real button. v0.52 (#274): Pilot Utilization hides all-zero / blank columns (panel + Sheets + CSV) with a 'hidden:' note and a checkbox to show them. v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        *://qa.percepto.app/*
+// @match        https://pulse.percepto.app/*
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        unsafeWindow
@@ -35,6 +36,8 @@
 //     (how many Ø-mile circles cover the fleet), 📏 ruler, KML export.
 //   📅 Sweep Scheduler (#335): what has / has not been flown for a client's
 //     recurring inspection missions and what to fly next, in order.
+//     🔋 (#343) battery type + usage per site: on pulse.percepto.app the
+//     script only copies the maintenance dashboard's table into GM storage.
 // GitHub PAT arrives over the AIM_CONTROL_CHANNEL TOKEN_VALUE broadcast
 // (the Control Panel's channel runs on the landing page — verified).
 // No hotkeys. Log tag: [AIM FLEET]
@@ -45,8 +48,116 @@
     const TAG = '[AIM FLEET]';
     if (window !== window.top) return;   // landing page is top-level; nothing to do in iframes
 
+    // ------------------------------------------------------------------
+    // 🔋 Pulse battery bridge (v1.00, #343). On pulse.percepto.app this script
+    // does ONE thing and nothing else: when a page shows a table with a
+    // "Battery type" column (the upcoming-maintenance dashboard) it copies the
+    // rows the page already rendered into this script's GM storage, where the
+    // Sweep Scheduler on the landing page reads them. Read-only: no request is
+    // sent to Pulse, no token is read or stored. The tab reloads itself every
+    // N hours (default 10, 0 = never) so the saved rows stay current while you
+    // are signed in. GM storage is shared across origins for one script.
+    // ------------------------------------------------------------------
+    const KEY_PULSE = 'aim-ft-pulse';          // JSON { at, path, rows: [{ key, site, drone, battery, usage, gs, down, reason }] }
+    const KEY_PULSE_CFG = 'aim-ft-pulse-cfg';  // JSON { hours }
+    function pulseBridge() {
+        console.log(`${TAG} pulse bridge init`);
+        const loadedAt = Date.now();
+        const saved = {};                      // rows seen during THIS page load, by key (union — a Site filter never removes rows)
+        let savedJson = '', savedAt = 0, collecting = false, collects = 0, badgeEl = null, badgeText = '';
+        const txt = (el) => (el ? el.textContent.replace(/\s+/g, ' ').trim() : '');
+        const clean = (v) => (/^[—–-]?$/.test(v) ? '' : v);
+        const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+        function findTable() {
+            const bt = Array.from(document.querySelectorAll('th')).find(th => /battery\s*type/i.test(th.textContent));
+            if (!bt || !bt.parentElement) return null;
+            const heads = Array.from(bt.parentElement.children).map(txt);
+            const col = (re) => heads.findIndex(h => re.test(h));
+            const ix = { key: col(/^key\b/i), site: col(/site\s*name/i), gs: col(/gs\s*id/i), down: col(/in\s*downtime/i), reason: col(/downtime\s*reason/i), drone: col(/^drone\b/i), bat: col(/battery\s*type/i), use: col(/usage/i) };
+            if (ix.site < 0 || ix.bat < 0) { console.warn(`${TAG} pulse bridge: battery table found but no "Site name" column — headers: ${heads.join(' | ')}`); return null; }
+            let wrap = bt.closest('table');
+            for (let n = 0; wrap && n < 6 && !wrap.querySelector('tbody td'); n++) wrap = wrap.parentElement;   // header and body can be two tables in one wrapper
+            if (!wrap || !wrap.querySelector('tbody td')) return null;
+            return { wrap, ix, n: heads.length };
+        }
+        function readRows(T) {
+            let added = 0;
+            T.wrap.querySelectorAll('tbody tr').forEach(tr => {
+                const tds = Array.from(tr.children).filter(c => c.tagName === 'TD');
+                if (tds.length !== T.n) return;                                    // spacer / other-table rows
+                const g = (i) => (i >= 0 ? clean(txt(tds[i])) : '');
+                const site = g(T.ix.site); if (!site) return;
+                const u = parseFloat(g(T.ix.use).replace(',', '.'));
+                const row = { key: g(T.ix.key), site, drone: g(T.ix.drone), battery: g(T.ix.bat), usage: isFinite(u) ? u : null, gs: g(T.ix.gs), down: /^yes$/i.test(g(T.ix.down)), reason: g(T.ix.reason) };
+                const k = row.key || `${site}|${row.drone}`;
+                if (JSON.stringify(saved[k]) !== JSON.stringify(row)) { saved[k] = row; added++; }
+            });
+            return added;
+        }
+        // the table scrolls inside its card — walk it once so rows that only render when scrolled into view are read too
+        async function collect(T) {
+            collecting = true; collects++;
+            try {
+                const cands = [T.wrap].concat(Array.from(T.wrap.querySelectorAll('div')));
+                for (let p = T.wrap.parentElement, n = 0; p && n < 4; p = p.parentElement, n++) cands.push(p);
+                const sc = cands.find(el => el.scrollHeight > el.clientHeight + 30 && /auto|scroll/.test(getComputedStyle(el).overflowY) && el !== document.documentElement && el !== document.body);
+                readRows(T);
+                if (sc) {
+                    const top0 = sc.scrollTop;
+                    for (let pos = 0, n = 0; pos < sc.scrollHeight && n < 80; pos += Math.max(80, sc.clientHeight * 0.8), n++) {
+                        sc.scrollTop = pos; await sleep(180);
+                        const T2 = findTable(); if (T2) readRows(T2);
+                    }
+                    sc.scrollTop = top0;
+                }
+            } catch (e) { console.warn(`${TAG} pulse bridge: scroll read failed:`, e); }
+            collecting = false;
+        }
+        function save() {
+            const rows = Object.keys(saved).sort().map(k => saved[k]);
+            const json = JSON.stringify(rows);
+            if (json === savedJson && Date.now() - savedAt < 30 * 60000) return;   // unchanged: refresh the timestamp at most every 30 min (GM writes are not free)
+            savedJson = json; savedAt = Date.now();
+            try { GM_setValue(KEY_PULSE, JSON.stringify({ at: savedAt, path: location.pathname, rows })); console.log(`${TAG} pulse bridge: saved ${rows.length} battery row(s)`); }
+            catch (e) { console.error(`${TAG} pulse bridge: could not save rows:`, e); }
+        }
+        function hours() {
+            try { const v = JSON.parse(GM_getValue(KEY_PULSE_CFG, 'null') || 'null'); if (v && typeof v.hours === 'number' && v.hours >= 0 && v.hours <= 48) return v.hours; }
+            catch (e) { console.warn(`${TAG} pulse bridge: bad refresh setting:`, e); }
+            return 10;
+        }
+        function badge(text) {
+            if (text === badgeText) return; badgeText = text;
+            if (!badgeEl) {
+                badgeEl = document.createElement('div'); badgeEl.setAttribute('data-aim-pulse-badge', '1');
+                badgeEl.style.cssText = 'position:fixed;right:8px;bottom:8px;z-index:99999;background:#0e1218;color:#7adfe6;border:1px solid #2a3140;border-radius:4px;padding:3px 8px;font:11px/1.4 Arial,sans-serif;pointer-events:none;opacity:.9';
+                document.body.appendChild(badgeEl);
+            }
+            badgeEl.textContent = text;
+        }
+        async function tick() {
+            if (collecting) return;
+            try {
+                const T = findTable();
+                if (T) {
+                    const before = Object.keys(saved).length;
+                    readRows(T);
+                    if (Object.keys(saved).length && (!collects || (Object.keys(saved).length > before && collects < 3))) await collect(T);
+                    if (Object.keys(saved).length) save();
+                }
+                const n = Object.keys(saved).length; if (!n) return;               // not the battery dashboard (or not loaded yet): stay silent
+                const h = hours(); const left = h * 3600000 - (Date.now() - loadedAt);
+                if (h > 0 && left <= 0) { console.log(`${TAG} pulse bridge: reloading the tab (every ${h} h)`); location.reload(); return; }
+                badge(`AIM 🔋 ${n} battery row(s) saved ${new Date(savedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` + (h > 0 ? ` · this tab reloads in ${Math.floor(left / 3600000)} h ${Math.floor((left % 3600000) / 60000)} m` : ' · auto-reload off'));
+            } catch (e) { console.error(`${TAG} pulse bridge tick failed:`, e); }
+        }
+        setInterval(tick, 5000);
+        console.log(`${TAG} pulse bridge ready`);
+    }
+    if (location.hostname === 'pulse.percepto.app') { pulseBridge(); return; }
+
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '0.99';
+    const SCRIPT_VERSION = '1.00';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -8425,7 +8536,7 @@
     // ---- [AIM_SK_CORE] end ----
 
     const KEY_SK = 'aim-ft-sk' + ENV_SUFFIX;          // { hold: { 'sid|name': 1 }, siteOn: { sid: bool } } — small, written on click only
-    const skLocal = (() => { const v = loadJson(KEY_SK, {}); return { hold: (v.hold && typeof v.hold === 'object') ? v.hold : {}, siteOn: (v.siteOn && typeof v.siteOn === 'object') ? v.siteOn : {} }; })();
+    const skLocal = (() => { const v = loadJson(KEY_SK, {}); return { hold: (v.hold && typeof v.hold === 'object') ? v.hold : {}, siteOn: (v.siteOn && typeof v.siteOn === 'object') ? v.siteOn : {}, pulse: (v.pulse && typeof v.pulse === 'object') ? v.pulse : {} }; })();
     const skLocalSave = () => gmSet(KEY_SK, JSON.stringify(skLocal));
     const SK_CONCURRENCY = 2;
     let skData = null;      // { at, sites: { sid: { name, status, payload, drone, cams, missions:[…], flights:[…], err:{bank,log,setup} } }, start, end }
@@ -8541,6 +8652,57 @@
     const SK_MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
     const skMonLabel = (ym) => SK_MON[Number(String(ym).slice(5, 7)) - 1] || ym;
     const SK_TIER = { 1: 'Age limit', 2: 'Not swept this cycle', 3: 'No full sweep in the log', 4: 'Swept — oldest first' };
+    // ---- 🔋 battery type + usage per site (v1.00, #343) — rows the Pulse bridge saved from the maintenance dashboard table ----
+    // Pulse names a site after its deployment ticket, AIM by its site name: matched on the letters/digits of the name
+    // (the user's site-filter prefix removed), then by a manual link the user makes once (skLocal.pulse: { sid: pulse site name }).
+    const skPulseNorm = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+    let skPulseCache = null;
+    function skPulse() {
+        const raw = loadJson(KEY_PULSE, null);
+        if (!raw || !Array.isArray(raw.rows)) return null;
+        const stripSrc = skStripFromTerms();
+        if (skPulseCache && skPulseCache.at === raw.at && skPulseCache.n === raw.rows.length && skPulseCache.stripSrc === stripSrc) return skPulseCache;
+        const strip = new RegExp(stripSrc, 'i');
+        const bySite = {}; raw.rows.forEach(r => { if (r && r.site) (bySite[r.site] || (bySite[r.site] = [])).push(r); });
+        const names = Object.keys(bySite).map(n => ({ name: n, norm: skPulseNorm(n), norm2: skPulseNorm(n.replace(strip, '')) }));
+        skPulseCache = { at: raw.at, n: raw.rows.length, bySite, names, strip, stripSrc };
+        return skPulseCache;
+    }
+    function skPulseName(sid) {
+        const PZ = skPulse(); if (!PZ) return null;
+        const link = skLocal.pulse[sid]; if (link && PZ.bySite[link]) return link;
+        const r = skData && skData.sites[sid]; if (!r) return null;
+        const a = skPulseNorm(r.name), b = skPulseNorm(r.name.replace(PZ.strip, ''));
+        if (!b) return null;
+        let hit = PZ.names.filter(x => x.norm === a || x.norm2 === b);
+        if (!hit.length && b.length >= 4) hit = PZ.names.filter(x => x.norm2.length >= 4 && (x.norm2.indexOf(b) >= 0 || b.indexOf(x.norm2) >= 0));
+        return hit.length === 1 ? hit[0].name : null;                         // two candidates = no guess; the user links it
+    }
+    function skPulseOf(sid) {
+        const PZ = skPulse(); const nm = skPulseName(sid); if (!PZ || !nm) return null;
+        let rows = PZ.bySite[nm];
+        const drone = skData && skData.sites[sid] && skData.sites[sid].payload && skData.sites[sid].payload.drone;
+        if (rows.length > 1 && drone) { const d = skPulseNorm(drone); const m = rows.filter(x => x.drone && (skPulseNorm(x.drone).indexOf(d) >= 0 || d.indexOf(skPulseNorm(x.drone)) >= 0)); if (m.length) rows = m; }
+        const uniq = (a) => a.filter((v, i) => v !== '' && v != null && a.indexOf(v) === i);
+        return { name: nm, battery: uniq(rows.map(x => x.battery)).join(' / '), usage: uniq(rows.map(x => x.usage)).join(' / '), drone: uniq(rows.map(x => x.drone)).join(' / '), down: rows.some(x => x.down) ? (uniq(rows.map(x => x.reason)).join(' / ') || 'yes') : '' };
+    }
+    const skPulseAge = (at) => { const m = Math.max(0, Math.round((Date.now() - at) / 60000)); return m < 90 ? `${m} min` : (m < 2880 ? `${Math.round(m / 60)} h` : `${Math.round(m / 1440)} days`); };
+    const skPulseHours = () => { const v = loadJson(KEY_PULSE_CFG, null); return (v && typeof v.hours === 'number' && v.hours >= 0 && v.hours <= 48) ? v.hours : 10; };
+    // sites on screen that have missions but no Pulse row yet
+    function skPulseUnmatched() { return skRes ? Array.from(new Set(skRes.rows.map(u => u.sid))).filter(sid => !skPulseName(sid)) : []; }
+    function skPulseLink(sid) {
+        const PZ = skPulse(); if (!PZ) { setStatus('Sweep scheduler: no Pulse battery data saved yet'); return; }
+        const used = new Set(Array.from(new Set((skRes ? skRes.rows : []).map(u => u.sid))).map(skPulseName).filter(Boolean));
+        const free = PZ.names.map(x => x.name).filter(n => !used.has(n)).sort();
+        if (!free.length) { setStatus('Sweep scheduler: every Pulse row is already matched to a site'); return; }
+        const ans = window.prompt(`Which Pulse row is "${siteName(sid)}"?\nType the number (blank = cancel, 0 = remove the link):\n\n` + free.map((n, i) => `${i + 1}. ${n}`).join('\n'), '');
+        if (ans == null || String(ans).trim() === '') return;
+        const k = Number(ans);
+        if (k === 0) delete skLocal.pulse[sid];
+        else if (Number.isInteger(k) && k >= 1 && k <= free.length) skLocal.pulse[sid] = free[k - 1];
+        else { setStatus(`Sweep scheduler: "${ans}" is not a number from the list — nothing changed`); return; }
+        skLocalSave(); setStatus(`Sweep scheduler: ${siteName(sid)} ${k === 0 ? 'unlinked' : `linked to Pulse row "${free[k - 1]}"`} (saved on this computer)`); renderPanel();
+    }
     const skPayloadLabel = (sid) => { const r = skData && skData.sites[sid]; return r && r.payload ? r.payload.label : '?'; };
     // one column registry drives the panel table, Sheets and CSV. adv = only with "All columns".
     function skCols() {
@@ -8557,9 +8719,13 @@
             { label: 'Est. flights per sweep', get: u => u.expFlights, num: true },
             { label: 'Last flown', get: u => skYmd(u.lastFlown) },
             { label: 'Payload', get: u => skPayloadLabel(u.sid) },
+            { label: 'Battery', get: u => { const b = skPulseOf(u.sid); return b ? b.battery : ''; } },
+            { label: 'Battery usage %', get: u => { const b = skPulseOf(u.sid); return b ? b.usage : ''; }, num: true },
             { label: 'Scheduled', get: u => u.held ? 'held' : (u.want ? 'yes' : 'no') },
             { label: 'Why', get: u => u.tier === 3 ? u.state : SK_TIER[u.tier] },
             { label: 'Phase', get: u => u.phase, adv: true },
+            { label: 'Pulse drone', get: u => { const b = skPulseOf(u.sid); return b ? b.drone : ''; }, adv: true },
+            { label: 'In downtime (Pulse)', get: u => { const b = skPulseOf(u.sid); return b ? b.down : ''; }, adv: true },
             { label: `Passes ${R.limit} days on`, get: u => skYmd(u.passDay), adv: true },
             { label: 'First planned flight', get: u => skYmd(u.first), adv: true },
             { label: `Oldest pole ${R.winEnd} (days)`, get: u => u.ageAtEnd != null ? u.ageAtEnd : '', num: true, adv: true },
@@ -8713,6 +8879,7 @@
     }
     function skOpt(t) {
         const k = t.getAttribute('data-sk-opt');
+        if (k === 'pulseHours') { const v = Number(t.value); if (v >= 0 && v <= 48) { gmSet(KEY_PULSE_CFG, JSON.stringify({ hours: v })); setStatus(v ? `Sweep scheduler: an open Pulse dashboard tab now reloads itself every ${v} h` : 'Sweep scheduler: Pulse tab auto-reload is off'); } else setStatus('Sweep scheduler: Pulse reload must be 0–48 hours'); return; }
         if (k === 'calWeeks') { const v = Number(t.value); if (v >= 0 && v <= 60) { ftCfg.sk.calWeeks = v; saveCfg(); renderPanel(); } return; }
         if (k === 'terms') { ftCfg.sk.terms = String(t.value || '').slice(0, 200); saveCfg(); setStatus('Sweep scheduler: site filter changed — takes effect on the next run'); renderPanel(); return; }
         if (k === 'lookMo') { const v = Number(t.value); if (v >= 1 && v <= 24) { ftCfg.sk.lookMo = v; saveCfg(); setStatus('Sweep scheduler: log window changed — takes effect on the next run'); } return; }
@@ -8767,6 +8934,16 @@
         if (!skRes) { h.push(`<div style="padding:8px 10px;color:#888">${running ? 'Reading…' : 'No result.'}</div>`); return h.join(''); }
         const R = skRes;
         h.push(`<div style="padding:5px 10px;color:#aaa;border-bottom:1px solid #222834;">Read ${new Date(skData.at).toLocaleString()} · log ${fdYmd(skData.start)} → ${fdYmd(skData.end)} · <span style="color:#ddd">${escapeHtml(skHeadline())}</span></div>`);
+        {   // 🔋 Pulse battery data status
+            const PZ = skPulse(); const un = PZ ? skPulseUnmatched() : [];
+            const old = PZ && (Date.now() - PZ.at) > 24 * 3600000;
+            h.push(`<div style="padding:4px 10px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;font-size:11px;color:${!PZ || old ? '#ffa030' : '#aaa'}">`
+                + (PZ ? `<span title="Battery type and usage come from the Pulse maintenance dashboard table. This script copies the table while that page is open in another tab — it is only as fresh as that tab's last load.">🔋 Pulse battery data: ${PZ.n} row(s), saved ${skPulseAge(PZ.at)} ago${old ? ' — OLD: open the Pulse maintenance dashboard (sign in again if asked)' : ''}</span>`
+                    : '<span>🔋 No Pulse battery data yet — open the Pulse maintenance dashboard (the page with the Battery type column) in another tab and leave it open; this table fills in on the next redraw.</span>')
+                + `<label style="display:inline-flex;align-items:center;gap:3px;color:#aaa" title="How often the open Pulse tab reloads itself so the saved battery rows stay current. 0 = never. Takes effect in the Pulse tab within a few seconds.">reload the Pulse tab every <input type="number" data-sk-opt="pulseHours" min="0" max="48" value="${skPulseHours()}" style="${inCss}width:42px"> h</label>`
+                + (un.length ? `<span style="color:#ffa030" title="Pulse names a site after its deployment ticket, so some names do not match. Click a site to pick its Pulse row once (saved on this computer).">no Pulse row for: ${un.map(sid => `<span data-sk-pulse="${escapeHtml(sid)}" style="cursor:pointer;text-decoration:underline">${escapeHtml(siteName(sid))}</span>`).join(', ')}</span>` : '')
+                + '</div>');
+        }
         // site chips — click = schedule / don't schedule this site (the "what if I moved a drone here" switch)
         const sids = Object.keys(skData.sites).sort((a, b) => skData.sites[a].name.localeCompare(skData.sites[b].name));
         const unitsBySite = {}; R.rows.forEach(u => { unitsBySite[u.sid] = (unitsBySite[u.sid] || 0) + 1; });
@@ -10657,6 +10834,8 @@
                 if (sopSiteEl && !ev.target.closest('a')) { const ssid = sopSiteEl.getAttribute('data-sop-site'); sopOpenSite = sopOpenSite === ssid ? null : ssid; fdRenderKeepScroll(); return; }
                 const skSiteEl = ev.target.closest('[data-sk-site]');
                 if (skSiteEl) { skToggleSite(skSiteEl.getAttribute('data-sk-site')); return; }
+                const skPulseEl = ev.target.closest('[data-sk-pulse]');
+                if (skPulseEl) { skPulseLink(skPulseEl.getAttribute('data-sk-pulse')); return; }
                 const skHoldEl = ev.target.closest('[data-sk-hold]');
                 if (skHoldEl) { skToggleHold(skHoldEl.getAttribute('data-sk-hold')); return; }
                 const nvSiteEl = ev.target.closest('[data-nv-site]');

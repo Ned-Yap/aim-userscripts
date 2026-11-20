@@ -1,3 +1,11 @@
+## 2026-11-20 — 🌐 AIM Fleet Tools latest v1.00 (latest only) — 🔋 battery type and usage in the Sweep Scheduler
+
+- **Two new columns: Battery and Battery usage %** (feature #343), per site, in the table and in every export. "All columns" adds the Pulse drone and downtime reason.
+- **Where it comes from:** the Pulse maintenance dashboard (the page with the Battery type column). Open it in another tab and leave it open — the script copies the table it shows. A small badge bottom-right on that page confirms how many rows were saved.
+- **The Pulse tab reloads itself every 10 hours** so the numbers stay current (change it, or 0 = never, in the Sweep Scheduler). If Pulse asks you to sign in again, the scheduler shows the data as OLD until you do.
+- **Site names differ between Pulse and AIM.** Most match automatically; any that do not are listed in orange — click one and pick its Pulse row once (saved on this computer).
+- Read-only: the script sends nothing to Pulse and stores no sign-in token. Tampermonkey will ask to approve the new page the script runs on.
+
 ## 2026-11-20 — PROD: Site Setup Tools v4.407 / Fleet Tools v0.74 / Mission Bank Tools v2.97 / Map Styler v34.159 — client-neutral tools
 
 - **Nothing in the tools is tied to one client any more.** Anything client-specific now comes from the site name or from your own settings.
