@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.96
+// @version      2.97
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.96';
+    const SCRIPT_VERSION = '2.97';
 
     // v2.95: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -549,8 +549,8 @@
     function getCurrentSiteName() {
         // Percepto renders the site name in the top-frame site picker.
         // The Ant Design select uses `.ant-select-selection-item` with
-        // a `title` attribute holding the full name (e.g. "Client B 32 -
-        // XBC Giddings Estate 1184H"). Fall back to textContent if no
+        // a `title` attribute holding the full name (e.g. "Acme 32 -
+        // Well Name 1H"). Fall back to textContent if no
         // title attribute, and to null if anything throws (cross-origin
         // / racing the initial render).
         try {
@@ -4953,7 +4953,7 @@
 
     // Asset↔FFZ distance measured RING-PERIMETER to polygon (sampled ~10 m) —
     // corners alone miss an FFZ hugging the middle of a pad edge (engraved
-    // segments-not-vertices rule; live case v2.34: "ATKINS 14 4213H — no FFZ"
+    // segments-not-vertices rule; live case v2.34: "WELL NAME 1H — no FFZ"
     // with its FFZ visibly touching the pad edge).
     function rngRingToPolyM(ringA, ringB) {
         let best = Infinity;
@@ -6836,7 +6836,7 @@
         const emptyNavs = parsed.units.map((u, ui) => ui).filter(ui => !parsed.units[ui].bundles.length && !parsed.units[ui].others.length);
         // clusters + solve — tried at TWO radii, and the CURRENT order is a
         // scored candidate too (v2.67). Live NE 1-2 test: the user's manual
-        // interleave (Rivers 1974JH sandwiched INSIDE the Jack Mohr run) BEAT
+        // interleave (Well B 1H sandwiched INSIDE the Well A run) BEAT
         // contiguous clusters under legal routing by 3% — 1974JH sat just
         // outside the 400 ft radius, so the solver wasn't allowed to consider
         // that shape. 2× radius puts it in the search space, and keeping the
@@ -7055,7 +7055,7 @@
         // sits east, so the straight-line guess picks the wrong side.
         // v2.79 — the pass is now the full lasso BRANCH WALK applied inside
         // every same-pad run, with that run's arrival point as "base". Decoded
-        // from the SW 1-2 MIDKIFF pad via the route_points corridor graph:
+        // from the SW 1-2 PAD NAME pad via the route_points corridor graph:
         // the user's expected order (12→11→15→14→13) is exactly: start at the
         // LEGAL-deepest nav from the arrival, next = deepest route junction
         // with the current nav (junc = (dArr(a)+dArr(b)−d(a,b))/2), ties →
@@ -7064,7 +7064,7 @@
         // (the corridor arrives from the WEST; straight-line depth is inverted
         // by the corridor loop, so LEGAL distances are mandatory here).
         // Doctrine over feet: the walk may cost a little more than the feet-
-        // optimal sweep (MIDKIFF: ~300 ft) — "we ALWAYS start at the furthest
+        // optimal sweep (PAD NAME: ~300 ft) — "we ALWAYS start at the furthest
         // nav at a pad and move back". Applied unconditionally per run.
         const branchWalk = (uis, arrPt) => {
             const loc = ui => parsed.units[ui].nav.location;
@@ -8805,8 +8805,8 @@
         return c.length === 1 ? c[0] : null;
     }
 
-    // v2.01: mission names carry section prefixes ("NNE - SMITH SN 48-37 03
-    // 203H" for pad "SMITH SN 48-37 03 203H" — the generator's
+    // v2.01: mission names carry section prefixes ("NNE - PAD NAME
+    // 203H" for pad "PAD NAME 203H" — the generator's
     // "{section} - {asset}" template). Rank matches: exact → ends with
     // " - <pad>" → contains. Multiple survivors at a rank → the panel shows
     // a pick-one chooser instead of guessing (a "Merged - A + B" mission
@@ -8831,8 +8831,8 @@
         c = all.filter(m => norm(m).indexOf(want) >= 0);
         if (c.length) return c;
         // v2.91: pad-root rung — some sites name missions "<PAD> _ID <n>"
-        // while asset polygons are "<Pad> <Equipment>" ("LHS Ranch 1702BH
-        // Pump Jack" ↔ "LHS RANCH 1702BH _ID 5062"). Neither name contains
+        // while asset polygons are "<Pad> <Equipment>" ("Pad Name 1H
+        // Pump Jack" ↔ "PAD NAME 1H _ID 5062"). Neither name contains
         // the other, but both extend the same pad root. Drop up to 3
         // trailing tokens (equipment suffixes are 1–3 words: "Pump Jack",
         // "Gas Lift Header", "Flow Line 2") and take missions whose name IS

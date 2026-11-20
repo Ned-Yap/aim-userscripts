@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.504
+// @version      4.505
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  v4.498 (#329): SOP check 'FP ⨯ FP crossing' — two flight-path segments that intersect / T / overlap WITHOUT a shared vertex (same or different FPs; the drone's safe-zone recalc thrashes at the crossing); Control Panel ☑ All / ☐ None / ◎ solo on the SOP checks; ?aim-goto=lat,lng,z URL param pans + pulses the Site Setup map on load (Fleet Tools SOP Sweep links). Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -92,7 +92,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.504';
+    const SCRIPT_VERSION = '4.505';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -442,7 +442,7 @@
         }
         return null;
     }
-    // Combined "Site 1596 · Client B 34 - Texas Ten" string for headers.
+    // Combined "Site 1596 · Acme 34 - Well Name" string for headers.
     // If no name resolves, just returns "Site 1596".
     function siteHeaderLabel(siteID) {
         const name = getCurrentSiteName();
@@ -15588,7 +15588,7 @@
         b.mountain_terrain_site = !!(siteCfg && siteCfg.mountain_terrain);
         // v4.179: the native asset save ALWAYS includes
         // custom.new_poi_type_str ("" when picking an existing type) —
-        // recon 2026-07-09 on KEMPER 16 1. Without it, the server
+        // recon 2026-07-09 on PAD NAME 1. Without it, the server
         // second-guesses poi_type_str on some pads (forces base type back
         // to "well-cluster") or 400s ("Could not create object"). Mirror
         // it; applyEditsToBody overwrites it with the new value when the
@@ -24198,7 +24198,7 @@
         el.querySelectorAll('[data-impswap-row]').forEach(d => d.onclick = (ev) => { if (ev.target.closest('[data-impswap-on]')) return; const x = S.pairs[Number(d.getAttribute('data-impswap-row'))]; if (!x) return; const pts = [{ lat: x.a.lat, lng: x.a.lng, name: `${x.a.name} (asset)` }, { lat: x.b.lat, lng: x.b.lng, name: `${x.b.name} (asset)` }]; if (x.a.pin) pts.push({ lat: x.a.pin.lat, lng: x.a.pin.lng, name: `${x.a.name} (Enverus pin)` }); if (x.b.pin) pts.push({ lat: x.b.pin.lat, lng: x.b.pin.lng, name: `${x.b.name} (Enverus pin)` }); impZoomToPoints(pts, `${x.a.name} ↔ ${x.b.name}`); });
     }
     // ---- 📬 CLIENT RESPONSE — the client's answered review comes back as the same sheet with
-    // "Diamondback response", "Correct coordinates", "Source", "Needs internal confirmation?" columns.
+    // "<client> response", "Correct coordinates", "Source", "Needs internal confirmation?" columns.
     // Every row is classified (move / keep / keep-list / add / add-centroid / remove / remove-dup /
     // status / rename / none / review), shown for verification, then applied to the STAGED points;
     // changes to EXISTING assets (moves, renames) are queued for one dry-run-able write with undo,
@@ -24247,7 +24247,7 @@
             name: impRespCol(headers, /^asset/i), api: impRespCol(headers, /^api/i), finding: impRespCol(headers, /what we found/i), inList: impRespCol(headers, /^in your list/i),
             response: impRespCol(headers, /response/i), coordsK: impRespCol(headers, /correct coord/i), source: impRespCol(headers, /^source/i), confirm: impRespCol(headers, /confirmation/i), importance: impRespCol(headers, /importance/i),
         };
-        if (!H.name || !H.response) throw new Error('could not find the "Asset" and "Diamondback response" columns');
+        if (!H.name || !H.response) throw new Error('could not find the "Asset" and "… response" columns');
         const out = [];
         rows.forEach((row, i) => {
             const name = String(row[H.name] || '').trim(); if (!name) return;
@@ -24520,7 +24520,7 @@
         el.innerHTML = `<div style="padding:6px 8px;background:rgba(126,200,255,0.05);border:1px dashed rgba(126,200,255,0.4);border-radius:3px;font-size:11px;color:#cfd6dc">
             <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:6px">
                 <button id="aim-imp-resp-load" style="${btn('126,200,255')}">📬 Load the client's response (xlsx / csv)</button>
-                <span style="color:#888;font-size:10px">${R.rows ? `${impEsc(R.fileName)} · ${R.rows.length} rows · read ${impEsc(R.at)}` : 'the review sheet they sent back, with their answers in the "Diamondback response" / "Correct coordinates" / "Needs internal confirmation?" columns'}</span>
+                <span style="color:#888;font-size:10px">${R.rows ? `${impEsc(R.fileName)} · ${R.rows.length} rows · read ${impEsc(R.at)}` : 'the review sheet they sent back, with their answers in the "… response" / "Correct coordinates" / "Needs internal confirmation?" columns'}</span>
                 <span style="flex:1"></span>
                 ${R.rows ? `<button id="aim-imp-resp-apply" ${R.applied ? 'disabled' : ''} style="${btn('95,255,95', ';font-weight:600' + (R.applied ? ';opacity:0.45;cursor:default' : ''))}" title="Changes the staged points on the map only (moves, added rows, statuses, renames) — nothing is written until step 7, or 🏷 / 🗑 below for existing assets.">${R.applied ? '➕ applied to the staged points' : '➕ Apply to the staged points (map only)'}</button>` : ''}
             </div>
@@ -25054,7 +25054,7 @@
             if (nm && !guarded && nmM.tier === 3 && nmM.ambiguous) {                      // v4.455/v4.456: ambiguous containment
                 const st = impNameTokens(p.name).length, gap = (a) => Math.abs((a.tokens || []).length - st);
                 const o2 = (nmM.others || [])[0];
-                if (o2 && gap(nm) < gap(o2)) { nmM.ambiguous = false; p.matchNote = ''; nmM.why = `name matches existing asset "${nm.name}" (closest of ${1 + nmM.others.length} that contain it)`; }   // one clear closest fit (e.g. "Pad - BAYES 16" over "Pad - BAYES 16 1") = the match
+                if (o2 && gap(nm) < gap(o2)) { nmM.ambiguous = false; p.matchNote = ''; nmM.why = `name matches existing asset "${nm.name}" (closest of ${1 + nmM.others.length} that contain it)`; }   // one clear closest fit (e.g. "Pad - NAME 16" over "Pad - NAME 16 1") = the match
                 else guarded = `name fits ${1 + (nmM.others || []).length} assets equally (${[nm.name].concat((nmM.others || []).slice(0, 2).map(o => o.name)).join(', ')}…) and none exactly — created as NEW`;
             }
             if (nm && !guarded) { p.dup = true; p.dupWhy = nmM.why; p.dupTier = nmM.tier; p.dupAmbiguous = nmM.ambiguous; p.dupId = nm.id; p.dupSubtype = nm.subtype || ''; } else { p.dupId = null; p.dupSubtype = ''; p.dupTier = 0; p.dupAmbiguous = false; if (guarded) p.matchNote = guarded; }
@@ -27531,7 +27531,7 @@
         const rows = impClientReviewRows();
         if (!rows.length) { impStatus('Nothing to report — no findings for the client in this scope', '#5fff5f'); return; }
         const site = getCurrentSiteName() || `Site ${genState.siteID}`;
-        const client = String(site).split(/\s[-–—]\s|\s+Cobra|\s+\d/)[0].trim() || 'Client';
+        const client = String(site).split(/\s[-–—]\s|\s+\d/)[0].trim() || 'Client';
         const cols = [
             { label: 'Importance', val: x => x.sev }, { label: 'What we found', val: x => x.find }, { label: 'Asset (name in your list)', val: x => x.name }, { label: 'API number', val: x => x.api },
             { label: 'In your list', val: x => x.clientVal }, { label: 'What the records / our map show', val: x => x.otherVal }, { label: 'Distance', val: x => x.distFt != null ? `${Math.round(x.distFt).toLocaleString()} ft` : '' },
@@ -28707,7 +28707,7 @@
     }
     function impPadType(p) { const t = impPadTier(p); return t ? `${t} - Pad` : 'Pad'; }
     // v4.486: a container pad's tier = the sum over the wells NESTED UNDER IT on the site (plus a row that name-matches the
-    // pad itself), not the cluster of whichever row the pad was keyed on. Pad - NICHOLS EAST UNIT 1WB read plain `Pad`
+    // pad itself), not the cluster of whichever row the pad was keyed on. Pad - PAD NAME 1WB read plain `Pad`
     // while its two children carried 441 BLPD: the keying row sat in another cluster. Falls back to impPadTier(row).
     function impPadModelFor(pad, p) {
         const c = imp.pri; const fbTier = impPadTier(p); const fb = { tier: fbTier, type: fbTier ? `${fbTier} - Pad` : 'Pad', pp: p, total: null, n: 0 };
@@ -28744,7 +28744,7 @@
         const out = [];
         imp.points.forEach(p => {
             if (!p.dup || p.dupId == null || p.removed || p.pa || p.thirdParty) return;
-            if (!p.sel && !p.createdId && !p.done) return;                                    // v4.474: never a row outside the selection (HUGHES / FRAZIER, 20–60 mi away, matched local pads by name)
+            if (!p.sel && !p.createdId && !p.done) return;                                    // v4.474: never a row outside the selection (two pads 20–60 mi away, matched local pads by name)
             const m = byId.get(p.dupId); if (!m) return;
             const rowName = genCleanName(p.name); if (!rowName) return;
             const isWrapperOf = (e) => { const st = impNameTokens(rowName), at = impNameTokens(e.name || ''); return at.length > st.length && impTokensContain(at, st) && at.filter(t => !st.includes(t)).every(t => /^(pad|battery|batt|tank|tb)$/.test(t)); };
@@ -32962,7 +32962,7 @@
     // the row dropping off the sheet turns the row "ending" until a CSM confirms
     // the equipment is gone. RPIC-spotted obstructions are added by hand and
     // follow the same lifecycle; "mission pulled" is recorded so the restore is
-    // not forgotten (LILLY 49 UNIT 3LS lost a month that way, 2026-09-22).
+    // not forgotten (PAD NAME 3LS lost a month that way, 2026-09-22).
     // Source today = CSV dropped on the panel; the Apps Script bridge feeds the
     // same ingest later. State per site in GM (`aim-rig-state:<env-sid>`).
     // (RIG_* constants + state live at the top of the IIFE — TDZ rule, see v4.382)
@@ -33147,7 +33147,7 @@
             const best = (r || []).map(poly => poly[0]).filter(x => x && x.length >= 4).sort((a, b) => b.length - a.length)[0];
             if (!best) return { points: ring.map(p => ({ lat: p.lat, lng: p.lng })), note: 'intersection empty → pad outline' };
             const pts = best.slice(0, -1).map(([lng, lat]) => ({ lat, lng }));
-            // v4.385 SAFEGUARD: a pad asset drawn over only part of its pad (LILLY 49 UNIT 3LS
+            // v4.385 SAFEGUARD: a pad asset drawn over only part of its pad (PAD NAME 3LS
             // covered half) would leave the rest of the pad unblocked. If the asset covers
             // less than padCoverPct of its FFZ-inset, use the whole FFZ inset and flag it.
             const cover = rigRingAreaFt2(pts) / Math.max(1, rigRingAreaFt2(inset));
@@ -34839,7 +34839,7 @@
             const kml = buildSiteKML(siteID, opts);
             if (!kml) { showToast('Failed to build KML'); return; }
             // Filename: mirror the in-KML document name, e.g.
-            // "Site 1605 Map - Client B - Lille Midkiff 5 - OFFLINE (3D).kml".
+            // "Site 1605 Map - Client B - Site Name 5 - OFFLINE (3D).kml".
             // Strip characters illegal in filenames (/ \ : * ? " < > |) so the
             // download doesn't get rejected or silently mangled by the OS.
             const base = (opts.siteName || `Site ${siteID} Map`).replace(/[/\\:*?"<>|]/g, '-').replace(/\s+/g, ' ').trim();
@@ -37008,7 +37008,7 @@
 
             const ta = document.createElement('textarea');
             ta.rows = 8;
-            ta.placeholder = 'FRYAR 2 BATTERY\tBattery\nELIAS 16-9 1\tBATTERY\nHYDRA 45-4_1\tBATTERY';
+            ta.placeholder = 'PAD ONE BATTERY\tBattery\nPAD TWO 1\tBATTERY\nPAD THREE_1\tBATTERY';
             ta.style.cssText = 'width:100%;box-sizing:border-box;background:#1a1d23;border:1px solid rgba(255,255,255,0.20);color:#fff;padding:6px 8px;border-radius:3px;font-family:monospace;font-size:11px;resize:vertical;margin-bottom:8px';
             pop.appendChild(ta);
 
@@ -41053,7 +41053,7 @@
         //
         // Names are NOT used for equipment auto-detect — earlier
         // versions had a name-tag pass that surfaced false positives
-        // like "TEXAS", "PU", "ARICK" (asset name prefixes, not
+        // like "TEXAS", "PU", a pad name (asset name prefixes, not
         // equipment types). Per user feedback, subtype is the only
         // source of truth here.
         // v4.180: all three asset breakdowns share parseAssetSubtype —

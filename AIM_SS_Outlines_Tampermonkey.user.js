@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.158
+// @version      34.159
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -69,7 +69,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.158';
+    const SCRIPT_VERSION = '34.159';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -927,7 +927,7 @@
     // --- Settings ---
     const LINE_THICKNESS = 10; // Target for Green and Blue solid lines
     const UPDATE_DELAY_MS = 50;
-    // Houston-style fallback. When no legacy native buffer (>12) exists,
+    // No-legacy-layer fallback. When no legacy native buffer (>12) exists,
     // derive globalBaseWidth from the line itself instead of from the host app's
     // modern native buffer (which represents a metric distance and scales
     // aggressively with zoom — multiplying it produced runaway halos).
@@ -1199,7 +1199,7 @@
         document.querySelectorAll(GREEN_BUFFER_SELECTOR).forEach(el => nativeBuffers.push(el));
 
         // Backup 2: derive width from the line itself.
-        // Used on sites (e.g. Houston) where neither legacy native buffers
+        // Used on sites where neither legacy native buffers
         // (>12) nor blue gradient buffers exist. Avoids depending on
         // the host app's modern native buffer, whose width represents a metric
         // distance and scales aggressively with zoom.

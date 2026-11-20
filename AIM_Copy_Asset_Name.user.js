@@ -2,7 +2,7 @@
 // @name         AIM Copy Asset Name
 // @name:en      AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.406
+// @version      4.407
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.406';
+    const SCRIPT_VERSION = '4.407';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -434,7 +434,7 @@
         }
         return null;
     }
-    // Combined "Site 1596 · Client B 34 - Texas Ten" string for headers.
+    // Combined "Site 1596 · Acme 34 - Well Name" string for headers.
     // If no name resolves, just returns "Site 1596".
     function siteHeaderLabel(siteID) {
         const name = getCurrentSiteName();
@@ -15440,7 +15440,7 @@
         b.mountain_terrain_site = !!(siteCfg && siteCfg.mountain_terrain);
         // v4.179: the native asset save ALWAYS includes
         // custom.new_poi_type_str ("" when picking an existing type) —
-        // recon 2026-07-09 on KEMPER 16 1. Without it, the server
+        // recon 2026-07-09 on PAD NAME 1. Without it, the server
         // second-guesses poi_type_str on some pads (forces base type back
         // to "well-cluster") or 400s ("Could not create object"). Mirror
         // it; applyEditsToBody overwrites it with the new value when the
@@ -25515,7 +25515,7 @@
         const rows = impClientReviewRows();
         if (!rows.length) { impStatus('Nothing to report — no findings for the client in this scope', '#5fff5f'); return; }
         const site = getCurrentSiteName() || `Site ${genState.siteID}`;
-        const client = String(site).split(/\s[-–—]\s|\s+Cobra|\s+\d/)[0].trim() || 'Client';
+        const client = String(site).split(/\s[-–—]\s|\s+\d/)[0].trim() || 'Client';
         const cols = [
             { label: 'Importance', val: x => x.sev }, { label: 'What we found', val: x => x.find }, { label: 'Asset (name in your list)', val: x => x.name }, { label: 'API number', val: x => x.api },
             { label: 'In your list', val: x => x.clientVal }, { label: 'What the records / our map show', val: x => x.otherVal }, { label: 'Distance', val: x => x.distFt != null ? `${Math.round(x.distFt).toLocaleString()} ft` : '' },
@@ -29957,7 +29957,7 @@
     // the row dropping off the sheet turns the row "ending" until a CSM confirms
     // the equipment is gone. RPIC-spotted obstructions are added by hand and
     // follow the same lifecycle; "mission pulled" is recorded so the restore is
-    // not forgotten (LILLY 49 UNIT 3LS lost a month that way, 2026-09-22).
+    // not forgotten (PAD NAME 3LS lost a month that way, 2026-09-22).
     // Source today = CSV dropped on the panel; the Apps Script bridge feeds the
     // same ingest later. State per site in GM (`aim-rig-state:<env-sid>`).
     // (RIG_* constants + state live at the top of the IIFE — TDZ rule, see v4.382)
@@ -30142,7 +30142,7 @@
             const best = (r || []).map(poly => poly[0]).filter(x => x && x.length >= 4).sort((a, b) => b.length - a.length)[0];
             if (!best) return { points: ring.map(p => ({ lat: p.lat, lng: p.lng })), note: 'intersection empty → pad outline' };
             const pts = best.slice(0, -1).map(([lng, lat]) => ({ lat, lng }));
-            // v4.385 SAFEGUARD: a pad asset drawn over only part of its pad (LILLY 49 UNIT 3LS
+            // v4.385 SAFEGUARD: a pad asset drawn over only part of its pad (PAD NAME 3LS
             // covered half) would leave the rest of the pad unblocked. If the asset covers
             // less than padCoverPct of its FFZ-inset, use the whole FFZ inset and flag it.
             const cover = rigRingAreaFt2(pts) / Math.max(1, rigRingAreaFt2(inset));
@@ -31806,7 +31806,7 @@
             const kml = buildSiteKML(siteID, opts);
             if (!kml) { showToast('Failed to build KML'); return; }
             // Filename: mirror the in-KML document name, e.g.
-            // "Site 1605 Map - Client B - Lille Midkiff 5 - OFFLINE (3D).kml".
+            // "Site 1605 Map - Client B - Site Name 5 - OFFLINE (3D).kml".
             // Strip characters illegal in filenames (/ \ : * ? " < > |) so the
             // download doesn't get rejected or silently mangled by the OS.
             const base = (opts.siteName || `Site ${siteID} Map`).replace(/[/\\:*?"<>|]/g, '-').replace(/\s+/g, ' ').trim();
@@ -33575,7 +33575,7 @@
 
             const ta = document.createElement('textarea');
             ta.rows = 8;
-            ta.placeholder = 'FRYAR 2 BATTERY\tBattery\nELIAS 16-9 1\tBATTERY\nHYDRA 45-4_1\tBATTERY';
+            ta.placeholder = 'PAD ONE BATTERY\tBattery\nPAD TWO 1\tBATTERY\nPAD THREE_1\tBATTERY';
             ta.style.cssText = 'width:100%;box-sizing:border-box;background:#1a1d23;border:1px solid rgba(255,255,255,0.20);color:#fff;padding:6px 8px;border-radius:3px;font-family:monospace;font-size:11px;resize:vertical;margin-bottom:8px';
             pop.appendChild(ta);
 
@@ -37609,7 +37609,7 @@
         //
         // Names are NOT used for equipment auto-detect — earlier
         // versions had a name-tag pass that surfaced false positives
-        // like "TEXAS", "PU", "ARICK" (asset name prefixes, not
+        // like "TEXAS", "PU", a pad name (asset name prefixes, not
         // equipment types). Per user feedback, subtype is the only
         // source of truth here.
         // v4.180: all three asset breakdowns share parseAssetSubtype —

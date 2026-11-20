@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.132
+// @version      3.133
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.132';
+    const SCRIPT_VERSION = '3.133';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -565,11 +565,11 @@
     const COV_STATUS_COLORS = { ok: '#39ff14', due: '#ffb300', behind: '#ffb300', over: '#ff3b3b', never: '#ff3b3b' };
     const COV_STATUS_LABEL = { ok: 'OK', due: 'Due', behind: 'Behind target', over: 'Overdue', never: 'Never flown' };
     // Rulebooks. floorDays = hard: red when the last fly is older than this
-    // (never inside the current calendar month for the Diamondback book).
+    // (never inside the current calendar month for the client-cadence book).
     // weekTarget = soft: amber when this Mon–Sun week has fewer flies.
     const COV_DEFAULT_CFG = {
-        rulebook: 'diamondback',
-        p1WeekTarget: 2, p2WeekTarget: 1,              // Client A: promoted cadence
+        rulebook: 'cadence',
+        p1WeekTarget: 2, p2WeekTarget: 1,              // promoted cadence
         p3FloorDays: 31,                               // 31 = monthly · 92 = quarterly (their fine print)
         intP1Days: 7, intP2Days: 14, intP3Days: 31,    // internal SLA rolling windows
         noneDays: 31,
@@ -589,6 +589,7 @@
         if (covCfgCache) return covCfgCache;
         const o = gmGet(COV_CFG_KEY, {});
         covCfgCache = Object.assign({}, COV_DEFAULT_CFG, (o && typeof o === 'object') ? o : {});
+        if (covCfgCache.rulebook !== 'internal') covCfgCache.rulebook = 'cadence';   // v3.133: any older saved rulebook value = the client-cadence book
         return covCfgCache;
     }
     function covCfgSet(k, v) { const c = covCfg(); if (c[k] === v) return; c[k] = v; gmSet(COV_CFG_KEY, c); }
@@ -653,7 +654,7 @@
             if (ageDays > win - cfg.dueWithinDays) return 'due';
             return 'ok';
         }
-        // Diamondback book: floor = at least one fly per calendar month
+        // Client-cadence book: floor = at least one fly per calendar month
         // (P3 optionally quarterly); targets promote P1/P2 within the week.
         const floorDays = t === 'P3' ? cfg.p3FloorDays : 31;
         const floorMet = floorDays > 31 ? ageDays <= floorDays : rec.monthFlies > 0;
@@ -1146,7 +1147,7 @@
                 <span style="position:relative"><button class="aim-mb-tbtn" data-cov-act="gear" title="Coverage settings">⚙</button>
                     <div data-cov-gear style="display:none;position:absolute;right:0;top:26px;z-index:5;background:#1a1a1a;border:1px solid #444;border-radius:4px;padding:8px;min-width:260px;font-size:11px;box-shadow:0 4px 14px rgba(0,0,0,.5)">
                         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px"><span>Read back</span><span><input type="number" data-cov-cfg="windowDays" value="${cfg.windowDays}" min="31" max="730" step="1" style="width:64px;background:#0f1216;border:1px solid #444;color:#e6e6e6;padding:2px 4px"> days</span></div>
-                        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px"><span>Rulebook</span><select data-cov-cfg="rulebook" style="background:#0f1216;border:1px solid #444;color:#e6e6e6;padding:2px 4px"><option value="diamondback" ${cfg.rulebook === 'diamondback' ? 'selected' : ''}>Diamondback</option><option value="internal" ${cfg.rulebook === 'internal' ? 'selected' : ''}>Internal SLA</option></select></div>
+                        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px"><span>Rulebook</span><select data-cov-cfg="rulebook" style="background:#0f1216;border:1px solid #444;color:#e6e6e6;padding:2px 4px"><option value="cadence" ${cfg.rulebook !== 'internal' ? 'selected' : ''}>Client cadence</option><option value="internal" ${cfg.rulebook === 'internal' ? 'selected' : ''}>Internal SLA</option></select></div>
                         <label style="display:flex;gap:6px;align-items:center;margin-bottom:6px;cursor:pointer"><input type="checkbox" data-cov-cfg="targetedOnly" ${cfg.targetedOnly !== false ? 'checked' : ''} style="accent-color:#14d2dc"> <span>Targeted only — a fly counts for an asset only when the mission <b>plans</b> that asset (in-frame neighbours ignored)</span></label>
                         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px"><span title="Opening the panel re-reads automatically once the cached result is older than this. 0 = only on ↻ Refresh.">Auto re-read after</span><span><input type="number" data-cov-cfg="ttlMin" value="${cfg.ttlMin}" min="0" max="1440" step="5" style="width:64px;background:#0f1216;border:1px solid #444;color:#e6e6e6;padding:2px 4px"> min</span></div>
                         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px"><span>Parallel reads</span><input type="number" data-cov-cfg="pool" value="${cfg.pool}" min="2" max="24" step="1" style="width:64px;background:#0f1216;border:1px solid #444;color:#e6e6e6;padding:2px 4px"></div>
@@ -1160,7 +1161,7 @@
             <div style="padding:5px 10px;border-bottom:1px solid #2a2a2a;font-size:11px;color:#bbb;display:flex;flex-wrap:wrap;gap:4px 0;align-items:center">
                 ${sum}
                 <span style="flex:1"></span>
-                <span style="color:#777">Rulebook: <b style="color:#14d2dc">${cfg.rulebook === 'internal' ? `Internal SLA (P1 ${cfg.intP1Days}d · P2 ${cfg.intP2Days}d · P3 ${cfg.intP3Days}d)` : `Diamondback (floor monthly${cfg.p3FloorDays > 31 ? ', P3 quarterly' : ''} · P1 ${cfg.p1WeekTarget}×/wk · P2 ${cfg.p2WeekTarget}×/wk)`}</b> · month from ${covFmtDate(bucket.monthStart)} · week from ${covFmtDate(bucket.weekStart)} · read back ${bucket.windowDays || cfg.windowDays} d</span>
+                <span style="color:#777">Rulebook: <b style="color:#14d2dc">${cfg.rulebook === 'internal' ? `Internal SLA (P1 ${cfg.intP1Days}d · P2 ${cfg.intP2Days}d · P3 ${cfg.intP3Days}d)` : `Client cadence (floor monthly${cfg.p3FloorDays > 31 ? ', P3 quarterly' : ''} · P1 ${cfg.p1WeekTarget}×/wk · P2 ${cfg.p2WeekTarget}×/wk)`}</b> · month from ${covFmtDate(bucket.monthStart)} · week from ${covFmtDate(bucket.weekStart)} · read back ${bucket.windowDays || cfg.windowDays} d</span>
             </div>
             <div class="aim-mb-table-wrap">
                 <table>
@@ -1339,9 +1340,9 @@
             version: SCRIPT_VERSION, group: 'Mission Bank Macros', scope: 'mission-bank', priority: 25,
             toggles: [
                 { id: 'rulebook', label: 'Rulebook', type: 'select', default: c.rulebook, options: [
-                    { value: 'diamondback', label: 'Diamondback — floor monthly, P1 2×/wk, P2 weekly' },
+                    { value: 'cadence', label: 'Client cadence — floor monthly, P1 2×/wk, P2 weekly' },
                     { value: 'internal', label: 'Internal SLA — P1 weekly, P2 biweekly, P3 monthly' }] },
-                { id: 'db-header', label: 'Diamondback book', type: 'header' },
+                { id: 'cad-header', label: 'Client cadence book', type: 'header' },
                 { id: 'p1WeekTarget', label: 'P1 target flies per week', type: 'number', min: 0, max: 7, step: 1, default: c.p1WeekTarget },
                 { id: 'p2WeekTarget', label: 'P2 target flies per week', type: 'number', min: 0, max: 7, step: 1, default: c.p2WeekTarget },
                 { id: 'p3FloorDays', label: 'P3 floor (31 = monthly · 92 = quarterly)', type: 'number', min: 7, max: 120, step: 1, default: c.p3FloorDays, unit: 'days' },
@@ -1385,7 +1386,7 @@
     // 🗓 THIS WEEK — Jira ROC schedule (#293, v3.28)
     // ========================================================
     // Pilots fly from the Jira ROC board. The laptop agent (aim-userscripts-data/
-    // rig-agent) publishes the client's tickets to jira/diamondback.json; the
+    // rig-agent) publishes the client's tickets to jira/<client>.json (client = first word of the site name); the
     // panel joins them to Mission Bank missions by NAME (`Customer and Mission
     // Selection`, else the summary "<Client> - <Mission> - FLY n"), to flown
     // takeoff missions by the `Mission ID` fields, and to planned assets through
@@ -1398,7 +1399,7 @@
     const SCH_CFG_KEY = 'aim-mb-schedule-cfg';
     const SCH_BTN_ID = 'aim-mb-sch-btn';
     const SCH_REPO = 'Ned-Yap/aim-userscripts-data';
-    const SCH_DEFAULT_CFG = { feedPath: 'jira/diamondback.json', jiraBase: 'https://percepto.atlassian.net/browse/', doneDays: 14, ttlMin: 30, allSites: false, aliases: '' };
+    const SCH_DEFAULT_CFG = { feedPath: '', jiraBase: 'https://percepto.atlassian.net/browse/', doneDays: 14, ttlMin: 30, allSites: false, aliases: '' };
     const SCH_WIN_LABEL = { week: 'This week', overdue: 'Overdue', upcoming: 'Upcoming', unscheduled: 'Unscheduled', done: 'Done' };
     const SCH_WIN_COLOR = { week: '#14d2dc', overdue: '#ff3b3b', upcoming: '#9aa', unscheduled: '#ffb300', done: '#39ff14' };
     const SCH_WIN_ORDER = { overdue: 0, week: 1, upcoming: 2, unscheduled: 3, done: 4 };
@@ -1408,6 +1409,13 @@
     const schEnt = {};                // sid → entities (genFetchEntities) for planned-asset counts
     let schLoading = null;
     function schCfg() { if (schCfgCache) return schCfgCache; const o = gmGet(SCH_CFG_KEY, {}); schCfgCache = Object.assign({}, SCH_DEFAULT_CFG, (o && typeof o === 'object') ? o : {}); return schCfgCache; }
+    // v3.133: blank feed path = jira/<client>.json, client = first word of the site name ("Acme Field 01" → jira/acme.json).
+    function schFeedPath() {
+        const set = String(schCfg().feedPath || '').trim();
+        if (set) return set;
+        const slug = String(getCurrentSiteName() || '').trim().split(/[\s\-–—_]+/)[0].toLowerCase().replace(/[^a-z0-9]/g, '');
+        return slug ? `jira/${slug}.json` : '';
+    }
     function schCfgSet(k, v) { const c = schCfg(); if (c[k] === v) return; c[k] = v; gmSet(SCH_CFG_KEY, c); }
     // GitHub Contents API read (api.github.com allows cross-origin reads with a bearer token; no GM grant needed).
     // v3.31: GM_xmlhttpRequest (same path as Site Setup Tools) — a plain fetch from the
@@ -1563,8 +1571,10 @@
     }
     async function schLoadFeed() {
         const cfg = schCfg();
-        const j = await mbGhGetJson(cfg.feedPath);
-        if (!j || !Array.isArray(j.tickets)) throw new Error(`no feed yet at ${cfg.feedPath} — run the laptop agent (python rig_agent.py jira) or paste a Jira CSV`);
+        const feedPath = schFeedPath();
+        if (!feedPath) throw new Error('no feed path — the site name is not readable yet; set "Feed path in the data repo" under ⚙ or paste a Jira CSV');
+        const j = await mbGhGetJson(feedPath);
+        if (!j || !Array.isArray(j.tickets)) throw new Error(`no feed yet at ${feedPath} — run the laptop agent (python rig_agent.py jira) or paste a Jira CSV`);
         schStore = { tickets: j.tickets, at: Date.now(), source: 'feed', fetchedAt: j.fetchedAt || '', jql: j.jql || '', client: j.client || '' };
         gmSet(SCH_CACHE_KEY, schStore);
         console.log(`${TAG} schedule: ${j.tickets.length} tickets from the feed (${j.fetchedAt || '?'})`);
@@ -1647,7 +1657,7 @@
                 <input class="aim-mb-search" type="text" placeholder="Search ticket / mission / pilot / status / flight id…" value="${escapeHtml(panelState.search || '')}" />
                 ${winChips}
                 <span style="flex:1"></span>
-                <button class="aim-mb-tbtn" data-sch-act="feed" title="Re-read ${escapeHtml(cfg.feedPath)} from the data repo (written by the laptop agent)">↻ Feed</button>
+                <button class="aim-mb-tbtn" data-sch-act="feed" title="Re-read ${escapeHtml(schFeedPath() || 'the client feed')} from the data repo (written by the laptop agent)">↻ Feed</button>
                 <span style="position:relative"><button class="aim-mb-tbtn" data-sch-act="csv-menu" title="Load a Jira CSV export instead of the feed (Jira → list view → Export → CSV (all fields))">📂 Jira CSV ▾</button>
                     <div data-sch-csvmenu style="display:none;position:absolute;right:0;top:26px;z-index:5;background:#1a1a1a;border:1px solid #444;border-radius:4px;padding:8px;min-width:320px;font-size:11px;box-shadow:0 4px 14px rgba(0,0,0,.5)">
                         <label style="display:inline-block;background:rgba(20,210,220,0.12);color:#14d2dc;border:1px solid rgba(20,210,220,0.5);border-radius:3px;padding:2px 8px;cursor:pointer">📂 Choose CSV<input type="file" accept=".csv,text/csv" data-sch-file style="display:none"></label>
@@ -1658,7 +1668,7 @@
                 <span style="position:relative"><button class="aim-mb-tbtn" data-sch-act="gear" title="Schedule settings">⚙</button>
                     <div data-sch-gear style="display:none;position:absolute;right:0;top:26px;z-index:5;background:#1a1a1a;border:1px solid #444;border-radius:4px;padding:8px;min-width:300px;font-size:11px;box-shadow:0 4px 14px rgba(0,0,0,.5)">
                         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px"><span>Jira browse URL</span><input type="text" data-sch-cfg="jiraBase" value="${escapeHtml(cfg.jiraBase)}" style="width:170px;background:#0f1216;border:1px solid #444;color:#e6e6e6;padding:2px 4px"></div>
-                        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px"><span>Feed path in the data repo</span><input type="text" data-sch-cfg="feedPath" value="${escapeHtml(cfg.feedPath)}" style="width:170px;background:#0f1216;border:1px solid #444;color:#e6e6e6;padding:2px 4px"></div>
+                        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px"><span>Feed path in the data repo</span><input type="text" data-sch-cfg="feedPath" value="${escapeHtml(cfg.feedPath)}" placeholder="${escapeHtml(schFeedPath() || 'jira/<client>.json')}" title="Blank = jira/<client>.json, from the first word of the site name" style="width:170px;background:#0f1216;border:1px solid #444;color:#e6e6e6;padding:2px 4px"></div>
                         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px"><span>Show Done tickets updated within</span><span><input type="number" data-sch-cfg="doneDays" value="${cfg.doneDays}" min="0" max="90" step="1" style="width:56px;background:#0f1216;border:1px solid #444;color:#e6e6e6;padding:2px 4px"> days</span></div>
                         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px"><span>Re-read the feed when older than</span><span><input type="number" data-sch-cfg="ttlMin" value="${cfg.ttlMin}" min="0" max="1440" step="5" style="width:56px;background:#0f1216;border:1px solid #444;color:#e6e6e6;padding:2px 4px"> min</span></div>
                         <label style="display:flex;gap:6px;align-items:center;margin-bottom:6px;cursor:pointer"><input type="checkbox" data-sch-cfg="allSites" ${cfg.allSites ? 'checked' : ''} style="accent-color:#14d2dc"> <span>Show tickets of every site (not just ones whose "Site and Base Name" matches this site)</span></label>
@@ -1759,7 +1769,7 @@
         const c = schCfg();
         controlChannel.postMessage({
             type: 'REGISTER', scriptId: SCH_SCRIPT_ID, name: '🗓 This week (Jira ROC schedule)',
-            description: 'Jira ROC tickets for the client → Mission Bank missions → flown flights + planned assets this Mon–Sun week. Opens from the 🗓 button on the Mission Bank; reads jira/diamondback.json written by the laptop agent (needs the GitHub token), or a pasted Jira CSV export.',
+            description: 'Jira ROC tickets for the client → Mission Bank missions → flown flights + planned assets this Mon–Sun week. Opens from the 🗓 button on the Mission Bank; reads the client Jira feed (jira/<client>.json in the data repo) written by the laptop agent (needs the GitHub token), or a pasted Jira CSV export.',
             version: SCRIPT_VERSION, group: 'Mission Bank Macros', scope: 'mission-bank', priority: 26,
             toggles: [
                 { id: 'doneDays', label: 'Show Done tickets updated within', type: 'number', min: 0, max: 90, step: 1, default: c.doneDays, unit: 'days' },
@@ -2798,8 +2808,8 @@
     function getCurrentSiteName() {
         // Percepto renders the site name in the top-frame site picker.
         // The Ant Design select uses `.ant-select-selection-item` with
-        // a `title` attribute holding the full name (e.g. "Client B 32 -
-        // XBC Giddings Estate 1184H"). Fall back to textContent if no
+        // a `title` attribute holding the full name (e.g. "Acme 32 -
+        // Well Name 1H"). Fall back to textContent if no
         // title attribute, and to null if anything throws (cross-origin
         // / racing the initial render).
         try {
@@ -7994,7 +8004,7 @@
     }
     // v3.109: 'unshielded' is lifted when the asset already sits inside an FFZ — the envelope
     // has been built (SpiderWeb / hand), so it IS flyable and only lacks a mission (1637
-    // "Pad - SHOCKLEY 9A", p3 - battery - unshielded, FFZ + FPs built, never listed by ▣).
+    // "Pad - PAD NAME", p3 - battery - unshielded, FFZ + FPs built, never listed by ▣).
     // Pass `ffzs` (array of {ring}) where known; without it the old rule stands.
     function genInsideFfz(asset, ffzs) {
         if (!Array.isArray(ffzs) || !ffzs.length || !asset || !Array.isArray(asset.ring) || asset.ring.length < 3) return false;
@@ -9565,7 +9575,7 @@
         for (let i = 0; i < n; i++) { const t = tMid + (i - (n - 1) / 2) * step; units.push({ ring, name: `${name} ${i + 1}/${n}`, c: { lat: c.lat + (u.y * t) / mLat, lng: c.lng + (u.x * t) / mLng }, virtual: true }); }
         return units;
     }
-    // ── ROW TEMPLATE (v3.69, from the user's hand-built reference on GRANTHAM WEST) ──
+    // ── ROW TEMPLATE (v3.69, from the user's hand-built reference on PAD NAME WEST) ──
     // Order the wells along the row, chunk into trios (5 → 3+2, 4 → 2+2, never a lone 1).
     // Per group: a nav on EACH broadside, perpendicular to the row at the standoff, taking
     // one snapshot per GAP between adjacent wells (two wells per image, the middle well in
@@ -10783,7 +10793,7 @@
 
     // Asset↔FFZ distance measured RING-PERIMETER to polygon (sampled ~10 m) —
     // corners alone miss an FFZ hugging the middle of a pad edge (engraved
-    // segments-not-vertices rule; live case v2.34: "ATKINS 14 4213H — no FFZ"
+    // segments-not-vertices rule; live case v2.34: "WELL NAME 1H — no FFZ"
     // with its FFZ visibly touching the pad edge).
     function rngRingToPolyM(ringA, ringB) {
         let best = Infinity;
@@ -11493,7 +11503,7 @@
     }
     // ── 🏁 Tier macros (v3.102) ─────────────────────────────────────────────
     // Account-manager ask (2026-10-30): per BASE, one macro per priority tier — every P1 pad
-    // nearest Horn Frog in one mission, every P2 in another, P3 likewise; same three at Elias.
+    // nearest base in one mission, every P2 in another, P3 likewise; same three at the next base.
     // No co-mixing of tiers, P4 (quarterly) not built. Pad → base = shortest LEGAL route on the
     // 🔋 graph (not straight-line); a pad over the one-way radius is skipped (same gate as 🖊).
     // Each set is ordered far→near on its OWN base's distances (branch walk); the simulator only
@@ -11666,12 +11676,12 @@
     }
     // v3.104: pad → micro by GEOMETRY (the 🧩 detector: a mission whose steps sit on exactly one pad),
     // the same link ▣ Generate's "have a micro" uses. The name ladder missed the legacy micros
-    // ("HFNC - Adams 47 2" vs pad "Pad - ADAMS 47 2": 98 of 184 tiered pads skipped on 1637).
+    // ("ABNC - Name 47 2" vs pad "Pad - PAD NAME 2": 98 of 184 tiered pads skipped on 1637).
     // Name match stays as the fallback for a pad the detector sees no steps on (flagged).
     // Several micros on one pad → the one the name ladder picks, else the most recently saved
     // (highest id — Percepto mints a new id per save); the others are listed in the report.
     // v3.105 — which micro wins when a pad carries several. Keeper family = names that
-    // start with a BASE CODE (HF…/EL… — HFNC = Horn Frog North Central, ELSE = Elias
+    // start with a BASE CODE (AB…/CD… — ABNC = Base A North Central, CDSE = Base B
     // South East); the un-coded NNE/N family and junk names (TEST, DUP, Base Hop,
     // timestamped copies) lose. Ties → stripped name equals the pad name → newest id.
     const TM_JUNK_RE = /\bTEST\b|\bDUP\b|Base Hop|\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}/i;
@@ -11701,7 +11711,7 @@
             let viaName = false;
             if (!cands.length) {
                 // v3.108: EXACT name only (prefix stripped) — the ladder's prefix match handed
-                // "Pad - SHOCKLEY 9A" the mission for "SHOCKLEY 9A 6" on 1637.
+                // "Pad - PAD NAME" the mission for "PAD NAME 6" on 1637.
                 const wantN = tmNorm(a.name);
                 const byName = rankMatchMissions(a.name, missions).filter(m => !TM_JUNK_RE.test(m.name || '') && tmNorm(m.name) === wantN);
                 if (!byName.length) { skip(a, 'no micro on this pad (no steps on it, no exact name match)'); return; }
@@ -12124,7 +12134,7 @@
     // as a SOLO of its primary pad (the pad with the most attributed steps).
     const MCV_NOT_MACRO_KEY = 'aim-mb-not-macros';
     // v3.38: classification RULES (GM, CP-free). The site convention is the
-    // signal: a MICRO is named after its pad ("NNE - SMITH SN 48-37 BATTERY"),
+    // signal: a MICRO is named after its pad ("NNE - PAD NAME BATTERY"),
     // a MACRO carries only a section word ("NNE", "North Assets …") and spans
     // 10–30 pads. Geometry alone can't tell a micro from a macro on a dense
     // nested site: a micro's nav brushes a neighbour's 150-ft halo and reads
@@ -12927,7 +12937,7 @@
         return () => !flagCount || (rv && rv.checked);
     }
     // v3.40: micro NAME template for ✂ split — site convention is
-    // "<section> - <pad>" ("NNE - SMITH SN 48-37 BATTERY"); the importer's
+    // "<section> - <pad>" ("NNE - PAD NAME BATTERY"); the importer's
     // "Pad - " wrapper is dropped from {pad}. {asset} = the raw asset name.
     const MCV_SPLIT_NAME_KEY = 'aim-mb-split-name';
     function mcvSplitNameTpl() { let t = ''; try { t = String(gmGet(MCV_SPLIT_NAME_KEY, '') || ''); } catch (e) { console.warn(`${TAG} [✂] name tpl read failed`, e); } return t.trim() || '{section} - {pad}'; }
@@ -13824,7 +13834,7 @@
         const emptyNavs = parsed.units.map((u, ui) => ui).filter(ui => !parsed.units[ui].bundles.length && !parsed.units[ui].others.length);
         // clusters + solve — tried at TWO radii, and the CURRENT order is a
         // scored candidate too (v2.67). Live NE 1-2 test: the user's manual
-        // interleave (Rivers 1974JH sandwiched INSIDE the Jack Mohr run) BEAT
+        // interleave (Well B 1H sandwiched INSIDE the Well A run) BEAT
         // contiguous clusters under legal routing by 3% — 1974JH sat just
         // outside the 400 ft radius, so the solver wasn't allowed to consider
         // that shape. 2× radius puts it in the search space, and keeping the
@@ -14043,7 +14053,7 @@
         // sits east, so the straight-line guess picks the wrong side.
         // v2.79 — the pass is now the full lasso BRANCH WALK applied inside
         // every same-pad run, with that run's arrival point as "base". Decoded
-        // from the SW 1-2 MIDKIFF pad via the route_points corridor graph:
+        // from the SW 1-2 PAD NAME pad via the route_points corridor graph:
         // the user's expected order (12→11→15→14→13) is exactly: start at the
         // LEGAL-deepest nav from the arrival, next = deepest route junction
         // with the current nav (junc = (dArr(a)+dArr(b)−d(a,b))/2), ties →
@@ -14052,7 +14062,7 @@
         // (the corridor arrives from the WEST; straight-line depth is inverted
         // by the corridor loop, so LEGAL distances are mandatory here).
         // Doctrine over feet: the walk may cost a little more than the feet-
-        // optimal sweep (MIDKIFF: ~300 ft) — "we ALWAYS start at the furthest
+        // optimal sweep (PAD NAME: ~300 ft) — "we ALWAYS start at the furthest
         // nav at a pad and move back". Applied unconditionally per run.
         const branchWalk = (uis, arrPt) => {
             const loc = ui => parsed.units[ui].nav.location;
@@ -16592,8 +16602,8 @@
         return c.length === 1 ? c[0] : null;
     }
 
-    // v2.01: mission names carry section prefixes ("NNE - SMITH SN 48-37 03
-    // 203H" for pad "SMITH SN 48-37 03 203H" — the generator's
+    // v2.01: mission names carry section prefixes ("NNE - PAD NAME
+    // 203H" for pad "PAD NAME 203H" — the generator's
     // "{section} - {asset}" template). Rank matches: exact → ends with
     // " - <pad>" → contains. Multiple survivors at a rank → the panel shows
     // a pick-one chooser instead of guessing (a "Merged - A + B" mission
@@ -16618,8 +16628,8 @@
         c = all.filter(m => norm(m).indexOf(want) >= 0);
         if (c.length) return c;
         // v2.91: pad-root rung — some sites name missions "<PAD> _ID <n>"
-        // while asset polygons are "<Pad> <Equipment>" ("LHS Ranch 1702BH
-        // Pump Jack" ↔ "LHS RANCH 1702BH _ID 5062"). Neither name contains
+        // while asset polygons are "<Pad> <Equipment>" ("Pad Name 1H
+        // Pump Jack" ↔ "PAD NAME 1H _ID 5062"). Neither name contains
         // the other, but both extend the same pad root. Drop up to 3
         // trailing tokens (equipment suffixes are 1–3 words: "Pump Jack",
         // "Gas Lift Header", "Flow Line 2") and take missions whose name IS
