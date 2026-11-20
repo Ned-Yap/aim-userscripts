@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.00
+// @version      1.01
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
-// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v1.00 (#343): 🔋 Sweep Scheduler shows each site's battery type and usage, read from the Pulse maintenance dashboard table while that page is open in another tab (the tab reloads itself every 10 h). v0.90 (#341): 📰 Report cards show each asset's findings in the last 12 / 6 / 3 months with a rising / steady / falling cue (the 'days flagged' number is gone from the cards). v0.89 (#341): 📈 Findings Report keeps its last finished run (browser IndexedDB) — it is back after a reload, so filters, the report period and every export work without re-running; ✕ Clear forgets it. v0.88 (#341): 📈 Findings Report gains 📰 Report — a print-ready (Save as PDF) narrative for the last 7 / 14 / 30 days: one card per asset with its 12-month history, assets that keep coming back, trend, by site; the earlier HTML is now 📊 Dashboard; finding types that differ only by capitalisation are merged. v0.87 (#341): 📈 Findings Report — the Data View Issues tab (emissions and every other finding type) across the picked sites: findings per month and per 100 flights, assets flagged on 2+ days, by type / component / site, rejected + status + type filters, issues CSV, site×month CSV and a self-contained HTML report whose rows link to the site and the issue. v0.86: 📅 Sweep Scheduler gains a 📆 Calendar view (the forecast day by day, Mon–Fri weeks, exports). v0.85 (#335): 📅 Sweep Scheduler — for a client's recurring inspection missions (first profile: Client C feeder poles) it reads the live mission bank, the flown log and each base's docked drone, works out how old each mission's oldest pole is (count-back to 90 % of a full sweep), and lists what to fly next in order with flights planned per month, flights per sweep, payload (4.0 / 3.0 / none), per-site schedule switches, mission holds, Sheets / CSV / Slack text. v0.84 (#334): ⚙ ESC Sweep — for every flown flight of the picked sites × date window, download the log archive (in memory only), read the ESC telemetry and list each flight where the drone raised the ESC ratio alarm (false alarm vs real) plus long takeoff spikes; capped per run with Continue, Pause / Stop, gentle mode, finished flights remembered, Sheets / CSV, each row links to the full Mission Logs card. v0.82 (#331): 🎬 Mission Review — sweep the mission log of the picked sites (or every site) for flagged flights; checks are a registry (first: flew but NO video; also no images / fewer images than planned / landing failed); per-site counts, every flight a link to its Mission Playback, Copy → Sheets / CSV. v0.79 (#329): 🚩 SOP Sweep — run Site-Setup SOP checks across the picked sites (or every site) from LIVE /map_objects/; first check = FP ⨯ FP crossing (segments that cross / T / overlap with no shared vertex); per-site rows, 🎯 fly-to on the landing map, ↗ opens the site in a NEW tab and jumps to the spot (?aim-goto deep link, Site Setup Tools v4.498+), Copy → Sheets / CSV. v0.78 (#318): 🖼 Map Export — renders what the landing map shows (KML layers, cross-ref bands, site setups, site names) on its own canvas at print size with basemap tiles, legend, scale bar, north arrow, title and a dead-space trim (transparent outside the content); preview modal with toggles; ⬇ PNG poster or 🌐 self-contained interactive HTML (small, zooms forever). v0.77: Site setups scope — draw the FFZs / flight paths / assets of ONLY the sites matching a names box or the 📦 Fleet Data pick (independent of the label filter, "= labels" copies it) so another client's setup never shows on a shared map. v0.76: site labels "Only matching / picked" mode (names box or the 📦 Fleet Data pick keep their label, every other site name hidden), 🗺 on-map legend (cross-ref bands + numbers, shown KML layers, site-setup colours) and 📷 Client view (names hidden, legend on, panel + button tucked away for a screenshot; ↩ Exit restores). v0.75: 📊 Fleet Metrics follows the 📦 Fleet Data pick ("picked only" checkbox, on by default; nothing picked → every site) — table, totals, Sheets / CSV and 🛂 Approval FPs. v0.67 (#285): 📡 Coverage — radius circles on the landing map (any Ø, drag centre / edge, live count of sites inside under a fully-inside / centre-inside rule, KML export), footprint of the picked sites (span, convex hull, smallest enclosing circle, site extents + FFZ acreage), 🧠 Best spot (centre covering the MOST sites at a Ø — exact candidate search) + 🗂 Plan all (greedy: how many circles cover every site), 📏 two-click ruler. v0.57 (#274): data check shows whether the skipped no-duration rows carry images / videos (+ first video object), and 🔎 probes one /missions/ page without the field filter to list every server field (hunting an abort / end-reason field). v0.56 (#274): 📋 Copy check button on the data check. v0.55 (#276): Utilization lenses — 🧑‍✈️ Pilots / 🛸 Drones / 📍 Sites / 🏢 Clients (sites + clients: flights, drone-hrs, air, flyable drone-hrs, util %, coverage, sites never flown, incomplete, capture %, gaps); Drones gain flyable hrs + util %. v0.54 (#274): Incomplete flights + Capture % from planned-vs-actual image counts (Pilots / Pilot-days / Flights), raw state codes + mission_data_reports sample in the data check. v0.53 (#274): ⚙ Site rules is a real button. v0.52 (#274): Pilot Utilization hides all-zero / blank columns (panel + Sheets + CSV) with a 'hidden:' note and a checkbox to show them. v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
+// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v1.01 (#344): 📅 Sweep Scheduler keeps its last run (it is back after a reload) and ▶ Update reads only the flights since then; missions and docked drones are re-read once a day. v1.00 (#343): 🔋 Sweep Scheduler shows each site's battery type and usage, read from the Pulse maintenance dashboard table while that page is open in another tab (the tab reloads itself every 10 h). v0.90 (#341): 📰 Report cards show each asset's findings in the last 12 / 6 / 3 months with a rising / steady / falling cue (the 'days flagged' number is gone from the cards). v0.89 (#341): 📈 Findings Report keeps its last finished run (browser IndexedDB) — it is back after a reload, so filters, the report period and every export work without re-running; ✕ Clear forgets it. v0.88 (#341): 📈 Findings Report gains 📰 Report — a print-ready (Save as PDF) narrative for the last 7 / 14 / 30 days: one card per asset with its 12-month history, assets that keep coming back, trend, by site; the earlier HTML is now 📊 Dashboard; finding types that differ only by capitalisation are merged. v0.87 (#341): 📈 Findings Report — the Data View Issues tab (emissions and every other finding type) across the picked sites: findings per month and per 100 flights, assets flagged on 2+ days, by type / component / site, rejected + status + type filters, issues CSV, site×month CSV and a self-contained HTML report whose rows link to the site and the issue. v0.86: 📅 Sweep Scheduler gains a 📆 Calendar view (the forecast day by day, Mon–Fri weeks, exports). v0.85 (#335): 📅 Sweep Scheduler — for a client's recurring inspection missions (first profile: Client C feeder poles) it reads the live mission bank, the flown log and each base's docked drone, works out how old each mission's oldest pole is (count-back to 90 % of a full sweep), and lists what to fly next in order with flights planned per month, flights per sweep, payload (4.0 / 3.0 / none), per-site schedule switches, mission holds, Sheets / CSV / Slack text. v0.84 (#334): ⚙ ESC Sweep — for every flown flight of the picked sites × date window, download the log archive (in memory only), read the ESC telemetry and list each flight where the drone raised the ESC ratio alarm (false alarm vs real) plus long takeoff spikes; capped per run with Continue, Pause / Stop, gentle mode, finished flights remembered, Sheets / CSV, each row links to the full Mission Logs card. v0.82 (#331): 🎬 Mission Review — sweep the mission log of the picked sites (or every site) for flagged flights; checks are a registry (first: flew but NO video; also no images / fewer images than planned / landing failed); per-site counts, every flight a link to its Mission Playback, Copy → Sheets / CSV. v0.79 (#329): 🚩 SOP Sweep — run Site-Setup SOP checks across the picked sites (or every site) from LIVE /map_objects/; first check = FP ⨯ FP crossing (segments that cross / T / overlap with no shared vertex); per-site rows, 🎯 fly-to on the landing map, ↗ opens the site in a NEW tab and jumps to the spot (?aim-goto deep link, Site Setup Tools v4.498+), Copy → Sheets / CSV. v0.78 (#318): 🖼 Map Export — renders what the landing map shows (KML layers, cross-ref bands, site setups, site names) on its own canvas at print size with basemap tiles, legend, scale bar, north arrow, title and a dead-space trim (transparent outside the content); preview modal with toggles; ⬇ PNG poster or 🌐 self-contained interactive HTML (small, zooms forever). v0.77: Site setups scope — draw the FFZs / flight paths / assets of ONLY the sites matching a names box or the 📦 Fleet Data pick (independent of the label filter, "= labels" copies it) so another client's setup never shows on a shared map. v0.76: site labels "Only matching / picked" mode (names box or the 📦 Fleet Data pick keep their label, every other site name hidden), 🗺 on-map legend (cross-ref bands + numbers, shown KML layers, site-setup colours) and 📷 Client view (names hidden, legend on, panel + button tucked away for a screenshot; ↩ Exit restores). v0.75: 📊 Fleet Metrics follows the 📦 Fleet Data pick ("picked only" checkbox, on by default; nothing picked → every site) — table, totals, Sheets / CSV and 🛂 Approval FPs. v0.67 (#285): 📡 Coverage — radius circles on the landing map (any Ø, drag centre / edge, live count of sites inside under a fully-inside / centre-inside rule, KML export), footprint of the picked sites (span, convex hull, smallest enclosing circle, site extents + FFZ acreage), 🧠 Best spot (centre covering the MOST sites at a Ø — exact candidate search) + 🗂 Plan all (greedy: how many circles cover every site), 📏 two-click ruler. v0.57 (#274): data check shows whether the skipped no-duration rows carry images / videos (+ first video object), and 🔎 probes one /missions/ page without the field filter to list every server field (hunting an abort / end-reason field). v0.56 (#274): 📋 Copy check button on the data check. v0.55 (#276): Utilization lenses — 🧑‍✈️ Pilots / 🛸 Drones / 📍 Sites / 🏢 Clients (sites + clients: flights, drone-hrs, air, flyable drone-hrs, util %, coverage, sites never flown, incomplete, capture %, gaps); Drones gain flyable hrs + util %. v0.54 (#274): Incomplete flights + Capture % from planned-vs-actual image counts (Pilots / Pilot-days / Flights), raw state codes + mission_data_reports sample in the data check. v0.53 (#274): ⚙ Site rules is a real button. v0.52 (#274): Pilot Utilization hides all-zero / blank columns (panel + Sheets + CSV) with a 'hidden:' note and a checkbox to show them. v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        *://qa.percepto.app/*
@@ -157,7 +157,7 @@
     if (location.hostname === 'pulse.percepto.app') { pulseBridge(); return; }
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '1.00';
+    const SCRIPT_VERSION = '1.01';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -8539,6 +8539,10 @@
     const skLocal = (() => { const v = loadJson(KEY_SK, {}); return { hold: (v.hold && typeof v.hold === 'object') ? v.hold : {}, siteOn: (v.siteOn && typeof v.siteOn === 'object') ? v.siteOn : {}, pulse: (v.pulse && typeof v.pulse === 'object') ? v.pulse : {} }; })();
     const skLocalSave = () => gmSet(KEY_SK, JSON.stringify(skLocal));
     const SK_CONCURRENCY = 2;
+    // v1.01 (#344): the run is kept (IndexedDB) and ▶ Update only reads what is new.
+    const SK_BANK_MAX_AGE = 24 * 3600000;   // mission bank + docked drone are re-read when older than this
+    const SK_LOG_OVERLAP_DAYS = 3;          // re-read the last days of the saved log: image counts keep rising while uploads finish
+    const SK_RUN_KEY = 'sk-last', SK_RUN_V = 1;
     let skData = null;      // { at, sites: { sid: { name, status, payload, drone, cams, missions:[…], flights:[…], err:{bank,log,setup} } }, start, end }
     let skRes = null;       // skCompute result
     let skRun = null;       // { done, total, msg, aborted, seq }
@@ -8562,11 +8566,11 @@
         out.label = P.payloads[bestIdx].label; out.want = !!P.payloads[bestIdx].want;
         return out;
     }
-    async function skFetchSite(sid, P, start, end, isDead, only) {
+    async function skFetchSite(sid, P, start, end, isDead, only, logFrom) {
         const rec = (skData.sites[sid] = skData.sites[sid] || { name: siteName(sid), status: siteStatus(sid), payload: null, missions: null, flights: null, err: {} });
         const want = (k) => !only || only[k];
         if (want('setup')) {
-            try { const raw = await fdGetJson(`/map_objects/?getPoiMapObjectsAsList=true&site_id=${encodeURIComponent(sid)}`, 60000); rec.payload = skPayloadOf(P, extractList(raw)); delete rec.err.setup; }
+            try { const raw = await fdGetJson(`/map_objects/?getPoiMapObjectsAsList=true&site_id=${encodeURIComponent(sid)}`, 60000); rec.payload = skPayloadOf(P, extractList(raw)); rec.setupAt = Date.now(); delete rec.err.setup; }
             catch (e) { rec.err.setup = (e && e.message) || String(e); console.warn(`${TAG} sweep scheduler: site ${sid} setup failed:`, e); }
         }
         if (isDead()) return;
@@ -8578,19 +8582,46 @@
                 catch (e) { if (/401\/403|login page/.test(String(e && e.message))) throw e; console.warn(`${TAG} sweep scheduler: site ${sid} mission bank failed (${e && e.message || e}) — retrying once`); raw = await fdGetJson(url, 240000); }
                 if (!Array.isArray(raw)) throw new Error('unexpected /available_app/ response shape (not a list)');
                 rec.missions = raw.filter(m => m && m.is_active !== false).map(m => ({ id: m.id, name: m.name || '', points: (m.instructions || []).filter(i => i && i.type_name === P.stepType).length }));
+                rec.bankAt = Date.now();
                 delete rec.err.bank;
             } catch (e) { rec.err.bank = (e && e.message) || String(e); console.warn(`${TAG} sweep scheduler: site ${sid} mission bank failed:`, e); }
         }
         if (isDead()) return;
         if (want('log')) {
             try {
-                const got = await nvFetchSite(sid, start, end, isDead);
-                rec.flights = got.rows.map(m => ({ id: m.id, name: m.app_name || '', when: m.when, durMs: Number(m.duration) || 0, images: m.image_count }));
+                const inc = !!(logFrom && Array.isArray(rec.flights));        // only the days since the saved log ended
+                const got = await nvFetchSite(sid, inc ? logFrom : start, end, isDead);
+                const fresh = got.rows.map(m => ({ id: m.id, name: m.app_name || '', when: m.when, durMs: Number(m.duration) || 0, images: m.image_count }));
+                if (inc) { const seen = new Set(fresh.map(x => x.id)); const t0 = start.getTime(); rec.flights = rec.flights.filter(x => !seen.has(x.id) && !(Date.parse(x.when) < t0)).concat(fresh); }
+                else { rec.flights = fresh; rec.logFrom = start.getTime(); }
+                rec.logTo = end.getTime();
                 if (got.partial) rec.err.log = 'page cap hit — older flights were not read'; else delete rec.err.log;
             } catch (e) { if (e && e.message === 'aborted') return; rec.err.log = (e && e.message) || String(e); console.warn(`${TAG} sweep scheduler: site ${sid} mission log failed:`, e); }
         }
     }
-    async function skRunFetch(retryFailed) {
+    function skSaveRun() {
+        if (!skData || !Object.values(skData.sites).some(r => Array.isArray(r.flights) || Array.isArray(r.missions))) return;   // nothing readable → keep the previous saved run
+        fiDbOp('readwrite', st => st.put({ v: SK_RUN_V, data: skData }, SK_RUN_KEY))
+            .then(() => console.log(`${TAG} sweep scheduler: run saved (${Object.keys(skData.sites).length} site(s)) — it will be back after a reload`))
+            .catch(e => { console.warn(`${TAG} sweep scheduler: could not save the run:`, e); setStatus(`Sweep scheduler: could not save this run for next time (${e && e.message || e}) — the table still works now`); });
+    }
+    function skLoadRun() {
+        fiDbOp('readonly', st => st.get(SK_RUN_KEY)).then(rec => {
+            if (!rec || skData || skRun) return;                    // nothing saved, or a run already started this session
+            const d = rec.data;
+            if (rec.v !== SK_RUN_V || !d || !d.sites || typeof d.sites !== 'object' || !(d.start instanceof Date) || !(d.end instanceof Date) || typeof d.at !== 'number') {
+                console.warn(`${TAG} sweep scheduler: saved run has an old / unexpected shape — ignored (run it again)`); return;
+            }
+            Object.values(d.sites).forEach(r => { if (!r.err || typeof r.err !== 'object') r.err = {}; });
+            skData = d; skData.saved = true;
+            skRecompute();
+            console.log(`${TAG} sweep scheduler: restored the saved run of ${new Date(d.at).toLocaleString()} (${Object.keys(d.sites).length} site(s))`);
+            if (panelEl) renderPanel();
+        }).catch(e => console.warn(`${TAG} sweep scheduler: could not read the saved run:`, e));
+    }
+    // mode: 'full' = read everything · 'update' = keep the saved run, read only new flights (+ missions / drones older than a day) · 'retry' = only what failed
+    async function skRunFetch(mode) {
+        const retryFailed = mode === 'retry';
         if (skRun) return;
         try { await fetchRawSites(false); } catch (e) { console.warn(`${TAG} sweep scheduler: /sites/ failed:`, e); setStatus(`Sweep scheduler: /sites/ failed — ${e.message}`); return; }
         const P = skProfile();
@@ -8600,9 +8631,18 @@
             const ids = skScopeIds();
             if (!ids.length) { setStatus('Sweep scheduler: no site matches the site filter'); return; }
             const end = new Date(); const start = new Date(); start.setMonth(start.getMonth() - (Number(ftCfg.sk.lookMo) > 0 ? Number(ftCfg.sk.lookMo) : 12));
-            skData = { at: Date.now(), sites: {}, start, end };
-            skRes = null;
-            jobs = ids.map(sid => ({ sid, only: null }));
+            const prev = (mode === 'update' && skData) ? skData : null;
+            const sites = {}; const recent = (t) => typeof t === 'number' && Date.now() - t < SK_BANK_MAX_AGE;
+            jobs = ids.map(sid => {
+                const c = prev && prev.sites[sid];
+                const ok = c && !Object.keys(c.err || {}).length && Array.isArray(c.flights) && Array.isArray(c.missions) && c.payload && typeof c.logTo === 'number' && typeof c.logFrom === 'number';
+                if (!ok) return { sid, only: null };                               // new site, or its last read failed → read it all
+                sites[sid] = c; c.name = siteName(sid); c.status = siteStatus(sid);
+                const covers = c.logFrom <= start.getTime() + SK_DAY;              // the saved log reaches back to the start of the window
+                return { sid, only: { setup: !recent(c.setupAt), bank: !recent(c.bankAt), log: true }, logFrom: covers ? new Date(Math.max(start.getTime(), c.logTo - SK_LOG_OVERLAP_DAYS * SK_DAY)) : null };
+            });
+            skData = { at: Date.now(), sites, start, end };
+            if (!prev) skRes = null;
         }
         if (!jobs.length) { setStatus('Sweep scheduler: nothing to retry'); return; }
         const seq = ++skRunSeq;
@@ -8615,7 +8655,7 @@
             while (cursor < jobs.length) {
                 if (isDead()) return;
                 const job = jobs[cursor++];
-                await skFetchSite(job.sid, P, skData.start, skData.end, isDead, job.only);
+                await skFetchSite(job.sid, P, skData.start, skData.end, isDead, job.only, job.logFrom);
                 if (skRunSeq !== seq) return;
                 skRun.done++; skRun.msg = siteName(job.sid);
                 setStatus(`Sweep scheduler… ${skRun.done}/${skRun.total} · ${skRun.msg}`);
@@ -8627,7 +8667,9 @@
         finally { if (skRunSeq === seq) { stopped = !!(skRun && skRun.aborted); skRun = null; } }
         if (skRunSeq !== seq) return;
         if (stopped) skData.partial = true; else if (!retryFailed) skData.partial = false;
+        skData.saved = false;
         skRecompute();
+        skSaveRun();
         const failed = skFailed();
         setStatus(`Sweep scheduler done — ${skRes ? `${skRes.eligible} mission(s) to schedule on ${skRes.schedSites} site(s)` : 'no result'}${failed.length ? ` · ⚠ ${failed.length} site(s) had a FAILED read — their rows are incomplete (↻ Retry failed)` : ''}`);
         console.log(`${TAG} sweep scheduler ${seq}: done — ${skRes ? `${skRes.units} unit(s), ${skRes.eligible} eligible, N ${skRes.N.toFixed(2)}` : 'no result'}, ${failed.length} failed site(s)`);
@@ -8918,7 +8960,9 @@
         h.push('<div style="padding:6px 10px;display:flex;gap:14px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;">'
             + (running
                 ? `<span data-ft="sk-abort" style="cursor:pointer;color:#ff5252;font-weight:bold">■ Stop (${skRun.done}/${skRun.total})</span><span style="color:#aaa">${escapeHtml(skRun.msg)} — big mission banks take a minute or two each</span>`
-                : `<span data-ft="sk-run" style="cursor:pointer;color:#5fff5f;font-weight:bold">▶ ${skData ? 'Re-run' : 'Run'} — read missions + flown log</span>`)
+                : (skData ? '<span data-ft="sk-run" style="cursor:pointer;color:#5fff5f;font-weight:bold" title="Keeps what is saved and reads only the flights since the last run (plus the last 3 days again, for late image uploads). Missions and docked drones are re-read when they are more than a day old. A new site, or one whose last read failed, is read in full.">▶ Update — new flights only</span>'
+                    + '<span data-ft="sk-full" style="cursor:pointer;color:#aaa" title="Throw away the saved run and read every mission bank and the whole log window again. Use it after missions were added or renamed today.">⟳ Full re-read</span>'
+                    : '<span data-ft="sk-run" style="cursor:pointer;color:#5fff5f;font-weight:bold">▶ Run — read missions + flown log</span>'))
             + (!running && skFailed().length ? `<span data-ft="sk-retry" style="cursor:pointer;color:#ffa030;font-weight:bold" title="Re-read only what failed">↻ Retry failed (${skFailed().length})</span>` : '')
             + (skRes && !running ? '<span data-ft="sk-sheets" style="cursor:pointer;color:#7adfe6" title="The table (every column) on the clipboard — paste into Google Sheets / Excel">📋 Copy → Sheets</span>'
                 + '<span data-ft="sk-csv" style="cursor:pointer;color:#7adfe6">⬇ CSV</span>'
@@ -8933,7 +8977,7 @@
         }
         if (!skRes) { h.push(`<div style="padding:8px 10px;color:#888">${running ? 'Reading…' : 'No result.'}</div>`); return h.join(''); }
         const R = skRes;
-        h.push(`<div style="padding:5px 10px;color:#aaa;border-bottom:1px solid #222834;">Read ${new Date(skData.at).toLocaleString()} · log ${fdYmd(skData.start)} → ${fdYmd(skData.end)} · <span style="color:#ddd">${escapeHtml(skHeadline())}</span></div>`);
+        h.push(`<div style="padding:5px 10px;color:#aaa;border-bottom:1px solid #222834;">${skData.saved ? '<span style="color:#ffd27a" title="This is the run saved on this computer. ▶ Update reads only what is new.">Saved run — </span>' : ''}Read ${new Date(skData.at).toLocaleString()}${(() => { const t = Object.values(skData.sites).map(r => r.bankAt).filter(x => typeof x === 'number'); return t.length ? ` · missions read ${skPulseAge(Math.min.apply(null, t))} ago` : ''; })()} · log ${fdYmd(skData.start)} → ${fdYmd(skData.end)} · <span style="color:#ddd">${escapeHtml(skHeadline())}</span></div>`);
         {   // 🔋 Pulse battery data status
             const PZ = skPulse(); const un = PZ ? skPulseUnmatched() : [];
             const old = PZ && (Date.now() - PZ.at) > 24 * 3600000;
@@ -10851,7 +10895,7 @@
                     else if (cmd === 'sop-sheets') sopCopySheets();
                     else if (cmd === 'sop-csv') sopDownloadCsv();
                     else if (cmd === 'sop-clear') { sopSweepSeq++; sopSweep = null; sopOpenSite = null; renderPanel(); }
-                    else if (cmd === 'sk-run' || cmd === 'sk-retry') skRunFetch(cmd === 'sk-retry').catch(e => { console.warn(`${TAG} sweep scheduler threw:`, e); setStatus(`Sweep scheduler failed — ${e.message}`); skRun = null; renderPanel(); });
+                    else if (cmd === 'sk-run' || cmd === 'sk-retry' || cmd === 'sk-full') skRunFetch(cmd === 'sk-retry' ? 'retry' : (cmd === 'sk-run' && skData ? 'update' : 'full')).catch(e => { console.warn(`${TAG} sweep scheduler threw:`, e); setStatus(`Sweep scheduler failed — ${e.message}`); skRun = null; renderPanel(); });
                     else if (cmd === 'sk-abort') { if (skRun) skRun.aborted = true; setStatus('Sweep scheduler stopping after the reads already started…'); }
                     else if (cmd === 'sk-sheets') { if (ftCfg.sk.view === 'cal' && skRes) skCalCopySheets(); else skCopySheets(); }
                     else if (cmd === 'sk-csv') { if (ftCfg.sk.view === 'cal' && skRes) skCalDownloadCsv(); else skDownloadCsv(); }
@@ -12077,6 +12121,7 @@ map.fitBounds([[D.bbox.minLat, D.bbox.minLng], [D.bbox.maxLat, D.bbox.maxLng]], 
     // Persistent KML layers with show=true should appear without opening
     // the panel — boot once the token has had a moment to arrive
     setTimeout(() => { try { kmlBoot(); } catch (e) {} }, 2500);
+    skLoadRun();   // v1.01: bring back the last 📅 Sweep Scheduler run (async, IndexedDB)
     fiLoadRun();   // v0.89: bring back the last finished 📈 Findings run (async, IndexedDB)
     console.log(`${TAG} v${SCRIPT_VERSION} ready (${ENV_LABEL}${onLandingPage() ? ', landing page' : ''})`);
 })();

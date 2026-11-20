@@ -1,3 +1,10 @@
+## 2026-11-20 — 🌐 AIM Fleet Tools latest v1.01 (latest only) — 📅 Sweep Scheduler keeps its run and only reads what is new
+
+- **The last run is saved on your computer** (feature #344). Open the Sweep Scheduler after a reload and the table is already there, marked "Saved run".
+- **▶ Update — new flights only.** Reads just the flights since the last run (and the last 3 days again, because image counts keep rising while uploads finish). Mission banks and docked drones are re-read only when they are more than a day old.
+- **⟳ Full re-read** throws the saved run away and reads everything again. Use it after missions were added or renamed today.
+- A site that is new to the filter, or whose last read failed, is read in full automatically. A longer log window than the saved one also triggers a full log read.
+
 ## 2026-11-20 — 🌐 AIM Fleet Tools latest v1.00 (latest only) — 🔋 battery type and usage in the Sweep Scheduler
 
 - **Two new columns: Battery and Battery usage %** (feature #343), per site, in the table and in every export. "All columns" adds the Pulse drone and downtime reason.
