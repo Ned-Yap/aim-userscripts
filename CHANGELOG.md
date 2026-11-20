@@ -1,3 +1,7 @@
+## 2026-11-20 — PROD: Site Setup Tools v4.406 / Fleet Tools v0.73 / Issues v1.49 / Mission Bank Tools v2.96 / Map Styler v34.158 — comment and help-text cleanup
+
+- **No behavior change.** Example names in help text and placeholders are now generic, and code comments and older release notes were tidied. Latest twins bumped to match: 4.504 / 0.98 / 1.50 / 3.132 / 34.179.
+
 ## 2026-11-17 — PROD: Map Styler v34.157 (latest 34.178) — Hide satellite works on Remote Ops
 
 - **"Hide satellite base tiles" now also works on the Remote Ops page.** The Basemap replacement is still skipped there (Percepto's own base map shows unless you hide it).
@@ -81,7 +85,7 @@ Features [#336], [#337], [#338], [#330]. Control Panel is a full promote. Map St
 - Download names changed: `AIM_Anomalies_…csv`, `AIM_Anomalies_Monthly_…csv`, `Inspection_Anomalies_…html`.
 - Wording only. The saved run still loads.
 
-## 2026-11-14 — AIM Fleet Tools latest v0.91 (latest only) — 📰 Report rebuilt to Chris's layout: anomalies, per pad (#341)
+## 2026-11-14 — AIM Fleet Tools latest v0.91 (latest only) — 📰 Report rebuilt to a coworker's layout: anomalies, per pad (#341)
 
 - **The 📰 Report now says "anomalies"** and counts them per pad (an anomaly on equipment nested inside a pad counts for the pad).
 - **01 Last 7 days:** every anomaly of the period, one card per pad, no cap. The History line shows that pad's other anomalies in the last 6 and 12 months.
@@ -108,7 +112,7 @@ Features [#336], [#337], [#338], [#330]. Control Panel is a full promote. Map St
 - **The earlier HTML page is now 📊 Dashboard**, unchanged in content.
 - **Fix: finding types that differed only by capitalisation or a typo** ("Emission", "emission", "Emmision") were counted as separate types. They are now one type.
 - **Fix: the chart legend showed "Other" twice** when a real type was called Other. The catch-all group is now "All other types".
-- The report title now reads the client name ("Exxon") when every site in scope starts with the same word.
+- The report title now reads the client name ("Client B") when every site in scope starts with the same word.
 - The period can be changed without running the sweep again. A sweep run on v0.87 has to be re-run once so the flight counts for the period are read.
 
 ## 2026-11-13 — AIM Fleet Tools latest v0.87 (latest only) — 📈 Findings Report (#341)
@@ -201,7 +205,7 @@ Promoted from `latest/` (features [#333], [#334]). Adjust stays off by default i
 
 ## 2026-11-12 — 🌐 AIM Fleet Tools latest v0.85 (latest only) — 📅 Sweep Scheduler
 
-- **New Fleet Tools section: 📅 Sweep Scheduler.** One click reads the mission bank, the flown log and the docked drone of every FPL site, then lists each feeder mission by how old its oldest pole is and what to fly next. It replaces the manual export → spreadsheet step (feature #335).
+- **New Fleet Tools section: 📅 Sweep Scheduler.** One click reads the mission bank, the flown log and the docked drone of every Client C site, then lists each feeder mission by how old its oldest pole is and what to fly next. It replaces the manual export → spreadsheet step (feature #335).
 - **Which missions count:** `FDR` in the name and a `P1` / `P2` / `P3`; per feeder only the highest phase is used. `NO FLY` and lateral (`LAT`) missions are left out. A mission that exists in numbered parts is listed part by part.
 - **Oldest pole, not last flight.** A mission takes many flights to sweep, so the age is found by counting back through its flights until 90 % of one full sweep is covered.
 - **The table:** order number, site, AIM mission to fly, oldest pole (days and date), flights planned this month and next, flights per sweep, last flown, payload (4.0 / 3.0 / none) and why it is where it is. "All columns" adds sweep size, estimated poles, air hours and check-before-flying notes.
@@ -294,7 +298,7 @@ Promoted from `latest/` (features [#333], [#334]). Adjust stays off by default i
 
 ## 2026-11-10 — 🌐 AIM Fleet Tools latest v0.80 (latest only) — Fleet Data export no longer drops big mission banks
 
-- **Sites with a large mission bank (FPL Ranch, Deltrail, Homeland) were missing from `ALL-missions.csv`.** The missions request was cut off at 30 s; it now waits 2 min and retries once.
+- **Sites with a large mission bank (Client C Ranch, Deltrail, Homeland) were missing from `ALL-missions.csv`.** The missions request was cut off at 30 s; it now waits 2 min and retries once.
 - **A failed fetch is now impossible to miss.** The ZIP name says `N FAILED`, a `!FAILED - READ ME.txt` sits at the top of the ZIP listing what is missing, and the status line names the sites.
 
 ## 2026-11-10 — 🚩 AIM Issues latest v1.46 (latest only) — Mission Playback context on issues (feature #330)
@@ -318,7 +322,7 @@ Promoted from `latest/` (features [#333], [#334]). Adjust stays off by default i
 
 ## 2026-11-09 — 🚩 FP ⨯ FP crossing check + SOP Sweep (#329) — Site Setup Tools latest v4.498 · Fleet Tools latest v0.79 · Control Panel latest v1.49 (latest only)
 
-- **Site Setup Tools v4.498 — new SOP check "FP ⨯ FP crossing".** Flags any two flight-path segments that cross, T into, or lie on top of each other WITHOUT a shared vertex — same FP or different FPs, altitude ignored. Junctions that share a waypoint (branches, a real cross with a vertex in the middle) are fine and never flag. Why: it is legal for Percepto, but the drone's constant nearest-safe-zone recalculation thrashes at the crossing and floods notifications (agreed with Chris: never build it that way). Runs with 🚩 Draw issues like every other check; the pin sits at the exact crossing. Also: `?aim-goto=lat,lng,z&aim-site=<id>` on a Site Setup URL pans + zooms + pulses the map at that spot once it loads (the Fleet SOP Sweep links use it).
+- **Site Setup Tools v4.498 — new SOP check "FP ⨯ FP crossing".** Flags any two flight-path segments that cross, T into, or lie on top of each other WITHOUT a shared vertex — same FP or different FPs, altitude ignored. Junctions that share a waypoint (branches, a real cross with a vertex in the middle) are fine and never flag. Why: it is legal for Percepto, but the drone's constant nearest-safe-zone recalculation thrashes at the crossing and floods notifications (agreed with a coworker: never build it that way). Runs with 🚩 Draw issues like every other check; the pin sits at the exact crossing. Also: `?aim-goto=lat,lng,z&aim-site=<id>` on a Site Setup URL pans + zooms + pulses the map at that spot once it loads (the Fleet SOP Sweep links use it).
 - **Control Panel v1.49 — ☑ All / ☐ None / ◎ solo on the SOP checks.** The SOP Validators card has a "Checks" header with All / None, and every check row has a ◎ button that turns that check on and every other check off — one click to run a single check against a site.
 - **Fleet Tools v0.79 — 🚩 SOP Sweep section.** Run the SOP checks across the 📦 Fleet Data pick (or every site, Production-only by default) from the landing page, reading each site LIVE from `/map_objects/`. Sites with findings list first; expand a site for its rows; 🎯 flies the landing map there; ↗ opens the site in a NEW tab and jumps straight to the crossing; 📋 Copy → Sheets (Open column is a clickable deep link) / ⬇ CSV. First check = FP ⨯ FP crossing; the registry is built for the other SOP checks to port in next.
 
@@ -420,7 +424,7 @@ Site Diff graduates from `latest/` to the main install list (README row 21 / ins
 - **v3.79** — ⊕ Assets overlay that “can't be turned off”: it was cleared off whatever map was current, and the editor swaps the map instance, so the old overlay and its M2-generate handlers stayed alive. The layer now removes itself from the map it was drawn on, the overlay switches off by itself when a mission opens in the editor, and M2-generate never fires inside the editor or while 🎯 is live.
 - **v3.78** — **🔁 Re-stage — no more delete-and-recreate after a template fix.** The 📋 Review list gets **🔁 Re-stage pumps** (every unreviewed pad with a lone pumping unit) and **🔁 Re-stage all** (every unreviewed mission): the pad is rebuilt with the current template and the mission's ghosts are replaced in place — the mission itself is untouched, and committing replaces its navs. Review rows remember their pad; elevation prefetch now covers pump and pad centroids.
 - **v3.77** — Pumping-unit side pick fixed: a long-side shot that fell OUTSIDE the FFZ counted as “infinitely far from the edge” and was kept — the wall side, the one to skip. Outside is now the worst case (negative room), so the kept side is always the one with the most FFZ room.
-- **v3.76** — Pumping-unit template fix: the match now reads the asset TYPE string (“P1 - v - pumping rod - empty”), not just the name — v3.75 never fired on Cobra because no asset name says pump.
+- **v3.76** — Pumping-unit template fix: the match now reads the asset TYPE string (“P1 - v - pumping rod - empty”), not just the name — v3.75 never fired on Field A because no asset name says pump.
 - **v3.75** — **Pumping-unit template + review access.** Auto-shots: a lone asset whose name contains “pump” gets a fixed 3-face shape instead of the solver — one shot from each END along the unit's long axis and one from the LONG SIDE facing away from the nearest FFZ border (the side toward the border is skipped), all square to the box at the standoff; a shot that can't sit exactly there swings in 5° steps, then slides inside the band, while the other two never move; the review flag names the skipped side and any swing. **📋 Review** is now also in the ▣ Generate footer, and the review list has **🗑 Delete unreviewed (N)** — selects every not-done mission and opens the existing 🗑 Delete dialog (backup file + Delete Guard + slider) so a run can be redone; deleted missions drop out of the list and their ghosts are dropped. “Clear” renamed “Forget list”.
 - **v3.74** — **Staged ghosts are editable on the map.** With 🎯 live, press-and-drag a staged nav (purple ring) or one of its aim points (pink) to move it; the chip now reads the nav→aim distances in band colours (green 95–110) so you can see where to park it. R-click a staged nav drops that nav (the whole group when it was the last one); R-click an aim drops that snapshot. The map doesn't pan during the drag and the release click places nothing. HUD ↑ ↓ ⇄ ✕ unchanged.
 - **v3.73** — **📋 Review list, stacked snapshots, nav hover.** The Auto-shots review list is now persisted per site with a ☐ done box per pad and reopens from the toolbar (📋 Review); new runs merge in by mission, done state sticks, rows open the mission. Stacked snapshots each keep their own number and id (markers at one coordinate are matched to steps in order), hovering a stack shows chips to open any one of them, and the step open in the editor rides on top of its stack so it is the one you drag. Hovering a nav shows which snapshots it takes (N7 → S8 · S13) and glows them on the map.
@@ -469,11 +473,11 @@ Site Diff graduates from `latest/` to the main install list (README row 21 / ins
 
 ## 2026-10-29 — 🗺 Site-setup scope — Fleet Tools latest v0.77 (latest only)
 
-- **v0.77** — **Draw only the sites you mean to show.** 🗺 Map → new **Site setups** scope: "Every site in view" (as before) or **Only matching / picked** — a names box (e.g. `Exxon`) or the sites ticked in 📦 Fleet Data. Independent of the site-label filter; **= labels** copies the label filter across in one click. Fail-closed: filter mode with an empty box and nothing picked draws nothing, so another client's FFZs / flight paths / assets can never land on a shared map. Applied when sites are fetched AND when they are drawn (an already-cached site can't slip through), follows the Fleet Data pick live, and the on-map legend names the scope.
+- **v0.77** — **Draw only the sites you mean to show.** 🗺 Map → new **Site setups** scope: "Every site in view" (as before) or **Only matching / picked** — a names box (e.g. `Client B`) or the sites ticked in 📦 Fleet Data. Independent of the site-label filter; **= labels** copies the label filter across in one click. Fail-closed: filter mode with an empty box and nothing picked draws nothing, so another client's FFZs / flight paths / assets can never land on a shared map. Applied when sites are fetched AND when they are drawn (an already-cached site can't slip through), follows the Fleet Data pick live, and the on-map legend names the scope.
 
 ## 2026-10-29 — 🏷 Site-label filter + 🗺 legend + 📷 Client view — Fleet Tools latest v0.76 (latest only)
 
-- **v0.76** — **Hide every site name except the ones you want.** 🗺 Map → Site labels gains **Only matching / picked**: a names box (comma-separated, e.g. `Exxon`) keeps just the sites whose name contains a term, or tick **picked only** to keep the sites ticked in 📦 Fleet Data; every other name (and the "Multiple sites" cluster bubbles) disappears. Live as you type, survives zooms (Percepto rebuilds its labels on every zoom — the filter re-stamps them). **🗺 Legend** checkbox in Cross-reference draws a legend bottom-left of the map: the cross-ref bands with their counts / miles and %, the KML layers currently shown (source flagged), and the FFZ / flight-path / asset colours when site setups are drawn. **📷 Client view** = one click for a client-ready screenshot: all names hidden, legend on, the panel and the Fleet Tools button tucked away; **↩ Exit client view** (bottom-right) restores whatever the Map section was set to. Session-only — a reload comes back normal.
+- **v0.76** — **Hide every site name except the ones you want.** 🗺 Map → Site labels gains **Only matching / picked**: a names box (comma-separated, e.g. `Client B`) keeps just the sites whose name contains a term, or tick **picked only** to keep the sites ticked in 📦 Fleet Data; every other name (and the "Multiple sites" cluster bubbles) disappears. Live as you type, survives zooms (Percepto rebuilds its labels on every zoom — the filter re-stamps them). **🗺 Legend** checkbox in Cross-reference draws a legend bottom-left of the map: the cross-ref bands with their counts / miles and %, the KML layers currently shown (source flagged), and the FFZ / flight-path / asset colours when site setups are drawn. **📷 Client view** = one click for a client-ready screenshot: all names hidden, legend on, the panel and the Fleet Tools button tucked away; **↩ Exit client view** (bottom-right) restores whatever the Map section was set to. Session-only — a reload comes back normal.
 
 ## 2026-10-28 — 👁 Generate map overlay — Mission Bank Tools latest v3.46 → v3.51 (latest only)
 
@@ -591,7 +595,7 @@ Site Diff graduates from `latest/` to the main install list (README row 21 / ins
 
 - **v4.460** — a type the site did not have at the start of the run is declared as new on EVERY write of it, not only the first (the first live run stored the OLD type on all 256 updates). The DONE line now reports types and notes stored-as-sent separately. **⚡ ↻ Re-send types** (next to Undo): compares every asset this session touched with the intended type and re-sends only the type where it differs — dry run first, backup, undo.
 
-- **v4.458** — asset notes are sanitised before writing: Percepto returns 400 "Name or description consists illegal characters" for `" ' # & ( )` and similar, which reached the notes through Enverus well names and the P & A status. `&` becomes "and", `#` becomes "No", quotes are dropped, anything else outside letters / digits / space / newline / `- _ . , : ·` becomes a space. First live run on Cobra 01: 347 created, 47 of the P&A rows failed on exactly this.
+- **v4.458** — asset notes are sanitised before writing: Percepto returns 400 "Name or description consists illegal characters" for `" ' # & ( )` and similar, which reached the notes through Enverus well names and the P & A status. `&` becomes "and", `#` becomes "No", quotes are dropped, anything else outside letters / digits / space / newline / `- _ . , : ·` becomes a space. First live run on Field 01: 347 created, 47 of the P&A rows failed on exactly this.
 
 - **v4.457** — every message from ⚡ Create (dry-run plan, progress, blockers, final counts) also renders directly under the Create button, not only in the status line at the top of the panel.
 
@@ -641,7 +645,7 @@ Site Diff graduates from `latest/` to the main install list (README row 21 / ins
 
 - **v4.436** — ✏ Shape: a freshly drawn outline now lands exactly where it was drawn. It used to slide to the 15 ft gap whenever a neighbour was within 10 ft of that gap, which looked like a jump after the second click. Position snapping still applies when you drag an edge, corner or the whole box, copy an outline with ALT+click, or press ⟂ Align.
 
-- **v4.435** — **🔁 Replace file (keep my work)**, next to 📂 Load: the client re-sent the list with extra columns? Load it here and every moved / removed / outlined / ticked / reviewed point, the Enverus results and the client-response work are carried over by matching rows on name + original coordinates (API number, then a unique name, as fallbacks); points with no row in the new file (Enverus fill-in, client-added) are kept as extra rows; the old column choices are kept where the header still exists. A session snapshot is saved first, so ↻ Resume brings the old state back. Verified offline on the real Diamondback files: 11,807 of 11,808 points carried, 107 moves intact. The 🆔 External ID guess now **never picks a BATTERY_… column** (that id is shared by every well on the battery) — pick the per-asset column yourself if the header is unusual. When the file has a battery accounting id it is **ticked into the notes** by default.
+- **v4.435** — **🔁 Replace file (keep my work)**, next to 📂 Load: the client re-sent the list with extra columns? Load it here and every moved / removed / outlined / ticked / reviewed point, the Enverus results and the client-response work are carried over by matching rows on name + original coordinates (API number, then a unique name, as fallbacks); points with no row in the new file (Enverus fill-in, client-added) are kept as extra rows; the old column choices are kept where the header still exists. A session snapshot is saved first, so ↻ Resume brings the old state back. Verified offline on the real Client A files: 11,807 of 11,808 points carried, 107 moves intact. The 🆔 External ID guess now **never picks a BATTERY_… column** (that id is shared by every well on the battery) — pick the per-asset column yourself if the header is unusual. When the file has a battery accounting id it is **ticked into the notes** by default.
 
 - **v4.434** — Percepto's asset **External ID** field is now filled from the client's list. New mapping column **🆔 External ID** (guessed from headers like BATTERY_ACCOUNTING_ID / accounting id / external id), written on every ⚡ Create and every name-match update; the dry run says how many rows carry one and the verify step confirms the server echoed it. **Backfill for assets already on the site**: a 🆔 box in 7 · Create lists the name-matched assets whose External ID is empty or differs from the file (selected points or whole file), with one ⚡ Write button that sets that single field and nothing else — dry run, backup JSON, ↩ Undo last import. Hovering a dot shows its id.
 
@@ -749,7 +753,7 @@ Site Diff graduates from `latest/` to the main install list (README row 21 / ins
 - **Trim, don't delete (v4.402).** On a custom-FFZ pad each connecting leg is shortened to end on the 15 ft standoff line around the pad (altitudes kept); legs entirely inside or crossing the pad are removed. Control Panel: trim | remove, standoff ft. Cut rows draw their gaps as red dashes, never an NFZ outline.
 - **Preview + confirm (v4.398).** 🛡 Protect first paints what it will do (red = removed, orange = trimmed leg, dashed = NFZ), lists it with the missions, and asks before any write. **↩ Undo gone (v4.401)** re-stages a row cleared by mistake. ✓ Gone names its action (restore paths / remove NFZ / close).
 - **Story (v4.392).** History narrates each obstruction: sheet dates, match, what was done and when, missions pulled, why it ended, restore, close. Inert rows (off-site / unmatched) have no stage and are hidden by default (v4.393).
-- **Issue (v4.403).** Five short lines: job + well, pads, what was done, missions to remove with step counts, sheet dates. Confirmed live: AIM Issues 1.43 creates it and Slack pings Payden + Chris. 🚩✗ on a row = click to request again (v4.399).
+- **Issue (v4.403).** Five short lines: job + well, pads, what was done, missions to remove with step counts, sheet dates. Confirmed live: AIM Issues 1.43 creates it and Slack pings Payden + a coworker. 🚩✗ on a row = click to request again (v4.399).
 - Fixes: cut rule = arcs touching the FFZ corridor (v4.396); `logL` crash that wrote a cut and lost its record (v4.397, cuts now persist per path); button labels generic (v4.394, v4.400).
 
 ## 2026-10-21 — 🏗 Rigs & cranes: custom-FFZ arc cut, stages, issues, report — Site Setup Tools latest v4.391 + AIM Issues latest v1.43 (latest only, feature #291)
@@ -757,7 +761,7 @@ Site Diff graduates from `latest/` to the main install list (README row 21 / ins
 - **FFZ design check.** A standard FFZ is a ring ~15 ft outside the pad; when most of the FFZ edge is NOT 15 ft off the pad (a custom corridor that puts the drone ON the pad) an NFZ cannot protect it, so the tool **cuts the flight-path arcs inside every pad that FFZ spans** (one POST per path, backup JSON + exact restore on ✓ Gone, verified by arc count). Standard pads still get the NFZ.
 - **Missions + steps.** Every Mission Bank mission with a step within 15 ft of the affected pads is listed with its step ranges (e.g. 14-21); tick each as pulled / restored from the stage pill.
 - **Stages.** Staged → Site Setup corrected → Missions pending → Safe → Verify → Restoring → Closed, each stamped with date + user; 📤 Report (Sheets) / ⬇ CSV = every obstruction with all stage dates, action, missions, issue, days exposed.
-- **Issue.** Every commit creates a real AIM Issue on the pad (HIGH, Slack post pinging Payden + Chris) with the action taken and the missions to remove. AIM Issues v1.43 accepts `ISSUE_CREATE` over the validator channel (visible map frame only).
+- **Issue.** Every commit creates a real AIM Issue on the pad (HIGH, Slack post pinging Payden + a coworker) with the action taken and the missions to remove. AIM Issues v1.43 accepts `ISSUE_CREATE` over the validator channel (visible map frame only).
 - History: outcomes read "removed from sheet <day>", "end date <d> passed", "marked gone <day>"; Cleared + Stage columns. Unmatched / off-site rows explain themselves on hover.
 
 ## 2026-10-20 — 🧠 Smart plan (Phase 1, read-only) — Mission Bank Tools latest v3.29 (latest only, feature #303)
@@ -789,7 +793,7 @@ Site Diff graduates from `latest/` to the main install list (README row 21 / ins
 
 ## 2026-10-20 — 🚧 Hazard Layer (#288): Enverus facilities — Map Styler latest v34.170 (latest only)
 
-- **Facilities are now a hazard source.** The Enverus `facilities` dataset became entitled on 2026-10-20: compressor stations, gas processing plants, tank batteries, pump stations and terminals. The builder pulls them per county (point only → 400 ft square); third-party ones draw charcoal like other third-party sites, abandoned ones grey. Cards show the facility type, status, compressor units / plant capacity and owner. Cobra 01 has none inside its box (Howard 34, Martin 31 county-wide). ([#288](https://github.com/Ned-Yap/aim-userscripts-issues/issues/288))
+- **Facilities are now a hazard source.** The Enverus `facilities` dataset became entitled on 2026-10-20: compressor stations, gas processing plants, tank batteries, pump stations and terminals. The builder pulls them per county (point only → 400 ft square); third-party ones draw charcoal like other third-party sites, abandoned ones grey. Cards show the facility type, status, compressor units / plant capacity and owner. Field 01 has none inside its box (Howard 34, Martin 31 county-wide). ([#288](https://github.com/Ned-Yap/aim-userscripts-issues/issues/288))
 
 ## 2026-10-20 — 🏗 Rigs & cranes: temporary NFZs from the daily sheet — Site Setup Tools latest v4.381 (latest only, feature #291)
 
@@ -845,7 +849,7 @@ Site Diff graduates from `latest/` to the main install list (README row 21 / ins
 
 ## 2026-10-19 — 📅 Coverage: flown vs SLA tiers — Mission Bank Tools latest v3.09 + Map Styler latest v34.166 (latest only, feature #292)
 
-- **Mission Bank Tools (latest) v3.09 — 📅 Coverage panel.** New **📅 Coverage** button next to Mission Bank Summary. For every asset on the site it reads Percepto's own image tags (the Data Map's asset filter) and shows **last flown · last mission · flies this calendar month · flies this Mon–Sun week · status**, with the asset's priority tier taken from the type prefix the Asset Importer stamps (`P1 - …`). Tier and status chips, search, sortable columns, click a row to pan, ↻ Refresh (results cached an hour per site), 📤 Sheets / ⬇ CSV export. Two rulebooks in the new **📅 Coverage (SLA tiers)** Control Panel card: **Diamondback** (floor = at least one fly per calendar month, P3 optionally quarterly; targets P1 2×/week, P2 weekly → "Behind target") and **Internal SLA** (rolling 7 / 14 / 31 days). Every number is editable.
+- **Mission Bank Tools (latest) v3.09 — 📅 Coverage panel.** New **📅 Coverage** button next to Mission Bank Summary. For every asset on the site it reads Percepto's own image tags (the Data Map's asset filter) and shows **last flown · last mission · flies this calendar month · flies this Mon–Sun week · status**, with the asset's priority tier taken from the type prefix the Asset Importer stamps (`P1 - …`). Tier and status chips, search, sortable columns, click a row to pan, ↻ Refresh (results cached an hour per site), 📤 Sheets / ⬇ CSV export. Two rulebooks in the new **📅 Coverage (SLA tiers)** Control Panel card: **Client A** (floor = at least one fly per calendar month, P3 optionally quarterly; targets P1 2×/week, P2 weekly → "Behind target") and **Internal SLA** (rolling 7 / 14 / 31 days). Every number is editable.
 - **Map Styler (latest) v34.166 — Coverage colours on the map.** Assets → **📅 Coverage colours** (off by default): the asset **ring takes the tier colour** (P1 red / P2 orange / P3 yellow / untiered grey) and the **fill the status** (OK green · Due amber · Overdue red, pulsing); dashed ring = planned this week (lands with the schedule feature). Small legend bottom-left. Colours and fill opacity editable. Data arrives from the Coverage panel (🎨 Map button, and automatically after each refresh) and is remembered per site, so a reload still paints.
 
 ## 2026-10-19 — 🛟 Safe Zone Planner: spots on pad edges, wells first — Site Setup Tools latest v4.370 (latest only)
@@ -878,7 +882,7 @@ Site Diff graduates from `latest/` to the main install list (README row 21 / ins
 
 ## 2026-10-18 — Asset Import: shared names resolved before Create — Site Setup Tools latest v4.363 (latest only)
 
-- **Site Setup Tools (latest) v4.363.** The client's list reuses names (276 cases in the Diamondback file: a tank battery named after its single well). Before anything is matched against the site: a battery + well pair sharing a name → the battery is created as **"<name> BATTERY"** (what the client report says we do); any other repeat → the 2nd+ row gets **"-DUP"** and both rows show in a new **Placement › Same name in file** tab (click = both pulse, ⓘ = which is which). The renamed battery is then matched against the site by its new name, so an existing "X BATTERY" asset is still an update. The Data section header counts the renames.
+- **Site Setup Tools (latest) v4.363.** The client's list reuses names (276 cases in the Client A file: a tank battery named after its single well). Before anything is matched against the site: a battery + well pair sharing a name → the battery is created as **"<name> BATTERY"** (what the client report says we do); any other repeat → the 2nd+ row gets **"-DUP"** and both rows show in a new **Placement › Same name in file** tab (click = both pulse, ⓘ = which is which). The renamed battery is then matched against the site by its new name, so an existing "X BATTERY" asset is still an update. The Data section header counts the renames.
 
 ## 2026-10-17 — Client review: ready to send — Site Setup Tools latest v4.362 (latest only)
 
@@ -890,7 +894,7 @@ Site Diff graduates from `latest/` to the main install list (README row 21 / ins
 
 ## 2026-10-17 — Enverus check: whole-file scope — Site Setup Tools latest v4.360 (latest only)
 
-- **Site Setup Tools (latest) v4.360 — one Scope switch for the Enverus section:** "selected points (inside boundaries)" or "WHOLE file". It drives the cross-check (the button says how many wells and roughly how long), the pills, the Placement › 🛢 Enverus flags and the 📋 client review, so a whole-file client report no longer needs the boundaries cleared. The Diamondback file is ~10,000 wells → about 50 requests, 3–4 minutes.
+- **Site Setup Tools (latest) v4.360 — one Scope switch for the Enverus section:** "selected points (inside boundaries)" or "WHOLE file". It drives the cross-check (the button says how many wells and roughly how long), the pills, the Placement › 🛢 Enverus flags and the 📋 client review, so a whole-file client report no longer needs the boundaries cleared. The Client A file is ~10,000 wells → about 50 requests, 3–4 minutes.
 
 ## 2026-10-17 — Client review report written for non-technical readers — Site Setup Tools latest v4.359 (latest only)
 
@@ -943,7 +947,7 @@ Site Diff graduates from `latest/` to the main install list (README row 21 / ins
 
 ## 2026-10-16 — Asset Import: Priority tiers + update-by-name — Site Setup Tools latest v4.347 (latest only)
 
-- **Site Setup Tools (latest) v4.347 — Priority tiers (client rule, Diamondback).** New collapsed **▸ Priority tiers** section under the Type table. Pick the Oil + Water columns (summed), or a single BLPD column, or a ready-made P1/P2/P3 column (wins outright) — auto-guessed. Every asset on a pad shares the pad total: **P3 < 250 · P1 250–1500 · P2 > 1500 BLPD** (P1 is the middle band on purpose: the biggest producers have people on site; thresholds editable in the section). Pad = the nested parent/child tree plus anything within 50 ft of the pad polygon; brand-new points cluster within 100 ft of each other (both editable). The tier is written as a **type prefix** (`P1 - v - pumping rod`) — never the name, so next quarter's list updates the same assets — plus `Priority` / `Prioritized <date>` blocks in the notes. Pads with no numbers get no prefix and are **flagged** (also: a cluster spanning two existing pads, mixed ready-made priorities on one pad). Summary pills (P1/P2/P3/untiered, pads, flagged, same/changed/new vs the site), dots coloured by tier, **📤 Tier report for Sheets / ⬇ CSV** (Name · Tier · Tier before · Change · Pad · Pad BLPD · Asset BLPD · Assets on pad · Type · Flags · Lat · Lng).
+- **Site Setup Tools (latest) v4.347 — Priority tiers (client rule, Client A).** New collapsed **▸ Priority tiers** section under the Type table. Pick the Oil + Water columns (summed), or a single BLPD column, or a ready-made P1/P2/P3 column (wins outright) — auto-guessed. Every asset on a pad shares the pad total: **P3 < 250 · P1 250–1500 · P2 > 1500 BLPD** (P1 is the middle band on purpose: the biggest producers have people on site; thresholds editable in the section). Pad = the nested parent/child tree plus anything within 50 ft of the pad polygon; brand-new points cluster within 100 ft of each other (both editable). The tier is written as a **type prefix** (`P1 - v - pumping rod`) — never the name, so next quarter's list updates the same assets — plus `Priority` / `Prioritized <date>` blocks in the notes. Pads with no numbers get no prefix and are **flagged** (also: a cluster spanning two existing pads, mixed ready-made priorities on one pad). Summary pills (P1/P2/P3/untiered, pads, flagged, same/changed/new vs the site), dots coloured by tier, **📤 Tier report for Sheets / ⬇ CSV** (Name · Tier · Tier before · Change · Pad · Pad BLPD · Asset BLPD · Assets on pad · Type · Flags · Lat · Lng).
 - **Name matches → update type + notes (default).** The "include name duplicates" checkbox is now a selector: **update type + notes** (rewrites just those two fields on the existing asset, shape and position untouched — the quarterly re-run), skip, or create a copy (-N). Updates ride the same dry run, backup manifest (before bodies included), verify-by-refetch and **↩ Undo last import** (re-POSTs the previous type + notes). With no type column, an update keeps the asset's own base type and only changes the P-prefix.
 
 ## 2026-10-16 — Fleet Metrics follows the Fleet Data pick — Fleet Tools latest v0.75 (latest only)
@@ -1046,7 +1050,7 @@ Site Diff graduates from `latest/` to the main install list (README row 21 / ins
 - **v34.163 (superseded) — outline hit bands.** Percepto's FFZ polygon sits above the hazard layer and ate the hover on pads fully inside it (HERA 56-46). Each hazard now also has an invisible 14 px hit band on its outline in a pane above the entities: hover the outline anywhere for the card; the interior still belongs to Percepto. A re-tier no longer counts as a status change (no spurious NEW pulse).
 - **Palette for tan ground and green scrub** (orange / yellow vanished): red, purple, dashed white, charcoal with a white edge for third-party producing pads, white with a dark edge for buildings.
 - **Site Setup Tools v4.324** — SOP check 13 flags work / likely as high, possible as warn, pads / buildings by distance. **Fleet Tools v0.74** — Likely / Possible columns in the 🚧 Hazards set.
-- **Data repo** — `hazards_build.py` schema `aim-hazards/2` (tier engine, signals, rigs / frac crews folded into their pad); Cobra 01 regenerated: 0 work now, 4 likely (HERA 56-46 permits + DUCs 2026, Jensen permit 2026), 5 possible (Zeus 7-6 DUCs from 2023, Spackler / Hercules permits from early 2025 with missed predicted spuds). ([#288](https://github.com/Ned-Yap/aim-userscripts-issues/issues/288))
+- **Data repo** — `hazards_build.py` schema `aim-hazards/2` (tier engine, signals, rigs / frac crews folded into their pad); Field 01 regenerated: 0 work now, 4 likely (HERA 56-46 permits + DUCs 2026, Jensen permit 2026), 5 possible (Zeus 7-6 DUCs from 2023, Spackler / Hercules permits from early 2025 with missed predicted spuds). ([#288](https://github.com/Ned-Yap/aim-userscripts-issues/issues/288))
 
 ## 2026-10-12 — 🚧 Hazard Layer (#288): Map Styler latest v34.156 — hover cards wrap, land owner on buildings (latest only)
 
@@ -1067,7 +1071,7 @@ Site Diff graduates from `latest/` to the main install list (README row 21 / ins
 
 - **Map Styler (latest) v34.154 — new "Hazard Layer" card in the Control Panel (its own section, pilot-visible).** Draws the site's `hazards/<siteID>.geojson` from the data repo (QA: `hazards/qa-<siteID>.geojson`) as an overlay under the entities: 🟥 upcoming work of ANY operator (active permits, rigs, frac crews, drilling / completing / soaking / infill-activity pads) hatched red · 🟧 third-party producing pads hatched orange · 🟫 buildings / private property · 🟦 our producing pads (off) · ⬜ plugged wells / expired permits (off — not hazards). Per-class show / colour / opacity, outline width, hatch toggle, dashed standoff envelope, hover card (operator OURS / 3RD PARTY, status, wells, dates, permits approved → expires, predicted spud / frac, contractor, APIs — click copies the API list), pulse on anything new or changed in the last 30 days. File older than 28 days (or a failed Enverus pull) = red "hazards STALE" badge on the map and a re-check of GitHub on every load until a newer file lands; fresh files are ETag-cached. Buttons: ↻ Reload file, 🔄 Refresh now (dispatches the data-repo Action — PAT needs Actions write), 📋 Copy hazard summary. Loaded features are shared on `AIM_HAZARDS` for the SOP validator (next step). Never creates Percepto entities. ([#288](https://github.com/Ned-Yap/aim-userscripts-issues/issues/288))
 - **Control Panel (latest) v1.48** — `aim-hazards` gets its own "Hazard Layer" section and is visible in Lite mode (read-only safety info).
-- **Data repo** — `hazards/hazards_build.py` (Enverus wells / permits / rigs / detected-well-pads / frac-crews + Ortho Scanner buildings / CV pads → one GeoJSON per site, `new_since` diff against the previous file) and the first file `hazards/1637.geojson` (Cobra 01).
+- **Data repo** — `hazards/hazards_build.py` (Enverus wells / permits / rigs / detected-well-pads / frac-crews + Ortho Scanner buildings / CV pads → one GeoJSON per site, `new_since` diff against the previous file) and the first file `hazards/1637.geojson` (Field 01).
 
 ## 2026-10-07 — ⭐ PROMOTED TO PROD: Map Styler v34.153 · Fleet Tools v0.72 · Site Setup Tools v4.322 · Map Nav v0.14 · Mission Logs v0.8 (new) · Control Panel v1.47
 
@@ -1214,7 +1218,7 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ## 2026-09-29 — 🛡 KML crash-loop breaker — AIM Fleet Tools v0.65 (latest — dev only)
 
-A huge client KML could crash the tab **on every boot**: repo layers auto-load before the panel is reachable, so there was no way to turn the layer off. Three guards: (1) a boot guard is set before each auto-load and cleared after — found still set on the next boot, that layer is switched **OFF** with a status note (tick it to retry on demand); (2) repo layers over 12 MB are never auto-loaded, click to load; (3) `<Style>`/`<StyleMap>`/`<description>` blocks are stripped before parsing — Google Earth / Diamondback exports carry one style block per placemark (6.9 MB → 0.7 MB, same 1,078 points).
+A huge client KML could crash the tab **on every boot**: repo layers auto-load before the panel is reachable, so there was no way to turn the layer off. Three guards: (1) a boot guard is set before each auto-load and cleared after — found still set on the next boot, that layer is switched **OFF** with a status note (tick it to retry on demand); (2) repo layers over 12 MB are never auto-loaded, click to load; (3) `<Style>`/`<StyleMap>`/`<description>` blocks are stripped before parsing — Google Earth / Client A exports carry one style block per placemark (6.9 MB → 0.7 MB, same 1,078 points).
 
 ---
 
@@ -1383,7 +1387,7 @@ General Markers all need a unique name, and the native flow makes you pick the t
 
 ## 2026-09-18 — 📊 Entities → Sheets from the fleet site picker: AIM Fleet Tools v0.41 (latest — dev only, feature #270)
 
-Pick sites in **Fleet Data** (tick a whole client, e.g. every Exxon site), then use the new **Entities:** row: **📊 Copy → Sheets** puts one row per entity of every picked site on the clipboard as a real table (paste into Google Sheets / Excel — the Site column is a link), or **⬇ CSV** downloads the same thing. Per-type checkboxes (Assets / FFZ / FP / NFZ / Markers / Base / Safe) choose what goes in; they're remembered. Columns are everything Percepto stores for the ticked types — name, ID, type, subtype / equipment / state, description, GPS + vertices + area, FFZ/NFZ altitude bands, flight-path length + altitudes, asset POI / pole / elevation fields, base-station drone — and "Key: value | Key: value" descriptions (the Exxon asset convention) are split into their own **Desc:** columns so the client's asset ID is a sortable cell. Optional extras: **coordinates** (every vertex, FP arcs, polygon WKT) and **raw JSON**. Read-only; sites are fetched one at a time with progress + Abort.
+Pick sites in **Fleet Data** (tick a whole client, e.g. every Client B site), then use the new **Entities:** row: **📊 Copy → Sheets** puts one row per entity of every picked site on the clipboard as a real table (paste into Google Sheets / Excel — the Site column is a link), or **⬇ CSV** downloads the same thing. Per-type checkboxes (Assets / FFZ / FP / NFZ / Markers / Base / Safe) choose what goes in; they're remembered. Columns are everything Percepto stores for the ticked types — name, ID, type, subtype / equipment / state, description, GPS + vertices + area, FFZ/NFZ altitude bands, flight-path length + altitudes, asset POI / pole / elevation fields, base-station drone — and "Key: value | Key: value" descriptions (the Client B asset convention) are split into their own **Desc:** columns so the client's asset ID is a sortable cell. Optional extras: **coordinates** (every vertex, FP arcs, polygon WKT) and **raw JSON**. Read-only; sites are fetched one at a time with progress + Abort.
 
 ## 2026-09-17 — 🌐 Fleet KML layers on the site map: AIM Map Styler v34.140 (latest — dev only, feature #269)
 
@@ -1613,7 +1617,7 @@ The old "Sites in range" number was the count of sites whose setup was **checked
 ## 2026-09-15 — Site Setup Tools latest v4.296: SpiderWeb base star reaches across open ground (dev only)
 
 - New "base star" pass: any zone within 12,000 ft of a base gets a straight spoke home when that spoke shortens its way home by ≥ 5 % and its new pieces cross at most 3 existing legs. The spoke is **threaded through the pads in its way** (base → neighbouring pad → target) instead of being refused as "cuts through a zone", which is why the open ground west of the Elias base had no legs before. Panel/Control Panel fields: base star ft, star gain %, star max cross (0 ft = off).
-- Cobra 01 dup + Base 1: 5 spoke pieces (HUGHES-PARKER 56, HUGHES-PARKER 56 2, JENSEN 52 1 +1 via ELIAS 172; TREE FROG 47 EAST C; NICHOLS 50 2), 618 legs / 677 arcs / 1,295 vertices, longest way home 1.18× → 1.15×, all gates green.
+- Field 01 dup + Base 1: 5 spoke pieces (HUGHES-PARKER 56, HUGHES-PARKER 56 2, JENSEN 52 1 +1 via ELIAS 172; TREE FROG 47 EAST C; NICHOLS 50 2), 618 legs / 677 arcs / 1,295 vertices, longest way home 1.18× → 1.15×, all gates green.
 
 ---
 
@@ -1624,12 +1628,12 @@ The old "Sites in range" number was the count of sites whose setup was **checked
 ## 2026-09-15 — Site Setup Tools latest v4.294: SpiderWeb — 52 m floor, 2 m overlap, corridor cleanup (dev only)
 
 - New defaults: FP floor 52 m (170.6 ft), band 26 ft, overlap 2 m. Two metres is now both the target and the hard line; the panel and Control Panel refuse anything lower. Stored old defaults migrate once.
-- **Corridor cleanup:** a leg that skims within 100 ft of a zone it does not end on is rerouted through that zone. On the Cobra dup every one of the eight halves already existed as a neighbour leg, so the net effect is one line where two ran side by side. Any near-parallel pair that survives is flagged under a new soft gate.
-- Result on the Cobra dup: 663 arcs on 605 legs (was 976 on 613), 551 legs a single straight arc, no parallel corridors left.
+- **Corridor cleanup:** a leg that skims within 100 ft of a zone it does not end on is rerouted through that zone. On the Field A dup every one of the eight halves already existed as a neighbour leg, so the net effect is one line where two ran side by side. Any near-parallel pair that survives is flagged under a new soft gate.
+- Result on the Field A dup: 663 arcs on 605 legs (was 976 on 613), 551 legs a single straight arc, no parallel corridors left.
 
 ## 2026-09-15 — Site Setup Tools latest v4.293: SpiderWeb — fewest-vertex stairs, corridor merge, purge button (dev only)
 
-- **Exact stair walker.** The greedy stair walk is replaced by an exact search that finds the fewest arcs a leg can legally have (54 m over the highest ground, drone under 200 ft over the lowest, 3 m overlap, zone handoff). On the Cobra dup that is 976 arcs instead of 1,028 at the same settings; with a 51 m floor and 30 ft band it is 669. The old "descent head room" rule, which was inflating step counts, is gone.
+- **Exact stair walker.** The greedy stair walk is replaced by an exact search that finds the fewest arcs a leg can legally have (54 m over the highest ground, drone under 200 ft over the lowest, 3 m overlap, zone handoff). On the Field A dup that is 976 arcs instead of 1,028 at the same settings; with a 51 m floor and 30 ft band it is 669. The old "descent head room" rule, which was inflating step counts, is gone.
 - **Near-parallel legs merge.** A leg that passes within 100 ft of a hub or junction is now routed through it and the duplicate half is dropped, so two legs no longer ride the same corridor into a pad with separate stairs.
 - Every arc meeting at a hub or junction now shares a pinned floor window, so the "junction bands agree" gate holds by construction.
 - **🗑 Remove all DRAFT SW** button: deletes every entity on the site whose name starts with DRAFT SW, flight paths first, through Delete Guard. Works after a reload when Undo no longer knows this run's ids.
@@ -1661,12 +1665,12 @@ The old "Sites in range" number was the count of sites whose setup was **checked
 
 ## 2026-09-14 — Site Setup Tools latest v4.286: SpiderWeb — full mesh by default, hubs add to the mesh, saved hub ratio migrated (dev only)
 
-- **Web density** is now a choice, and the default is "full mesh": every neighbouring pair of zones in the triangulation gets a leg (under a 6,000 ft cap) instead of the long side of each triangle being dropped. On the Cobra dup that is 615 legs instead of 289.
+- **Web density** is now a choice, and the default is "full mesh": every neighbouring pair of zones in the triangulation gets a leg (under a 6,000 ft cap) instead of the long side of each triangle being dropped. On the Field A dup that is 615 legs instead of 289.
 - Hubs now add spokes on top of the mesh instead of replacing the legs between their member pads ("hubs keep mesh legs", on by default). The hub gain ratio default is 0.1, and a saved ratio of 1 from earlier builds is migrated once so the denser default actually takes effect.
 
 ## 2026-09-14 — Site Setup Tools latest v4.285: SpiderWeb — denser web: more hubs by default, junctions where legs cross (dev only)
 
-- The hub gain ratio now defaults to 0.25. On the Cobra dup that is 34 hubs with 13 spokes straight to a base instead of 15 hubs with 3, at the same 80 miles of path and a shorter summed way home.
+- The hub gain ratio now defaults to 0.25. On the Field A dup that is 34 hubs with 13 spokes straight to a base instead of 15 hubs with 3, at the same 80 miles of path and a shorter summed way home.
 - **Junctions at crossings:** where two legs cross, both now get a shared waypoint there, so the drone can switch legs at the crossing. Junctions draw as magenta rings; hubs stay filled. A new gate checks that every junction's arcs share the 3 m band. No junction is made within 60 ft of a leg end.
 
 ## 2026-09-14 — Site Setup Tools latest v4.284: SpiderWeb — base zones always join a hub star, final crossing check (dev only)
@@ -1697,7 +1701,7 @@ The old "Sites in range" number was the count of sites whose setup was **checked
 
 ## 2026-09-14 — Site Setup Tools latest v4.277: SpiderWeb — sloped zones raise their ceiling for the handoff, direct base legs, crowded edges spill (dev only)
 
-- A sloped zone whose 196 ft ceiling sat too low for a landing arc to share 3 m now raises its ceiling only as far as needed, never above the "zone ceil max" (200 ft). The report marks those zones. All hard handoff failures on the Cobra dup are gone.
+- A sloped zone whose 196 ft ceiling sat too low for a landing arc to share 3 m now raises its ceiling only as far as needed, never above the "zone ceil max" (200 ft). The report marks those zones. All hard handoff failures on the Field A dup are gone.
 - The way-home pass can add a direct leg from a zone to the nearest base when no web leg shortens a long detour; zones next to the base no longer show a meaningless stretch ratio.
 - When too many legs land on one short edge, the extra legs move to the next best edge instead of being flagged "crowded". Only leg ends under 10 ft apart remain a hard gate.
 
@@ -1747,7 +1751,7 @@ The `changes.csv` audit log crossed GitHub's 1 MB Contents-API cliff on 2026-08-
 
 ## 2026-09-16 — 🗺 Fleet KML exports: AIM Fleet Tools v0.32 — site circles + all site setups in one KML (latest — dev only, feature #264)
 
-In **📦 Fleet Data**, pick sites (one client, several, or all — the picker now groups "Exxon 40", "Exxon 33"… under one **Exxon** header with a select-all box) and use the new **KML** row:
+In **📦 Fleet Data**, pick sites (one client, several, or all — the picker now groups "Client B 40", "Client B 33"… under one **Client B** header with a select-all box) and use the new **KML** row:
 - **⭕ Site circles** — one ground circle per picked site that encloses **every** entity of its setup (minimum enclosing circle, plus an editable pad, default 100 ft), with a centre pin, a folder per client, and radius / centre / site id in each placemark's data. One .kml for the whole selection.
 - **🗺 Site setups** — every picked site's full setup in **one** .kml, laid out exactly like the Site Setup Analyzer export (Asset / Flight Path / Freezone / No-fly / General Marker · General · Tower · Hazard / Base Station / Safe Zone folders, same colours), nested client → site → type. 2D (ground) or 3D (FFZ altitude boxes, FP walls, 400 ft NFZ columns), and tick which entity types to include.
 Both read each site's setup live (progress + ■ Abort, partial file still downloads).
@@ -1759,7 +1763,7 @@ Both read each site's setup live (progress + ■ Abort, partial file still downl
 
 ## 2026-09-14 — 📐 Cross-ref site scope: AIM Fleet Tools v0.30 (latest — dev only)
 
-New **sites:** box on the cross-ref row (shown for the site and base-station targets): type one or more comma-separated words and only sites whose **name contains** one of them count as coverage / bases — e.g. `Exxon` limits a base-station range check to the Exxon sites. Empty = every site you can access. The result label records the scope.
+New **sites:** box on the cross-ref row (shown for the site and base-station targets): type one or more comma-separated words and only sites whose **name contains** one of them count as coverage / bases — e.g. `Client B` limits a base-station range check to the Client B sites. Empty = every site you can access. The result label records the scope.
 
 ## 2026-09-14 — 📐 Cross-ref: point layers report point counts: AIM Fleet Tools v0.29 (latest — dev only)
 
@@ -1922,7 +1926,7 @@ Live find: the map showed setups labeled "site 807 / site 1227 / site 1310" — 
 
 ## 2026-09-09 — ⚠ Fleet Tools v0.10: site-name labels on drawn setups (latest — dev only, feature #250)
 
-The v0.9 overlay held up live (map pans, geometry draws) — but overlapping duplicate/test sites make the picture ambiguous: a giant FFZ blob over the Midkiff area looked like the renderer was "merging" Exxon 01 and 07, when it is almost certainly a third site's copied geometry drawn on top (each entity is its own SVG path — rings cannot join across sites). Every drawn site now shows a **site-name label** (name + #id, halo-outlined text at its geometry center), so mystery geometry names its owner at a glance — then one ⊘ in the panel or a client-chip toggle removes that site from the map and the sweep.
+The v0.9 overlay held up live (map pans, geometry draws) — but overlapping duplicate/test sites make the picture ambiguous: a giant FFZ blob over the Midkiff area looked like the renderer was "merging" Client B 01 and 07, when it is almost certainly a third site's copied geometry drawn on top (each entity is its own SVG path — rings cannot join across sites). Every drawn site now shows a **site-name label** (name + #id, halo-outlined text at its geometry center), so mystery geometry names its owner at a glance — then one ⊘ in the panel or a client-chip toggle removes that site from the map and the sweep.
 
 ## 2026-09-09 — 🚑 Fleet Tools v0.9: raw-SVG overlay — foreign Leaflet layers were wedging the landing map (latest — dev only, feature #250)
 
@@ -1946,7 +1950,7 @@ The landing map now shows actual site-setup geometry, not just conflict pins: zo
 
 ## 2026-09-09 — ⚠ Fleet Tools v0.4: view filters + render caps — a 677-pair sweep can't flood the browser (latest — dev only, feature #250)
 
-First full sweep found 677 conflicting pairs (mostly duplicate/OFFLINE copies), so v0.4 adds display-side filters that slice the finished result instantly — no re-run: **Show FFZs / Flight paths / Assets** checkboxes (a conflict shows only when both its entity classes are on) and **client chips** derived from the site-name prefix ("Koch Fertilizer - Enid" → "Koch Fertilizer" — /sites/ carries no client field, so the naming convention is the grouping signal), toggleable per client with all/none shortcuts; a single enabled client still shows its cross-client conflicts (the dangerous kind). Hard safety caps: the panel lists at most the 400 closest pairs and the map draws at most the 300 closest pins, both sorted by filtered closest-distance with a "narrow the filters" note when capped. The 📋 report deliberately ignores the view filters — it stays the full record. All filter state persists.
+First full sweep found 677 conflicting pairs (mostly duplicate/OFFLINE copies), so v0.4 adds display-side filters that slice the finished result instantly — no re-run: **Show FFZs / Flight paths / Assets** checkboxes (a conflict shows only when both its entity classes are on) and **client chips** derived from the site-name prefix ("Client D - Town" → "Client D" — /sites/ carries no client field, so the naming convention is the grouping signal), toggleable per client with all/none shortcuts; a single enabled client still shows its cross-client conflicts (the dangerous kind). Hard safety caps: the panel lists at most the 400 closest pairs and the map draws at most the 300 closest pins, both sorted by filtered closest-distance with a "narrow the filters" note when capped. The 📋 report deliberately ignores the view filters — it stays the full record. All filter state persists.
 
 ## 2026-09-09 — ⚠ Fleet Tools v0.3: sweep results draw on the landing map (latest — dev only, feature #250)
 
@@ -1986,15 +1990,15 @@ Two frames run this script (page + map iframe); a Control Panel echo landing in 
 
 ## 2026-09-09 — 🏗 Site Setup Tools latest v4.267: Unshielded Site Builder — simple shapes
 
-The builder no longer tries to keep every FFZ provably inside its terrain band; it builds the big simple shapes a CSM would draw by hand and lets the floor recompute do the safety work. Seams are simplified with tolerances in the thousands of feet (defaults 150 ft near assets, 2,000 ft in the open) and pulled back only by half the gap (now 50 ft), so an edge may wander into the next band and the piece's floor rises to clear whatever ground it really covers. Bump islands that hold assets are absorbed into the parent (toggle "absorb bumps") instead of becoming keyholed islands. Pads on a seam are handled at the vector level with polygon-clipping: pad clusters move as one unit into the taller piece (folded in with the standoff, carved out of the neighbor with standoff + gap), stranded pads get a corridor. NFZs are convex hulls. Outer edges erode no further than the profile margin. On the Cobra duplicate at Δ 30: 7 FFZs, 713 vertices, largest 231, every gate green — versus 14 pieces and 2,755 vertices the day before.
+The builder no longer tries to keep every FFZ provably inside its terrain band; it builds the big simple shapes a CSM would draw by hand and lets the floor recompute do the safety work. Seams are simplified with tolerances in the thousands of feet (defaults 150 ft near assets, 2,000 ft in the open) and pulled back only by half the gap (now 50 ft), so an edge may wander into the next band and the piece's floor rises to clear whatever ground it really covers. Bump islands that hold assets are absorbed into the parent (toggle "absorb bumps") instead of becoming keyholed islands. Pads on a seam are handled at the vector level with polygon-clipping: pad clusters move as one unit into the taller piece (folded in with the standoff, carved out of the neighbor with standoff + gap), stranded pads get a corridor. NFZs are convex hulls. Outer edges erode no further than the profile margin. On the Field A duplicate at Δ 30: 7 FFZs, 713 vertices, largest 231, every gate green — versus 14 pieces and 2,755 vertices the day before.
 
 ## 2026-09-09 — 🏗 Site Setup Tools latest v4.266: Unshielded Site Builder — bridge ends land inside the FFZs
 
-Bridge waypoints were placed from the smoothed seam using the raster grid, so ends sat on the dashed edge (median 65 ft, some at 0 ft, four outside their piece). Each end now marches along the seam normal until it is inside the real piece polygon with at least the inset clearance from its edge; lobe links only join selected pieces. Offline on the Cobra duplicate: all 121 ends inside, 68–300 ft clearance.
+Bridge waypoints were placed from the smoothed seam using the raster grid, so ends sat on the dashed edge (median 65 ft, some at 0 ft, four outside their piece). Each end now marches along the seam normal until it is inside the real piece polygon with at least the inset clearance from its edge; lobe links only join selected pieces. Offline on the Field A duplicate: all 121 ends inside, 68–300 ft clearance.
 
 ## 2026-09-09 — 🏗 Site Setup Tools latest v4.263–v4.265: Unshielded Site Builder — no more out-of-band ground
 
-With the Cobra duplicate now reproducible offline, three real defects fell out of one render: (1) a self-intersecting offset ring was retried at HALF the pull-back, which decoupled the pull-back from the simplification tolerance and let the neighbor band's spurs into a piece (1,449 out-of-band cells on one FFZ) — the pull-back now always matches the tolerance and self-intersections are cleaned or turned into local tolerance cuts; (2) the junction vertex between a coarse and a fine run pulled back by the fine tolerance only, and sharp corners hit the miter cap — junctions take the larger tolerance and capped corners bevel; (3) the hand-stitched keyhole failed on a two-cell sliver and fell back to slicing through a pad cluster — keyholes are now cut by polygon-clipping (a gap-wide slit subtracted from the polygon-with-holes). Also: the smoothing tunables re-registered under new Control Panel ids so stale stored values stop overriding the retuned defaults, the Build header shows the version, the run log prints the tolerances used, out-of-band cells are drawn as red dots in the preview, and bridge insets scale with the local gap.
+With the Field A duplicate now reproducible offline, three real defects fell out of one render: (1) a self-intersecting offset ring was retried at HALF the pull-back, which decoupled the pull-back from the simplification tolerance and let the neighbor band's spurs into a piece (1,449 out-of-band cells on one FFZ) — the pull-back now always matches the tolerance and self-intersections are cleaned or turned into local tolerance cuts; (2) the junction vertex between a coarse and a fine run pulled back by the fine tolerance only, and sharp corners hit the miter cap — junctions take the larger tolerance and capped corners bevel; (3) the hand-stitched keyhole failed on a two-cell sliver and fell back to slicing through a pad cluster — keyholes are now cut by polygon-clipping (a gap-wide slit subtracted from the polygon-with-holes). Also: the smoothing tunables re-registered under new Control Panel ids so stale stored values stop overriding the retuned defaults, the Build header shows the version, the run log prints the tolerances used, out-of-band cells are drawn as red dots in the preview, and bridge insets scale with the local gap.
 
 ## 2026-09-09 — 🏗 Site Setup Tools latest v4.261–v4.262: Unshielded Site Builder — fewer vertices, wider gaps
 
@@ -2002,7 +2006,7 @@ Smoothing defaults retuned from the first live builds: near tolerance 25 ft (col
 
 ## 2026-09-09 — 🏗 Site Setup Tools latest v4.259–v4.260: Unshielded Site Builder — all gates green live
 
-Fifth live Stage on the Cobra duplicate passed every gate: 11 giant FFZs over 19,844 ac, 308 assets each inside exactly one FFZ and reachable from base, 47 NFZs, 183 bridges. The preview now also draws the builder's own boundaries (white = seam between two FFZs, grey = outer edge) so the yellow pair can be checked against the terrain bands at a glance, and stale preview layers from an earlier stage are removed through the layer itself, which fixes a mismatch seen after re-running the profiler.
+Fifth live Stage on the Field A duplicate passed every gate: 11 giant FFZs over 19,844 ac, 308 assets each inside exactly one FFZ and reachable from base, 47 NFZs, 183 bridges. The preview now also draws the builder's own boundaries (white = seam between two FFZs, grey = outer edge) so the yellow pair can be checked against the terrain bands at a glance, and stale preview layers from an earlier stage are removed through the layer itself, which fixes a mismatch seen after re-running the profiler.
 
 ## 2026-09-09 — 🏗 Site Setup Tools latest v4.258: Unshielded Site Builder — pad corners in the seam gap
 
@@ -2022,7 +2026,7 @@ First live Stage on a 19,700 ac site was stopped by the gates (8 pads split/outs
 
 ## 2026-09-08 — 🏗 Site Setup Tools latest v4.254: Unshielded Site Builder (feature #254, dev only)
 
-The Terrain Profiler's Build section is now the **Unshielded Site Builder**: one giant fixed-floor FFZ per terrain band (Δ now defaults to 25 ft), seamed to the next band by short **bridge flight paths** so a DAA return from anywhere is a straight line to base. Asset-free islands become NFZs, pits holding an asset are absorbed upward, bumps holding an asset become their own taller FFZ with a keyhole channel so the parent stays one polygon, straddling pads go to the taller band. Seams keep a 10 ft gap next to assets and widen with inward-only smoothing far from them (gap = 2×tolerance + 10). Every FFZ's floor/ceiling is recomputed from the DEM inside its final polygon. Bridges land where each asset's straight line to base crosses a seam; band = intersection of the two FFZ bands. Commit is gated (MSL site, base inside a piece, every asset inside exactly one FFZ, feasibility, base→asset reachability) and ends by deleting the old pad FFZs and corridor FPs through Delete Guard. Full mode only; in live test on a Cobra 01 duplicate.
+The Terrain Profiler's Build section is now the **Unshielded Site Builder**: one giant fixed-floor FFZ per terrain band (Δ now defaults to 25 ft), seamed to the next band by short **bridge flight paths** so a DAA return from anywhere is a straight line to base. Asset-free islands become NFZs, pits holding an asset are absorbed upward, bumps holding an asset become their own taller FFZ with a keyhole channel so the parent stays one polygon, straddling pads go to the taller band. Seams keep a 10 ft gap next to assets and widen with inward-only smoothing far from them (gap = 2×tolerance + 10). Every FFZ's floor/ceiling is recomputed from the DEM inside its final polygon. Bridges land where each asset's straight line to base crosses a seam; band = intersection of the two FFZ bands. Commit is gated (MSL site, base inside a piece, every asset inside exactly one FFZ, feasibility, base→asset reachability) and ends by deleting the old pad FFZs and corridor FPs through Delete Guard. Full mode only; in live test on a Field 01 duplicate.
 
 ## 2026-09-08 — 🛡 Site Setup Tools v4.244.1 (prod) / v4.253 (latest): Terrain Profiler 🏗 Build altitude-mode guard fixed
 
@@ -2056,7 +2060,7 @@ The standalone HotspotFinder desktop app (base-station site selection — cluste
 
 ## 2026-09-01 — ⚙ Control Panel v1.44: settings now survive Percepto sign-outs ([#1](https://github.com/Ned-Yap/aim-userscripts-issues/issues/1))
 
-Percepto's sign-out (the ~weekly session expiry) wipes the browser storage the Control Panel kept every setting in, so all toggles — outlines included — reset to defaults each time you signed back in. The panel now mirrors every setting (toggles, hotkey rebinds, panel position/size, Lite/Full mode) into Tampermonkey's own storage, which Percepto can't touch, and restores it automatically after a wipe. No action needed: your current settings are backed up the first time v1.44 loads, and the next sign-out will no longer reset them. Reported by Chris S.
+Percepto's sign-out (the ~weekly session expiry) wipes the browser storage the Control Panel kept every setting in, so all toggles — outlines included — reset to defaults each time you signed back in. The panel now mirrors every setting (toggles, hotkey rebinds, panel position/size, Lite/Full mode) into Tampermonkey's own storage, which Percepto can't touch, and restores it automatically after a wipe. No action needed: your current settings are backed up the first time v1.44 loads, and the next sign-out will no longer reset them. Reported by a coworker S.
 
 ## 2026-08-31 — 🖊 Mission Bank Tools v2.91 + Site Setup Tools v4.252: pad-root mission matching (latest — dev only)
 
@@ -2072,7 +2076,7 @@ The **Show ALL missions light-dots layer** (blue nav / pink snap circles) is now
 
 ## 2026-08-31 — 🎨 Map Styler v34.137: Asset Styles — custom color rules + client presets (latest — dev only, feature #252)
 
-The fixed six-state asset coloring is now a fully customizable **rule + preset system**. New **🎨 Edit styles & presets** button in the Assets card opens a floating editor: an ordered rule list where each rule matches assets by **state, equipment type (contains), and/or asset name (contains)** — first match wins — and carries full styling: line color, width, dashed, line opacity, fill on/off, fill color, fill opacity, plus a 👁 hide toggle per rule and for unmatched assets. Everything previews **live on the map as you tweak** (real color pickers) until you 💾 Save. Rules live in named **presets** — the shipped look is the read-only ★ Default (Upstream) preset — and a preset can **auto-apply by client from the site name** ("Exxon", "Diamondback"); an explicit pick is remembered per site (QA and prod kept separate). Presets export/import as JSON for sharing. The old per-state Control Panel rows and per-equipment show/hide checkboxes are replaced by this editor (equipment hiding = a rule with Type match + 👁 off); prior per-state color tweaks reset to defaults — recreate them in the editor.
+The fixed six-state asset coloring is now a fully customizable **rule + preset system**. New **🎨 Edit styles & presets** button in the Assets card opens a floating editor: an ordered rule list where each rule matches assets by **state, equipment type (contains), and/or asset name (contains)** — first match wins — and carries full styling: line color, width, dashed, line opacity, fill on/off, fill color, fill opacity, plus a 👁 hide toggle per rule and for unmatched assets. Everything previews **live on the map as you tweak** (real color pickers) until you 💾 Save. Rules live in named **presets** — the shipped look is the read-only ★ Default (Upstream) preset — and a preset can **auto-apply by client from the site name** ("Client B", "Client A"); an explicit pick is remembered per site (QA and prod kept separate). Presets export/import as JSON for sharing. The old per-state Control Panel rows and per-equipment show/hide checkboxes are replaced by this editor (equipment hiding = a rule with Type match + 👁 off); prior per-state color tweaks reset to defaults — recreate them in the editor.
 
 ## 2026-08-29 — 📥 Site Setup Tools v4.250: Asset Importer — movable shapes + live per-shape counters (latest — dev only, feature #249)
 
@@ -3281,15 +3285,15 @@ The live-drone page (`#/site/<id>/live_drone/<id>`) has no `.map-tools` bar, so 
 
 ## 2026-07-10 — Asset Inspector v4.181 (dev/latest) — 📊 Stats polish for long type names + Unshielded count fix
 
-Three refinements from the first Diamondback Site Summary: (1) cards whose type names run long (`V - Pumping Rod - …`) now **span two grid columns** with a slimmer share bar, so names stop getting ellipsis-chopped — short-name taxonomies (EXXON) keep the original compact layout, and hovering any truncated name has always shown the full text; (2) the **V vs H card** buckets non-V/H assets under their real base type (`Battery`, `Well-Cluster`) instead of an opaque "Other"; (3) **"Unshielded (all types)" was reading 0** on Diamondback because it only counted Percepto's `is_unshielded` boolean flag — Diamondback marks unshielded in the subtype string with the flag left false. It now counts both sources, so it agrees with the States card. Dev-only (latest/).
+Three refinements from the first Client A Site Summary: (1) cards whose type names run long (`V - Pumping Rod - …`) now **span two grid columns** with a slimmer share bar, so names stop getting ellipsis-chopped — short-name taxonomies (Client B) keep the original compact layout, and hovering any truncated name has always shown the full text; (2) the **V vs H card** buckets non-V/H assets under their real base type (`Battery`, `Well-Cluster`) instead of an opaque "Other"; (3) **"Unshielded (all types)" was reading 0** on Client A because it only counted Percepto's `is_unshielded` boolean flag — Client A marks unshielded in the subtype string with the flag left false. It now counts both sources, so it agrees with the States card. Dev-only (latest/).
 
 ---
 
-## 2026-07-09 — Asset Inspector v4.180 + Map Styler v34.116 (dev/latest) — Diamondback subtype taxonomy support
+## 2026-07-09 — Asset Inspector v4.180 + Map Styler v34.116 (dev/latest) — Client A subtype taxonomy support
 
-Diamondback's subtypes lead with wellhead orientation (`V - PUMPING ROD - Empty`) instead of EXXON's `equipment - state` shape, which scrambled every parser that assumed "first segment = equipment, rest = state" — the 📊 Site Summary showed "Pumping Rod" as a *state* with V/H as *equipment*, and Map Styler's color-by-state painted freshly-updated `v - pumping rod` assets gray instead of Normal-pink. New shared rule in both scripts: **only trailing segments that are known state words (empty / unshielded / unreachable / inactive / hy) count as the state; everything before them is the type.** EXXON's taxonomy parses identically to before.
+Client A's subtypes lead with wellhead orientation (`V - PUMPING ROD - Empty`) instead of Client B's `equipment - state` shape, which scrambled every parser that assumed "first segment = equipment, rest = state" — the 📊 Site Summary showed "Pumping Rod" as a *state* with V/H as *equipment*, and Map Styler's color-by-state painted freshly-updated `v - pumping rod` assets gray instead of Normal-pink. New shared rule in both scripts: **only trailing segments that are known state words (empty / unshielded / unreachable / inactive / hy) count as the state; everything before them is the type.** Client B's taxonomy parses identically to before.
 
-- **Site Summary**: Equipment card now lists full types (`V - Pumping Rod`, `H - Gas Lift`, `Battery`, …), the States card is back to a clean Normal/Empty/Unshielded distribution, the Health-by-Equipment matrix keys on full types with semantic state colors, and a new **Asset · V vs H** card breaks down wellhead orientation (only appears when the taxonomy has V/H leads — EXXON sites are unchanged). SUM table Equipment/State columns and both Copy exports follow the same parse.
+- **Site Summary**: Equipment card now lists full types (`V - Pumping Rod`, `H - Gas Lift`, `Battery`, …), the States card is back to a clean Normal/Empty/Unshielded distribution, the Health-by-Equipment matrix keys on full types with semantic state colors, and a new **Asset · V vs H** card breaks down wellhead orientation (only appears when the taxonomy has V/H leads — Client B sites are unchanged). SUM table Equipment/State columns and both Copy exports follow the same parse.
 - **Map Styler**: `v - pumping rod` classifies as **Normal → pink** again; state suffixes color correctly (`- unshielded` → orange-red, etc.), and the per-equipment show/hide checkboxes in the Control Panel now list full types — which doubles as a map-level filter per subtype when color-by-state is on.
 
 Dev-only (latest/).
@@ -4189,7 +4193,7 @@ The Site Setup SUM → Analyzer KML export skipped Base Stations (type 8) and Sa
 
 ## 2026-06-23 — Asset Inspector v4.31 (prod) / v4.88 (dev/latest) — Analyzer KML download now uses the site name
 
-The Site Setup SUM → Analyzer "Download .kml" button named the file by site ID only (`Site_1605_Map_(3D).kml`), even though the KML's internal document name already carried the full site name. The download filename now mirrors that document name — e.g. `Site 1605 Map - Exxon - Lille Midkiff 5 - OFFLINE (3D).kml`. Filesystem-illegal characters (`/ \ : * ? " < > |`) are stripped so the download isn't rejected or mangled.
+The Site Setup SUM → Analyzer "Download .kml" button named the file by site ID only (`Site_1605_Map_(3D).kml`), even though the KML's internal document name already carried the full site name. The download filename now mirrors that document name — e.g. `Site 1605 Map - Client B - Lille Midkiff 5 - OFFLINE (3D).kml`. Filesystem-illegal characters (`/ \ : * ? " < > |`) are stripped so the download isn't rejected or mangled.
 
 ---
 
@@ -5390,7 +5394,7 @@ Diagnostic value: v3.76's debug logs + v3.77's diagnostic snippet were the only 
 
 ## 2026-06-09 — AIM Asset Inspector v3.77 (PROD + latest) — points→coords fallback for Apply'd entities
 
-**Real root cause found.** Right-click on Assets/FFZs at Exxon site 1599 was failing for entities AI had hit-tested fine before. v3.76's debug logs caught it: AI's pip on the cached entity returned no match, but a parallel pip on a fresh live fetch of the same entity DID find it. Same code, same coords, different result → cache must hold different data than the live response.
+**Real root cause found.** Right-click on Assets/FFZs at Client B site 1599 was failing for entities AI had hit-tested fine before. v3.76's debug logs caught it: AI's pip on the cached entity returned no match, but a parallel pip on a fresh live fetch of the same entity DID find it. Same code, same coords, different result → cache must hold different data than the live response.
 
 **Diagnosis:** The Direct-API Apply pipeline (shipped in v3.67-v3.74) POSTs entity changes to `/map_objects/` and overwrites `bucket.entities[idx]` with the server's echoed entity. The server's echo is in **WRITE shape** (`.points` instead of `.coords`). After any Apply run, those cached entities had `.points` set but `.coords` missing. `findEntityAtLatLng` checked `Array.isArray(e.coords)` → false → skipped the entity → "no entity at lat,lng" bail → browser context menu won. Silent hit-test rot, growing worse with every Apply.
 
@@ -5420,7 +5424,7 @@ Same effect as v3.75 for bowtie wells, but no regression for normal FFZs.
 
 ## 2026-06-09 — AIM Asset Inspector v3.75 (PROD + latest) — Right-click finds well-pad assets again
 
-Bugfix. Right-clicking Assets and FFZs on some sites (notably Exxon-style well pads with horizontal-drilling sites) brought up Chrome's native context menu instead of the Inspector popup. Flight Paths kept working.
+Bugfix. Right-clicking Assets and FFZs on some sites (notably Client B-style well pads with horizontal-drilling sites) brought up Chrome's native context menu instead of the Inspector popup. Flight Paths kept working.
 
 **Cause:** Percepto stores well-pad asset polygons as `[NE_corner, well-head-point, SE_corner, SW_corner, NW_corner]` — i.e. the 4 corners of the pad PLUS the surface well-head as an interior 5th vertex. In that raw vertex order the polygon is self-intersecting (a "bowtie"), which makes standard ray-casting return nonsense. AI's hit-test ran ray-cast on the raw coords, missed the entity, fell through, native menu won.
 
@@ -5668,7 +5672,7 @@ The M2 status modal was a full-screen overlay that dimmed the map and blocked re
 Two tweaks. `latest/` only.
 
 - **Priority filter chips row** in the panel under the status chips. Four chips: `🎯 HIGH` / `🎯 MEDIUM` / `🎯 LOW` / `— NONE` (for issues with no priority set). Same UX as status chips: M1 toggle individual, M2 solo. Default all 4 active. Counts in each chip update live.
-- **Sheets export — Site Name is now a clickable link** to the site-setup URL (`https://percepto.app/#/site/<id>/control-panel/site-setup`). Pasting into Google Sheets or Excel produces a hyperlink cell that displays the friendly name (`Exxon - Lille Midkiff 5`) but clicks through to the site. TSV fallback stays plain text.
+- **Sheets export — Site Name is now a clickable link** to the site-setup URL (`https://percepto.app/#/site/<id>/control-panel/site-setup`). Pasting into Google Sheets or Excel produces a hyperlink cell that displays the friendly name (`Client B - Lille Midkiff 5`) but clicks through to the site. TSV fallback stays plain text.
 
 ---
 
@@ -5861,10 +5865,10 @@ Coworker installs get all of this on their next Tampermonkey check.
 
 ## 2026-06-01 — AIM Issues v0.20 (Site Name in export + panel header)
 
-- **Site column split** in the export — `Site` renamed to `Site ID` (the numeric id, unchanged), and a new `Site Name` column added with the human-readable name (e.g. "Exxon - Lille Midkiff 5"). HTML table + TSV both updated.
+- **Site column split** in the export — `Site` renamed to `Site ID` (the numeric id, unchanged), and a new `Site Name` column added with the human-readable name (e.g. "Client B - Lille Midkiff 5"). HTML table + TSV both updated.
 - **Reads the name from Percepto's `.site-select .ant-select-selection-item`** (lives in TOP frame's header). Prefers the `title` attribute, falls back to `textContent`. Same-origin so the cross-frame query works.
 - **Retry tick**: the site-select widget can mount a few hundred ms after a site nav. `tickReadSiteName` retries every 500ms for up to ~10s until a name appears, then re-renders the panel so the header updates.
-- **Bonus**: panel header now shows `Site 1245 · Exxon - Lille Midkiff 5` in blue when the name is available. Just the site id alone when it's not.
+- **Bonus**: panel header now shows `Site 1245 · Client B - Lille Midkiff 5` in blue when the name is available. Just the site id alone when it's not.
 
 ---
 
@@ -6376,7 +6380,7 @@ Also registers with AIM Controls as a "Power Lines" section (master toggle + edi
 - **AIM Asset Inspector v3.36** — Power line height configuration + DEM cache diagnostics.
   - **Power lines now sit at realistic wire height in 3D** instead of flat on ground. New "Power line heights (3D only)" panel in the Analyzer modal: Distribution default **35 ft AGL** (Permian Basin typical 30-45 ft), Transmission default **80 ft AGL** (varies 40-150 ft by voltage class). Inputs are per-export so you can dial per site. Folder labels include the height (`Power Lines - Distribution (218) @ 35 ft AGL`). 2D mode unchanged (lines clamp to ground).
   - **DEM elevation cache diagnostics.** On every page load you'll see in console: `[AIM AI] DEM elevation cache loaded: N points (KB)` so you can verify the persistent cache survived between sessions. On every SUM panel open: `[AIM AI] DEM bulk for site X: N unique sample points · M cache hits · K new (need fetch)`. If "new" stays high across reloads, that's the smoking gun the cache isn't persisting (Tampermonkey storage eviction, key mismatch, etc.). Report back with the numbers.
-- **AIM Asset Inspector v3.35** — Power Lines KML colors now match Exxon Powerlines standard. Distro = YELLOW thin lines at ~50% opacity (`8000ffff`); Trans = RED slightly thicker at ~70% opacity (`b30000ff`). V-Buffer moved from yellow → BLUE (`ffff0000`) so it doesn't clash with the distro standard. V-Buffer is used less often than Power Lines, so it gets the new color.
+- **AIM Asset Inspector v3.35** — Power Lines KML colors now match Client B Powerlines standard. Distro = YELLOW thin lines at ~50% opacity (`8000ffff`); Trans = RED slightly thicker at ~70% opacity (`b30000ff`). V-Buffer moved from yellow → BLUE (`ffff0000`) so it doesn't clash with the distro standard. V-Buffer is used less often than Power Lines, so it gets the new color.
 - **AIM Asset Inspector v3.34** + **AIM Map Styler v34.43** — KML Analyzer per-entity elevation + Power Lines import.
   - **Asset Inspector v3.34: per-entity elevation from existing DEM data.** Stopped trying to guess a single "Site Datum Elevation" from asset-elevation averages — that was wrong because assets vary across the site (hill vs valley). Now each placemark shows its OWN `Ground Elevation (here)` (max DEM at this entity's sample points — the data we already fetch for the SUM panel). AGL is computed per-entity against that local ground, not a global guess. If DEM hasn't loaded yet for an entity, the AGL line gracefully omits and shows MSL only.
   - **Asset Inspector v3.34: Power Lines folder import.** New "Power Lines" checkbox in the Analyzer modal. Requests parsed KML features from Map Styler over a dedicated `AIM_KML_DATA` BroadcastChannel; renders distro lines as cyan + transmission lines as red folders in the export. Hidden lines (user marked them hidden in Map Styler) are skipped. Status text in the modal live-updates: "(requesting…)" → "(loaded N lines)" or "(not loaded — open Map Styler tab to fetch)". Disables the checkbox if no data is available.
@@ -6716,7 +6720,7 @@ Also registers with AIM Controls as a "Power Lines" section (master toggle + edi
   - **Responsive card layout** — popup body now uses `display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr))`. When you resize the popup wider, cards re-flow horizontally into 2-, 3-, even 4-column layouts; resize narrower and they stack vertically. Combined with the existing resize handle this lets you tile a wide-screenshot view (great for site reviews) or keep a narrow column for a side-by-side workspace.
   - Plain-text export now reflects the per-type validation structure too (`Flight Paths: / Validated: 80 / Unvalidated: 12 / FFZs: / Validated: 50 / Unvalidated: 8 / ...`).
 - **AIM Asset Inspector v3.5** — three Summary popup fixes.
-  - **Site name in both panel headers.** Pulled from the TOP-frame `.site-select .ant-select-selection-item`'s `title` attribute (e.g. "Exxon 34 - Texas Ten Y Pu 3901H"). SUM panel header is now `AIM Entities · <name> · Site 1596`; Stats popup is `Site Summary · <name>` with a `Site 1596 · X entities total` subtitle. Falls back to just the ID if the site dropdown hasn't rendered yet. Long names truncate with ellipsis so the close button isn't pushed off the panel.
+  - **Site name in both panel headers.** Pulled from the TOP-frame `.site-select .ant-select-selection-item`'s `title` attribute (e.g. "Client B 34 - Texas Ten Y Pu 3901H"). SUM panel header is now `AIM Entities · <name> · Site 1596`; Stats popup is `Site Summary · <name>` with a `Site 1596 · X entities total` subtitle. Falls back to just the ID if the site dropdown hasn't rendered yet. Long names truncate with ellipsis so the close button isn't pushed off the panel.
   - **Stats popup is now draggable** — same pattern as the SUM panel (drag the header). Position persists across reopens in a new `statsPopupState`.
   - **Stats popup is now resizable** — bottom-right corner grip, min 400×300, max 96vw×90vh. Size persists across reopens. Default first-open is centered.
   - All document-level mousemove/mouseup listeners are cleaned up when the popup closes (wrapped `popup.remove`) to avoid leaks.

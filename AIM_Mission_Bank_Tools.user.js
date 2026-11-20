@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      2.95
+// @version      2.96
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -125,7 +125,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '2.95';
+    const SCRIPT_VERSION = '2.96';
 
     // v2.95: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -549,7 +549,7 @@
     function getCurrentSiteName() {
         // Percepto renders the site name in the top-frame site picker.
         // The Ant Design select uses `.ant-select-selection-item` with
-        // a `title` attribute holding the full name (e.g. "Exxon 32 -
+        // a `title` attribute holding the full name (e.g. "Client B 32 -
         // XBC Giddings Estate 1184H"). Fall back to textContent if no
         // title attribute, and to null if anything throws (cross-origin
         // / racing the initial render).

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.49
+// @version      1.50
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -78,7 +78,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.49';
+    const SCRIPT_VERSION = '1.50';
 
     // Server model (v1.36): prod and QA are separate databases — the same
     // numeric site ID is two different sites. QA issues live in their own
@@ -1250,7 +1250,7 @@
         // succeeded), so fetchSlackConfig actually executes here. If it's STILL
         // unavailable, tell the actor instead of failing silently: the prior
         // behaviour skipped Slack with zero feedback, so a missed notification
-        // looked identical to a successful one (the bug Chris hit on 06-23).
+        // looked identical to a successful one (the bug a coworker hit on 06-23).
         if (!slackEnabled() && cachedToken) {
             try { await fetchSlackConfig(); } catch (e) {}
         }
@@ -5409,7 +5409,7 @@
         'open': [
             // Proposal path. v1.06: approvers can ALSO propose (not just
             // direct-resolve) so an approver can route their own find through
-            // another approver (e.g. Chris) instead of self-approving.
+            // another approver (e.g. a coworker) instead of self-approving.
             { to: 'pending_fix',    label: '→ Propose Fix',     noteRequired: true,  color: '#FFD700', textColor: '#000',
               notePrompt: 'What was fixed? e.g. "Added missing H-Well to Site Setup"',
               roles: ['csm', 'approver'] },

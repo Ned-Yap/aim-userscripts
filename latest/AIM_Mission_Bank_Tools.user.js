@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.131
+// @version      3.132
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -128,7 +128,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '3.131';
+    const SCRIPT_VERSION = '3.132';
 
     // v3.06: the server's REASON for a rejected mission save. Percepto's
     // saveApp throws a bare "HTTP 400" — the validation message in the
@@ -569,7 +569,7 @@
     // weekTarget = soft: amber when this Mon–Sun week has fewer flies.
     const COV_DEFAULT_CFG = {
         rulebook: 'diamondback',
-        p1WeekTarget: 2, p2WeekTarget: 1,              // Diamondback: promoted cadence
+        p1WeekTarget: 2, p2WeekTarget: 1,              // Client A: promoted cadence
         p3FloorDays: 31,                               // 31 = monthly · 92 = quarterly (their fine print)
         intP1Days: 7, intP2Days: 14, intP3Days: 31,    // internal SLA rolling windows
         noneDays: 31,
@@ -2798,7 +2798,7 @@
     function getCurrentSiteName() {
         // Percepto renders the site name in the top-frame site picker.
         // The Ant Design select uses `.ant-select-selection-item` with
-        // a `title` attribute holding the full name (e.g. "Exxon 32 -
+        // a `title` attribute holding the full name (e.g. "Client B 32 -
         // XBC Giddings Estate 1184H"). Fall back to textContent if no
         // title attribute, and to null if anything throws (cross-origin
         // / racing the initial render).

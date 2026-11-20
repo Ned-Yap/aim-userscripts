@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.157
+// @version      34.158
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -69,7 +69,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.157';
+    const SCRIPT_VERSION = '34.158';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -4671,9 +4671,9 @@
     // v34.116: shared taxonomy split — only TRAILING " - " segments that
     // are known STATE words count as the health state; everything before
     // them is the equipment/type. Handles BOTH taxonomies:
-    //   EXXON:       "battery - empty"           → equip "battery",         state Empty
-    //   Diamondback: "v - pumping rod - empty"   → equip "v - pumping rod", state Empty
-    // Before this, Diamondback's "v - pumping rod" classified as unknown
+    //   Client B:       "battery - empty"           → equip "battery",         state Empty
+    //   Client A: "v - pumping rod - empty"   → equip "v - pumping rod", state Empty
+    // Before this, Client A's "v - pumping rod" classified as unknown
     // state "Pumping rod" → gray fallback instead of Normal-pink.
     const ASSET_STATE_WORDS = ['unreachable', 'unshielded', 'empty', 'inactive', 'hy'];
     function splitSubtypeTaxonomy(sub) {
@@ -4724,7 +4724,7 @@
     // full style (line color/width/dash/opacity + fill color/opacity) and a
     // "show on map" flag (unchecked = hide matching assets + halos).
     // Rules live in named PRESETS (per client). A preset can auto-apply by
-    // site-name match ("Exxon", "Diamondback"); an explicit pick in the
+    // site-name match ("Client B", "Client A"); an explicit pick in the
     // editor is remembered per site (env-namespaced — QA ≠ prod). Edits are
     // a live-preview DRAFT until 💾 Save. Stored in GM (per-user; presets
     // shareable via 📤/📥 JSON). Editor lives ONLY in the render frame.
@@ -5092,7 +5092,7 @@
             + `</div>`
             + `<div class="asp-row" style="margin-bottom:8px;">`
             + `<span class="asp-muted" title="Comma-separated. First preset whose word appears in the site name auto-applies.">Auto-apply if site name has</span>`
-            + `<input type="text" data-asp-field="preset.siteMatch" value="${aspEsc((p.siteMatch || []).join(', '))}" placeholder="Exxon, Diamondback…" style="flex:1;min-width:100px;" ${dis}>`
+            + `<input type="text" data-asp-field="preset.siteMatch" value="${aspEsc((p.siteMatch || []).join(', '))}" placeholder="Acme, Globex…" style="flex:1;min-width:100px;" ${dis}>`
             + `</div>`
             + (isBuiltin ? `<div class="asp-muted" style="margin-bottom:8px;">★ Built-in preset (read-only) — ⧉ Duplicate it to customize, or ＋ for a fresh copy.</div>` : '')
             + `<datalist id="asp-equip-list">${disc.equips.map(n => `<option value="${aspEsc(n)}">`).join('')}</datalist>`

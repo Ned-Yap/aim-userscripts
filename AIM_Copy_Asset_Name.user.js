@@ -2,7 +2,7 @@
 // @name         AIM Copy Asset Name
 // @name:en      AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.405
+// @version      4.406
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -91,7 +91,7 @@
     }
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.405';
+    const SCRIPT_VERSION = '4.406';
 
     // Server model (v4.210): prod and QA are separate databases — the same
     // numeric site ID is two different sites. Per-site keys in GM storage
@@ -434,7 +434,7 @@
         }
         return null;
     }
-    // Combined "Site 1596 · Exxon 34 - Texas Ten" string for headers.
+    // Combined "Site 1596 · Client B 34 - Texas Ten" string for headers.
     // If no name resolves, just returns "Site 1596".
     function siteHeaderLabel(siteID) {
         const name = getCurrentSiteName();
@@ -4296,7 +4296,7 @@
             thresholds: Object.assign({}, airThresholds), enabled: Object.assign({}, airEnabled),
             site: {
                 // Notes override → site record → the site NAME's first word (Percepto site
-                // names start with the client: "Diamondback Cobra 01 - Web", "Delek US - …").
+                // names start with the client: "Client A Field 01 - Web", "Client F - …").
                 customer: nf.customer || (siteInfo && siteInfo.customer) || ((siteName || (siteInfo && siteInfo.name) || '').trim().split(/\s+/)[0] || ''),
                 address: nf.address || [siteInfo && siteInfo.address, siteInfo && siteInfo.city, siteInfo && siteInfo.state].filter(Boolean).join(', '),
                 timezone: siteInfo && siteInfo.timezone || '', mountainTerrain: !!(siteInfo && siteInfo.mountain),
@@ -9444,7 +9444,7 @@
     // would exceed 2× the distance the corner is BEVELED (two points, one per
     // edge normal) so the offset edge is never closer than d to either raw
     // edge — a capped miter at a sharp corner pulled back too little and let
-    // the neighbor band's spurs into the piece (Cobra, 2026-09-09).
+    // the neighbor band's spurs into the piece (Field A, 2026-09-09).
     function terUOffsetRing(pts, dArr) {
         const n = pts.length;
         const out = [];
@@ -9933,7 +9933,7 @@
                 // The pull-back MUST equal the simplification tolerance (+ half gap):
                 // an earlier version retried a self-intersecting ring at half the
                 // pull-back, which let the neighbor band's spurs into the piece
-                // (Cobra: 1,449 out-of-band cells). Self-intersections are cleaned
+                // (Field A: 1,449 out-of-band cells). Self-intersections are cleaned
                 // by the self-union; when that yields nothing usable the crossing
                 // points become "cuts" and the next pass lowers the tolerance there.
                 const D = x.D.map((d, i) => x.S[i] ? Math.max(gapD * 0.5, d) : d);
@@ -17577,7 +17577,7 @@
             // columns read identically to the 📊 Stats popup. v4.180: uses
             // the shared taxonomy parser — state = trailing known STATE
             // word(s) only, equipment = everything before them (so
-            // Diamondback's "v - pumping rod - empty" → Equipment
+            // Client A's "v - pumping rod - empty" → Equipment
             // "V - Pumping Rod", State "Empty"). GM Group = name with trailing
             // numeric tokens stripped ("Elevator 1"/"Elevator 2" → "Elevator").
             if (e.type === 3 && row.subtype) {
@@ -18069,11 +18069,11 @@
             // drawn so overlapping fills don't muddy the map.
             '<Style id="gmradius_outline_style"><LineStyle><color>fff020a0</color><width>2</width></LineStyle><PolyStyle><fill>0</fill></PolyStyle></Style>',
             // V-Buffer: BLUE (moved from yellow — yellow is now reserved
-            // for distro power lines per Exxon Powerlines KML standard).
+            // for distro power lines per Client B Powerlines KML standard).
             // KML color aabbggrr: ffff0000 = full alpha + pure blue.
             '<Style id="verticalbuffer_style"><LineStyle><color>ffff0000</color><width>2</width></LineStyle><PolyStyle><fill>0</fill></PolyStyle></Style>',
             '<Style id="horizontalbuffer_style"><LineStyle><color>ff00a5ff</color><width>2</width></LineStyle><PolyStyle><color>4D00a5ff</color></PolyStyle></Style>',
-            // Power lines — Exxon Powerlines KML standard colors:
+            // Power lines — Client B Powerlines KML standard colors:
             //   distro = YELLOW thin lines, ~50% opacity (8000ffff)
             //   trans  = RED slightly thicker, ~70% opacity (b30000ff)
             // KML format is aabbggrr: alpha+blue+green+red.
@@ -29948,7 +29948,7 @@
     // ========================================================
     // 🏗 RIGS & CRANES (#291, v4.381) — temporary NFZs from the daily sheet
     // ========================================================
-    // Diamondback emails a daily CSV of wells with a crane / big rig on them
+    // Client A emails a daily CSV of wells with a crane / big rig on them
     // (WELL_NAME, SURFACE_LATITUDE, SURFACE_LONGITUDE, JOB_TYPE_CATEGORY,
     // START_DATE, END_DATE). Rows are WELLS: match each to a PAD here (GPS in a
     // root pad polygon → nearest pad within N ft → exact child name → prefix),
@@ -30559,7 +30559,7 @@
             <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">
                 <b style="color:#ff9a3d">🏗 Rigs & cranes</b>
                 <label style="background:rgba(122,223,230,0.12);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:2px 8px;cursor:pointer;font-size:11px">📂 Load today's CSV<input type="file" accept=".csv,text/csv" data-rig-file style="display:none"></label>
-                <span style="color:#888;font-size:10px">drag & drop works · sheet day from the file name (Diamondback_Rig_Data_10.16.26.csv) · last ingest: <b style="color:#cfd6dc">${esc(st.day || 'never')}</b> · <span id="aim-rig-sync"></span> · <span id="aim-rig-feed"></span></span>
+                <span style="color:#888;font-size:10px">drag & drop works · sheet day from the file name (e.g. Rig_Data_10.16.26.csv) · last ingest: <b style="color:#cfd6dc">${esc(st.day || 'never')}</b> · <span id="aim-rig-sync"></span> · <span id="aim-rig-feed"></span></span>
                 <span style="flex:1"></span>
                 <button data-rig-act="manual" style="background:none;border:1px solid #7adfe6;color:#7adfe6;border-radius:3px;padding:2px 8px;cursor:pointer;font-size:11px">👁 Add RPIC report</button>
                 <button data-rig-act="commit" style="background:rgba(255,154,61,0.18);border:1px solid #ff9a3d;color:#ffb060;border-radius:3px;padding:2px 10px;cursor:pointer;font-size:11px;font-weight:700">🛡 Protect staged${cnt.staged ? ` (${cnt.staged})` : ''}</button>
@@ -30737,7 +30737,7 @@
         imp: { what: 'Bring a client asset list into Percepto. Load a CSV or KML → points stage on the map (nothing written) → narrow with boundaries → map the type → ✓ Create makes real asset squares. Create-only, with dry run, backup manifest and undo.',
             steps: ['The page is five numbered sections in working order (plus Advanced). Each header shows where it stands; click to open / close, or use the jump chips at the top. The status line under the title shows the latest result.', 'Boundaries first: ⬆ Load boundary KML (several polygons or several files), or draw a ⭕ circle / 🖊 polygon yourself; ✎ Edit reshapes any of them. Only points inside a boundary are selected.', '📂 Load CSV / KML (drag & drop works). Name / lat / lng are guessed; "edit" fixes the mapping.', '↔ Move point fixes a location before import: click a dot to pick it up, click where it belongs (or drag it); Delete while holding removes it from the import. Moved dots get a magenta ring; ↩ reset moved puts them back.', '✏ Shape draws the asset\'s real outline before it is created: click a dot, CTRL+drag a stroke across the asset (draw along the LONG side → a rectangle that long by the narrow side, default 15 ft; a loop → the tightest box). A red buffer ring (7.5 ft, editable) shows around the outline you are holding so you can see the 15 ft you must keep; ALT+click other dots to copy the held outline onto them — copies and dragged edges snap to a 15 ft gap from neighbours (gap editable, 0 = flush; Alt while dragging = no snap). Shift is left alone so Percepto\'s asset names stay visible. Drag inside the box to move it whole, drag an edge to pull it longer or shorter, drag a corner to move that corner; click an edge midpoint to add a corner, right-click a corner to remove it, Delete = back to a square. Colour / fill in the Control Panel.', 'Notes: under the mapping ("edit"), tick every extra column that belongs in the asset notes, rename labels, order them with ▲▼. The client\'s original name is always the first block, and a who / when / file stamp is always the last.', 'Progress is saved per site — automatically a few seconds after any change and every few minutes, or 💾 Save progress. Reopen the page later and ↻ Resume brings back the file, moved / removed points and boundaries.', 'Undo: ↩ Undo last import reverts the last run (creates deleted, updates put back) and survives a reload via ↻ Resume. Independently, 🕘 Imports on this site lists every import found on the assets themselves (the "Imported by …" line) and can delete a run\'s created assets from any machine, any time.', '📊 Analyze (in Create / update): the quarterly compare — run it on a new list before Create to see what would change: new · gone (on the site but not in the list; nothing is deleted) · moved over N ft · tier / type changes · production changes vs our last notes. Click a row to zoom; 📤 Sheets for the review.', '5 · Enverus check: set the Developer API key once, pick the API-number column, Cross-check — every selected well gets its Enverus status / type / trajectory / operator / dates and location; anything not plainly producing lands in Placement › 🛢 Enverus and an "Enverus" block goes into the notes.', '🔍 Find missing wells (same section, after a cross-check): every well the operator has inside your boundaries whose API is not in the file, with status and the nearest mapped asset — tick the ones to add, ➕ Stage, and they become ordinary points (source noted) that go through tiers, flags and Create like the rest. They also appear in the client review as "Well on your pads that is not in the list".', 'Priority tiers (in 3 · Type & priority): pick the oil + water columns (or a single BLPD column, or a ready-made P1/P2/P3 column); every asset on a pad shares the pad total; the tier is written as a type prefix ("P1 - …") and a Priority / Prioritized block in the notes. "name matches → update type + notes" is the quarterly re-run: load the new list, review the Tier report, Create.', 'Type: the file\'s type column maps to Percepto subtypes (new values are created on the site); with no type column one subtype applies to all.', 'Flags: name duplicates, parent/child, nearby — 📤 Copy for Sheets or ⬇ CSV for the account manager.', 'Size → untick Dry run → ✓ Create. ↩ Undo last import deletes exactly what it made.'],
             test: 'Load the list, add one boundary, confirm the selected count drops, Create with Dry run ON.' },
-        rig: { what: 'Temporary no-fly zones for pads with a crane or big rig on them, from Diamondback\'s daily sheet (or an RPIC report). Each well row is matched to its pad, an NFZ = pad ∩ FFZ-inset is staged, and committed create-only. When the end date passes or the row drops off the sheet, the row turns VERIFY — nothing is deleted until a CSM confirms the equipment is gone.', steps: ['📂 Load today\'s CSV (drag & drop). The sheet day comes from the file name.', 'Check the table: Staged rows have a pad (hover the pad for how it matched; ⚠ = name and GPS disagree). Unmatched / off-site rows are listed, never guessed.', 'Untick Dry run in the header → ⬠ Create staged NFZs. A backup JSON downloads first; each NFZ is verified by refetch.', 'Next day: load the new CSV. Re-dated rows show ✎; dropped rows and passed end dates turn VERIFY — click ✓ Gone to delete that NFZ or ↩ Still there to snooze.', '👁 Add RPIC report for a crane a pilot spotted: same lifecycle, plus the mission(s) pulled so the restore is not forgotten.'], test: 'Load Diamondback_Rig_Data_10.16.26.csv on Cobra 01 with Dry run on: four rows match pads, the rest are off-site. Then load 10.15 then 10.16 to watch the diff.' },
+        rig: { what: 'Temporary no-fly zones for pads with a crane or big rig on them, from the client\'s daily sheet (or an RPIC report). Each well row is matched to its pad, an NFZ = pad ∩ FFZ-inset is staged, and committed create-only. When the end date passes or the row drops off the sheet, the row turns VERIFY — nothing is deleted until a CSM confirms the equipment is gone.', steps: ['📂 Load today\'s CSV (drag & drop). The sheet day comes from the file name.', 'Check the table: Staged rows have a pad (hover the pad for how it matched; ⚠ = name and GPS disagree). Unmatched / off-site rows are listed, never guessed.', 'Untick Dry run in the header → ⬠ Create staged NFZs. A backup JSON downloads first; each NFZ is verified by refetch.', 'Next day: load the new CSV. Re-dated rows show ✎; dropped rows and passed end dates turn VERIFY — click ✓ Gone to delete that NFZ or ↩ Still there to snooze.', '👁 Add RPIC report for a crane a pilot spotted: same lifecycle, plus the mission(s) pulled so the restore is not forgotten.'], test: 'Load a Rig_Data_MM.DD.YY.csv sheet on a test site with Dry run on: four rows match pads, the rest are off-site. Then load 10.15 then 10.16 to watch the diff.' },
         sci: { what: 'Applies the Ortho Scanner review sheet\'s decisions: accepted NFZs and flight-path leg changes stage on the map (green / yellow, removed legs red), preflight runs, then Apply writes them — NFZs create-only, flight paths one POST each with Delete Guard backups.',
             steps: ['Load the decisions JSON and the scan bundle from the review sheet.', 'Check the staged plan on the map and the preflight result.', 'Untick Dry run → Apply.'],
             test: 'Load a bundle, confirm the staged counts match the sheet, Apply with Dry run ON.' },
@@ -31806,7 +31806,7 @@
             const kml = buildSiteKML(siteID, opts);
             if (!kml) { showToast('Failed to build KML'); return; }
             // Filename: mirror the in-KML document name, e.g.
-            // "Site 1605 Map - Exxon - Lille Midkiff 5 - OFFLINE (3D).kml".
+            // "Site 1605 Map - Client B - Lille Midkiff 5 - OFFLINE (3D).kml".
             // Strip characters illegal in filenames (/ \ : * ? " < > |) so the
             // download doesn't get rejected or silently mangled by the OS.
             const base = (opts.siteName || `Site ${siteID} Map`).replace(/[/\\:*?"<>|]/g, '-').replace(/\s+/g, ' ').trim();
@@ -37615,8 +37615,8 @@
         // v4.180: all three asset breakdowns share parseAssetSubtype —
         // equipment = the full type (orientation + equipment, e.g.
         // "V - Pumping Rod"), state = trailing known STATE word(s) only,
-        // plus a V-vs-H orientation rollup for taxonomies (Diamondback)
-        // whose types lead with the wellhead orientation. EXXON's
+        // plus a V-vs-H orientation rollup for taxonomies (Client A)
+        // whose types lead with the wellhead orientation. Client B's
         // "battery - empty" style parses identically to before.
         const equipMap = {};
         const stateMap = {};
@@ -37635,7 +37635,7 @@
         const assetEquipment = sortAndCap(equipMap, 16);
         const assetStates = sortAndCap(stateMap, 10);
         // Only meaningful when the taxonomy actually has V/H leads —
-        // EXXON sites get no orientation card.
+        // Client B sites get no orientation card.
         const assetOrientation = (orientMap['V'] || orientMap['H']) ? sortAndCap(orientMap, 5) : null;
 
         // Auto-detect GM groups from names. Strategy:
@@ -37669,7 +37669,7 @@
             'With notes': allRows.filter(r => r.hasNotes).length,
             // v4.181: count BOTH unshielded sources — the is_unshielded
             // boolean flag (any entity type) AND the parsed asset subtype
-            // state. Diamondback marks unshielded in the subtype string
+            // state. Client A marks unshielded in the subtype string
             // ("… - unshielded") with the flag left false, so the old
             // flag-only count read 0 while States showed 101.
             'Unshielded (all types)': allRows.filter(r => r.unshielded || r.state === 'Unshielded').length,
@@ -37694,9 +37694,9 @@
     // agree. Subtypes are " - "-separated; only TRAILING segments that
     // are known STATE words count as the health state, everything
     // before them is the TYPE (which may itself contain " - "):
-    //   EXXON:       "battery - empty"            → type "Battery", state Empty
-    //   Diamondback: "v - pumping rod - empty"    → type "V - Pumping Rod", state Empty, orientation V
-    //   Diamondback: "h - pumping - submersible"  → type "H - Pumping - Submersible", state Normal
+    //   Client B:       "battery - empty"            → type "Battery", state Empty
+    //   Client A: "v - pumping rod - empty"    → type "V - Pumping Rod", state Empty, orientation V
+    //   Client A: "h - pumping - submersible"  → type "H - Pumping - Submersible", state Normal
     // Multiple trailing state words resolve by safety-first precedence
     // (worst wins), mirroring Map Styler's classifyAssetState.
     const ASSET_STATE_WORDS = ['unreachable', 'unshielded', 'empty', 'inactive', 'hy'];
@@ -38202,11 +38202,11 @@
         //   "Type" — but "Subtype" or "Group" reads better in context).
         const kwCard = (titleText, dict, color, denominator, labelHeader) => {
             const c = card(titleText);
-            // v4.181: long type names (Diamondback's "V - Pumping Rod")
+            // v4.181: long type names (Client A's "V - Pumping Rod")
             // were ellipsis-truncated in a single-column card. When any
             // label runs long, span TWO grid columns and shrink the Share
             // bar (38% → 28%) so the label column gets the room. Short
-            // taxonomies (EXXON) keep the original one-column layout.
+            // taxonomies (Client B) keep the original one-column layout.
             const wide = Object.keys(dict).some(k => k.length > 14);
             if (wide) c.style.gridColumn = 'span 2';
             const maxVal = Math.max(0, ...Object.values(dict));
@@ -38273,7 +38273,7 @@
         const totalAssets = stats.counts[3];
         const totalGMs = stats.counts[19];
         // v4.180: V vs H orientation rollup — only for taxonomies whose
-        // types lead with the wellhead orientation (e.g. Diamondback).
+        // types lead with the wellhead orientation (e.g. Client A).
         if (stats.assetOrientation) {
             body.appendChild(kwCard('Asset · V vs H (auto)', stats.assetOrientation, '#7adfe6', totalAssets, 'Orientation'));
         }
