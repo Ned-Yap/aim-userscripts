@@ -1,3 +1,11 @@
+## 2026-11-20 — 🌐 AIM Fleet Tools latest v1.02 (latest only) — 📅 Sweep Scheduler: 2nd / 3rd choice, flights done, distance
+
+- **🥇 Fly next, 🥈 2nd choice, 🥉 3rd choice** (feature #345) above the table: the first mission in the order, then the next two that are at a different site — for when weather, a TFR or a crane blocks the first. Also at the top of Copy for Slack.
+- **Flights done (approx.)** column: for example "2 of ~5" — flights flown this cycle toward the sweep, and how many it should take in total. It is an estimate from image counts, not a count of the incomplete mission's steps.
+- **Farthest step (ft)** column: one-way distance from the base to the mission's farthest step, measured along the site setup (flight paths, and across FFZs), not in a straight line. A site with no flight paths is measured in a straight line and says so under "all columns".
+- **Distance: close / medium / far.** Enter the two cut-offs (in feet) above the table and every mission gets a label you can sort by. Blank until you enter them.
+- Distances are measured when the missions are read, so the next ▶ Update re-reads the mission banks once.
+
 ## 2026-11-20 — 🌐 AIM Fleet Tools latest v1.01 (latest only) — 📅 Sweep Scheduler keeps its run and only reads what is new
 
 - **The last run is saved on your computer** (feature #344). Open the Sweep Scheduler after a reload and the table is already there, marked "Saved run".

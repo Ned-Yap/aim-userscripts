@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.01
+// @version      1.02
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
-// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v1.01 (#344): 📅 Sweep Scheduler keeps its last run (it is back after a reload) and ▶ Update reads only the flights since then; missions and docked drones are re-read once a day. v1.00 (#343): 🔋 Sweep Scheduler shows each site's battery type and usage, read from the Pulse maintenance dashboard table while that page is open in another tab (the tab reloads itself every 10 h). v0.90 (#341): 📰 Report cards show each asset's findings in the last 12 / 6 / 3 months with a rising / steady / falling cue (the 'days flagged' number is gone from the cards). v0.89 (#341): 📈 Findings Report keeps its last finished run (browser IndexedDB) — it is back after a reload, so filters, the report period and every export work without re-running; ✕ Clear forgets it. v0.88 (#341): 📈 Findings Report gains 📰 Report — a print-ready (Save as PDF) narrative for the last 7 / 14 / 30 days: one card per asset with its 12-month history, assets that keep coming back, trend, by site; the earlier HTML is now 📊 Dashboard; finding types that differ only by capitalisation are merged. v0.87 (#341): 📈 Findings Report — the Data View Issues tab (emissions and every other finding type) across the picked sites: findings per month and per 100 flights, assets flagged on 2+ days, by type / component / site, rejected + status + type filters, issues CSV, site×month CSV and a self-contained HTML report whose rows link to the site and the issue. v0.86: 📅 Sweep Scheduler gains a 📆 Calendar view (the forecast day by day, Mon–Fri weeks, exports). v0.85 (#335): 📅 Sweep Scheduler — for a client's recurring inspection missions (first profile: Client C feeder poles) it reads the live mission bank, the flown log and each base's docked drone, works out how old each mission's oldest pole is (count-back to 90 % of a full sweep), and lists what to fly next in order with flights planned per month, flights per sweep, payload (4.0 / 3.0 / none), per-site schedule switches, mission holds, Sheets / CSV / Slack text. v0.84 (#334): ⚙ ESC Sweep — for every flown flight of the picked sites × date window, download the log archive (in memory only), read the ESC telemetry and list each flight where the drone raised the ESC ratio alarm (false alarm vs real) plus long takeoff spikes; capped per run with Continue, Pause / Stop, gentle mode, finished flights remembered, Sheets / CSV, each row links to the full Mission Logs card. v0.82 (#331): 🎬 Mission Review — sweep the mission log of the picked sites (or every site) for flagged flights; checks are a registry (first: flew but NO video; also no images / fewer images than planned / landing failed); per-site counts, every flight a link to its Mission Playback, Copy → Sheets / CSV. v0.79 (#329): 🚩 SOP Sweep — run Site-Setup SOP checks across the picked sites (or every site) from LIVE /map_objects/; first check = FP ⨯ FP crossing (segments that cross / T / overlap with no shared vertex); per-site rows, 🎯 fly-to on the landing map, ↗ opens the site in a NEW tab and jumps to the spot (?aim-goto deep link, Site Setup Tools v4.498+), Copy → Sheets / CSV. v0.78 (#318): 🖼 Map Export — renders what the landing map shows (KML layers, cross-ref bands, site setups, site names) on its own canvas at print size with basemap tiles, legend, scale bar, north arrow, title and a dead-space trim (transparent outside the content); preview modal with toggles; ⬇ PNG poster or 🌐 self-contained interactive HTML (small, zooms forever). v0.77: Site setups scope — draw the FFZs / flight paths / assets of ONLY the sites matching a names box or the 📦 Fleet Data pick (independent of the label filter, "= labels" copies it) so another client's setup never shows on a shared map. v0.76: site labels "Only matching / picked" mode (names box or the 📦 Fleet Data pick keep their label, every other site name hidden), 🗺 on-map legend (cross-ref bands + numbers, shown KML layers, site-setup colours) and 📷 Client view (names hidden, legend on, panel + button tucked away for a screenshot; ↩ Exit restores). v0.75: 📊 Fleet Metrics follows the 📦 Fleet Data pick ("picked only" checkbox, on by default; nothing picked → every site) — table, totals, Sheets / CSV and 🛂 Approval FPs. v0.67 (#285): 📡 Coverage — radius circles on the landing map (any Ø, drag centre / edge, live count of sites inside under a fully-inside / centre-inside rule, KML export), footprint of the picked sites (span, convex hull, smallest enclosing circle, site extents + FFZ acreage), 🧠 Best spot (centre covering the MOST sites at a Ø — exact candidate search) + 🗂 Plan all (greedy: how many circles cover every site), 📏 two-click ruler. v0.57 (#274): data check shows whether the skipped no-duration rows carry images / videos (+ first video object), and 🔎 probes one /missions/ page without the field filter to list every server field (hunting an abort / end-reason field). v0.56 (#274): 📋 Copy check button on the data check. v0.55 (#276): Utilization lenses — 🧑‍✈️ Pilots / 🛸 Drones / 📍 Sites / 🏢 Clients (sites + clients: flights, drone-hrs, air, flyable drone-hrs, util %, coverage, sites never flown, incomplete, capture %, gaps); Drones gain flyable hrs + util %. v0.54 (#274): Incomplete flights + Capture % from planned-vs-actual image counts (Pilots / Pilot-days / Flights), raw state codes + mission_data_reports sample in the data check. v0.53 (#274): ⚙ Site rules is a real button. v0.52 (#274): Pilot Utilization hides all-zero / blank columns (panel + Sheets + CSV) with a 'hidden:' note and a checkbox to show them. v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
+// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v1.02 (#345): 📅 Sweep Scheduler — 'Fly next' strip with a 2nd and 3rd choice at other sites, a flights-done column (2 of ~5), and the distance to each mission's farthest step measured along the site setup (close / medium / far once you enter the cut-offs). v1.01 (#344): 📅 Sweep Scheduler keeps its last run (it is back after a reload) and ▶ Update reads only the flights since then; missions and docked drones are re-read once a day. v1.00 (#343): 🔋 Sweep Scheduler shows each site's battery type and usage, read from the Pulse maintenance dashboard table while that page is open in another tab (the tab reloads itself every 10 h). v0.90 (#341): 📰 Report cards show each asset's findings in the last 12 / 6 / 3 months with a rising / steady / falling cue (the 'days flagged' number is gone from the cards). v0.89 (#341): 📈 Findings Report keeps its last finished run (browser IndexedDB) — it is back after a reload, so filters, the report period and every export work without re-running; ✕ Clear forgets it. v0.88 (#341): 📈 Findings Report gains 📰 Report — a print-ready (Save as PDF) narrative for the last 7 / 14 / 30 days: one card per asset with its 12-month history, assets that keep coming back, trend, by site; the earlier HTML is now 📊 Dashboard; finding types that differ only by capitalisation are merged. v0.87 (#341): 📈 Findings Report — the Data View Issues tab (emissions and every other finding type) across the picked sites: findings per month and per 100 flights, assets flagged on 2+ days, by type / component / site, rejected + status + type filters, issues CSV, site×month CSV and a self-contained HTML report whose rows link to the site and the issue. v0.86: 📅 Sweep Scheduler gains a 📆 Calendar view (the forecast day by day, Mon–Fri weeks, exports). v0.85 (#335): 📅 Sweep Scheduler — for a client's recurring inspection missions (first profile: Client C feeder poles) it reads the live mission bank, the flown log and each base's docked drone, works out how old each mission's oldest pole is (count-back to 90 % of a full sweep), and lists what to fly next in order with flights planned per month, flights per sweep, payload (4.0 / 3.0 / none), per-site schedule switches, mission holds, Sheets / CSV / Slack text. v0.84 (#334): ⚙ ESC Sweep — for every flown flight of the picked sites × date window, download the log archive (in memory only), read the ESC telemetry and list each flight where the drone raised the ESC ratio alarm (false alarm vs real) plus long takeoff spikes; capped per run with Continue, Pause / Stop, gentle mode, finished flights remembered, Sheets / CSV, each row links to the full Mission Logs card. v0.82 (#331): 🎬 Mission Review — sweep the mission log of the picked sites (or every site) for flagged flights; checks are a registry (first: flew but NO video; also no images / fewer images than planned / landing failed); per-site counts, every flight a link to its Mission Playback, Copy → Sheets / CSV. v0.79 (#329): 🚩 SOP Sweep — run Site-Setup SOP checks across the picked sites (or every site) from LIVE /map_objects/; first check = FP ⨯ FP crossing (segments that cross / T / overlap with no shared vertex); per-site rows, 🎯 fly-to on the landing map, ↗ opens the site in a NEW tab and jumps to the spot (?aim-goto deep link, Site Setup Tools v4.498+), Copy → Sheets / CSV. v0.78 (#318): 🖼 Map Export — renders what the landing map shows (KML layers, cross-ref bands, site setups, site names) on its own canvas at print size with basemap tiles, legend, scale bar, north arrow, title and a dead-space trim (transparent outside the content); preview modal with toggles; ⬇ PNG poster or 🌐 self-contained interactive HTML (small, zooms forever). v0.77: Site setups scope — draw the FFZs / flight paths / assets of ONLY the sites matching a names box or the 📦 Fleet Data pick (independent of the label filter, "= labels" copies it) so another client's setup never shows on a shared map. v0.76: site labels "Only matching / picked" mode (names box or the 📦 Fleet Data pick keep their label, every other site name hidden), 🗺 on-map legend (cross-ref bands + numbers, shown KML layers, site-setup colours) and 📷 Client view (names hidden, legend on, panel + button tucked away for a screenshot; ↩ Exit restores). v0.75: 📊 Fleet Metrics follows the 📦 Fleet Data pick ("picked only" checkbox, on by default; nothing picked → every site) — table, totals, Sheets / CSV and 🛂 Approval FPs. v0.67 (#285): 📡 Coverage — radius circles on the landing map (any Ø, drag centre / edge, live count of sites inside under a fully-inside / centre-inside rule, KML export), footprint of the picked sites (span, convex hull, smallest enclosing circle, site extents + FFZ acreage), 🧠 Best spot (centre covering the MOST sites at a Ø — exact candidate search) + 🗂 Plan all (greedy: how many circles cover every site), 📏 two-click ruler. v0.57 (#274): data check shows whether the skipped no-duration rows carry images / videos (+ first video object), and 🔎 probes one /missions/ page without the field filter to list every server field (hunting an abort / end-reason field). v0.56 (#274): 📋 Copy check button on the data check. v0.55 (#276): Utilization lenses — 🧑‍✈️ Pilots / 🛸 Drones / 📍 Sites / 🏢 Clients (sites + clients: flights, drone-hrs, air, flyable drone-hrs, util %, coverage, sites never flown, incomplete, capture %, gaps); Drones gain flyable hrs + util %. v0.54 (#274): Incomplete flights + Capture % from planned-vs-actual image counts (Pilots / Pilot-days / Flights), raw state codes + mission_data_reports sample in the data check. v0.53 (#274): ⚙ Site rules is a real button. v0.52 (#274): Pilot Utilization hides all-zero / blank columns (panel + Sheets + CSV) with a 'hidden:' note and a checkbox to show them. v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        *://qa.percepto.app/*
@@ -157,7 +157,7 @@
     if (location.hostname === 'pulse.percepto.app') { pulseBridge(); return; }
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '1.01';
+    const SCRIPT_VERSION = '1.02';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -249,7 +249,7 @@
             // v0.84 (#334): ⚙ ESC Sweep scope + window (days back) + max downloads per run + one-at-a-time mode + which rows show
             esPicked: true, esProdOnly: true, esDays: 7, esCap: 200, esGentle: false, esShow: 'flag',
             // v0.85 (#335): 📅 Sweep Scheduler — site-name filter, log months, cycle start / age-limit overrides ('' / 0 = profile default), view switches
-            sk: { terms: '', prodOnly: true, lookMo: 12, cycleStart: '', limitDays: 0, showOther: true, onlyDue: false, adv: false, view: 'table', calWeeks: 6 },
+            sk: { terms: '', prodOnly: true, lookMo: 12, cycleStart: '', limitDays: 0, showOther: true, onlyDue: false, adv: false, view: 'table', calWeeks: 6, distClose: 0, distFar: 0 },
             // v0.87 (#341): 📈 Findings Report — scope, site-name filter (regex), months back, display filters (rejected / status / type)
             fi: { picked: true, prodOnly: true, name: '', months: 12, recentDays: 7, showRejected: false, statusOff: {}, typeOff: {} },
         };
@@ -281,6 +281,7 @@
                 if (typeof s.sk.limitDays === 'number' && s.sk.limitDays >= 0) d.sk.limitDays = s.sk.limitDays;
                 ['prodOnly', 'showOther', 'onlyDue', 'adv'].forEach(k => { if (typeof s.sk[k] === 'boolean') d.sk[k] = s.sk[k]; });
                 if (s.sk.view === 'table' || s.sk.view === 'cal') d.sk.view = s.sk.view;
+                ['distClose', 'distFar'].forEach(k => { if (typeof s.sk[k] === 'number' && s.sk[k] >= 0 && s.sk[k] <= 200000) d.sk[k] = s.sk[k]; });
                 if (typeof s.sk.calWeeks === 'number' && s.sk.calWeeks >= 0 && s.sk.calWeeks <= 60) d.sk.calWeeks = s.sk.calWeeks;
             }
             if (typeof s.nvMinMin === 'number' && s.nvMinMin >= 0) d.nvMinMin = s.nvMinMin;
@@ -8566,11 +8567,92 @@
         out.label = P.payloads[bestIdx].label; out.want = !!P.payloads[bestIdx].want;
         return out;
     }
+    // ---- 📏 route distance (v1.02, #345): how far the drone travels from the base to a mission step ALONG THE SITE SETUP ----
+    // Flight-path arcs form the graph; flight-path vertices inside (or within 25 ft of) the same FFZ are joined, because the
+    // drone may fly anywhere inside an FFZ; the base joins at its nearest vertex. A step is measured to the nearest flight-path
+    // SEGMENT (not vertex), then along the graph to the base. No flight paths → straight line from the base, and it says so.
+    // One-way distance. Flat-earth metres around the base (error well under 1 % at site scale). Bump SK_DIST_V if the maths changes.
+    const SK_DIST_V = 1;
+    function skRouter(entities) {
+        const ents = (entities || []).filter(Boolean);
+        const bases = ents.filter(e => e.type === 8).map(fxCentroid).filter(Boolean);
+        if (!bases.length) return { how: 'no base station', dist: null };
+        const kx = 111320 * Math.cos(bases[0].lat * Math.PI / 180), ky = 110540;
+        const X = (p) => p.lng * kx, Y = (p) => p.lat * ky;
+        const bxy = bases.map(b => ({ x: X(b), y: Y(b) }));
+        const verts = new Map(), segs = [];
+        const vert = (p) => { const k = p.lat + ',' + p.lng; let v = verts.get(k); if (!v) { v = { x: X(p), y: Y(p), adj: [], d: Infinity }; verts.set(k, v); } return v; };
+        const link = (a, b) => { const w = Math.hypot(a.x - b.x, a.y - b.y); a.adj.push([b, w]); b.adj.push([a, w]); };
+        ents.forEach(e => {
+            if (e.type !== 15 || !Array.isArray(e.arcs)) return;
+            e.arcs.forEach(a => {
+                if (!a || !a.point_a || !a.point_b || typeof a.point_a.lat !== 'number' || typeof a.point_a.lng !== 'number' || typeof a.point_b.lat !== 'number' || typeof a.point_b.lng !== 'number') return;
+                const va = vert(a.point_a), vb = vert(a.point_b); if (va === vb) return;
+                link(va, vb); segs.push([va, vb]);
+            });
+        });
+        if (!segs.length) return { how: 'straight line (no flight paths)', dist: (p) => { const x = X(p), y = Y(p); return Math.min.apply(null, bxy.map(b => Math.hypot(b.x - x, b.y - y))); } };
+        const all = Array.from(verts.values());
+        const margin = 25 / FT_PER_M;
+        const segOff = (x, y, a, b) => { const dx = b.x - a.x, dy = b.y - a.y; const L2 = dx * dx + dy * dy; let t = L2 > 0 ? ((x - a.x) * dx + (y - a.y) * dy) / L2 : 0; t = t < 0 ? 0 : (t > 1 ? 1 : t); const px = a.x + dx * t, py = a.y + dy * t; return { off: Math.hypot(x - px, y - py), px, py }; };
+        ents.forEach(e => {
+            if (e.type !== 16) return;
+            const ring = (entityCoords(e) || []).filter(p => p && typeof p.lat === 'number' && typeof p.lng === 'number').map(p => ({ x: X(p), y: Y(p) }));
+            if (ring.length < 3) return;
+            let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+            ring.forEach(p => { if (p.x < x0) x0 = p.x; if (p.x > x1) x1 = p.x; if (p.y < y0) y0 = p.y; if (p.y > y1) y1 = p.y; });
+            const inside = all.filter(v => {
+                if (v.x < x0 - margin || v.x > x1 + margin || v.y < y0 - margin || v.y > y1 + margin) return false;
+                let inPoly = false;
+                for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) { const a = ring[i], b = ring[j]; if ((a.y > v.y) !== (b.y > v.y) && v.x < (b.x - a.x) * (v.y - a.y) / (b.y - a.y) + a.x) inPoly = !inPoly; }
+                if (inPoly) return true;
+                for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) if (segOff(v.x, v.y, ring[j], ring[i]).off <= margin) return true;
+                return false;
+            });
+            if (inside.length < 2) return;
+            if (inside.length <= 150) { for (let i = 0; i < inside.length; i++) for (let j = i + 1; j < inside.length; j++) link(inside[i], inside[j]); }
+            else { for (let i = 1; i < inside.length; i++) link(inside[0], inside[i]); }   // huge FFZ: star through one vertex (slight over-estimate) instead of n² edges
+        });
+        // Dijkstra from every base at once (binary heap)
+        const heap = [];
+        const push = (d, v) => { heap.push([d, v]); let i = heap.length - 1; while (i > 0) { const p = (i - 1) >> 1; if (heap[p][0] <= heap[i][0]) break; const t = heap[p]; heap[p] = heap[i]; heap[i] = t; i = p; } };
+        const pop = () => { const top = heap[0], last = heap.pop(); if (heap.length) { heap[0] = last; let i = 0; for (;;) { const l = 2 * i + 1, r = l + 1; let m = i; if (l < heap.length && heap[l][0] < heap[m][0]) m = l; if (r < heap.length && heap[r][0] < heap[m][0]) m = r; if (m === i) break; const t = heap[m]; heap[m] = heap[i]; heap[i] = t; i = m; } } return top; };
+        bxy.forEach(b => { let best = null, bd = Infinity; all.forEach(v => { const d = Math.hypot(v.x - b.x, v.y - b.y); if (d < bd) { bd = d; best = v; } }); if (best && bd < best.d) { best.d = bd; push(bd, best); } });
+        while (heap.length) { const [d, v] = pop(); if (d > v.d) continue; for (let i = 0; i < v.adj.length; i++) { const to = v.adj[i][0], nd = d + v.adj[i][1]; if (nd < to.d) { to.d = nd; push(nd, to); } } }
+        const viaSeg = (x, y, sg) => { const o = segOff(x, y, sg[0], sg[1]); const via = Math.min(sg[0].d + Math.hypot(sg[0].x - o.px, sg[0].y - o.py), sg[1].d + Math.hypot(sg[1].x - o.px, sg[1].y - o.py)); return { off: o.off, total: via + o.off }; };
+        return {
+            how: 'along site setup',
+            dist: (p) => {
+                const x = X(p), y = Y(p);
+                let best = null, bo = Infinity;
+                for (let i = 0; i < segs.length; i++) { const o = segOff(x, y, segs[i][0], segs[i][1]).off; if (o < bo) { bo = o; best = segs[i]; } }
+                let r = viaSeg(x, y, best);
+                if (isFinite(r.total)) return r.total;
+                let alt = Infinity;                                            // nearest segment is not connected to the base: take a connected one within 60 m more
+                for (let i = 0; i < segs.length; i++) { r = viaSeg(x, y, segs[i]); if (r.off <= bo + 60 && r.total < alt) alt = r.total; }
+                return isFinite(alt) ? alt : null;
+            },
+        };
+    }
+    // → { far, first (ft, one way), un (steps with no connected flight path), how } for one mission's instructions
+    function skMissionDist(router, instructions) {
+        if (!router || !router.dist) return { far: null, first: null, un: 0, how: router ? router.how : 'site setup not read' };
+        const seen = new Set(); let far = -1, first = null, un = 0;
+        (instructions || []).forEach(i => {
+            const L = i && i.location; if (!L || typeof L.lat !== 'number' || typeof L.lng !== 'number') return;
+            const k = L.lat + ',' + L.lng; if (seen.has(k)) return; seen.add(k);
+            const d = router.dist(L);
+            if (d == null || !isFinite(d)) { un++; return; }
+            if (first == null) first = d; if (d > far) far = d;
+        });
+        return { far: far >= 0 ? Math.round(far * FT_PER_M) : null, first: first != null ? Math.round(first * FT_PER_M) : null, un, how: seen.size ? router.how : 'no step has a location' };
+    }
     async function skFetchSite(sid, P, start, end, isDead, only, logFrom) {
         const rec = (skData.sites[sid] = skData.sites[sid] || { name: siteName(sid), status: siteStatus(sid), payload: null, missions: null, flights: null, err: {} });
         const want = (k) => !only || only[k];
-        if (want('setup')) {
-            try { const raw = await fdGetJson(`/map_objects/?getPoiMapObjectsAsList=true&site_id=${encodeURIComponent(sid)}`, 60000); rec.payload = skPayloadOf(P, extractList(raw)); rec.setupAt = Date.now(); delete rec.err.setup; }
+        let ents = null;                                                       // the site setup, also needed to measure mission distances
+        if (want('setup') || want('bank')) {
+            try { const raw = await fdGetJson(`/map_objects/?getPoiMapObjectsAsList=true&site_id=${encodeURIComponent(sid)}`, 60000); ents = extractList(raw); rec.payload = skPayloadOf(P, ents); rec.setupAt = Date.now(); delete rec.err.setup; }
             catch (e) { rec.err.setup = (e && e.message) || String(e); console.warn(`${TAG} sweep scheduler: site ${sid} setup failed:`, e); }
         }
         if (isDead()) return;
@@ -8581,7 +8663,15 @@
                 try { raw = await fdGetJson(url, 120000); }
                 catch (e) { if (/401\/403|login page/.test(String(e && e.message))) throw e; console.warn(`${TAG} sweep scheduler: site ${sid} mission bank failed (${e && e.message || e}) — retrying once`); raw = await fdGetJson(url, 240000); }
                 if (!Array.isArray(raw)) throw new Error('unexpected /available_app/ response shape (not a list)');
-                rec.missions = raw.filter(m => m && m.is_active !== false).map(m => ({ id: m.id, name: m.name || '', points: (m.instructions || []).filter(i => i && i.type_name === P.stepType).length }));
+                let router = null;
+                try { router = ents ? skRouter(ents) : null; } catch (e) { console.warn(`${TAG} sweep scheduler: site ${sid} route graph failed — distances left blank:`, e); }
+                const fRe = new RegExp(P.feederRe, 'i');
+                rec.missions = raw.filter(m => m && m.is_active !== false).map(m => {
+                    const o = { id: m.id, name: m.name || '', points: (m.instructions || []).filter(i => i && i.type_name === P.stepType).length };
+                    if (fRe.test(o.name)) { try { Object.assign(o, skMissionDist(router, m.instructions)); } catch (e) { console.warn(`${TAG} sweep scheduler: distance of "${o.name}" failed:`, e); o.how = 'failed'; } }
+                    return o;
+                });
+                rec.distV = SK_DIST_V;
                 rec.bankAt = Date.now();
                 delete rec.err.bank;
             } catch (e) { rec.err.bank = (e && e.message) || String(e); console.warn(`${TAG} sweep scheduler: site ${sid} mission bank failed:`, e); }
@@ -8639,7 +8729,7 @@
                 if (!ok) return { sid, only: null };                               // new site, or its last read failed → read it all
                 sites[sid] = c; c.name = siteName(sid); c.status = siteStatus(sid);
                 const covers = c.logFrom <= start.getTime() + SK_DAY;              // the saved log reaches back to the start of the window
-                return { sid, only: { setup: !recent(c.setupAt), bank: !recent(c.bankAt), log: true }, logFrom: covers ? new Date(Math.max(start.getTime(), c.logTo - SK_LOG_OVERLAP_DAYS * SK_DAY)) : null };
+                return { sid, only: { setup: !recent(c.setupAt), bank: !recent(c.bankAt) || c.distV !== SK_DIST_V, log: true }, logFrom: covers ? new Date(Math.max(start.getTime(), c.logTo - SK_LOG_OVERLAP_DAYS * SK_DAY)) : null };
             });
             skData = { at: Date.now(), sites, start, end };
             if (!prev) skRes = null;
@@ -8747,6 +8837,44 @@
     }
     const skPayloadLabel = (sid) => { const r = skData && skData.sites[sid]; return r && r.payload ? r.payload.label : '?'; };
     // one column registry drives the panel table, Sheets and CSV. adv = only with "All columns".
+    // ---- v1.02 (#345): mission distance, flights done, and the fly-next picks ----
+    const skMisIdx = new WeakMap();   // missions array → { id: mission } (kept out of the saved run)
+    function skMis(u) {
+        const r = skData && skData.sites[u.sid]; if (!r || !Array.isArray(r.missions)) return null;
+        let m = skMisIdx.get(r.missions);
+        if (!m) { m = {}; r.missions.forEach(x => { m[x.id] = x; }); skMisIdx.set(r.missions, m); }
+        return m[u.aim.id] || null;
+    }
+    const skFar = (u) => { const m = skMis(u); return m && typeof m.far === 'number' ? m.far : null; };
+    function skDistLabel(u) {
+        const d = skFar(u); const a = Number(ftCfg.sk.distClose) || 0, b = Number(ftCfg.sk.distFar) || 0;
+        if (d == null || !(a > 0) || !(b > a)) return '';
+        return d < a ? 'close' : (d >= b ? 'far' : 'medium');
+    }
+    // flights already flown toward the sweep this cycle still needs: { n, left } — null once it is swept this cycle. Approximate.
+    function skProgress(u) {
+        if (!skRes || !Array.isArray(u.cr)) return null;
+        const cyc = skDn(skRes.cycleStart);
+        if (u.od != null && u.od >= cyc) return null;
+        let n = 0, pairs = 0; u.cr.forEach(x => { if (x.day >= cyc && x.pairs > 0) { n++; pairs += x.pairs; } });
+        const need = (skProfile().sweepPct || 0.9) * u.S - pairs;
+        const left = Math.max(1, Math.ceil(need / (u.pairsPerFlight > 0 ? u.pairsPerFlight : 1)));
+        return { n, left };
+    }
+    // best mission to fly + the next two in order that are at OTHER sites (what blocks a flight usually blocks the site)
+    function skPicks() {
+        if (!skRes) return [];
+        const out = [], seen = new Set();
+        skRes.rows.filter(u => u.order != null).sort((a, b) => a.order - b.order).some(u => { if (seen.has(u.sid)) return false; seen.add(u.sid); out.push(u); return out.length >= 3; });
+        return out;
+    }
+    function skPickText(u) {
+        const b = skPulseOf(u.sid), d = skFar(u), p = skProgress(u), lab = skDistLabel(u);
+        return `${u.site} — ${u.aim.name} (${u.age != null ? `oldest pole ${u.age} d` : u.state.toLowerCase()}`
+            + (p ? `, ${p.n} of ~${p.n + p.left} flights done` : '')
+            + (d != null ? `, farthest step ${d.toLocaleString()} ft${lab ? ` = ${lab}` : ''}` : '')
+            + (b && b.battery ? `, battery ${b.battery}${b.usage !== '' ? ` ${b.usage} %` : ''}` : '') + ')';
+    }
     function skCols() {
         const R = skRes; const P = skProfile();
         const cols = [
@@ -8759,6 +8887,9 @@
         R.months.forEach(ym => cols.push({ label: `${skMonLabel(ym)} flights planned`, get: u => u.planned ? (u.planned[ym] || 0) : '', num: true }));
         cols.push(
             { label: 'Est. flights per sweep', get: u => u.expFlights, num: true },
+            { label: 'Flights done (approx.)', get: u => { const p = skProgress(u); return p ? `${p.n} of ~${p.n + p.left}` : (u.od != null ? 'swept' : ''); } },
+            { label: 'Farthest step (ft)', get: u => { const d = skFar(u); return d != null ? d : ''; }, num: true },
+            { label: 'Distance', get: u => skDistLabel(u) },
             { label: 'Last flown', get: u => skYmd(u.lastFlown) },
             { label: 'Payload', get: u => skPayloadLabel(u.sid) },
             { label: 'Battery', get: u => { const b = skPulseOf(u.sid); return b ? b.battery : ''; } },
@@ -8766,6 +8897,9 @@
             { label: 'Scheduled', get: u => u.held ? 'held' : (u.want ? 'yes' : 'no') },
             { label: 'Why', get: u => u.tier === 3 ? u.state : SK_TIER[u.tier] },
             { label: 'Phase', get: u => u.phase, adv: true },
+            { label: 'Flights left (approx.)', get: u => { const p = skProgress(u); return p ? p.left : ''; }, num: true, adv: true },
+            { label: 'First step (ft)', get: u => { const m = skMis(u); return m && typeof m.first === 'number' ? m.first : ''; }, num: true, adv: true },
+            { label: 'Distance measured', get: u => { const m = skMis(u); return m ? ((m.how || '') + (m.un ? ` — ${m.un} step(s) not connected to the base` : '')) : ''; }, adv: true },
             { label: 'Pulse drone', get: u => { const b = skPulseOf(u.sid); return b ? b.drone : ''; }, adv: true },
             { label: 'In downtime (Pulse)', get: u => { const b = skPulseOf(u.sid); return b ? b.down : ''; }, adv: true },
             { label: `Passes ${R.limit} days on`, get: u => skYmd(u.passDay), adv: true },
@@ -8826,6 +8960,8 @@
         if (!skRes) { setStatus('Sweep scheduler: nothing to copy — run it first'); return; }
         const top = skRes.rows.filter(u => u.order != null && u.tier <= 3).slice(0, 25);
         const lines = [`*${skProfile().label} — what to fly next* (run ${skRes.today})`, skHeadline(), ''];
+        const picks = skPicks();
+        if (picks.length) { lines.push(`*Fly next:* ${skPickText(picks[0])}`); picks.slice(1).forEach((u, i) => lines.push(`*If that is blocked, ${i ? '3rd' : '2nd'} choice:* ${skPickText(u)}`)); lines.push(''); }
         top.forEach(u => lines.push(`${u.order}. ${u.site} — ${u.aim.name} — ${u.age != null ? `oldest pole ${u.age} d (${skYmd(u.od)})` : u.state.toLowerCase()} — about ${u.expFlights} flight(s)`));
         if (!top.length) lines.push('Nothing overdue — every scheduled mission has been swept this cycle.');
         const failed = skFailed(); if (failed.length) lines.push('', `⚠ ${failed.length} site(s) could not be read and are incomplete: ${failed.map(siteName).join(', ')}`);
@@ -8926,6 +9062,7 @@
         if (k === 'terms') { ftCfg.sk.terms = String(t.value || '').slice(0, 200); saveCfg(); setStatus('Sweep scheduler: site filter changed — takes effect on the next run'); renderPanel(); return; }
         if (k === 'lookMo') { const v = Number(t.value); if (v >= 1 && v <= 24) { ftCfg.sk.lookMo = v; saveCfg(); setStatus('Sweep scheduler: log window changed — takes effect on the next run'); } return; }
         if (k === 'cycleStart') { if (/^(\d{4}-\d{2}-\d{2})?$/.test(t.value)) { ftCfg.sk.cycleStart = t.value; saveCfg(); skRecompute(); renderPanel(); } return; }
+        if (k === 'distClose' || k === 'distFar') { const v = Number(t.value); if (v >= 0 && v <= 200000) { ftCfg.sk[k] = Math.round(v); saveCfg(); renderPanel(); } else setStatus('Sweep scheduler: distance cut-off must be 0–200,000 ft'); return; }
         if (k === 'limitDays') { const v = Number(t.value); if (v >= 30 && v <= 730) { ftCfg.sk.limitDays = v; saveCfg(); skRecompute(); renderPanel(); } else setStatus('Sweep scheduler: age limit must be 30–730 days'); return; }
         if (k === 'prodOnly' || k === 'showOther' || k === 'onlyDue' || k === 'adv') { ftCfg.sk[k] = !!t.checked; saveCfg(); renderPanel(); return; }
     }
@@ -9004,6 +9141,17 @@
             + `<span style="color:#888">${skViewRows().length} row(s) · ⏸ = hold a mission out of the plan</span>`
             + '</div>');
         const isCal = ftCfg.sk.view === 'cal';
+        {   // 🥇 fly next + 2nd / 3rd choice at other sites
+            const picks = skPicks(); const medal = ['🥇 Fly next', '🥈 2nd choice', '🥉 3rd choice'];
+            if (picks.length) h.push('<div style="padding:5px 10px;border-bottom:1px solid #222834;font-size:11px;line-height:1.6" title="The first mission in the order, then the next two that are at a DIFFERENT site — weather, a TFR or a crane usually blocks a whole site.">'
+                + picks.map((u, i) => `<div><span style="color:#7adfe6;font-weight:bold">${medal[i]}:</span> <span style="color:${skAgeColor(u)}">${escapeHtml(skPickText(u))}</span></div>`).join('') + '</div>');
+            const a = Number(ftCfg.sk.distClose) || 0, b = Number(ftCfg.sk.distFar) || 0;
+            h.push(`<div style="padding:4px 10px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;font-size:11px;color:#aaa" title="Farthest step = one-way distance from the base to the mission's farthest step, along the flight paths and FFZs of the site setup. Enter both cut-offs to fill the Distance column.">`
+                + `<span>📏 Distance: close under <input type="number" data-sk-opt="distClose" min="0" max="200000" step="500" value="${a || ''}" placeholder="ft" style="${inCss}width:64px"> ft · far from <input type="number" data-sk-opt="distFar" min="0" max="200000" step="500" value="${b || ''}" placeholder="ft" style="${inCss}width:64px"> ft</span>`
+                + (!(a > 0 && b > a) ? '<span style="color:#888">enter both to label each mission close / medium / far</span>' : '')
+                + (R.rows.some(u => skMis(u) && skMis(u).how === undefined) ? '<span style="color:#ffa030">distances not measured yet — ▶ Update reads them (missions are re-read once)</span>' : '')
+                + '</div>');
+        }
         const tab = (v, label, title) => `<span data-ft="sk-view-${v}" title="${escapeHtml(title)}" style="cursor:pointer;padding:1px 8px;border-radius:3px;border:1px solid ${ftCfg.sk.view === v ? '#7adfe6' : '#2a3140'};color:${ftCfg.sk.view === v ? '#7adfe6' : '#888'};font-weight:bold">${label}</span>`;
         h.push('<div style="padding:4px 10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;">'
             + tab('table', '☰ Table', 'Every mission, in the order to fly it')
