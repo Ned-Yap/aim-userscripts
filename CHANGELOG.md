@@ -1,3 +1,11 @@
+## 2026-11-24 — 🌐 AIM Fleet Tools latest v1.04 (latest only) — ⏱ Hours & Cycle: completed runs, outages, per base
+
+- **Fix: a mission only counts as done when its run was completed** (feature #346). A mission flown over several battery flights is one run. Before, any single flight counted, which made cycles look shorter than they were on sites that fly multi-flight missions.
+- **Fix: outages no longer distort the cycle time.** Cycles that overlap an outage (3 or more days in a row with at most one real flight) are shown apart, under "incl. outages". The main number is normal operation.
+- **New: flights per cycle**, next to flight hours per cycle.
+- **New: per-base breakdown** when mission names say "Base N": flight hours, cycle time and outages for each base. Open a site row to see it; the HTML report has a "By base" section.
+- The saved mission logs are read again in full on the first run after this update (the cycle needs two more fields from the log).
+
 ## 2026-11-23 — 🌐 AIM Fleet Tools latest v1.03 (latest only) — ⏱ Hours & Cycle
 
 - **New ⏱ Hours & Cycle section** (feature #346). Pick sites in 📦 Fleet Data (or leave the pick empty for every site) and press ▶ Run.
