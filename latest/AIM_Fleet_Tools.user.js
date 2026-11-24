@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Fleet Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.02
+// @version      1.03
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Fleet_Tools.user.js
-// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v1.02 (#345): 📅 Sweep Scheduler — 'Fly next' strip with a 2nd and 3rd choice at other sites, a flights-done column (2 of ~5), and the distance to each mission's farthest step measured along the site setup (close / medium / far once you enter the cut-offs). v1.01 (#344): 📅 Sweep Scheduler keeps its last run (it is back after a reload) and ▶ Update reads only the flights since then; missions and docked drones are re-read once a day. v1.00 (#343): 🔋 Sweep Scheduler shows each site's battery type and usage, read from the Pulse maintenance dashboard table while that page is open in another tab (the tab reloads itself every 10 h). v0.90 (#341): 📰 Report cards show each asset's findings in the last 12 / 6 / 3 months with a rising / steady / falling cue (the 'days flagged' number is gone from the cards). v0.89 (#341): 📈 Findings Report keeps its last finished run (browser IndexedDB) — it is back after a reload, so filters, the report period and every export work without re-running; ✕ Clear forgets it. v0.88 (#341): 📈 Findings Report gains 📰 Report — a print-ready (Save as PDF) narrative for the last 7 / 14 / 30 days: one card per asset with its 12-month history, assets that keep coming back, trend, by site; the earlier HTML is now 📊 Dashboard; finding types that differ only by capitalisation are merged. v0.87 (#341): 📈 Findings Report — the Data View Issues tab (emissions and every other finding type) across the picked sites: findings per month and per 100 flights, assets flagged on 2+ days, by type / component / site, rejected + status + type filters, issues CSV, site×month CSV and a self-contained HTML report whose rows link to the site and the issue. v0.86: 📅 Sweep Scheduler gains a 📆 Calendar view (the forecast day by day, Mon–Fri weeks, exports). v0.85 (#335): 📅 Sweep Scheduler — for a client's recurring inspection missions (first profile: Client C feeder poles) it reads the live mission bank, the flown log and each base's docked drone, works out how old each mission's oldest pole is (count-back to 90 % of a full sweep), and lists what to fly next in order with flights planned per month, flights per sweep, payload (4.0 / 3.0 / none), per-site schedule switches, mission holds, Sheets / CSV / Slack text. v0.84 (#334): ⚙ ESC Sweep — for every flown flight of the picked sites × date window, download the log archive (in memory only), read the ESC telemetry and list each flight where the drone raised the ESC ratio alarm (false alarm vs real) plus long takeoff spikes; capped per run with Continue, Pause / Stop, gentle mode, finished flights remembered, Sheets / CSV, each row links to the full Mission Logs card. v0.82 (#331): 🎬 Mission Review — sweep the mission log of the picked sites (or every site) for flagged flights; checks are a registry (first: flew but NO video; also no images / fewer images than planned / landing failed); per-site counts, every flight a link to its Mission Playback, Copy → Sheets / CSV. v0.79 (#329): 🚩 SOP Sweep — run Site-Setup SOP checks across the picked sites (or every site) from LIVE /map_objects/; first check = FP ⨯ FP crossing (segments that cross / T / overlap with no shared vertex); per-site rows, 🎯 fly-to on the landing map, ↗ opens the site in a NEW tab and jumps to the spot (?aim-goto deep link, Site Setup Tools v4.498+), Copy → Sheets / CSV. v0.78 (#318): 🖼 Map Export — renders what the landing map shows (KML layers, cross-ref bands, site setups, site names) on its own canvas at print size with basemap tiles, legend, scale bar, north arrow, title and a dead-space trim (transparent outside the content); preview modal with toggles; ⬇ PNG poster or 🌐 self-contained interactive HTML (small, zooms forever). v0.77: Site setups scope — draw the FFZs / flight paths / assets of ONLY the sites matching a names box or the 📦 Fleet Data pick (independent of the label filter, "= labels" copies it) so another client's setup never shows on a shared map. v0.76: site labels "Only matching / picked" mode (names box or the 📦 Fleet Data pick keep their label, every other site name hidden), 🗺 on-map legend (cross-ref bands + numbers, shown KML layers, site-setup colours) and 📷 Client view (names hidden, legend on, panel + button tucked away for a screenshot; ↩ Exit restores). v0.75: 📊 Fleet Metrics follows the 📦 Fleet Data pick ("picked only" checkbox, on by default; nothing picked → every site) — table, totals, Sheets / CSV and 🛂 Approval FPs. v0.67 (#285): 📡 Coverage — radius circles on the landing map (any Ø, drag centre / edge, live count of sites inside under a fully-inside / centre-inside rule, KML export), footprint of the picked sites (span, convex hull, smallest enclosing circle, site extents + FFZ acreage), 🧠 Best spot (centre covering the MOST sites at a Ø — exact candidate search) + 🗂 Plan all (greedy: how many circles cover every site), 📏 two-click ruler. v0.57 (#274): data check shows whether the skipped no-duration rows carry images / videos (+ first video object), and 🔎 probes one /missions/ page without the field filter to list every server field (hunting an abort / end-reason field). v0.56 (#274): 📋 Copy check button on the data check. v0.55 (#276): Utilization lenses — 🧑‍✈️ Pilots / 🛸 Drones / 📍 Sites / 🏢 Clients (sites + clients: flights, drone-hrs, air, flyable drone-hrs, util %, coverage, sites never flown, incomplete, capture %, gaps); Drones gain flyable hrs + util %. v0.54 (#274): Incomplete flights + Capture % from planned-vs-actual image counts (Pilots / Pilot-days / Flights), raw state codes + mission_data_reports sample in the data check. v0.53 (#274): ⚙ Site rules is a real button. v0.52 (#274): Pilot Utilization hides all-zero / blank columns (panel + Sheets + CSV) with a 'hidden:' note and a checkbox to show them. v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
+// @description  Fleet-wide tools on the sites-select landing page (before entering any site). v1.03 (#346): ⏱ Hours & Cycle — total flight hours over the last 18 / 12 / 6 / 3 months (+ custom range, Jump To Alert broken out, monthly bars) and how long a FULL mission cycle takes (by pad code or mission name, Jump To Alert + excluded names left out, current mission set + set-changed warning), per site and all picked sites together; ⬇ self-contained HTML report; each site's log is cached so a re-run reads only the new flights. v1.02 (#345): 📅 Sweep Scheduler — 'Fly next' strip with a 2nd and 3rd choice at other sites, a flights-done column (2 of ~5), and the distance to each mission's farthest step measured along the site setup (close / medium / far once you enter the cut-offs). v1.01 (#344): 📅 Sweep Scheduler keeps its last run (it is back after a reload) and ▶ Update reads only the flights since then; missions and docked drones are re-read once a day. v1.00 (#343): 🔋 Sweep Scheduler shows each site's battery type and usage, read from the Pulse maintenance dashboard table while that page is open in another tab (the tab reloads itself every 10 h). v0.90 (#341): 📰 Report cards show each asset's findings in the last 12 / 6 / 3 months with a rising / steady / falling cue (the 'days flagged' number is gone from the cards). v0.89 (#341): 📈 Findings Report keeps its last finished run (browser IndexedDB) — it is back after a reload, so filters, the report period and every export work without re-running; ✕ Clear forgets it. v0.88 (#341): 📈 Findings Report gains 📰 Report — a print-ready (Save as PDF) narrative for the last 7 / 14 / 30 days: one card per asset with its 12-month history, assets that keep coming back, trend, by site; the earlier HTML is now 📊 Dashboard; finding types that differ only by capitalisation are merged. v0.87 (#341): 📈 Findings Report — the Data View Issues tab (emissions and every other finding type) across the picked sites: findings per month and per 100 flights, assets flagged on 2+ days, by type / component / site, rejected + status + type filters, issues CSV, site×month CSV and a self-contained HTML report whose rows link to the site and the issue. v0.86: 📅 Sweep Scheduler gains a 📆 Calendar view (the forecast day by day, Mon–Fri weeks, exports). v0.85 (#335): 📅 Sweep Scheduler — for a client's recurring inspection missions (first profile: Client C feeder poles) it reads the live mission bank, the flown log and each base's docked drone, works out how old each mission's oldest pole is (count-back to 90 % of a full sweep), and lists what to fly next in order with flights planned per month, flights per sweep, payload (4.0 / 3.0 / none), per-site schedule switches, mission holds, Sheets / CSV / Slack text. v0.84 (#334): ⚙ ESC Sweep — for every flown flight of the picked sites × date window, download the log archive (in memory only), read the ESC telemetry and list each flight where the drone raised the ESC ratio alarm (false alarm vs real) plus long takeoff spikes; capped per run with Continue, Pause / Stop, gentle mode, finished flights remembered, Sheets / CSV, each row links to the full Mission Logs card. v0.82 (#331): 🎬 Mission Review — sweep the mission log of the picked sites (or every site) for flagged flights; checks are a registry (first: flew but NO video; also no images / fewer images than planned / landing failed); per-site counts, every flight a link to its Mission Playback, Copy → Sheets / CSV. v0.79 (#329): 🚩 SOP Sweep — run Site-Setup SOP checks across the picked sites (or every site) from LIVE /map_objects/; first check = FP ⨯ FP crossing (segments that cross / T / overlap with no shared vertex); per-site rows, 🎯 fly-to on the landing map, ↗ opens the site in a NEW tab and jumps to the spot (?aim-goto deep link, Site Setup Tools v4.498+), Copy → Sheets / CSV. v0.78 (#318): 🖼 Map Export — renders what the landing map shows (KML layers, cross-ref bands, site setups, site names) on its own canvas at print size with basemap tiles, legend, scale bar, north arrow, title and a dead-space trim (transparent outside the content); preview modal with toggles; ⬇ PNG poster or 🌐 self-contained interactive HTML (small, zooms forever). v0.77: Site setups scope — draw the FFZs / flight paths / assets of ONLY the sites matching a names box or the 📦 Fleet Data pick (independent of the label filter, "= labels" copies it) so another client's setup never shows on a shared map. v0.76: site labels "Only matching / picked" mode (names box or the 📦 Fleet Data pick keep their label, every other site name hidden), 🗺 on-map legend (cross-ref bands + numbers, shown KML layers, site-setup colours) and 📷 Client view (names hidden, legend on, panel + button tucked away for a screenshot; ↩ Exit restores). v0.75: 📊 Fleet Metrics follows the 📦 Fleet Data pick ("picked only" checkbox, on by default; nothing picked → every site) — table, totals, Sheets / CSV and 🛂 Approval FPs. v0.67 (#285): 📡 Coverage — radius circles on the landing map (any Ø, drag centre / edge, live count of sites inside under a fully-inside / centre-inside rule, KML export), footprint of the picked sites (span, convex hull, smallest enclosing circle, site extents + FFZ acreage), 🧠 Best spot (centre covering the MOST sites at a Ø — exact candidate search) + 🗂 Plan all (greedy: how many circles cover every site), 📏 two-click ruler. v0.57 (#274): data check shows whether the skipped no-duration rows carry images / videos (+ first video object), and 🔎 probes one /missions/ page without the field filter to list every server field (hunting an abort / end-reason field). v0.56 (#274): 📋 Copy check button on the data check. v0.55 (#276): Utilization lenses — 🧑‍✈️ Pilots / 🛸 Drones / 📍 Sites / 🏢 Clients (sites + clients: flights, drone-hrs, air, flyable drone-hrs, util %, coverage, sites never flown, incomplete, capture %, gaps); Drones gain flyable hrs + util %. v0.54 (#274): Incomplete flights + Capture % from planned-vs-actual image counts (Pilots / Pilot-days / Flights), raw state codes + mission_data_reports sample in the data check. v0.53 (#274): ⚙ Site rules is a real button. v0.52 (#274): Pilot Utilization hides all-zero / blank columns (panel + Sheets + CSV) with a 'hidden:' note and a checkbox to show them. v0.51 (#275): 🕘 remembered site selections in the Fleet Data picker — Recent (auto-noted by every run) + Saved (named), one pick re-selects the sites and filter. v0.50 (#274): Night hours unioned like air time (was summed per drone), Landing-failed column from landing_is_failed, data check shows flown rows by state. v0.49 (#274): ⚙ per-site rules (24/7 / day / night / custom window from NOAA sunrise-sunset at the site, 1:1 flag, drone count) → flyable drone-hrs + pool util % per date/hour, Locked-1:1 vs Flex air + Drones ⌀ (flex) + 1:1-overlap flags per pilot, Night hours; rules re-aggregate instantly. v0.48 (#274): Drones tab (air / idle days / longest gap / since last per drone) + Hours tab (drones airborne and pilots active by local hour) + fleet peak-airborne chip — the drone side of the utilization question. v0.47 (#274): 🔬 Data check (states / durations / landed-vs-duration verdict / same-drone overlap / attribution), flight end = duration | landed time, click a Pilot-day row for its flight-by-flight union trace. v0.46 (#274): 🧑‍✈️ Pilot Utilization — air time per pilot per local day as the UNION of flight intervals (1-to-many: overlapping drones count once), drone-hrs, util % of shift, 1/2/3/4+ drone breakdown, best/lightest day; sortable Pilots / Pilot-days / Dates / Flights tabs, Copy → Sheets / CSV. v0.41 (#270): 📊 Entities → Sheets from the site picker — every entity of every picked site as ONE table (per-type checkboxes, "Key: value | …" descriptions split into Desc: columns, optional coordinates / raw JSON), rich-clipboard Copy → Sheets or CSV download. v0.32 (#264): 🗺 KML exports from the site picker — ⭕ one enclosing circle per site (min enclosing circle + pad, folder per client) and 🗺 every picked site's setup in ONE KML (Site Setup Analyzer layout, 2D/3D). v0.28: 📐 cross-ref target "Base stations — straight-line range" (Tattu ≤14,000 ft / Tulip ≤18,000 ft from each site's base, per-base breakdown) = what a KML network can reach unshielded. v0.27 (#259): 📦 Fleet Data — pick any sites, browse their LIVE site setup / missions / mission log in-tool, export the selection as one ZIP (per-site JSON + CSV, combined CSVs, optional GPS tracks, date-ranged mission log). v0.26 (#259): 📊 Fleet Metrics — every site's setup (entities, FFZ/FP/NFZ/markers, acres, miles, equipment, states, pilot validation) + mission (count, steps, step mix, planned mi/h) numbers in one sortable table with column sets, fleet totals, per-site detail, Sheets/CSV export — computed from the Site Watch snapshots (sha-diffed, only changed sites re-download). v0.25 (#257): 🚩 Fleet Issues section — front door to AIM Issues' fleet panel (every site's issues in one place) with live open/pending/my-review counts + a badge on the button. v0.1 (#250 layer 1): ⚠ Overlap Sweep — checks EVERY pair of sites for geographic overlap (Site Watch snapshot bboxes prefilter candidate pairs, live /map_objects/ supplies current geometry, segment-to-segment math, threshold default 200 ft) with a per-pair conflict report + site links; per-site on/off for duplicate/OFFLINE copies. 📊 Fleet Metrics — per-site FFZ/FP/asset counts from the snapshot index. v0.2: /sites/ status surfaced everywhere (probe-confirmed payload: id/name/location/status) + optional "Production only" sweep filter. v0.3: sweep results draw ON the landing map — a pin at each conflicting pair's closest approach (red = overlap, orange = near), 🎯 per pair row flies the map there, "Show on map" toggle. Panel is built as sections so future fleet tools slot in.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        *://qa.percepto.app/*
@@ -157,7 +157,7 @@
     if (location.hostname === 'pulse.percepto.app') { pulseBridge(); return; }
 
     const SCRIPT_ID = 'aim-fleet-tools';
-    const SCRIPT_VERSION = '1.02';
+    const SCRIPT_VERSION = '1.03';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ------------------------------------------------------------------
@@ -252,6 +252,8 @@
             sk: { terms: '', prodOnly: true, lookMo: 12, cycleStart: '', limitDays: 0, showOther: true, onlyDue: false, adv: false, view: 'table', calWeeks: 6, distClose: 0, distFar: 0 },
             // v0.87 (#341): 📈 Findings Report — scope, site-name filter (regex), months back, display filters (rejected / status / type)
             fi: { picked: true, prodOnly: true, name: '', months: 12, recentDays: 7, showRejected: false, statusOff: {}, typeOff: {} },
+            // v1.03 (#346): ⏱ Hours & Cycle — scope, custom range, cycle unit / min length (min) / min runs / excluded name terms
+            hc: { picked: true, prodOnly: true, custom: false, start: '', end: '', unit: 'auto', minMin: 2, minRuns: 5, exclude: 'mapping, demo' },
         };
     }
     function loadCfg() {
@@ -296,6 +298,14 @@
                 if (typeof s.fi.months === 'number' && s.fi.months >= 1 && s.fi.months <= 24) d.fi.months = s.fi.months;
                 if (s.fi.recentDays === 7 || s.fi.recentDays === 14 || s.fi.recentDays === 30) d.fi.recentDays = s.fi.recentDays;
                 ['statusOff', 'typeOff'].forEach(k => { if (s.fi[k] && typeof s.fi[k] === 'object') d.fi[k] = s.fi[k]; });
+            }
+            if (s.hc && typeof s.hc === 'object') {
+                ['picked', 'prodOnly', 'custom'].forEach(k => { if (typeof s.hc[k] === 'boolean') d.hc[k] = s.hc[k]; });
+                ['start', 'end'].forEach(k => { if (typeof s.hc[k] === 'string' && /^(\d{4}-\d{2}-\d{2})?$/.test(s.hc[k])) d.hc[k] = s.hc[k]; });
+                if (['auto', 'pads', 'names'].includes(s.hc.unit)) d.hc.unit = s.hc.unit;
+                if (typeof s.hc.minMin === 'number' && s.hc.minMin >= 0) d.hc.minMin = s.hc.minMin;
+                if (typeof s.hc.minRuns === 'number' && s.hc.minRuns >= 1) d.hc.minRuns = s.hc.minRuns;
+                if (typeof s.hc.exclude === 'string') d.hc.exclude = s.hc.exclude;
             }
             if (typeof s.showOnMap === 'boolean') d.showOnMap = s.showOnMap;
             if (typeof s.drawSetups === 'boolean') d.drawSetups = s.drawSetups;
@@ -4570,7 +4580,7 @@
     let buttonEl = null;
     let panelEl = null;
     // v0.31: every section starts COLLAPSED (user request) — open what you need.
-    let openSections = { issues: false, data: false, fc: false, pilots: false, sweep: false, sop: false, sk: false, nv: false, fi: false, es: false, map: false, cov: false, kml: false, xref: false, mx: false, metrics: false, surveys: false };
+    let openSections = { issues: false, data: false, fc: false, pilots: false, sweep: false, sop: false, sk: false, nv: false, fi: false, hc: false, es: false, map: false, cov: false, kml: false, xref: false, mx: false, metrics: false, surveys: false };
     // v0.25 (#257): 🚩 Fleet Issues front door. AIM Issues owns the engine +
     // panel (one copy of the merge/Slack/role rules); we ask it for a summary
     // and open it over tab-local DOM events on `document` (NOT the
@@ -9458,6 +9468,539 @@
     }
 
     // ==================================================================
+    // ⏱ HOURS & CYCLE (v1.03, #346) — per site (or the whole pick):
+    //   • total flight hours over the last 18 / 12 / 6 / 3 months (+ an
+    //     optional custom range), Jump To Alert hours broken out, monthly bars;
+    //   • FULL CYCLE time = how long it takes to fly every recurring mission
+    //     once (Jump To Alert + excluded names + short flights left out).
+    // Cycle unit: mission names change all the time (backup copies, "UP"
+    // suffixes, merged lists), so when most names list pad codes (H45, J01 …)
+    // each flight is credited with its pads; otherwise the mission name is
+    // the unit (toggle: auto / pads / names). A unit is "required" on a day
+    // only between its first and last flight, so retired missions drop out and
+    // new ones join without poisoning the average. At the end of every flying
+    // day: cycle = the shortest stretch in which every required unit was flown.
+    // Source: GET /missions/ per site (same pager as Mission Review), cached
+    // per site in IndexedDB — a re-run reads only the flights since the last
+    // run (minus 3 days, so late-landing durations refresh). Read-only.
+    // ==================================================================
+    const HC_ONLY = 'id,when,duration,app_name,state';
+    const HC_PAGE_CAP = 2000;          // ~40k flights per site safety cap (flagged as partial when hit)
+    const HC_CONCURRENCY = 3;
+    const HC_REFRESH_DAYS = 3;         // incremental read re-reads this many days before the last run
+    const HC_WARMUP_DAYS = 14;         // no cycle is measured in the first 2 weeks of a site's data (every unit looks new)
+    const HC_DB = 'aim-fleet-hours', HC_STORE = 'sites', HC_V = 1;
+    const HC_PAD_RE = /\b[A-Z]{1,2}\d{2,3}\b/g;
+    const HC_JTA_RE = /^\s*jump to alert/i;
+    const HC_DAY = 86400000;
+    let hcRes = null;                  // { at, running, seq, scope, sites: { sid: rec }, done, total, aborted }
+    let hcSeq = 0;
+    let hcV = null;                    // memoised view (reset on any option change / run)
+    let hcOpenSite = null;
+
+    function hcDbOp(mode, fn) {
+        return new Promise((resolve, reject) => {
+            let open;
+            try { open = indexedDB.open(HC_DB, 1); } catch (e) { reject(e); return; }
+            open.onupgradeneeded = () => { if (!open.result.objectStoreNames.contains(HC_STORE)) open.result.createObjectStore(HC_STORE); };
+            open.onerror = () => reject(open.error || new Error('IndexedDB open failed'));
+            open.onsuccess = () => {
+                const db = open.result; let rq;
+                try {
+                    const tx = db.transaction(HC_STORE, mode);
+                    rq = fn(tx.objectStore(HC_STORE));
+                    tx.oncomplete = () => { db.close(); resolve(rq ? rq.result : undefined); };
+                    tx.onerror = tx.onabort = () => { db.close(); reject(tx.error || new Error('IndexedDB transaction failed')); };
+                } catch (e) { db.close(); reject(e); }
+            };
+        });
+    }
+    function hcScopeIds() {
+        const all = rawSites ? Object.keys(rawSites) : [];
+        let ids = (ftCfg.hc.picked && fdSelected.size) ? all.filter(id => fdSelected.has(String(id))) : all.slice();
+        if (ftCfg.hc.prodOnly) ids = ids.filter(id => { const st = siteStatus(id); return !st || st === 'Production'; });
+        return ids;
+    }
+    function hcMonthsAgo(n, from) { const d = new Date(from); d.setMonth(d.getMonth() - n); d.setHours(0, 0, 0, 0); return d.getTime(); }
+    function hcCustom() {
+        const c = ftCfg.hc;
+        if (!c.custom || !c.start) return null;
+        const s = new Date(c.start + 'T00:00:00').getTime();
+        const e = c.end ? new Date(c.end + 'T23:59:59').getTime() : Date.now();
+        if (!isFinite(s) || !isFinite(e) || e <= s) return { err: 'custom range: the end must be after the start' };
+        return { start: s, end: e };
+    }
+    // Oldest date the run must cover: 18 months back, or the custom start if earlier.
+    function hcNeedFrom() { let t = hcMonthsAgo(18, Date.now()); const c = hcCustom(); if (c && !c.err && c.start < t) t = c.start; return fdYmd(new Date(t)); }
+
+    async function hcFetchRange(sid, startYmd, endYmd, isDead) {
+        const rows = []; let total = null; let lastId = -1; let pages = 0; let partial = false; let seenN = 0;
+        for (;;) {
+            if (isDead()) throw new Error('aborted');
+            if (++pages > HC_PAGE_CAP) { partial = true; break; }
+            const params = { site_id: Number(sid), drones: [], missionTypes: [], missionId: [], users: [], state: null, takeoffCompleted: false, start: startYmd, end: endYmd, last_mission_id: lastId };
+            const url = `/missions/?site_id=${encodeURIComponent(sid)}&params=${encodeURIComponent(JSON.stringify(params))}&only=${encodeURIComponent(HC_ONLY)}`;
+            let j;
+            try { j = await fdGetJson(url, 40000); }
+            catch (e) {
+                if (/401\/403|login page/.test(String(e && e.message))) throw e;
+                console.warn(`${TAG} hours & cycle: site ${sid} page ${pages} failed (${e && e.message || e}) — retrying once`);
+                j = await fdGetJson(url, 90000);
+            }
+            if (!j || !Array.isArray(j.past_missions)) throw new Error('unexpected /missions/ response shape (no past_missions list)');
+            const past = j.past_missions;
+            if (total == null && typeof j.total_mission_count === 'number') total = j.total_mission_count;
+            past.forEach(m => {
+                const t = Date.parse(m && m.when);
+                if (!m || m.id == null || !isFinite(t)) return;
+                rows.push([m.id, t, Math.round((Number(m.duration) || 0) / 1000), String(m.app_name || '')]);
+            });
+            if (past.length && !rows.length) console.warn(`${TAG} hours & cycle: site ${sid} — log rows carry no readable "when"`);
+            const lastMid = past.length ? past[past.length - 1].id : null;
+            seenN += past.length;
+            const more = past.length > 0 && (total == null || seenN < total) && lastMid != null && lastMid !== lastId;
+            if (!more) break;
+            lastId = lastMid;
+        }
+        return { rows, partial };
+    }
+
+    async function hcRun(full) {
+        if (hcRes && hcRes.running) return;
+        try { await fetchRawSites(false); } catch (e) { console.warn(`${TAG} hours & cycle: /sites/ failed:`, e); setStatus(`Hours & cycle: /sites/ failed — ${e.message}`); return; }
+        const cr = hcCustom();
+        if (cr && cr.err) { setStatus(`Hours & cycle: ${cr.err}`); return; }
+        const ids = hcScopeIds();
+        if (!ids.length) { setStatus('Hours & cycle: no sites in scope (pick sites in 📦 Fleet Data or untick "picked only")'); return; }
+        fdNotePick();
+        const seq = ++hcSeq;
+        const needFrom = hcNeedFrom();
+        const today = fdYmd(new Date());
+        hcRes = { at: Date.now(), running: true, seq, scope: (ftCfg.hc.picked && fdSelected.size) ? `picked (${ids.length})` : `all (${ids.length})`, sites: {}, done: 0, total: ids.length, aborted: false, full: !!full };
+        hcV = null; hcOpenSite = null;
+        renderPanel();
+        console.log(`${TAG} hours & cycle ${seq}: init — ${ids.length} site(s), from ${needFrom}${full ? ' (full re-read)' : ''}`);
+        const isDead = () => hcSeq !== seq || hcRes.aborted;
+        let cursor = 0;
+        const worker = async () => {
+            while (cursor < ids.length) {
+                if (isDead()) return;
+                const sid = ids[cursor++];
+                const rec = { name: siteName(sid), client: clientOf(siteName(sid)), status: siteStatus(sid), rows: [], partial: false, err: null, fromCache: 0, fetched: 0, from: needFrom };
+                try {
+                    let cache = null;
+                    if (!full) {
+                        try { cache = await hcDbOp('readonly', st => st.get(String(sid))); }
+                        catch (e) { console.warn(`${TAG} hours & cycle: cache read for site ${sid} failed — reading the full range:`, e); }
+                        if (cache && (cache.v !== HC_V || !Array.isArray(cache.rows) || typeof cache.from !== 'string' || typeof cache.upTo !== 'number')) { console.warn(`${TAG} hours & cycle: cache for site ${sid} has an old shape — ignored`); cache = null; }
+                        if (cache && cache.from > needFrom) cache = null;   // cache does not reach back far enough → full read
+                    }
+                    let got;
+                    if (cache) {
+                        const since = fdYmd(new Date(cache.upTo - HC_REFRESH_DAYS * HC_DAY));
+                        got = await hcFetchRange(sid, since, today, isDead);
+                        const byId = new Map(cache.rows.map(r => [r[0], r]));
+                        got.rows.forEach(r => byId.set(r[0], r));
+                        rec.rows = Array.from(byId.values());
+                        rec.fromCache = cache.rows.length; rec.from = cache.from;
+                    } else {
+                        got = await hcFetchRange(sid, needFrom, today, isDead);
+                        rec.rows = got.rows;
+                    }
+                    rec.fetched = got.rows.length; rec.partial = got.partial;
+                    rec.rows.sort((a, b) => a[1] - b[1]);
+                    if (!got.partial) {
+                        const put = { v: HC_V, sid: String(sid), from: rec.from, upTo: hcRes.at, rows: rec.rows };
+                        hcDbOp('readwrite', st => st.put(put, String(sid)))
+                            .catch(e => console.warn(`${TAG} hours & cycle: could not cache site ${sid} — the next run reads it in full:`, e));
+                    } else console.warn(`${TAG} hours & cycle: site ${sid} hit the page cap — partial, not cached`);
+                } catch (e) {
+                    if (hcSeq !== seq) return;
+                    if (e && e.message === 'aborted') return;
+                    rec.err = (e && e.message) || String(e);
+                    console.warn(`${TAG} hours & cycle: site ${sid} failed:`, e);
+                }
+                if (hcSeq !== seq) return;
+                hcRes.sites[sid] = rec; hcRes.done++; hcV = null;
+                setStatus(`Hours & cycle… ${hcRes.done}/${hcRes.total} · ${rec.name}${rec.err ? ' → FAILED' : ` → ${rec.fetched.toLocaleString()} read${rec.fromCache ? ` + ${rec.fromCache.toLocaleString()} cached` : ''}`}`);
+                if (hcRes.done % 3 === 0 || hcRes.done === hcRes.total) fdRenderKeepScroll();
+            }
+        };
+        await Promise.all(Array.from({ length: Math.min(HC_CONCURRENCY, ids.length) }, worker));
+        if (hcSeq !== seq) return;
+        hcRes.running = false; hcV = null;
+        const v = hcView();
+        const failed = Object.values(hcRes.sites).filter(r => r.err).length;
+        setStatus(`Hours & cycle done — ${v.ok} site(s), ${v.fleet.windows[0] ? hcF1(v.fleet.windows[0].hrs) : '0'} h in 18 months${failed ? ` · ${failed} site(s) FAILED` : ''}${hcRes.aborted ? ' · ABORTED' : ''}`);
+        console.log(`${TAG} hours & cycle ${seq}: ready — ${v.ok} site(s), ${failed} failed`);
+        renderPanel();
+    }
+    function hcForgetCache() {
+        hcDbOp('readwrite', st => st.clear())
+            .then(() => setStatus('Hours & cycle: cache cleared — the next run reads every site in full'))
+            .catch(e => { console.warn(`${TAG} hours & cycle: could not clear the cache:`, e); setStatus(`Hours & cycle: could not clear the cache (${e && e.message || e})`); });
+    }
+
+    // ---- aggregation ----
+    const hcF1 = (v) => (Number(v) || 0).toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+    const hcMean = (a) => a.length ? a.reduce((s, x) => s + x, 0) / a.length : null;
+    const hcMedian = (a) => { if (!a.length) return null; const s = a.slice().sort((x, y) => x - y); const m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
+    const hcDayStart = (t) => { const d = new Date(t); d.setHours(0, 0, 0, 0); return d.getTime(); };
+    const hcMonthKey = (t) => { const d = new Date(t); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`; };
+    function hcExcludeTerms() { return String(ftCfg.hc.exclude || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean); }
+    function hcPads(name) { return Array.from(new Set(String(name).match(HC_PAD_RE) || [])); }
+    const hcNameKey = (name) => 'n:' + String(name).trim().replace(/\s+/g, ' ').toLowerCase();
+
+    // Cycle flights of one site → [{ t, end, d, units[] }] sorted, plus the unit mode used.
+    function hcCycleFlights(rows, prefix) {
+        const ex = hcExcludeTerms(); const minS = (Number(ftCfg.hc.minMin) || 0) * 60;
+        const cf = rows.filter(r => r[2] > 0 && r[2] >= minS && !HC_JTA_RE.test(r[3]) && !ex.some(x => r[3].toLowerCase().includes(x)));
+        let mode = ftCfg.hc.unit;
+        if (mode !== 'pads' && mode !== 'names') mode = (cf.length && cf.filter(r => hcPads(r[3]).length).length / cf.length >= 0.5) ? 'pads' : 'names';
+        const out = cf.map(r => {
+            const pads = mode === 'pads' ? hcPads(r[3]) : [];
+            const units = (pads.length ? pads.map(p => 'p:' + p) : [hcNameKey(r[3])]).map(u => prefix + u);
+            return { t: r[1], end: r[1] + r[2] * 1000, d: r[2], units };
+        });
+        return { cf: out, mode };
+    }
+    // Full-cycle stats inside [w0, w1). onlyUnits = a fixed unit set (current set); else units flown ≥ minRuns in the window.
+    function hcCycle(cf, w0, w1, onlyUnits) {
+        if (!cf.length) return null;
+        const minRuns = Math.max(1, Number(ftCfg.hc.minRuns) || 1);
+        const first = new Map(), last = new Map(), cnt = new Map(), times = new Map();
+        cf.forEach(f => {
+            if (f.t >= w1) return;
+            f.units.forEach(u => {
+                if (!first.has(u)) first.set(u, f.t);
+                last.set(u, f.t);
+                if (f.t >= w0) { cnt.set(u, (cnt.get(u) || 0) + 1); if (!times.has(u)) times.set(u, []); times.get(u).push(f.t); }
+            });
+        });
+        const U = onlyUnits ? Array.from(onlyUnits).filter(u => first.has(u)) : Array.from(cnt.keys()).filter(u => cnt.get(u) >= minRuns);
+        if (!U.length) return null;
+        const Uset = new Set(U);
+        const dataStart = cf[0].t;
+        const pre = [0]; cf.forEach((f, i) => { pre[i + 1] = pre[i] + f.d; });
+        const dayOrd = []; let ord = -1, prevDay = null;
+        cf.forEach((f, i) => { const ds = hcDayStart(f.t); if (ds !== prevDay) { ord++; prevDay = ds; } dayOrd[i] = ord; });
+        const lastSeen = new Map();   // unit → flight index
+        const cal = [], fly = [], hrs = [];
+        for (let i = 0; i < cf.length && cf[i].t < w1; i++) {
+            const f = cf[i];
+            f.units.forEach(u => { if (Uset.has(u)) lastSeen.set(u, i); });
+            const nextSameDay = i + 1 < cf.length && cf[i + 1].t < w1 && hcDayStart(cf[i + 1].t) === hcDayStart(f.t);
+            if (nextSameDay) continue;
+            const ds = hcDayStart(f.t);
+            if (ds < w0 || ds < dataStart + HC_WARMUP_DAYS * HC_DAY) continue;
+            let startIdx = Infinity, req = 0, missing = false;
+            for (const u of U) {
+                if (first.get(u) > f.t || last.get(u) < ds) continue;   // not yet introduced / already retired on this day
+                req++;
+                const li = lastSeen.get(u);
+                if (li == null) { missing = true; break; }
+                if (li < startIdx) startIdx = li;
+            }
+            if (!req || missing || !isFinite(startIdx)) continue;
+            let endT = f.end; for (let k = startIdx; k <= i; k++) if (cf[k].end > endT) endT = cf[k].end;
+            cal.push((endT - cf[startIdx].t) / HC_DAY);
+            fly.push(dayOrd[i] - dayOrd[startIdx] + 1);
+            hrs.push((pre[i + 1] - pre[startIdx]) / 3600);
+        }
+        const gaps = [];
+        U.forEach(u => { const ts = times.get(u) || []; if (ts.length > 2) { const g = []; for (let k = 1; k < ts.length; k++) g.push((ts[k] - ts[k - 1]) / HC_DAY); gaps.push(hcMedian(g)); } });
+        return { units: U.length, pads: U.filter(u => u.includes('p:')).length, n: cal.length,
+            avgCal: hcMean(cal), medCal: hcMedian(cal), avgFly: hcMean(fly), medFly: hcMedian(fly), avgHrs: hcMean(hrs), revisit: hcMedian(gaps) };
+    }
+    // The CURRENT mission set: units flown in the last 30 d (≥ 2×) and ≥ minRuns in the last 90 d. Measured from the day
+    // its newest unit first appeared. Units that were regular in the last 180 d but stopped > 30 d ago = "retired".
+    function hcCurrent(cf, now) {
+        if (!cf.length) return null;
+        const minRuns = Math.max(1, Number(ftCfg.hc.minRuns) || 1);
+        const c30 = new Map(), c90 = new Map(), c180 = new Map(), first = new Map(), last = new Map();
+        cf.forEach(f => f.units.forEach(u => {
+            if (!first.has(u)) first.set(u, f.t); last.set(u, f.t);
+            const age = now - f.t;
+            if (age <= 30 * HC_DAY) c30.set(u, (c30.get(u) || 0) + 1);
+            if (age <= 90 * HC_DAY) c90.set(u, (c90.get(u) || 0) + 1);
+            if (age <= 180 * HC_DAY) c180.set(u, (c180.get(u) || 0) + 1);
+        }));
+        const cur = Array.from(c30.keys()).filter(u => c30.get(u) >= 2 && (c90.get(u) || 0) >= minRuns);
+        const retired = Array.from(c180.keys()).filter(u => c180.get(u) >= minRuns && now - last.get(u) > 30 * HC_DAY);
+        const retiredLast = retired.length ? Math.max(...retired.map(u => last.get(u))) : null;
+        if (!cur.length) return { units: 0, retired: retired.length, retiredLast };
+        const setStart = hcDayStart(Math.max(...cur.map(u => first.get(u))));
+        const base = { units: cur.length, setStart, retired: retired.length, retiredLast };
+        if (now - setStart < 7 * HC_DAY) return Object.assign(base, { tooNew: true });
+        return Object.assign(base, hcCycle(cf, setStart, now + 1, new Set(cur)) || { n: 0 });
+    }
+    function hcWindows(now) {
+        const w = [18, 12, 6, 3].map(m => ({ key: `${m}m`, label: `${m} months`, start: hcMonthsAgo(m, now), end: now + 1 }));
+        const c = hcCustom(); if (c && !c.err) w.push({ key: 'custom', label: `${fdYmd(new Date(c.start))} → ${fdYmd(new Date(c.end))}`, start: c.start, end: c.end + 1 });
+        return w;
+    }
+    function hcHours(rows, wins) {
+        return wins.map(w => {
+            const o = { hrs: 0, jta: 0, flights: 0, zero: 0 };
+            rows.forEach(r => { if (r[1] < w.start || r[1] >= w.end) return; if (r[2] > 0) { o.flights++; o.hrs += r[2]; if (HC_JTA_RE.test(r[3])) o.jta += r[2]; } else o.zero++; });
+            o.hrs /= 3600; o.jta /= 3600; o.days = Math.max(1, Math.round((Math.min(w.end, Date.now()) - w.start) / HC_DAY));
+            return o;
+        });
+    }
+    function hcView() {
+        if (hcV) return hcV;
+        const v = { ok: 0, failed: 0, partial: 0, sites: [], fleet: { windows: [] }, months: [], combined: null, wins: [] };
+        if (!hcRes) return (hcV = v);
+        const now = hcRes.at;
+        const wins = hcWindows(now); v.wins = wins;
+        const cycleWins = wins.filter(w => w.key !== '18m');
+        const monthKeys = []; { const d = new Date(hcMonthsAgo(18, now)); d.setDate(1); while (d.getTime() <= now) { monthKeys.push(hcMonthKey(d.getTime())); d.setMonth(d.getMonth() + 1); } }
+        const allCf = [];
+        Object.keys(hcRes.sites).forEach(sid => {
+            const r = hcRes.sites[sid];
+            if (r.err) { v.failed++; v.sites.push({ sid, r }); return; }
+            v.ok++; if (r.partial) v.partial++;
+            const hours = hcHours(r.rows, wins);
+            const months = {}; monthKeys.forEach(k => { months[k] = { hrs: 0, flights: 0 }; });
+            r.rows.forEach(x => { if (x[2] <= 0) return; const k = hcMonthKey(x[1]); if (months[k]) { months[k].hrs += x[2] / 3600; months[k].flights++; } });
+            const { cf, mode } = hcCycleFlights(r.rows, `${sid}|`);
+            allCf.push(...cf);
+            const cycles = {}; cycleWins.forEach(w => { cycles[w.key] = hcCycle(cf, w.start, w.end); });
+            v.sites.push({ sid, r, hours, months, mode, cycles, current: hcCurrent(cf, now), zero: r.rows.filter(x => x[2] <= 0).length });
+        });
+        v.sites.sort((a, b) => (b.hours ? b.hours[0].hrs : -1) - (a.hours ? a.hours[0].hrs : -1));
+        const okSites = v.sites.filter(s => s.hours);
+        v.fleet.windows = wins.map((w, i) => okSites.reduce((o, s) => { const h = s.hours[i]; o.hrs += h.hrs; o.jta += h.jta; o.flights += h.flights; o.zero += h.zero; o.days = h.days; return o; }, { hrs: 0, jta: 0, flights: 0, zero: 0, days: 1 }));
+        v.months = monthKeys.map(k => ({ key: k, bySite: okSites.map(s => s.months[k].hrs), hrs: okSites.reduce((n, s) => n + s.months[k].hrs, 0), flights: okSites.reduce((n, s) => n + s.months[k].flights, 0) }));
+        if (okSites.length >= 2) {
+            allCf.sort((a, b) => a.t - b.t);
+            const cycles = {}; cycleWins.forEach(w => { cycles[w.key] = hcCycle(allCf, w.start, w.end); });
+            v.combined = { cycles, current: hcCurrent(allCf, now) };
+        }
+        return (hcV = v);
+    }
+    const hcD = (x) => x == null ? '—' : `${x.toFixed(1)} d`;
+    function hcCycleTxt(c) {
+        if (!c) return '—';
+        if (c.tooNew) return `set too new (since ${fdYmd(new Date(c.setStart))})`;
+        if (!c.n) return 'not measurable';
+        return `${hcD(c.avgCal)} (med ${hcD(c.medCal)}) · ≈${Math.round(c.avgHrs)} h`;
+    }
+
+    function hcOpt(t) {
+        const k = t.getAttribute('data-hc-opt'); const c = ftCfg.hc;
+        if (k === 'picked' || k === 'prodOnly' || k === 'custom') c[k] = !!t.checked;
+        else if (k === 'unit') { if (['auto', 'pads', 'names'].includes(t.value)) c.unit = t.value; }
+        else if (k === 'minMin' || k === 'minRuns') { const n = Number(t.value); if (!isFinite(n) || n < 0 || (k === 'minRuns' && n < 1)) { setStatus(`Hours & cycle: ${k === 'minMin' ? 'min length must be 0 or more minutes' : 'min runs must be 1 or more'}`); return; } c[k] = n; }
+        else if (k === 'exclude') c.exclude = String(t.value || '');
+        else if (k === 'start' || k === 'end') { if (!/^(\d{4}-\d{2}-\d{2})?$/.test(t.value)) return; c[k] = t.value; const cr = hcCustom(); if (cr && cr.err) setStatus(`Hours & cycle: ${cr.err}`); else if (cr && hcRes && fdYmd(new Date(cr.start)) < hcNeedFrom()) setStatus('Hours & cycle: the custom start is older than what was read — ▶ Run again to read it'); }
+        else return;
+        saveCfg(); hcV = null; fdRenderKeepScroll();
+    }
+
+    function renderHcSection() {
+        if (!openSections.hc) return '';
+        const c = ftCfg.hc; const h = [];
+        const running = !!(hcRes && hcRes.running);
+        const ids = rawSites ? hcScopeIds() : [];
+        const selCss = 'background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;font:inherit;padding:1px 3px;';
+        const dis = running ? 'disabled' : '';
+        h.push('<div style="padding:6px 10px;display:flex;gap:12px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;">'
+            + `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;" title="Only the sites ticked in 📦 Fleet Data. Nothing picked → every site."><input type="checkbox" data-hc-opt="picked" ${c.picked ? 'checked' : ''} ${dis}> picked only <span style="color:${fdSelected.size ? '#5fff5f' : '#888'}">(${fdSelected.size})</span></label>`
+            + `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;" title="Skip sites whose /sites/ status is not Production"><input type="checkbox" data-hc-opt="prodOnly" ${c.prodOnly ? 'checked' : ''} ${dis}> Production only</label>`
+            + `<label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;" title="Adds a custom-range row next to the 18 / 12 / 6 / 3 month windows"><input type="checkbox" data-hc-opt="custom" ${c.custom ? 'checked' : ''} ${dis}> custom range</label>`
+            + (c.custom ? `<span style="display:inline-flex;align-items:center;gap:4px" title="Launch dates, your local time. Blank end = today."><input type="date" data-hc-opt="start" value="${escapeHtml(c.start)}" ${dis} style="${selCss}color-scheme:dark"> → <input type="date" data-hc-opt="end" value="${escapeHtml(c.end)}" ${dis} style="${selCss}color-scheme:dark"></span>` : '')
+            + `<span style="color:#888">scope: ${rawSites ? `${ids.length} site(s)` : 'roster not loaded yet'}</span>`
+            + '</div>');
+        h.push('<div style="padding:4px 10px;display:flex;gap:12px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #222834;"><span style="color:#7adfe6" title="These only change the cycle numbers and apply instantly — no re-run">Cycle:</span>'
+            + `<label title="What counts as 'one mission' for the cycle. auto = pad codes (H45, J01 …) when most mission names list them, else the mission name">unit <select data-hc-opt="unit" style="${selCss}">${[['auto', 'auto'], ['pads', 'pad codes'], ['names', 'mission names']].map(o => `<option value="${o[0]}" ${c.unit === o[0] ? 'selected' : ''}>${o[1]}</option>`).join('')}</select></label>`
+            + `<label title="Flights shorter than this are left out of the cycle (hours still count them)">min length <input type="number" data-hc-opt="minMin" min="0" step="1" value="${escapeHtml(String(c.minMin))}" style="${selCss}width:40px"> min</label>`
+            + `<label title="A pad / mission must be flown at least this many times in the window to be part of the cycle (drops one-offs)">min runs <input type="number" data-hc-opt="minRuns" min="1" step="1" value="${escapeHtml(String(c.minRuns))}" style="${selCss}width:40px"></label>`
+            + `<label title="Mission names containing any of these (comma-separated, any case) are left out of the cycle. Jump To Alert is always left out.">exclude <input type="text" data-hc-opt="exclude" value="${escapeHtml(c.exclude)}" style="${selCss}width:170px"></label>`
+            + '</div>');
+        h.push('<div style="padding:6px 10px;display:flex;gap:14px;flex-wrap:wrap;border-bottom:1px solid #222834;">'
+            + (running
+                ? `<span data-ft="hc-abort" style="cursor:pointer;color:#ff5252;font-weight:bold">■ Abort (${hcRes.done}/${hcRes.total})</span>`
+                : '<span data-ft="hc-run" style="cursor:pointer;color:#5fff5f;font-weight:bold" title="Reads each site\'s mission log. Sites read before only fetch the flights since the last run.">▶ Run</span>'
+                + '<span data-ft="hc-full" style="cursor:pointer;color:#7adfe6" title="Ignore the cache and read every site\'s full 18 months again">⟳ Full re-read</span>')
+            + `<span data-ft="hc-html" style="cursor:pointer;color:${hcRes && !running ? '#7adfe6' : '#555'}" title="Self-contained HTML report (charts + tables) to share">⬇ HTML report</span>`
+            + (hcRes && !running ? '<span data-ft="hc-clear" style="cursor:pointer;color:#888">✕ Clear</span>' : '')
+            + '<span data-ft="hc-forget" style="cursor:pointer;color:#888" title="Delete the cached mission logs (the next run reads everything again)">🗑 Clear cache</span>'
+            + '</div>');
+        if (!hcRes) { h.push('<div style="padding:8px 10px;color:#888">No run yet. Reads each site\'s mission log (18 months, cached after the first run) and shows total flight hours + how long a full cycle of missions takes. Read-only.</div>'); return h.join(''); }
+        const v = hcView();
+        const read = Object.values(hcRes.sites).reduce((o, r) => { o.f += r.fetched || 0; o.c += r.fromCache || 0; return o; }, { f: 0, c: 0 });
+        h.push(`<div style="padding:4px 10px;color:#aaa;border-bottom:1px solid #222834;">${running ? `Running… ${hcRes.done}/${hcRes.total}` : `Ran ${new Date(hcRes.at).toLocaleString()} · ${hcRes.scope}${hcRes.aborted ? ' · <span style="color:#ff5252">ABORTED</span>' : ''}`}`
+            + ` · ${read.f.toLocaleString()} flight row(s) read${read.c ? `, ${read.c.toLocaleString()} from cache` : ''}`
+            + (v.failed ? ` · <span style="color:#ffa030">${v.failed} site(s) FAILED — not counted</span>` : '')
+            + (v.partial ? ` · <span style="color:#ffa030">${v.partial} site(s) hit the page cap — partial</span>` : '')
+            + '</div>');
+        if (!v.ok) { h.push(`<div style="padding:8px 10px;color:#888">${running ? 'waiting for the first site…' : 'no site could be read'}</div>`); return h.join(''); }
+        const td = 'padding:2px 6px;text-align:right;border-bottom:1px solid #1e2430;white-space:nowrap';
+        const th = 'padding:2px 6px;text-align:right;color:#7adfe6;font-weight:normal;border-bottom:1px solid #2a3140;white-space:nowrap';
+        h.push('<div style="padding:6px 10px;overflow-x:auto"><table style="border-collapse:collapse;width:100%">'
+            + `<tr><th style="${th};text-align:left">Window</th><th style="${th}">Total h</th><th style="${th}">excl. JTA</th><th style="${th}">JTA h</th><th style="${th}">Flights</th><th style="${th}">h / day</th><th style="${th}" title="rows at 0:00 with no duration — never got airborne">0:00 rows</th></tr>`
+            + v.wins.map((w, i) => { const o = v.fleet.windows[i]; return `<tr><td style="${td};text-align:left">${escapeHtml(w.label)}</td><td style="${td};color:#5fff5f;font-weight:bold">${hcF1(o.hrs)}</td><td style="${td}">${hcF1(o.hrs - o.jta)}</td><td style="${td}">${hcF1(o.jta)}</td><td style="${td}">${o.flights.toLocaleString()}</td><td style="${td}">${(o.hrs / o.days).toFixed(2)}</td><td style="${td};color:#888">${o.zero.toLocaleString()}</td></tr>`; }).join('')
+            + '</table></div>');
+        const maxM = Math.max(1, ...v.months.map(m => m.hrs));
+        h.push('<div style="padding:4px 10px 8px;border-bottom:1px solid #222834"><div style="color:#7adfe6;margin-bottom:3px">Monthly flight hours</div>'
+            + v.months.map(m => `<div style="display:flex;align-items:center;gap:6px;font-size:11px" title="${m.flights.toLocaleString()} flight(s)"><span style="width:56px;color:#888">${m.key}</span><span style="flex:1;background:#1a2029;height:9px;border-radius:2px"><span style="display:block;height:9px;border-radius:2px;background:#3987e5;width:${(m.hrs / maxM * 100).toFixed(1)}%"></span></span><span style="width:56px;text-align:right">${hcF1(m.hrs)}</span></div>`).join('')
+            + '</div>');
+        const cyc = (s) => s && s.current;
+        const curCell = (cur) => {
+            if (!cur) return '<span style="color:#888">—</span>';
+            if (!cur.units) return '<span style="color:#888">nothing flown regularly in 30 d</span>';
+            return `${escapeHtml(hcCycleTxt(cur))} <span style="color:#888">· ${cur.units} item(s)</span>${cur.retired ? ` <span style="color:#ffa030" title="${cur.retired} item(s) that were flown regularly stopped after ${escapeHtml(fdYmd(new Date(cur.retiredLast)))} — the mission set changed">⚠ set changed</span>` : ''}`;
+        };
+        h.push('<div style="padding:6px 10px 2px;color:#7adfe6">Per site <span style="color:#888">— 18 / 12 / 6 / 3 month hours · current full cycle (avg, median, flight hours per cycle) · click a row for every window</span></div>');
+        h.push('<div style="max-height:420px;overflow:auto">');
+        const detail = (cycles, cur, mode) => {
+            const rowsH = v.wins.filter(w => w.key !== '18m').map(w => { const c2 = cycles[w.key]; return `<tr><td style="${td};text-align:left">${escapeHtml(w.label)}</td><td style="${td}">${c2 ? c2.units : '—'}</td><td style="${td}">${c2 && c2.n ? `${hcD(c2.avgCal)} <span style="color:#888">(${hcD(c2.medCal)})</span>` : '—'}</td><td style="${td}">${c2 && c2.n ? `${c2.avgFly.toFixed(1)} <span style="color:#888">(${c2.medFly.toFixed(0)})</span>` : '—'}</td><td style="${td}">${c2 && c2.n ? Math.round(c2.avgHrs) : '—'}</td><td style="${td}">${c2 && c2.revisit != null ? hcD(c2.revisit) : '—'}</td></tr>`; }).join('');
+            return '<div style="padding:3px 10px 6px 30px;font-size:11px">'
+                + (mode ? `<div style="color:#888">unit: ${mode === 'pads' ? 'pad codes from mission names' : 'mission names'}${ftCfg.hc.unit === 'auto' ? ' (auto)' : ''}</div>` : '')
+                + (cur && cur.units ? `<div style="color:#aaa">current set: ${cur.units} item(s) since ${escapeHtml(fdYmd(new Date(cur.setStart)))}${cur.retired ? ` · <span style="color:#ffa030">${cur.retired} item(s) stopped after ${escapeHtml(fdYmd(new Date(cur.retiredLast)))}</span>` : ''}</div>` : '')
+                + `<table style="border-collapse:collapse;margin-top:3px"><tr><th style="${th};text-align:left">Window</th><th style="${th}">Items</th><th style="${th}">Cycle avg (med)</th><th style="${th}" title="days that had flights">Flying days</th><th style="${th}">Flight h / cycle</th><th style="${th}" title="median days between two flights of the same item">Revisit</th></tr>${rowsH}</table></div>`;
+        };
+        if (v.combined) {
+            const open = hcOpenSite === '__all';
+            h.push(`<div data-hc-site="__all" style="padding:4px 10px;cursor:pointer;border-top:1px solid #1e2430;display:flex;gap:8px;align-items:center;background:#161c25"><span style="width:12px;color:#888">${open ? '▾' : '▸'}</span><span style="flex:1"><b>All ${v.ok} sites together</b> <span style="color:#888">· every site's items in one cycle</span></span><span>${curCell(v.combined.current)}</span></div>`);
+            if (open) h.push(detail(v.combined.cycles, v.combined.current, null));
+        }
+        v.sites.forEach(s => {
+            const open = hcOpenSite === s.sid;
+            if (!s.hours) { h.push(`<div style="padding:4px 10px;border-top:1px solid #1e2430;color:#ffa030" title="${escapeHtml(s.r.err)}">⚠ ${escapeHtml(s.r.name)} — failed: ${escapeHtml(s.r.err)}</div>`); return; }
+            h.push(`<div data-hc-site="${escapeHtml(s.sid)}" style="padding:4px 10px;cursor:pointer;border-top:1px solid #1e2430;display:flex;gap:8px;align-items:center;flex-wrap:wrap">`
+                + `<span style="width:12px;color:#888">${open ? '▾' : '▸'}</span>`
+                + `<span style="flex:1;min-width:160px"><b>${escapeHtml(s.r.name)}</b>${s.r.partial ? ' <span style="color:#ffa030">partial</span>' : ''}</span>`
+                + `<span style="color:#ccc" title="hours over the last 18 / 12 / 6 / 3 months">${s.hours.slice(0, 4).map(o => Math.round(o.hrs).toLocaleString()).join(' / ')} h</span>`
+                + `<span style="width:100%;padding-left:20px;font-size:11px">${curCell(cyc(s))}</span>`
+                + '</div>');
+            if (open) h.push(detail(s.cycles, s.current, s.mode));
+        });
+        h.push('</div>');
+        return h.join('');
+    }
+
+    // ---- ⬇ self-contained HTML report (light / dark, hover chart, table view) ----
+    function hcBuildHtml() {
+        const v = hcView();
+        const esc = escapeHtml;
+        const ok = v.sites.filter(s => s.hours);
+        const title = ok.length === 1 ? ok[0].r.name : `${ok.length} sites`;
+        const now = new Date(hcRes.at);
+        const f0 = (x) => Math.round(x).toLocaleString();
+        const MAXS = 6;
+        const series = ok.length <= MAXS ? ok.map((s, i) => ({ name: s.r.name, idx: [i] })) : ok.slice(0, MAXS - 1).map((s, i) => ({ name: s.r.name, idx: [i] })).concat([{ name: `Other (${ok.length - MAXS + 1} sites)`, idx: ok.slice(MAXS - 1).map((s, i) => i + MAXS - 1), other: true }]);
+        const months = v.months.map(m => [m.key, series.map(se => Math.round(se.idx.reduce((n, i) => n + m.bySite[i], 0) * 10) / 10), m.flights]);
+        const data = JSON.stringify({ months, series: series.map(s => ({ name: s.name, other: !!s.other })) }).replace(/</g, '\\u003c');
+        const wins = v.wins;
+        const kpis = wins.slice(0, 4).map((w, i) => { const o = v.fleet.windows[i]; return `<div class="kpi"><div class="label">Last ${esc(w.label)}</div><div class="value">${f0(o.hrs)} <small>h</small></div><div class="meta">${o.flights.toLocaleString()} flights · ${(o.hrs / o.days).toFixed(1)} h/day</div></div>`; }).join('');
+        const perSiteCols = ok.length > 1 && ok.length <= MAXS;
+        const winRows = wins.map((w, i) => { const o = v.fleet.windows[i]; return `<tr><td>${esc(w.label)}</td><td>${esc(fdYmd(new Date(w.start)))}</td><td class="strong">${hcF1(o.hrs)}</td>${perSiteCols ? ok.map(s => `<td>${hcF1(s.hours[i].hrs)}</td>`).join('') : ''}<td>${hcF1(o.hrs - o.jta)}</td><td>${hcF1(o.jta)}</td><td>${o.flights.toLocaleString()}</td></tr>`; }).join('');
+        const zero = v.fleet.windows[0] ? v.fleet.windows[0].zero : 0;
+        const siteHoursTable = ok.length > MAXS ? `<div class="table-wrap" style="margin-top:16px"><table><thead><tr><th>Site</th>${wins.map(w => `<th>${esc(w.label)}</th>`).join('')}</tr></thead><tbody>${ok.map(s => `<tr><td>${esc(s.r.name)}</td>${s.hours.map(o => `<td>${hcF1(o.hrs)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>` : '';
+        const cw = wins.filter(w => w.key !== '18m');
+        const cell = (c) => c && c.n ? `${c.avgCal.toFixed(1)} d <span class="muted">(${c.medCal.toFixed(1)})</span>` : '<span class="muted">—</span>';
+        const curTxt = (cur) => !cur || !cur.units ? '<span class="muted">nothing flown regularly in the last 30 days</span>' : cur.tooNew ? `<span class="muted">set started ${esc(fdYmd(new Date(cur.setStart)))} — too new to measure</span>` : cur.n ? `<b>${cur.avgCal.toFixed(1)} d</b> <span class="muted">(median ${cur.medCal.toFixed(1)})</span> · ≈ ${Math.round(cur.avgHrs)} flight h · ${cur.units} items since ${esc(fdYmd(new Date(cur.setStart)))}` : '<span class="muted">not measurable</span>';
+        const cycRows = [];
+        if (v.combined) cycRows.push(`<tr class="all"><td>All ${ok.length} sites together</td>${cw.map(w => `<td>${cell(v.combined.cycles[w.key])}</td>`).join('')}<td>${curTxt(v.combined.current)}</td></tr>`);
+        ok.forEach(s => cycRows.push(`<tr><td>${esc(s.r.name)}<div class="muted small">${s.mode === 'pads' ? 'by pad code' : 'by mission name'}</div></td>${cw.map(w => `<td>${cell(s.cycles[w.key])}</td>`).join('')}<td>${curTxt(s.current)}</td></tr>`));
+        const changed = ok.filter(s => s.current && s.current.retired).map(s => `<li><b>${esc(s.r.name)}</b>: ${s.current.retired} item(s) that were flown regularly stopped after ${esc(fdYmd(new Date(s.current.retiredLast)))}${s.current.units ? `; the current set (${s.current.units} items) started ${esc(fdYmd(new Date(s.current.setStart)))}` : ''}.</li>`).join('');
+        const ex = hcExcludeTerms();
+        const headline = (() => {
+            const c = v.combined ? v.combined.current : ok[0] && ok[0].current;
+            const c3 = v.combined ? v.combined.cycles['3m'] : ok[0] && ok[0].cycles['3m'];
+            const parts = [];
+            if (c3 && c3.n) parts.push(`Over the last 3 months a full cycle${v.combined ? ' of every site' : ''} took <b>${c3.avgCal.toFixed(1)} days</b> on average (median ${c3.medCal.toFixed(1)}) and about <b>${Math.round(c3.avgHrs)} flight hours</b>.`);
+            if (c && c.n) parts.push(`The current mission set (${c.units} items since ${esc(fdYmd(new Date(c.setStart)))}) completes in <b>${c.avgCal.toFixed(1)} days</b> (median ${c.medCal.toFixed(1)}).`);
+            return parts.join(' ') || 'Not enough recurring flights to measure a full cycle.';
+        })();
+        return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${esc(title)} Flight Hours</title>
+<style>
+:root{color-scheme:light;--s0:#f4f4f2;--s1:#fcfcfb;--bd:#e2e1dc;--grid:#ebeae6;--t1:#0b0b0b;--t2:#52514e;--t3:#7a7974;--note:#eef4fc;--c1:#2a78d6;--c2:#eb6834;--c3:#1baf7a;--c4:#eda100;--c5:#e87ba4;--c6:#008300;--co:#a3a29c}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){color-scheme:dark;--s0:#121211;--s1:#1a1a19;--bd:#2e2e2c;--grid:#262625;--t1:#f0efec;--t2:#c3c2b7;--t3:#8f8e87;--note:#17222f;--c1:#3987e5;--c2:#d95926;--c3:#199e70;--c4:#c98500;--c5:#d55181;--c6:#0ca30c;--co:#6b6a65}}
+:root[data-theme="dark"]{color-scheme:dark;--s0:#121211;--s1:#1a1a19;--bd:#2e2e2c;--grid:#262625;--t1:#f0efec;--t2:#c3c2b7;--t3:#8f8e87;--note:#17222f;--c1:#3987e5;--c2:#d95926;--c3:#199e70;--c4:#c98500;--c5:#d55181;--c6:#0ca30c;--co:#6b6a65}
+*{box-sizing:border-box}body{margin:0;background:var(--s0);color:var(--t1);font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:1080px;margin:0 auto;padding:32px 16px 64px}h1{font-size:26px;margin:0 0 4px;letter-spacing:-.01em}h2{font-size:18px;margin:0 0 4px}
+.sub{color:var(--t2);margin:0 0 24px}.card{background:var(--s1);border:1px solid var(--bd);border-radius:12px;padding:20px;margin-bottom:20px}.lede{color:var(--t2);margin:0 0 16px}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin-bottom:20px}.kpi{background:var(--s1);border:1px solid var(--bd);border-radius:12px;padding:16px 18px}
+.kpi .label{color:var(--t2);font-size:13px}.kpi .value{font-size:30px;font-weight:650;letter-spacing:-.02em;font-variant-numeric:tabular-nums}.kpi .value small{font-size:15px;font-weight:500;color:var(--t2)}.kpi .meta{color:var(--t3);font-size:12.5px}
+.table-wrap{overflow-x:auto}table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}th,td{padding:8px 10px;text-align:right;border-bottom:1px solid var(--bd);vertical-align:top}
+th:first-child,td:first-child{text-align:left}th{color:var(--t2);font-weight:600;font-size:13px;white-space:nowrap}td.strong{font-weight:650}tr.all td{background:var(--note)}
+.muted{color:var(--t3)}.small{font-size:12px}.legend{display:flex;gap:16px;flex-wrap:wrap;font-size:13px;color:var(--t2);margin-bottom:8px}.legend span{display:inline-flex;align-items:center;gap:6px}
+.sw{width:12px;height:12px;border-radius:3px;display:inline-block}.head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap}
+button{font:inherit;font-size:13px;color:var(--t1);background:transparent;border:1px solid var(--bd);border-radius:8px;padding:4px 10px;cursor:pointer}
+#chart{position:relative}#chart svg{display:block;width:100%;height:auto}#chart text{fill:var(--t3);font-size:11px}
+.tip{position:absolute;pointer-events:none;opacity:0;background:var(--s1);border:1px solid var(--bd);border-radius:8px;padding:8px 10px;font-size:13px;box-shadow:0 4px 16px rgba(0,0,0,.12);min-width:170px;z-index:2}
+.tip .row{display:flex;justify-content:space-between;gap:14px;font-variant-numeric:tabular-nums}.tip .row span:first-child{display:inline-flex;align-items:center;gap:6px;color:var(--t2)}
+.note{background:var(--note);border-radius:10px;padding:12px 14px;font-size:14px;margin-top:14px}.answer{font-size:17px;margin:0 0 16px}ul{margin:8px 0 0;padding-left:20px}li{margin:4px 0}
+footer{color:var(--t3);font-size:12.5px;margin-top:28px}
+</style></head><body><main>
+<h1>${esc(title)} — Flight Hours &amp; Cycle Time</h1>
+<p class="sub">${ok.length === 1 ? '' : `${esc(ok.map(s => s.r.name).join(' · '))} · `}mission log to ${esc(fdYmd(now))} · ${ok.reduce((n, s) => n + s.r.rows.length, 0).toLocaleString()} records</p>
+<div class="kpis">${kpis}</div>
+<section class="card"><h2>Total flight hours by window</h2><p class="lede">All flights. Jump To Alert (JTA) hours are part of the total and broken out on the right.</p>
+<div class="table-wrap"><table><thead><tr><th>Window</th><th>Since</th><th>Total hours</th>${perSiteCols ? ok.map(s => `<th>${esc(s.r.name)}</th>`).join('') : ''}<th>Excl. JTA</th><th>JTA</th><th>Flights</th></tr></thead><tbody>${winRows}</tbody></table></div>
+${siteHoursTable}
+<div class="note">"Flights" counts records with a duration above zero.${zero ? ` The log also has <b>${zero.toLocaleString()} records at 0:00</b> (missions that never got airborne); they add no hours and aren't counted as flights.` : ''}</div></section>
+<section class="card"><div class="head"><div><h2>Monthly flight hours</h2><p class="lede" style="margin-bottom:8px">${series.length > 1 ? 'Stacked by site. ' : ''}The first and last months are partial.</p></div><button id="tg" type="button">Show table</button></div>
+${series.length > 1 ? `<div class="legend">${series.map((s, i) => `<span><i class="sw" style="background:var(${s.other ? '--co' : `--c${i + 1}`})"></i>${esc(s.name)}</span>`).join('')}</div>` : ''}
+<div id="chart" role="img" aria-label="Bar chart of monthly flight hours"><div class="tip" id="tip"></div></div><div class="table-wrap" id="mt" hidden></div></section>
+<section class="card"><h2>Full cycle time — how long to fly every mission once</h2><p class="lede">Jump To Alert flights${ex.length ? `, names containing ${ex.map(x => `"${esc(x)}"`).join(', ')}` : ''} and flights under ${esc(String(ftCfg.hc.minMin))} min are left out.</p>
+<p class="answer">${headline}</p>
+<div class="table-wrap"><table><thead><tr><th>Site</th>${cw.map(w => `<th>${esc(w.label)}</th>`).join('')}<th style="text-align:left">Current mission set</th></tr></thead><tbody>${cycRows.join('')}</tbody></table></div>
+<p class="muted small" style="margin:6px 0 0">Average days per full cycle, median in brackets.</p>
+${changed ? `<div class="note"><b>The mission set changed:</b><ul>${changed}</ul></div>` : ''}</section>
+<section class="card"><h2>Method</h2><ul>
+<li><b>Hours</b> = the sum of each flight's logged duration. Windows count back from ${esc(fdYmd(now))}.</li>
+<li><b>Cycle unit.</b> Mission names change often (backup copies, suffixes, merged lists). When most names list pad codes (H45, J01 …), each flight is credited with the pads in its name; otherwise the mission name is the unit. An item counts if it was flown at least ${esc(String(ftCfg.hc.minRuns))} times in the window.</li>
+<li><b>Cycle time</b> = at the end of each flying day, the shortest stretch in which every item was flown at least once, averaged over the days. An item only counts between its first and last flight, so missions that were retired or added don't distort the result. Stand-downs (days with no flights) make cycles longer; the median is less affected by them.</li>
+<li><b>Current mission set</b> = items flown at least twice in the last 30 days, measured from the day the newest of them first appeared.</li>
+</ul></section>
+<footer>Source: Percepto mission log. Generated ${esc(now.toLocaleString())}.</footer>
+</main>
+<script>
+(function(){
+const D=${data};const MON=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const lab=k=>{const p=k.split("-");return MON[+p[1]-1]+" "+p[0].slice(2)};const f1=v=>v.toLocaleString(undefined,{minimumFractionDigits:1,maximumFractionDigits:1});
+const col=i=>D.series[i].other?"var(--co)":"var(--c"+(i+1)+")";const NS="http://www.w3.org/2000/svg";const chart=document.getElementById("chart"),tip=document.getElementById("tip");
+function el(t,a,p){const n=document.createElementNS(NS,t);for(const k in a)n.setAttribute(k,a[k]);if(p)p.appendChild(n);return n}
+function bar(x,y,w,h,r){r=Math.min(r,w/2,h);if(h<=0)return"";if(r<=0)return"M"+x+","+y+"h"+w+"v"+h+"h"+(-w)+"Z";return"M"+x+","+(y+h)+"V"+(y+r)+"Q"+x+","+y+" "+(x+r)+","+y+"H"+(x+w-r)+"Q"+(x+w)+","+y+" "+(x+w)+","+(y+r)+"V"+(y+h)+"Z"}
+function nice(m){const s=[10,20,25,50,100,200,250,500,1000,2000,2500,5000,10000];for(const x of s)if(m/x<=7)return x;return Math.ceil(m/7)}
+function render(){const o=chart.querySelector("svg");if(o)o.remove();const W=Math.max(chart.clientWidth,320),narrow=W<560,H=narrow?260:320,m={t:12,r:8,b:28,l:46},iw=W-m.l-m.r,ih=H-m.t-m.b;
+const tot=D.months.map(d=>d[1].reduce((a,b)=>a+b,0));const st=nice(Math.max(1,...tot));const max=Math.max(st,Math.ceil(Math.max(1,...tot)/st)*st);
+const svg=el("svg",{viewBox:"0 0 "+W+" "+H,width:W,height:H});chart.insertBefore(svg,tip);const y=v=>m.t+ih-v/max*ih;
+for(let v=0;v<=max;v+=st){el("line",{x1:m.l,x2:W-m.r,y1:y(v),y2:y(v),stroke:"var(--grid)","stroke-width":1},svg);const t=el("text",{x:m.l-8,y:y(v)+4,"text-anchor":"end"},svg);t.textContent=v.toLocaleString()}
+const band=iw/D.months.length,bw=Math.max(6,Math.min(34,band*.62)),every=Math.ceil(D.months.length/(narrow?6:12));
+D.months.forEach((d,i)=>{const x=m.l+band*i+(band-bw)/2;let acc=0;const top=d[1].reduce((a,v,k)=>v>0?k:a,-1);
+d[1].forEach((v,k)=>{if(v<=0)return;const y0=y(acc+v),h=v/max*ih-(acc>0?2:0);el("path",{d:bar(x,y0,bw,Math.max(0,h),k===top?4:0),fill:col(k)},svg);acc+=v});
+if(i%every===0){const t=el("text",{x:x+bw/2,y:H-8,"text-anchor":"middle"},svg);t.textContent=lab(d[0])}
+el("rect",{x:m.l+band*i,y:m.t,width:band,height:ih,fill:"transparent","data-i":i},svg)});
+svg.addEventListener("pointermove",e=>{const r=e.target.closest("rect[data-i]");if(!r){tip.style.opacity=0;return}const d=D.months[+r.getAttribute("data-i")];
+tip.innerHTML="<b>"+lab(d[0])+"</b>"+(D.series.length>1?d[1].map((v,k)=>'<div class="row"><span><i class="sw" style="background:'+col(k)+'"></i>'+D.series[k].name.replace(/[<&]/g,"")+'</span><span>'+f1(v)+' h</span></div>').join(""):"")+'<div class="row" style="margin-top:4px"><span>Total</span><span><b>'+f1(d[1].reduce((a,b)=>a+b,0))+' h</b></span></div><div class="row"><span>Flights</span><span>'+d[2].toLocaleString()+'</span></div>';
+const cr=chart.getBoundingClientRect();let lx=e.clientX-cr.left+14;if(lx+200>cr.width)lx=e.clientX-cr.left-214;tip.style.left=lx+"px";tip.style.top=Math.max(0,e.clientY-cr.top-40)+"px";tip.style.opacity=1});
+svg.addEventListener("pointerleave",()=>{tip.style.opacity=0})}
+const mt=document.getElementById("mt");mt.innerHTML="<table><thead><tr><th>Month</th>"+(D.series.length>1?D.series.map(s=>"<th>"+s.name.replace(/[<&]/g,"")+"</th>").join(""):"")+"<th>Total h</th><th>Flights</th></tr></thead><tbody>"+D.months.map(d=>"<tr><td>"+lab(d[0])+"</td>"+(D.series.length>1?d[1].map(v=>"<td>"+f1(v)+"</td>").join(""):"")+'<td class="strong">'+f1(d[1].reduce((a,b)=>a+b,0))+"</td><td>"+d[2].toLocaleString()+"</td></tr>").join("")+"</tbody></table>";
+const tg=document.getElementById("tg");tg.addEventListener("click",()=>{const show=mt.hidden;mt.hidden=!show;chart.hidden=show;tg.textContent=show?"Show chart":"Show table";if(!show)render()});
+render();let rt=null;window.addEventListener("resize",()=>{clearTimeout(rt);rt=setTimeout(render,120)});
+})();
+</script></body></html>`;
+    }
+    function hcDownloadHtml() {
+        if (!hcRes || hcRes.running) { setStatus('Hours & cycle: run it first'); return; }
+        const v = hcView();
+        if (!v.ok) { setStatus('Hours & cycle: no site could be read — nothing to export'); return; }
+        try {
+            const ok = v.sites.filter(s => s.hours);
+            const name = ok.length === 1 ? fdSafe(ok[0].r.name) : `${ok.length} sites`;
+            fdDownload(new Blob([hcBuildHtml()], { type: 'text/html;charset=utf-8' }), `AIM_Flight_Hours_${name}_${fdYmd(new Date(hcRes.at))}.html`);
+            setStatus(`Hours & cycle: HTML report downloaded — ${ok.length} site(s)`);
+        } catch (e) { console.warn(`${TAG} hours & cycle: HTML export failed:`, e); setStatus(`Hours & cycle: HTML export failed — ${e.message}`); }
+    }
+
+    // ==================================================================
     // 📈 FINDINGS REPORT (v0.87, #341) — the Data View "Issues" tab at fleet
     // scale (emissions and every other type the AI / Insights team flags;
     // NOT the internal AIM Issues of the 🚩 Fleet Issues section). Per site:
@@ -10927,6 +11470,8 @@
             + renderFcSection()
             + sectionHeader('pilots', '📈', 'Utilization', puResults ? `${puResults.pilots.length} pilot(s) · ${(puResults.drones || []).length} drone(s) · ${(puResults.sites || []).length} site(s) · ${puResults.flights.length} flight(s) · last ${puResults.days} d` : 'pilots · drones · sites · clients — overlapping drones count once')
             + renderPilotSection()
+            + sectionHeader('hc', '⏱', 'Hours & Cycle', hcRes ? (hcRes.running ? `reading ${hcRes.done}/${hcRes.total}` : `${hcView().ok} site(s) · ${hcView().fleet.windows[0] ? Math.round(hcView().fleet.windows[0].hrs).toLocaleString() : 0} h in 18 months`) : 'flight hours 18 / 12 / 6 / 3 months + how long a full mission cycle takes')
+            + renderHcSection()
             + sectionHeader('sweep', '⚠', 'Overlap Sweep', `${ENV_LABEL} · thr ${ftCfg.thresholdFt} ft`)
             + renderSweepSection()
             + sectionHeader('sop', '🚩', 'SOP Sweep', sopSweep ? `${sopTotals().findings} finding(s) on ${sopTotals().sitesHit} site(s)${sopSweep.running ? ` · running ${sopSweep.done}/${sopSweep.total}` : ''}` : 'Site-Setup SOP checks across sites — FP ⨯ FP crossings')
@@ -10982,7 +11527,7 @@
 
             // Delegated — the body is rebuilt on every render, the root never is
             panelEl.addEventListener('click', (ev) => {
-                if (ev.target.closest('input[data-ft-class],input[data-ft-flag],select[data-es-opt],input[data-es-opt],select[data-sk-opt],input[data-sk-opt],input[data-sop-check],select[data-nv-days],input[data-nv-min],input[data-nv-date],input[data-nv-check],input[data-fi-opt],select[data-fi-opt],input[data-ft-view],input[data-kml-show],input[data-kml-fill],input[data-kml-color],input[data-fd-site],input[data-fd-clientsel],select[data-fd-pick],input[data-fd-dataset],select[data-fd-range],input[data-fd-date],input[data-kx-inc],select[data-kx-mode],input[data-kx-pad],input[data-fx-inc],input[data-fx-opt],input[data-fc-thr],input[data-pu-opt],input[data-pu-chk],select[data-pu-tz],select[data-pu-end],select[data-pu-rule],input[data-pu-rule],select[data-pu-bulk],#aim-ft-xr-picked')) return;   // checkbox/color/select → change handler
+                if (ev.target.closest('input[data-ft-class],input[data-ft-flag],select[data-es-opt],input[data-es-opt],select[data-sk-opt],input[data-sk-opt],input[data-sop-check],select[data-nv-days],input[data-nv-min],input[data-nv-date],input[data-nv-check],input[data-hc-opt],select[data-hc-opt],input[data-fi-opt],select[data-fi-opt],input[data-ft-view],input[data-kml-show],input[data-kml-fill],input[data-kml-color],input[data-fd-site],input[data-fd-clientsel],select[data-fd-pick],input[data-fd-dataset],select[data-fd-range],input[data-fd-date],input[data-kx-inc],select[data-kx-mode],input[data-kx-pad],input[data-fx-inc],input[data-fx-opt],input[data-fc-thr],input[data-pu-opt],input[data-pu-chk],select[data-pu-tz],select[data-pu-end],select[data-pu-rule],input[data-pu-rule],select[data-pu-bulk],#aim-ft-xr-picked')) return;   // checkbox/color/select → change handler
                 const clAll = ev.target.closest('[data-ft-clients]');
                 if (clAll) {
                     if (clAll.getAttribute('data-ft-clients') === 'all') {
@@ -11030,6 +11575,8 @@
                 if (skPulseEl) { skPulseLink(skPulseEl.getAttribute('data-sk-pulse')); return; }
                 const skHoldEl = ev.target.closest('[data-sk-hold]');
                 if (skHoldEl) { skToggleHold(skHoldEl.getAttribute('data-sk-hold')); return; }
+                const hcSiteEl = ev.target.closest('[data-hc-site]');
+                if (hcSiteEl) { const hsid = hcSiteEl.getAttribute('data-hc-site'); hcOpenSite = hcOpenSite === hsid ? null : hsid; fdRenderKeepScroll(); return; }
                 const nvSiteEl = ev.target.closest('[data-nv-site]');
                 if (nvSiteEl && !ev.target.closest('a')) { const nsid = nvSiteEl.getAttribute('data-nv-site'); nvOpenSite = nvOpenSite === nsid ? null : nsid; fdRenderKeepScroll(); return; }
                 const fiSiteEl = ev.target.closest('[data-fi-site]');
@@ -11053,6 +11600,11 @@
                     else if (cmd === 'nv-abort') { if (nvSweep) nvSweep.aborted = true; setStatus('Mission review aborting after the in-flight sites…'); }
                     else if (cmd === 'nv-sheets') nvCopySheets();
                     else if (cmd === 'nv-csv') nvDownloadCsv();
+                    else if (cmd === 'hc-run' || cmd === 'hc-full') hcRun(cmd === 'hc-full').catch(e => { console.warn(`${TAG} hours & cycle threw:`, e); setStatus(`Hours & cycle failed — ${e.message}`); if (hcRes) hcRes.running = false; hcV = null; renderPanel(); });
+                    else if (cmd === 'hc-abort') { if (hcRes) hcRes.aborted = true; setStatus('Hours & cycle stopping after the sites already being read…'); }
+                    else if (cmd === 'hc-html') hcDownloadHtml();
+                    else if (cmd === 'hc-clear') { hcSeq++; hcRes = null; hcV = null; hcOpenSite = null; renderPanel(); }
+                    else if (cmd === 'hc-forget') hcForgetCache();
                     else if (cmd === 'nv-clear') { nvSweepSeq++; nvSweep = null; nvOpenSite = null; renderPanel(); }
                     else if (cmd === 'fi-run') fiRunSweep().catch(e => { console.warn(`${TAG} anomaly report threw:`, e); setStatus(`Anomaly report failed — ${e.message}`); if (fiSweep) fiSweep.running = false; fiV = null; renderPanel(); });
                     else if (cmd === 'fi-abort') { if (fiSweep) fiSweep.aborted = true; setStatus('Anomaly report aborting after the in-flight sites…'); }
@@ -11306,6 +11858,7 @@
                 if (t.hasAttribute && t.hasAttribute('data-es-opt')) { esOpt(t); return; }
                 if (t.hasAttribute && t.hasAttribute('data-sk-opt')) { skOpt(t); return; }
                 if (t.hasAttribute && t.hasAttribute('data-fi-opt')) { fiOpt(t); return; }
+                if (t.hasAttribute && t.hasAttribute('data-hc-opt')) { hcOpt(t); return; }
                 if (t.hasAttribute && t.hasAttribute('data-nv-check')) { const k = t.getAttribute('data-nv-check'); if (NV_CHECKS.some(c => c.key === k)) { ftCfg.nvChecks[k] = !!t.checked; saveCfg(); fdRenderKeepScroll(); } return; }
                 if (t.hasAttribute && t.hasAttribute('data-nv-days')) { if (t.value === 'custom') { ftCfg.nvCustom = true; saveCfg(); setStatus('Mission review: pick the start / end dates — takes effect on the next run'); renderPanel(); return; } const v = Number(t.value); if (NV_DAY_OPTS.some(o => o[0] === v)) { ftCfg.nvDays = v; ftCfg.nvCustom = false; saveCfg(); setStatus(`Mission review window: ${v} day(s) — takes effect on the next run`); renderPanel(); } return; }
                 if (t.hasAttribute && t.hasAttribute('data-nv-date')) { const k = t.getAttribute('data-nv-date') === 'end' ? 'nvEnd' : 'nvStart'; if (/^(\d{4}-\d{2}-\d{2})?$/.test(t.value)) { ftCfg[k] = t.value; saveCfg(); const r = nvRange(); setStatus(r.err ? `Mission review: ${r.err}` : `Mission review range: ${fdYmd(r.start)} → ${fdYmd(r.end)} — takes effect on the next run`); } return; }

@@ -1,3 +1,13 @@
+## 2026-11-23 — 🌐 AIM Fleet Tools latest v1.03 (latest only) — ⏱ Hours & Cycle
+
+- **New ⏱ Hours & Cycle section** (feature #346). Pick sites in 📦 Fleet Data (or leave the pick empty for every site) and press ▶ Run.
+- **Total flight hours** over the last 18 / 12 / 6 / 3 months, plus an optional custom range. Jump To Alert hours are shown separately, and so are records at 0:00 that never got airborne. Includes monthly bars.
+- **Full cycle time**: how long it takes to fly every recurring mission once, per site and for all picked sites together. Shown as an average and a median, in calendar days and flying days, with the flight hours each cycle uses.
+- Mission names change often, so the cycle counts **pad codes** (H45, J01 …) when most names list them, and mission names otherwise. You can switch this. Jump To Alert flights, names containing words you exclude (default "mapping, demo") and short flights are left out.
+- **Current mission set**: the missions flown in the last 30 days and how fast they complete. **⚠ set changed** appears when missions that used to be flown regularly have stopped.
+- **⬇ HTML report**: one self-contained page with charts and tables (light / dark) to share.
+- **Faster re-runs**: each site's mission log is saved in the browser. A second run reads only the flights since the last one. ⟳ Full re-read and 🗑 Clear cache start fresh.
+
 ## 2026-11-20 — 🌐 AIM Fleet Tools latest v1.02 (latest only) — 📅 Sweep Scheduler: 2nd / 3rd choice, flights done, distance
 
 - **🥇 Fly next, 🥈 2nd choice, 🥉 3rd choice** (feature #345) above the table: the first mission in the order, then the next two that are at a different site — for when weather, a TFR or a crane blocks the first. Also at the top of Copy for Slack.
