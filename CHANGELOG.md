@@ -1,3 +1,9 @@
+## 2026-11-25 — 🔎 AIM Mission Logs latest v0.93 (latest only) — on a site's Mission Log and Mission Playback
+
+- **New: 🔎 AIM on every row of a site's Mission Log.** Click it to analyze that mission's logs in place, the same panel as on the dashboard, with ⬇ Report.
+- **New: 🔎 Logs on Mission Playback**, with the mission on screen already filled in.
+- On every other site page the tool stays hidden. The Control Panel switch for Mission Logs now turns the buttons on and off (it did nothing before).
+
 ## 2026-11-25 — 🔎 AIM Mission Logs latest v0.92 (latest only) — ⬇ Report
 
 - **New: ⬇ Report button** in the panel header (feature #347). It saves the analysis on screen as one HTML file that opens in any browser with no login, so it can be sent or printed instead of screenshotted. Simple view saves the plain-English cards with "Technical details" folded under each; Advanced view saves the full cards.

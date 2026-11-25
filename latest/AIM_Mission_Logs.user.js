@@ -1,13 +1,13 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Logs
 // @namespace    http://tampermonkey.net/
-// @version      0.92
+// @version      0.93
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Logs.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Logs.user.js
-// @description  v0.92: ⬇ Report — saves the analysis on screen as one self-contained HTML file (charts included as pictures; opens anywhere, no login). v0.91: deep link — /dashboard/?aim-ml=<mission id> opens the panel and analyzes that mission (used by the Fleet Tools ⚙ ESC Sweep rows). v0.9: ⚙ Motors / ESC card — reads the ESC telemetry log + the main drone log and says whether the drone's critical_current_rpm_ratio alert was a false positive (motor-controller readings arriving under 3 per second) or real; interactive per-ESC charts (drag to zoom all, double-click to reset, hover for values, switch the top chart between ratio / rpm / current / throttle / voltage / temperatures), editable thresholds, stretch table, per-ESC stats, Sheets copy. v0.8: Signal KML points, pins and track sit at the drone's flown altitude (absolute MSL, extruded to the ground) instead of clamped to the ground. v0.7: names the CARRIER from the LTE bands the modem camped on (B13 = Verizon-only spectrum, B14/B17/B29/B30 = AT&T, B71/B41/B25/B26 = T-Mobile; shared bands prove nothing); every outage, handover and the worst-signal sample now carries the drone's position at that moment (click 📍 to copy lat,lng — paste into Map Nav 🧭); 📍 Signal KML button exports the flown track with each signal sample colored Good/Fair/Weak/Edge plus outage and handover pins (open in Google Earth or Fleet Tools → KML Layers) to see WHERE the link was bad. v0.6: outage detection now also uses 100%-loss ping runs, IP-lease loss (udhcpc deconfigured→bound) and LTE-manager restarts — a reconnect the TCP checks never saw (238589) was reported as 'dropped 0 times' in red; outages are tagged before takeoff / in flight / after landing and the Simple card downgrades a drop that happened on the base to amber. v0.5: Simple / Advanced view toggle (remembered) — Simple is plain English for pilots and customers: one bold bottom line per card + bullets (signal as bars, response time, packet loss, blips, tower hopping, what to do) with the full technical card under 'Technical details ▸'. v0.4: reads the older EM7565 modem's status fields (RSRP_(dBm) / PCC_RxM_RSSI / Tx_Power) — v0.3 saw no RSRP and flagged a false 33-min outage; a sample is lost only with no band / stuck handover / no cell+no RSRP; isolated 10 s TCP blips = amber POOR link (loss %, avg/worst rtt) not red; unknown formats raise a ⚠ with lte.rawSample; mission duration is ms. v0.3: LTE card gains an Outages line (each loss window with start → recovery and duration, from no-cell / stuck-handover samples and failing TCP checks) and a Coverage line (median RSRP, % weak / very weak / no cell); dropped verdict names the outages. v0.2: row 🔎 anchors on the dashboard's own Get App Logs control (not table structure); prefill from the FILTER box or the single visible row only; server reply shown when a mission has no archive. Pull a mission's log archives straight from the Mission Dashboard (no download → unzip → hunt) and extract what matters: LTE link health (modem registration, TCP/ping checks, signal, cell handovers, RTK-stream gaps), mission event timeline (stages, aborts, go-to-base), DAA aircraft with closest approach to the drone, warnings/errors by process. v0.1 (#286): POC on percepto.app/dashboard — 🔎 per mission row + floating launcher; engine (fetch → gunzip → untar → extractors) is self-contained for the later Fleet Tools site/date sweep.
+// @description  v0.93: also on a site's Mission Log (🔎 AIM on every row) and on Mission Playback (🔎 Logs, mission prefilled). v0.92: ⬇ Report — saves the analysis on screen as one self-contained HTML file (charts included as pictures; opens anywhere, no login). v0.91: deep link — /dashboard/?aim-ml=<mission id> opens the panel and analyzes that mission (used by the Fleet Tools ⚙ ESC Sweep rows). v0.9: ⚙ Motors / ESC card — reads the ESC telemetry log + the main drone log and says whether the drone's critical_current_rpm_ratio alert was a false positive (motor-controller readings arriving under 3 per second) or real; interactive per-ESC charts (drag to zoom all, double-click to reset, hover for values, switch the top chart between ratio / rpm / current / throttle / voltage / temperatures), editable thresholds, stretch table, per-ESC stats, Sheets copy. v0.8: Signal KML points, pins and track sit at the drone's flown altitude (absolute MSL, extruded to the ground) instead of clamped to the ground. v0.7: names the CARRIER from the LTE bands the modem camped on (B13 = Verizon-only spectrum, B14/B17/B29/B30 = AT&T, B71/B41/B25/B26 = T-Mobile; shared bands prove nothing); every outage, handover and the worst-signal sample now carries the drone's position at that moment (click 📍 to copy lat,lng — paste into Map Nav 🧭); 📍 Signal KML button exports the flown track with each signal sample colored Good/Fair/Weak/Edge plus outage and handover pins (open in Google Earth or Fleet Tools → KML Layers) to see WHERE the link was bad. v0.6: outage detection now also uses 100%-loss ping runs, IP-lease loss (udhcpc deconfigured→bound) and LTE-manager restarts — a reconnect the TCP checks never saw (238589) was reported as 'dropped 0 times' in red; outages are tagged before takeoff / in flight / after landing and the Simple card downgrades a drop that happened on the base to amber. v0.5: Simple / Advanced view toggle (remembered) — Simple is plain English for pilots and customers: one bold bottom line per card + bullets (signal as bars, response time, packet loss, blips, tower hopping, what to do) with the full technical card under 'Technical details ▸'. v0.4: reads the older EM7565 modem's status fields (RSRP_(dBm) / PCC_RxM_RSSI / Tx_Power) — v0.3 saw no RSRP and flagged a false 33-min outage; a sample is lost only with no band / stuck handover / no cell+no RSRP; isolated 10 s TCP blips = amber POOR link (loss %, avg/worst rtt) not red; unknown formats raise a ⚠ with lte.rawSample; mission duration is ms. v0.3: LTE card gains an Outages line (each loss window with start → recovery and duration, from no-cell / stuck-handover samples and failing TCP checks) and a Coverage line (median RSRP, % weak / very weak / no cell); dropped verdict names the outages. v0.2: row 🔎 anchors on the dashboard's own Get App Logs control (not table structure); prefill from the FILTER box or the single visible row only; server reply shown when a mission has no archive. Pull a mission's log archives straight from the Mission Dashboard (no download → unzip → hunt) and extract what matters: LTE link health (modem registration, TCP/ping checks, signal, cell handovers, RTK-stream gaps), mission event timeline (stages, aborts, go-to-base), DAA aircraft with closest approach to the drone, warnings/errors by process. v0.1 (#286): POC on percepto.app/dashboard — 🔎 per mission row + floating launcher; engine (fetch → gunzip → untar → extractors) is self-contained for the later Fleet Tools site/date sweep.
 // @author       Payden
-// @match        *://percepto.app/dashboard*
-// @match        *://qa.percepto.app/dashboard*
+// @match        *://percepto.app/*
+// @match        *://qa.percepto.app/*
 // @connect      d2lb831xgi5b1q.cloudfront.net
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
@@ -19,7 +19,11 @@
 // turns them into answers ("did LTE drop?", "why did it abort?", "what was
 // the aircraft?", "was the ESC alert a false positive?") without the
 // download → unzip → grep loop.
-// Pages: the Mission Dashboard (/dashboard/#/, All Missions table).
+// Pages: the Mission Dashboard (/dashboard/#/, All Missions table); since v0.93 also a site's
+//   Mission Log (/#/site/<sid>/mission-log — 🔎 AIM on every row) and Mission Playback
+//   (/#/site/<sid>/control-panel/past-mission/<mid> — 🔎 Logs with the mission prefilled).
+//   Runs in the TOP window only; the Mission Log table lives in the same-origin react-pages
+//   iframe and is reached through iframe.contentDocument.
 // Endpoints (probed 2026-10-05, see memory reference_mission_log_endpoints):
 //   GET /missions/<id>/logs/new_app_log/  → {download_link: CloudFront signed .tar.gz}
 //   GET /missions/<id>/logs/daa_file/     → {download_link: CloudFront signed .tar.gz}
@@ -36,8 +40,14 @@
     if (window !== window.top) return;
 
     const SCRIPT_ID = 'aim-mission-logs';
-    const SCRIPT_VERSION = '0.92';
+    const SCRIPT_VERSION = '0.93';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
+    // v0.93 — where are we? 'dash' = Mission Dashboard · 'log' = a site's Mission Log · 'playback' = Mission Playback · null = any other page (stay out of the way)
+    const ON_DASH = /^\/dashboard/.test(location.pathname);
+    const SITE_LOG_RX = /#\/site\/\d+\/mission-log/;
+    const SITE_PB_RX = /#\/site\/\d+\/control-panel\/past-mission\/(\d+)/;
+    const routeKind = () => { const h = location.hash || ''; return ON_DASH ? 'dash' : SITE_LOG_RX.test(h) ? 'log' : SITE_PB_RX.test(h) ? 'playback' : null; };
+    let masterEnabled = true;
     const IS_QA = location.hostname === 'qa.percepto.app' || location.hostname.endsWith('.qa.percepto.app');
 
     console.log(`${TAG} init v${SCRIPT_VERSION} on ${location.href}`);
@@ -884,6 +894,9 @@
     // Prefill order: (1) the dashboard's own mission filter box = the input right before the FILTER
     // button, (2) the only row's ID when the table shows exactly one mission. Never a random input.
     function guessFilterMissionId() {
+        const pb = (location.hash || '').match(SITE_PB_RX);
+        if (pb) return pb[1];                       // Mission Playback: the mission on screen
+        if (!ON_DASH) return null;
         try {
             const filterBtn = Array.from(document.querySelectorAll('button, [role="button"], a')).find(b => /^\s*filter\s*$/i.test(b.textContent || '') && !b.closest('#aim-ml-panel'));
             if (filterBtn) {
@@ -1657,7 +1670,9 @@
 
     // ---------------- dashboard injection ----------------
     function injectLauncher() {
-        if (document.getElementById('aim-ml-launch')) return;
+        const have = document.getElementById('aim-ml-launch');
+        if (!masterEnabled || !routeKind()) { if (have) have.remove(); return; }
+        if (have) return;
         ensureStyles();
         const b = document.createElement('button');
         b.id = 'aim-ml-launch'; b.textContent = '🔎 Logs';
@@ -1696,6 +1711,7 @@
 
     let lastRowLog = '';
     function injectRowButtons() {
+        if (!masterEnabled) { document.querySelectorAll('.aim-ml-row-btn').forEach(b => b.remove()); document.querySelectorAll('[data-aim-ml]').forEach(r => r.removeAttribute('data-aim-ml')); lastRowLog = ''; return; }
         const rows = findMissionRows();
         const sig = rows.map(r => r.id).join(',');
         if (sig !== lastRowLog) { lastRowLog = sig; console.log(`${TAG} mission rows detected: ${rows.length}${rows.length ? ' → ' + sig : ' (no "Get App Logs" controls on the page yet)'}`); }
@@ -1712,6 +1728,48 @@
         }
     }
 
+    // v0.93 — a site's Mission Log: native Ant table inside the same-origin react-pages iframe. Every row carries
+    // data-row-key="mission-<id>". Our button is found by data-* (React rewrites className) and styled inline
+    // (the iframe has its own document, so the panel stylesheet does not reach it).
+    const SITE_ROW_SEL = 'tr.ant-table-row[data-row-key^="mission-"]';
+    function siteLogDocs() {
+        const docs = [document];
+        for (const f of document.querySelectorAll('iframe')) { const d = f.contentDocument; if (d && d.body) docs.push(d); }   // contentDocument is null for a cross-origin frame
+        return docs;
+    }
+    function removeSiteRowButtons() { for (const d of siteLogDocs()) d.querySelectorAll('[data-aim-ml-row]').forEach(b => b.remove()); }
+    let lastSiteRowLog = '';
+    function injectSiteRowButtons() {
+        if (!masterEnabled || routeKind() !== 'log') { if (lastSiteRowLog) { removeSiteRowButtons(); lastSiteRowLog = ''; } return; }
+        let n = 0;
+        for (const d of siteLogDocs()) {
+            for (const tr of d.querySelectorAll(SITE_ROW_SEL)) {
+                const m = (tr.getAttribute('data-row-key') || '').match(/^mission-(\d+)$/);
+                if (!m) continue;
+                const id = m[1];
+                n++;
+                const old = tr.querySelector('[data-aim-ml-row]');
+                if (old && old.getAttribute('data-aim-ml-row') === id) continue;
+                if (old) old.remove();                                   // React reused the row for another mission
+                const cell = tr.querySelector('.action-column-cell') || tr.lastElementChild;
+                if (!cell) continue;
+                const btn = d.createElement('span');
+                btn.setAttribute('data-aim-ml-row', id);
+                btn.textContent = '🔎 AIM';
+                btn.title = `AIM Mission Logs — analyze mission ${id}'s logs`;
+                btn.style.cssText = 'display:inline-block;margin-right:6px;padding:1px 6px;border:1px solid #2a3240;border-radius:4px;background:#0e1115;color:#7adfe6;font-size:11px;line-height:1.5;cursor:pointer;vertical-align:middle;white-space:nowrap';
+                // the row itself is clickable (opens playback) — keep our click from reaching it
+                const stop = (e) => e.stopPropagation();
+                btn.addEventListener('mousedown', stop); btn.addEventListener('pointerdown', stop);
+                btn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); openPanel(id); analyzeMission(id); });
+                cell.insertBefore(btn, cell.firstChild);
+            }
+        }
+        const sig = 'rows:' + n;
+        if (sig !== lastSiteRowLog) { lastSiteRowLog = sig; console.log(`${TAG} site Mission Log rows detected: ${n}${n ? '' : ' (table not on the page yet)'}`); }
+    }
+    function siteTick() { try { injectLauncher(); injectSiteRowButtons(); } catch (e) { console.warn(`${TAG} site inject error`, e); } }
+
     let injectTimer = null;
     function scheduleInject() { if (injectTimer) return; injectTimer = setTimeout(() => { injectTimer = null; try { injectLauncher(); injectRowButtons(); } catch (e) { console.warn(`${TAG} inject error`, e); } }, 300); }
 
@@ -1724,7 +1782,8 @@
             if (msg.type === 'REQUEST_REGISTRATIONS') registerWithControlPanel();
             else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SCRIPT_ID) {
                 const v = msg.value !== undefined ? msg.value : msg.enabled;
-                if (msg.toggleId === 'daa') { wantDaa = !!v; const cb = document.getElementById('aim-ml-daa'); if (cb) cb.checked = wantDaa; }
+                if (msg.toggleId === 'master') { masterEnabled = !!v; if (ON_DASH) scheduleInject(); else siteTick(); if (!masterEnabled && ui.panel) ui.panel.style.display = 'none'; }
+                else if (msg.toggleId === 'daa') { wantDaa = !!v; const cb = document.getElementById('aim-ml-daa'); if (cb) cb.checked = wantDaa; }
             }
         };
     }
@@ -1734,7 +1793,7 @@
             controlChannel.postMessage({
                 type: 'REGISTER', scriptId: SCRIPT_ID, name: 'Mission Logs', version: SCRIPT_VERSION, group: 'Fleet',
                 toggles: [
-                    { id: 'master', label: 'Enable Mission Logs (dashboard 🔎)', type: 'boolean', default: true, master: true },
+                    { id: 'master', label: 'Enable Mission Logs (🔎 on the dashboard, Mission Log and Playback)', type: 'boolean', default: true, master: true },
                     { id: 'daa', label: 'Also fetch the DAA (ADS-B/radar) archive', type: 'boolean', default: true },
                 ],
                 hotkeys: [],
@@ -1745,14 +1804,21 @@
     // ---------------- boot ----------------
     setupControlPanel();
     registerWithControlPanel();
-    scheduleInject();
     // v0.91 — deep link: /dashboard/?aim-ml=<mission id> opens the panel and analyzes that mission (Fleet Tools ⚙ ESC Sweep rows link here)
     try {
         const deep = new URLSearchParams(location.search).get('aim-ml');
         if (deep && /^\d{1,12}$/.test(deep)) setTimeout(() => { try { openPanel(deep); analyzeMission(deep); } catch (e) { console.error(`${TAG} deep link failed:`, e); } }, 1200);
         else if (deep) console.warn(`${TAG} deep link ignored — aim-ml must be a mission id, got:`, deep);
     } catch (e) { console.warn(`${TAG} deep link parse failed:`, e); }
-    new MutationObserver(scheduleInject).observe(document.documentElement, { childList: true, subtree: true });
-    window.addEventListener('hashchange', scheduleInject);
-    console.log(`${TAG} ready v${SCRIPT_VERSION} — 🔎 Logs launcher + per-row buttons on the All Missions table`);
+    if (ON_DASH) {
+        scheduleInject();
+        new MutationObserver(scheduleInject).observe(document.documentElement, { childList: true, subtree: true });
+        window.addEventListener('hashchange', scheduleInject);
+    } else {
+        // The site app is heavy: no subtree observer here. A light tick that does nothing off the two routes.
+        siteTick();
+        setInterval(siteTick, 1500);
+        window.addEventListener('hashchange', siteTick);
+    }
+    console.log(`${TAG} ready v${SCRIPT_VERSION} — ${ON_DASH ? '🔎 Logs launcher + per-row buttons on the All Missions table' : '🔎 on a site\'s Mission Log rows + Mission Playback'}`);
 })();
