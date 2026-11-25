@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Logs
 // @namespace    http://tampermonkey.net/
-// @version      0.94
+// @version      0.95
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Logs.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Logs.user.js
-// @description  v0.94: 🚨 Possible incident card (shows when the flight did not end normally) + Run incident review — reads the flight controller's own log for the first abnormal moment (outside-force stop, jolts, loss of control, motor stall, hard impact, parachute command). ⬇ Logs — save the app-log archive. v0.93: also on a site's Mission Log (🔎 AIM on every row) and on Mission Playback (🔎 Logs, mission prefilled). v0.92: ⬇ Report — saves the analysis on screen as one self-contained HTML file (charts included as pictures; opens anywhere, no login). v0.91: deep link — /dashboard/?aim-ml=<mission id> opens the panel and analyzes that mission (used by the Fleet Tools ⚙ ESC Sweep rows). v0.9: ⚙ Motors / ESC card — reads the ESC telemetry log + the main drone log and says whether the drone's critical_current_rpm_ratio alert was a false positive (motor-controller readings arriving under 3 per second) or real; interactive per-ESC charts (drag to zoom all, double-click to reset, hover for values, switch the top chart between ratio / rpm / current / throttle / voltage / temperatures), editable thresholds, stretch table, per-ESC stats, Sheets copy. v0.8: Signal KML points, pins and track sit at the drone's flown altitude (absolute MSL, extruded to the ground) instead of clamped to the ground. v0.7: names the CARRIER from the LTE bands the modem camped on (B13 = Verizon-only spectrum, B14/B17/B29/B30 = AT&T, B71/B41/B25/B26 = T-Mobile; shared bands prove nothing); every outage, handover and the worst-signal sample now carries the drone's position at that moment (click 📍 to copy lat,lng — paste into Map Nav 🧭); 📍 Signal KML button exports the flown track with each signal sample colored Good/Fair/Weak/Edge plus outage and handover pins (open in Google Earth or Fleet Tools → KML Layers) to see WHERE the link was bad. v0.6: outage detection now also uses 100%-loss ping runs, IP-lease loss (udhcpc deconfigured→bound) and LTE-manager restarts — a reconnect the TCP checks never saw (238589) was reported as 'dropped 0 times' in red; outages are tagged before takeoff / in flight / after landing and the Simple card downgrades a drop that happened on the base to amber. v0.5: Simple / Advanced view toggle (remembered) — Simple is plain English for pilots and customers: one bold bottom line per card + bullets (signal as bars, response time, packet loss, blips, tower hopping, what to do) with the full technical card under 'Technical details ▸'. v0.4: reads the older EM7565 modem's status fields (RSRP_(dBm) / PCC_RxM_RSSI / Tx_Power) — v0.3 saw no RSRP and flagged a false 33-min outage; a sample is lost only with no band / stuck handover / no cell+no RSRP; isolated 10 s TCP blips = amber POOR link (loss %, avg/worst rtt) not red; unknown formats raise a ⚠ with lte.rawSample; mission duration is ms. v0.3: LTE card gains an Outages line (each loss window with start → recovery and duration, from no-cell / stuck-handover samples and failing TCP checks) and a Coverage line (median RSRP, % weak / very weak / no cell); dropped verdict names the outages. v0.2: row 🔎 anchors on the dashboard's own Get App Logs control (not table structure); prefill from the FILTER box or the single visible row only; server reply shown when a mission has no archive. Pull a mission's log archives straight from the Mission Dashboard (no download → unzip → hunt) and extract what matters: LTE link health (modem registration, TCP/ping checks, signal, cell handovers, RTK-stream gaps), mission event timeline (stages, aborts, go-to-base), DAA aircraft with closest approach to the drone, warnings/errors by process. v0.1 (#286): POC on percepto.app/dashboard — 🔎 per mission row + floating launcher; engine (fetch → gunzip → untar → extractors) is self-contained for the later Fleet Tools site/date sweep.
+// @description  v0.95: incident review gets a “Where it happened” map — the flown track around the event, the numbered moments, and the site's flight paths, FFZs and NFZs from the archive. v0.94: 🚨 Possible incident card (shows when the flight did not end normally) + Run incident review — reads the flight controller's own log for the first abnormal moment (outside-force stop, jolts, loss of control, motor stall, hard impact, parachute command). ⬇ Logs — save the app-log archive. v0.93: also on a site's Mission Log (🔎 AIM on every row) and on Mission Playback (🔎 Logs, mission prefilled). v0.92: ⬇ Report — saves the analysis on screen as one self-contained HTML file (charts included as pictures; opens anywhere, no login). v0.91: deep link — /dashboard/?aim-ml=<mission id> opens the panel and analyzes that mission (used by the Fleet Tools ⚙ ESC Sweep rows). v0.9: ⚙ Motors / ESC card — reads the ESC telemetry log + the main drone log and says whether the drone's critical_current_rpm_ratio alert was a false positive (motor-controller readings arriving under 3 per second) or real; interactive per-ESC charts (drag to zoom all, double-click to reset, hover for values, switch the top chart between ratio / rpm / current / throttle / voltage / temperatures), editable thresholds, stretch table, per-ESC stats, Sheets copy. v0.8: Signal KML points, pins and track sit at the drone's flown altitude (absolute MSL, extruded to the ground) instead of clamped to the ground. v0.7: names the CARRIER from the LTE bands the modem camped on (B13 = Verizon-only spectrum, B14/B17/B29/B30 = AT&T, B71/B41/B25/B26 = T-Mobile; shared bands prove nothing); every outage, handover and the worst-signal sample now carries the drone's position at that moment (click 📍 to copy lat,lng — paste into Map Nav 🧭); 📍 Signal KML button exports the flown track with each signal sample colored Good/Fair/Weak/Edge plus outage and handover pins (open in Google Earth or Fleet Tools → KML Layers) to see WHERE the link was bad. v0.6: outage detection now also uses 100%-loss ping runs, IP-lease loss (udhcpc deconfigured→bound) and LTE-manager restarts — a reconnect the TCP checks never saw (238589) was reported as 'dropped 0 times' in red; outages are tagged before takeoff / in flight / after landing and the Simple card downgrades a drop that happened on the base to amber. v0.5: Simple / Advanced view toggle (remembered) — Simple is plain English for pilots and customers: one bold bottom line per card + bullets (signal as bars, response time, packet loss, blips, tower hopping, what to do) with the full technical card under 'Technical details ▸'. v0.4: reads the older EM7565 modem's status fields (RSRP_(dBm) / PCC_RxM_RSSI / Tx_Power) — v0.3 saw no RSRP and flagged a false 33-min outage; a sample is lost only with no band / stuck handover / no cell+no RSRP; isolated 10 s TCP blips = amber POOR link (loss %, avg/worst rtt) not red; unknown formats raise a ⚠ with lte.rawSample; mission duration is ms. v0.3: LTE card gains an Outages line (each loss window with start → recovery and duration, from no-cell / stuck-handover samples and failing TCP checks) and a Coverage line (median RSRP, % weak / very weak / no cell); dropped verdict names the outages. v0.2: row 🔎 anchors on the dashboard's own Get App Logs control (not table structure); prefill from the FILTER box or the single visible row only; server reply shown when a mission has no archive. Pull a mission's log archives straight from the Mission Dashboard (no download → unzip → hunt) and extract what matters: LTE link health (modem registration, TCP/ping checks, signal, cell handovers, RTK-stream gaps), mission event timeline (stages, aborts, go-to-base), DAA aircraft with closest approach to the drone, warnings/errors by process. v0.1 (#286): POC on percepto.app/dashboard — 🔎 per mission row + floating launcher; engine (fetch → gunzip → untar → extractors) is self-contained for the later Fleet Tools site/date sweep.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        *://qa.percepto.app/*
@@ -40,7 +40,7 @@
     if (window !== window.top) return;
 
     const SCRIPT_ID = 'aim-mission-logs';
-    const SCRIPT_VERSION = '0.94';
+    const SCRIPT_VERSION = '0.95';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     // v0.93 — where are we? 'dash' = Mission Dashboard · 'log' = a site's Mission Log · 'playback' = Mission Playback · null = any other page (stay out of the way)
     const ON_DASH = /^\/dashboard/.test(location.pathname);
@@ -971,6 +971,7 @@
             for (const g of groups.values()) F.push({ t: g.t, id: 'msg', level: 'm', title: 'Autopilot message', text: g.n > 1 ? `“${g.key}” — ${g.n} times, the last at ${mlHms(new Date(g.last))}` : `“${g.text}”` }); }
         for (const s of (signals ? signals.signals : [])) if (s.t != null) F.push({ t: s.t, id: 'sig', level: 'm', title: 'Drone app', text: s.text });
         if (escData && escData.alerts) for (const al of escData.alerts) if (al.t != null && al.t >= tAir0) F.push({ t: al.t, id: 'escAlarm', level: 'm', title: 'Motor / ESC alarm raised', text: al.esc ? `${al.esc}, value ${al.value} > ${al.limit}` : 'see the Motors card' });
+        for (const f of F) if (/^(stop|jolt|drag|deviation|upset|motor|impact|chute)$/.test(f.id)) f.pos = posAt(f.t);
         F.sort((x, y) => x.t - y.t);
         const physical = F.filter(f => /^(stop|jolt|drag|deviation|upset|motor|impact)$/.test(f.id) && f.level !== 'm');
         const first = physical[0] || null;
@@ -985,7 +986,31 @@
         const cut = (S, cols) => { const a = mlLowerBound(S.t, cFrom), b = mlLowerBound(S.t, cTo); const o = { t: S.t.slice(a, b) }; for (const c of cols) o[c] = S[c].slice(a, b); return o; };
         const ia = mlLowerBound(I.t, cFrom), ib = mlLowerBound(I.t, cTo);
         const chart = { from: cFrom, to: cTo, gps: cut(G, ['Spd']), att: cut(A, ['Roll', 'Pitch']), thr: C && C.t ? cut(C, ['ThO']) : null, imu: { t: I.t.slice(ia, ib), bx: Array.from(bx.subarray(ia, ib)) } };
-        return { ok: true, tAir0, tLog1, alt0, stop, jolts, drag, deviation, upset, impact, chute, motors, msgs, findings: F, first, notes: notes.filter(Boolean), chart, stats: { records: df.records, bad: df.bad, imuHz: Math.round(nI / ((I.t[nI - 1] - I.t[0]) / 1000)) } };
+        // --- map: the whole flight thinned out + the chart window at full detail ---
+        const pa = mlLowerBound(P.t, tAir0), stepN = Math.max(1, Math.ceil((P.t.length - pa) / 1500));
+        const flight = []; for (let k = pa; k < P.t.length; k += stepN) flight.push([P.Lat[k], P.Lng[k]]);
+        const wa = mlLowerBound(P.t, cFrom), wb = mlLowerBound(P.t, cTo);
+        const track = { flight, t: P.t.slice(wa, wb), lat: P.Lat.slice(wa, wb), lon: P.Lng.slice(wa, wb), alt: P.Alt.slice(wa, wb) };
+        return { ok: true, tAir0, tLog1, alt0, track, stop, jolts, drag, deviation, upset, impact, chute, motors, msgs, findings: F, first, notes: notes.filter(Boolean), chart, stats: { records: df.records, bad: df.bad, imuHz: Math.round(nI / ((I.t[nI - 1] - I.t[0]) / 1000)) } };
+    }
+    // Site setup as the drone had it for this flight (the archive's *_siteData.log.json): flight paths, FFZs, NFZs.
+    function mlSiteGeometry(roles) {
+        if (!roles.siteData) return null;
+        const d = JSON.parse(mlText(roles.siteData.bytes));
+        const ok = (p) => p && typeof p.lat === 'number' && typeof p.lon === 'number';
+        const routes = [], ffz = [], nfz = [];
+        for (const [name, pts] of Object.entries(d.routes || {})) {
+            if (!Array.isArray(pts)) continue;
+            const segs = [];
+            pts.forEach((p, i) => { if (ok(p)) for (const a of (p.arcs || [])) { const q = pts[a[0]]; if (a[0] > i && ok(q)) segs.push([p.lat, p.lon, q.lat, q.lon]); } });
+            if (segs.length) routes.push({ name, segs });
+        }
+        for (const [name, z] of Object.entries(d.free_zones || {})) {
+            if (!z || typeof z !== 'object') continue;
+            if (Array.isArray(z.coordinates)) { const ring = z.coordinates.filter(ok).map(p => [p.lat, p.lon]); if (ring.length >= 3) ffz.push({ name, ring }); }
+            for (const [k, v] of Object.entries(z)) if (k !== 'coordinates' && Array.isArray(v)) { const ring = v.filter(ok).map(p => [p.lat, p.lon]); if (ring.length >= 3) nfz.push({ name: k, ring }); }
+        }
+        return { routes, ffz, nfz };
     }
     // ===================== end [AIM_ML_INCIDENT] =======================
 
@@ -1111,6 +1136,11 @@
             .aim-ml-card.inc{border-color:#6a2a2a}
             .aim-ml-card.inc>h4{color:#ff7a7a;border-bottom-color:#4a2222}
             canvas[data-aim-ml-inc-cv]{display:block;width:100%;height:430px;cursor:crosshair}
+            canvas[data-aim-ml-inc-map]{display:block;width:100%;height:440px;cursor:crosshair;border-radius:4px}
+            .aim-ml-inc-h{margin:14px 0 4px;color:#7adfe6;font-weight:700;font-size:12px}
+            .aim-ml-inc-leg{display:flex;flex-wrap:wrap;gap:4px 14px;margin-top:6px;color:#aaa;font-size:11px}
+            .aim-ml-inc-leg i{display:inline-block;width:16px;height:0;border-top:3px solid;vertical-align:middle;margin-right:5px}
+            .aim-ml-inc-leg i.box{height:9px;border:1.5px solid;border-radius:2px}
             .aim-ml-inc-ro{min-height:18px;font-size:11.5px;margin:8px 0 2px}
             .aim-ml-mono{font-family:ui-monospace,Consolas,monospace;font-size:11px;white-space:pre-wrap;word-break:break-all;color:#bbb}
         `;
@@ -1900,6 +1930,11 @@
                 <div class="aim-ml-inc-ro" data-aim-ml-inc-ro><span class="m" data-aim-ml-live>Move the cursor over the chart for exact values.</span></div>
                 <canvas data-aim-ml-inc-cv></canvas>
                 <div class="m" style="margin-top:6px">Chart: 30 s before the first abnormal moment to 8 s after the impact. Numbered lines are the red and orange rows above. “Push along the body” is the force the drone felt front-to-back apart from its own propellers; near zero is normal.</div>
+                <div class="aim-ml-inc-h">Where it happened</div>
+                <div class="aim-ml-inc-ro" data-aim-ml-inc-mro><span class="m" data-aim-ml-live>Move the cursor along the track for the time, speed and height at that point.</span></div>
+                <canvas data-aim-ml-inc-map></canvas>
+                <div class="aim-ml-inc-leg"><span><i style="border-color:#7adfe6"></i>flown, before the first abnormal moment</span><span><i style="border-color:#ffb347"></i>flown, after it</span><span><i style="border-color:#55617a"></i>rest of the flight</span>${res.siteGeo ? '<span><i style="border-color:#c9c9d6;border-top-style:dashed"></i>planned flight path</span><span><i class="box" style="border-color:#3c9a3c"></i>FFZ</span><span><i class="box" style="border-color:#c04a4a"></i>NFZ</span>' : ''}</div>
+                <div class="m" style="margin-top:6px">${incNearestRoute(res)}North is up. Numbers match the table. ${res.siteGeo ? 'Flight paths and zones are the site setup the drone carried on this flight.' : 'No site setup file in this archive, so flight paths and zones are not drawn.'} Power lines and other obstacles are not in the drone's logs and are not drawn.</div>
                 <div class="m" style="margin-top:6px">This review reports what the sensors recorded. It cannot see what the drone touched or whether a parachute canopy was out — check the video and the airframe. Source: ${esc(bin ? bin.base : '')} · ${deep.stats.records.toLocaleString()} records${deep.stats.bad ? ` · ${deep.stats.bad} unreadable bytes skipped` : ''}.</div>`;
         }
         return `<div class="aim-ml-card inc"><h4>🚨 Possible incident<span class="sp"></span></h4><div>${inner}</div></div>`;
@@ -1915,6 +1950,10 @@
             try {
                 const df = mlDfParse(bin.bytes);
                 res.incidentDeep = mlIncidentDeep(df, res.esc, res.incident);
+                if (res.siteGeo === undefined) {
+                    try { res.siteGeo = mlSiteGeometry(res.roles); }
+                    catch (e) { console.warn(`${TAG} site setup file in the archive could not be read — the map is drawn without flight paths and zones:`, e); res.siteGeo = null; }
+                }
                 console.log(`${TAG} incident review done in ${((performance.now() - t0) / 1000).toFixed(1)} s`, res.incidentDeep);
                 setStatus(res.incidentDeep.ok ? `Incident review done · ${df.records.toLocaleString()} flight-controller records · ${((performance.now() - t0) / 1000).toFixed(1)} s` : `Incident review could not run: ${esc(res.incidentDeep.note)}`, res.incidentDeep.ok ? 'red' : 'amber');
             } catch (e) {
@@ -1999,13 +2038,14 @@
     function incRedraw() {
         const res = lastResult;
         if (!res || !ui.body) return;
-        try { ui.body.querySelectorAll('canvas[data-aim-ml-inc-cv]').forEach(cv => incDraw(cv, res, null)); }
+        try { ui.body.querySelectorAll('canvas[data-aim-ml-inc-cv]').forEach(cv => incDraw(cv, res, null)); ui.body.querySelectorAll('canvas[data-aim-ml-inc-map]').forEach(cv => incMapDraw(cv, res, null)); }
         catch (e) { console.error(`${TAG} incident chart draw failed:`, e); }
     }
     function incWire(res) {
         ui.body.querySelectorAll('[data-aim-ml-inc-run]').forEach(b => b.addEventListener('click', () => incRun(res)));
         const cv = ui.body.querySelector('canvas[data-aim-ml-inc-cv]');
         if (!cv || !res.incidentDeep || !res.incidentDeep.ok) return;
+        try { incMapWire(res); } catch (e) { console.error(`${TAG} incident map failed:`, e); }
         incDraw(cv, res, null);
         const ro = ui.body.querySelector('[data-aim-ml-inc-ro]'), idle = ro ? ro.innerHTML : '';
         const near = (s, t) => { if (!s.t.length) return null; let k = mlLowerBound(s.t, t); if (k >= s.t.length || (k > 0 && t - s.t[k - 1] < s.t[k] - t)) k--; return s.v[k]; };
@@ -2028,6 +2068,125 @@
         cv.addEventListener('pointerleave', () => { try { incDraw(cv, res, null); if (ro) ro.innerHTML = idle; } catch (e) { console.error(`${TAG} incident chart redraw failed:`, e); } });
     }
 
+    // ---- v0.95: "Where it happened" map (own canvas, no tiles: works offline and in the saved report) ----
+    const incMph = (ms) => ms * 2.23694;
+    function incMapFrame(res, W, H) {
+        const deep = res.incidentDeep, tr = deep.track;
+        const marks = deep.findings.filter(f => f.level === 'red' || f.level === 'amber');
+        const pts = []; for (let k = 0; k < tr.lat.length; k++) pts.push([tr.lat[k], tr.lon[k]]);
+        for (const f of marks) if (f.pos) pts.push([f.pos.lat, f.pos.lon]);
+        if (!pts.length) return null;
+        let la0 = Infinity, la1 = -Infinity, lo0 = Infinity, lo1 = -Infinity;
+        for (const [la, lo] of pts) { if (la < la0) la0 = la; if (la > la1) la1 = la; if (lo < lo0) lo0 = lo; if (lo > lo1) lo1 = lo; }
+        const latC = (la0 + la1) / 2, lonC = (lo0 + lo1) / 2, mLat = 110540, mLon = 111320 * Math.cos(latC * Math.PI / 180);
+        // metres per pixel: fit the event with a 30% margin, never tighter than 90 m across
+        const spanX = Math.max((lo1 - lo0) * mLon, 90), spanY = Math.max((la1 - la0) * mLat, 90);
+        const mpp = Math.max(spanX / (W * 0.7), spanY / (H * 0.7));
+        return { marks, mpp, X: (lon) => W / 2 + (lon - lonC) * mLon / mpp, Y: (lat) => H / 2 - (lat - latC) * mLat / mpp, mLat, mLon };
+    }
+    function incMapDraw(cv, res, hoverK) {
+        const deep = res.incidentDeep;
+        const W = cv.clientWidth, H = cv.clientHeight;
+        if (!deep || !deep.ok || !deep.track || !W || !H) return;
+        const fr = incMapFrame(res, W, H);
+        if (!fr) return;
+        const dpr = window.devicePixelRatio || 1;
+        cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+        const g = cv.getContext('2d');
+        g.setTransform(dpr, 0, 0, dpr, 0, 0);
+        g.fillStyle = '#0b0e12'; g.fillRect(0, 0, W, H);
+        g.font = '10px system-ui,sans-serif'; g.lineJoin = 'round'; g.lineCap = 'round';
+        const { X, Y } = fr, geo = res.siteGeo, tr = deep.track;
+        const inView = (ring) => ring.some(([la, lo]) => { const x = X(lo), y = Y(la); return x > -W && x < 2 * W && y > -H && y < 2 * H; });
+        const poly = (ring) => { g.beginPath(); ring.forEach(([la, lo], i) => { if (i) g.lineTo(X(lo), Y(la)); else g.moveTo(X(lo), Y(la)); }); g.closePath(); };
+        const labels = [];
+        if (geo) {
+            for (const z of geo.ffz) if (inView(z.ring)) { poly(z.ring); g.fillStyle = 'rgba(95,255,95,.06)'; g.fill(); g.strokeStyle = '#3c9a3c'; g.lineWidth = 1.5; g.stroke(); const cx = z.ring.reduce((a, p) => a + X(p[1]), 0) / z.ring.length, cy = z.ring.reduce((a, p) => a + Y(p[0]), 0) / z.ring.length; if (cx > 0 && cx < W && cy > 0 && cy < H) labels.push([z.name, cx, cy]); }
+            for (const z of geo.nfz) if (inView(z.ring)) { poly(z.ring); g.fillStyle = 'rgba(255,95,95,.10)'; g.fill(); g.strokeStyle = '#c04a4a'; g.lineWidth = 1.5; g.stroke(); }
+            g.strokeStyle = '#c9c9d6'; g.lineWidth = 1.5; g.setLineDash([6, 5]);
+            for (const r of geo.routes) for (const [a, b, c, d] of r.segs) { const x1 = X(b), y1 = Y(a), x2 = X(d), y2 = Y(c); if (Math.max(x1, x2) < 0 || Math.min(x1, x2) > W || Math.max(y1, y2) < 0 || Math.min(y1, y2) > H) continue; g.beginPath(); g.moveTo(x1, y1); g.lineTo(x2, y2); g.stroke(); }
+            g.setLineDash([]);
+        }
+        // whole flight, faint
+        g.strokeStyle = '#55617a'; g.lineWidth = 1; g.beginPath();
+        tr.flight.forEach(([la, lo], i) => { if (i) g.lineTo(X(lo), Y(la)); else g.moveTo(X(lo), Y(la)); }); g.stroke();
+        // the event window: before / after the first abnormal moment
+        const kSplit = deep.first ? mlLowerBound(tr.t, deep.first.t) : tr.t.length;
+        const seg = (a, b, color) => { if (b - a < 2) return; g.strokeStyle = '#0b0e12'; g.lineWidth = 5; g.beginPath(); for (let k = a; k < b; k++) { if (k > a) g.lineTo(X(tr.lon[k]), Y(tr.lat[k])); else g.moveTo(X(tr.lon[k]), Y(tr.lat[k])); } g.stroke(); g.strokeStyle = color; g.lineWidth = 2.5; g.stroke(); };
+        seg(0, Math.min(tr.t.length, kSplit + 1), '#7adfe6'); seg(Math.max(0, kSplit), tr.t.length, '#ffb347');
+        // direction of travel: an arrowhead on the "before" part
+        if (kSplit > 12) { const k = Math.max(6, Math.floor(kSplit * 0.5)), x = X(tr.lon[k]), y = Y(tr.lat[k]), ang = Math.atan2(y - Y(tr.lat[k - 5]), x - X(tr.lon[k - 5])); g.fillStyle = '#7adfe6'; g.beginPath(); g.moveTo(x + 9 * Math.cos(ang), y + 9 * Math.sin(ang)); g.lineTo(x + 6 * Math.cos(ang + 2.5), y + 6 * Math.sin(ang + 2.5)); g.lineTo(x + 6 * Math.cos(ang - 2.5), y + 6 * Math.sin(ang - 2.5)); g.closePath(); g.fill(); }
+        // FFZ names
+        g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillStyle = 'rgba(140,200,140,.75)';
+        for (const [name, x, y] of labels.slice(0, 12)) g.fillText(name.replace(/^FFZ - /, ''), x, y);
+        // numbered moments; markers that land on top of each other share one dot and list their numbers
+        const groups = [];
+        fr.marks.forEach((f, i) => { if (!f.pos) return; const x = X(f.pos.lon), y = Y(f.pos.lat); const gph = groups.find(q => Math.hypot(q.x - x, q.y - y) < 13); if (gph) { gph.n.push(i + 1); if (f.level === 'red') gph.red = true; } else groups.push({ x, y, n: [i + 1], red: f.level === 'red' }); });
+        for (const q of groups) {
+            const col = q.red ? '#ff5f5f' : '#ffb347', txt = q.n.join(' · ');
+            g.fillStyle = '#0b0e12'; g.beginPath(); g.arc(q.x, q.y, 7, 0, 6.2832); g.fill();
+            g.fillStyle = col; g.beginPath(); g.arc(q.x, q.y, 5, 0, 6.2832); g.fill();
+            g.font = '700 11px system-ui,sans-serif'; g.textAlign = 'left';
+            const w = g.measureText(txt).width + 8;
+            const crowded = groups.some(o => o !== q && o.x > q.x && o.x < q.x + w + 22 && Math.abs(o.y - q.y) < 14);   // a neighbour sits where the label would go
+            const lx = (q.x + 10 + w > W || crowded) && q.x - 10 - w > 0 ? q.x - 10 - w : q.x + 10;
+            g.fillStyle = 'rgba(11,14,18,.85)'; g.fillRect(lx, q.y - 8, w, 16); g.fillStyle = col; g.fillText(txt, lx + 4, q.y);
+            g.font = '10px system-ui,sans-serif';
+        }
+        if (hoverK != null && hoverK >= 0 && hoverK < tr.t.length) { g.strokeStyle = '#fff'; g.lineWidth = 1.5; g.beginPath(); g.arc(X(tr.lon[hoverK]), Y(tr.lat[hoverK]), 6, 0, 6.2832); g.stroke(); }
+        // scale bar (feet) + north
+        const ftPerPx = fr.mpp * 3.28084, nice = [10, 20, 50, 100, 200, 500, 1000, 2000, 5000].find(v => v / ftPerPx >= 70) || 10000, bw = nice / ftPerPx;
+        g.fillStyle = 'rgba(11,14,18,.8)'; g.fillRect(8, H - 28, bw + 16, 22);
+        g.fillStyle = '#ddd'; g.fillRect(16, H - 12, bw, 2); g.fillRect(16, H - 16, 1, 6); g.fillRect(16 + bw - 1, H - 16, 1, 6);
+        g.textAlign = 'center'; g.fillText(`${nice.toLocaleString()} ft`, 16 + bw / 2, H - 20);
+        g.fillStyle = 'rgba(11,14,18,.8)'; g.fillRect(W - 30, 8, 22, 34); g.fillStyle = '#ddd'; g.fillText('N', W - 19, 16);
+        g.beginPath(); g.moveTo(W - 19, 22); g.lineTo(W - 14, 36); g.lineTo(W - 19, 32); g.lineTo(W - 24, 36); g.closePath(); g.fill();
+        cv._aim = { X, Y };
+    }
+    // Which planned flight path was the first abnormal moment on? (distance to the nearest segment, never to a vertex)
+    function incNearestRoute(res) {
+        const deep = res.incidentDeep, geo = res.siteGeo, f = deep && deep.first;
+        if (!geo || !f || !f.pos) return '';
+        const mLat = 110540, mLon = 111320 * Math.cos(f.pos.lat * Math.PI / 180);
+        let best = null;
+        for (const r of geo.routes) for (const [a, b, c, d] of r.segs) {
+            const ax = (b - f.pos.lon) * mLon, ay = (a - f.pos.lat) * mLat, bx = (d - f.pos.lon) * mLon, by = (c - f.pos.lat) * mLat;
+            const dx = bx - ax, dy = by - ay, L2 = dx * dx + dy * dy, u = L2 ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / L2)) : 0;
+            const dist = Math.hypot(ax + u * dx, ay + u * dy);
+            if (!best || dist < best.dist) best = { dist, name: r.name };
+        }
+        if (!best) return '';
+        const ft = Math.round(best.dist * 3.28084);
+        return `The first abnormal moment was <b>${ft} ft</b> from the planned flight path “${esc(best.name)}”${ft <= 30 ? ' — on its path' : ' — off its path'}. `;
+    }
+    function incMapWire(res) {
+        const cv = ui.body.querySelector('canvas[data-aim-ml-inc-map]');
+        if (!cv) return;
+        incMapDraw(cv, res, null);
+        const ro = ui.body.querySelector('[data-aim-ml-inc-mro]'), idle = ro ? ro.innerHTML : '';
+        const deep = res.incidentDeep, tr = deep.track, gps = deep.chart.gps;
+        let raf = 0, last = null;
+        cv.addEventListener('pointermove', (ev) => {
+            last = ev;
+            if (raf) return;
+            raf = requestAnimationFrame(() => {
+                raf = 0;
+                try {
+                    const a = cv._aim; if (!a) return;
+                    const r = cv.getBoundingClientRect(), mx = last.clientX - r.left, my = last.clientY - r.top;
+                    let bk = -1, bd = 18 * 18;
+                    for (let k = 0; k < tr.t.length; k++) { const dx = a.X(tr.lon[k]) - mx, dy = a.Y(tr.lat[k]) - my, d2 = dx * dx + dy * dy; if (d2 < bd) { bd = d2; bk = k; } }
+                    incMapDraw(cv, res, bk >= 0 ? bk : null);
+                    if (!ro) return;
+                    if (bk < 0) { ro.innerHTML = idle; return; }
+                    const gk = Math.min(gps.t.length - 1, mlLowerBound(gps.t, tr.t[bk]));
+                    ro.innerHTML = `<b>${incT(tr.t[bk])} UTC</b> &nbsp; speed <b>${gps.t.length ? Math.round(incMph(gps.Spd[gk])) : '—'}</b> mph &nbsp;│&nbsp; <b>${Math.round((tr.alt[bk] - deep.alt0) * 3.28084)}</b> ft above the takeoff point &nbsp;│&nbsp; <span class="m">${tr.lat[bk].toFixed(6)}, ${tr.lon[bk].toFixed(6)}</span>`;
+                } catch (e) { console.error(`${TAG} incident map hover failed:`, e); }
+            });
+        });
+        cv.addEventListener('pointerleave', () => { try { incMapDraw(cv, res, null); if (ro) ro.innerHTML = idle; } catch (e) { console.error(`${TAG} incident map redraw failed:`, e); } });
+    }
+
     // ---------------- v0.92 — ⬇ Report: the analysis on screen as one HTML file ----------------
     function setExportEnabled(on) {
         const b = ui.panel && ui.panel.querySelector('#aim-ml-export');
@@ -2040,7 +2199,7 @@
     // for the capture, then put them back the way the user had them (all in one task, no flicker).
     function exportChartImages() {
         const closed = [];
-        const all = () => Array.from(ui.body.querySelectorAll('canvas[data-aim-ml-esc-cv], canvas[data-aim-ml-inc-cv]'));
+        const all = () => Array.from(ui.body.querySelectorAll('canvas[data-aim-ml-esc-cv], canvas[data-aim-ml-inc-cv], canvas[data-aim-ml-inc-map]'));
         for (const cv of all()) {
             for (let d = cv.closest('details'); d; d = d.parentElement && d.parentElement.closest('details')) {
                 if (!d.open) { d.open = true; closed.push(d); }
@@ -2063,22 +2222,22 @@
         if (!res || !ui.body || !ui.body.children.length) { setStatus('Nothing to export yet — analyze a mission first.', 'amber'); return; }
         const shots = exportChartImages();
         const clone = ui.body.cloneNode(true);
-        const cvs = Array.from(clone.querySelectorAll('canvas[data-aim-ml-esc-cv], canvas[data-aim-ml-inc-cv]'));
+        const cvs = Array.from(clone.querySelectorAll('canvas[data-aim-ml-esc-cv], canvas[data-aim-ml-inc-cv], canvas[data-aim-ml-inc-map]'));
         let missing = 0;
         cvs.forEach((cv, i) => {
             const url = shots[i];
             if (!url) { missing++; const d = document.createElement('div'); d.className = 'a'; d.textContent = '⚠ This chart could not be captured — open the mission in AIM Mission Logs to see it.'; cv.replaceWith(d); return; }
             const img = document.createElement('img');
-            img.src = url; img.alt = `${cv.getAttribute('data-aim-ml-esc-cv') || 'incident'} chart`; img.className = 'aim-ml-chart';
+            img.src = url; img.alt = cv.hasAttribute('data-aim-ml-inc-map') ? 'map of where it happened' : `${cv.getAttribute('data-aim-ml-esc-cv') || 'incident'} chart`; img.className = 'aim-ml-chart';
             cv.replaceWith(img);
         });
         // live-only pieces: raw-file downloads, buttons, chart controls, hover readout, "click here" hints
         const filesCard = clone.querySelector('[data-aim-ml-dl]');
         if (filesCard && filesCard.closest('.aim-ml-card')) filesCard.closest('.aim-ml-card').remove();
-        clone.querySelectorAll('button, .aim-ml-esc-ctl, [data-aim-ml-esc="readout"], [data-aim-ml-inc-ro]').forEach(el => el.remove());
+        clone.querySelectorAll('button, .aim-ml-esc-ctl, [data-aim-ml-esc="readout"], [data-aim-ml-inc-ro], [data-aim-ml-inc-mro]').forEach(el => el.remove());
         clone.querySelectorAll('[data-aim-ml-live]').forEach(el => { const li = el.closest('li'); el.remove(); if (li && !li.textContent.trim()) li.remove(); });
         clone.querySelectorAll('[data-aim-ml-ll], [data-aim-ml-esc-zoom]').forEach(el => { el.removeAttribute('title'); el.style.cursor = ''; });
-        const zoomed = !!escUi.view && clone.querySelectorAll('img.aim-ml-chart').length > (res.incidentDeep ? 1 : 0);
+        const zoomed = !!escUi.view && clone.querySelectorAll('img.aim-ml-chart').length > (res.incidentDeep && res.incidentDeep.ok ? 2 : 0);
 
         const mj = res.meta.json || {}, m = res.extra.mission || {};
         const site = mj.site_name || (m.site && m.site.name) || '';

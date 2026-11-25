@@ -1,3 +1,9 @@
+## 2026-11-25 — 🔎 AIM Mission Logs latest v0.95 (latest only) — incident review: "Where it happened" map
+
+- **New: a map in the incident review** (feature #348). It shows the flown track around the event (blue before the first abnormal moment, orange after), the numbered moments from the table, and the site's planned flight paths, FFZs and NFZs as the drone carried them on that flight. Hover the track for the time, speed and height at that point.
+- It also says how far the first abnormal moment was from the nearest planned flight path.
+- The map is included in ⬇ Report. Power lines and other obstacles are not in the drone's logs, so they are not drawn.
+
 ## 2026-11-25 — 🔎 AIM Mission Logs latest v0.94 (latest only) — 🚨 Possible incident + ⬇ Logs
 
 - **New: 🚨 Possible incident card** at the top of the analysis when a flight did not end normally (feature #348). It lists the warning signs from the drone's own event log in time order (parachute, land-in-place, hard limit, motor alarm and so on) and says when and why the drone first left its plan.
