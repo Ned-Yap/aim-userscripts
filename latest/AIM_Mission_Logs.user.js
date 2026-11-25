@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Logs
 // @namespace    http://tampermonkey.net/
-// @version      0.93
+// @version      0.94
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Logs.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Logs.user.js
-// @description  v0.93: also on a site's Mission Log (🔎 AIM on every row) and on Mission Playback (🔎 Logs, mission prefilled). v0.92: ⬇ Report — saves the analysis on screen as one self-contained HTML file (charts included as pictures; opens anywhere, no login). v0.91: deep link — /dashboard/?aim-ml=<mission id> opens the panel and analyzes that mission (used by the Fleet Tools ⚙ ESC Sweep rows). v0.9: ⚙ Motors / ESC card — reads the ESC telemetry log + the main drone log and says whether the drone's critical_current_rpm_ratio alert was a false positive (motor-controller readings arriving under 3 per second) or real; interactive per-ESC charts (drag to zoom all, double-click to reset, hover for values, switch the top chart between ratio / rpm / current / throttle / voltage / temperatures), editable thresholds, stretch table, per-ESC stats, Sheets copy. v0.8: Signal KML points, pins and track sit at the drone's flown altitude (absolute MSL, extruded to the ground) instead of clamped to the ground. v0.7: names the CARRIER from the LTE bands the modem camped on (B13 = Verizon-only spectrum, B14/B17/B29/B30 = AT&T, B71/B41/B25/B26 = T-Mobile; shared bands prove nothing); every outage, handover and the worst-signal sample now carries the drone's position at that moment (click 📍 to copy lat,lng — paste into Map Nav 🧭); 📍 Signal KML button exports the flown track with each signal sample colored Good/Fair/Weak/Edge plus outage and handover pins (open in Google Earth or Fleet Tools → KML Layers) to see WHERE the link was bad. v0.6: outage detection now also uses 100%-loss ping runs, IP-lease loss (udhcpc deconfigured→bound) and LTE-manager restarts — a reconnect the TCP checks never saw (238589) was reported as 'dropped 0 times' in red; outages are tagged before takeoff / in flight / after landing and the Simple card downgrades a drop that happened on the base to amber. v0.5: Simple / Advanced view toggle (remembered) — Simple is plain English for pilots and customers: one bold bottom line per card + bullets (signal as bars, response time, packet loss, blips, tower hopping, what to do) with the full technical card under 'Technical details ▸'. v0.4: reads the older EM7565 modem's status fields (RSRP_(dBm) / PCC_RxM_RSSI / Tx_Power) — v0.3 saw no RSRP and flagged a false 33-min outage; a sample is lost only with no band / stuck handover / no cell+no RSRP; isolated 10 s TCP blips = amber POOR link (loss %, avg/worst rtt) not red; unknown formats raise a ⚠ with lte.rawSample; mission duration is ms. v0.3: LTE card gains an Outages line (each loss window with start → recovery and duration, from no-cell / stuck-handover samples and failing TCP checks) and a Coverage line (median RSRP, % weak / very weak / no cell); dropped verdict names the outages. v0.2: row 🔎 anchors on the dashboard's own Get App Logs control (not table structure); prefill from the FILTER box or the single visible row only; server reply shown when a mission has no archive. Pull a mission's log archives straight from the Mission Dashboard (no download → unzip → hunt) and extract what matters: LTE link health (modem registration, TCP/ping checks, signal, cell handovers, RTK-stream gaps), mission event timeline (stages, aborts, go-to-base), DAA aircraft with closest approach to the drone, warnings/errors by process. v0.1 (#286): POC on percepto.app/dashboard — 🔎 per mission row + floating launcher; engine (fetch → gunzip → untar → extractors) is self-contained for the later Fleet Tools site/date sweep.
+// @description  v0.94: 🚨 Possible incident card (shows when the flight did not end normally) + Run incident review — reads the flight controller's own log for the first abnormal moment (outside-force stop, jolts, loss of control, motor stall, hard impact, parachute command). ⬇ Logs — save the app-log archive. v0.93: also on a site's Mission Log (🔎 AIM on every row) and on Mission Playback (🔎 Logs, mission prefilled). v0.92: ⬇ Report — saves the analysis on screen as one self-contained HTML file (charts included as pictures; opens anywhere, no login). v0.91: deep link — /dashboard/?aim-ml=<mission id> opens the panel and analyzes that mission (used by the Fleet Tools ⚙ ESC Sweep rows). v0.9: ⚙ Motors / ESC card — reads the ESC telemetry log + the main drone log and says whether the drone's critical_current_rpm_ratio alert was a false positive (motor-controller readings arriving under 3 per second) or real; interactive per-ESC charts (drag to zoom all, double-click to reset, hover for values, switch the top chart between ratio / rpm / current / throttle / voltage / temperatures), editable thresholds, stretch table, per-ESC stats, Sheets copy. v0.8: Signal KML points, pins and track sit at the drone's flown altitude (absolute MSL, extruded to the ground) instead of clamped to the ground. v0.7: names the CARRIER from the LTE bands the modem camped on (B13 = Verizon-only spectrum, B14/B17/B29/B30 = AT&T, B71/B41/B25/B26 = T-Mobile; shared bands prove nothing); every outage, handover and the worst-signal sample now carries the drone's position at that moment (click 📍 to copy lat,lng — paste into Map Nav 🧭); 📍 Signal KML button exports the flown track with each signal sample colored Good/Fair/Weak/Edge plus outage and handover pins (open in Google Earth or Fleet Tools → KML Layers) to see WHERE the link was bad. v0.6: outage detection now also uses 100%-loss ping runs, IP-lease loss (udhcpc deconfigured→bound) and LTE-manager restarts — a reconnect the TCP checks never saw (238589) was reported as 'dropped 0 times' in red; outages are tagged before takeoff / in flight / after landing and the Simple card downgrades a drop that happened on the base to amber. v0.5: Simple / Advanced view toggle (remembered) — Simple is plain English for pilots and customers: one bold bottom line per card + bullets (signal as bars, response time, packet loss, blips, tower hopping, what to do) with the full technical card under 'Technical details ▸'. v0.4: reads the older EM7565 modem's status fields (RSRP_(dBm) / PCC_RxM_RSSI / Tx_Power) — v0.3 saw no RSRP and flagged a false 33-min outage; a sample is lost only with no band / stuck handover / no cell+no RSRP; isolated 10 s TCP blips = amber POOR link (loss %, avg/worst rtt) not red; unknown formats raise a ⚠ with lte.rawSample; mission duration is ms. v0.3: LTE card gains an Outages line (each loss window with start → recovery and duration, from no-cell / stuck-handover samples and failing TCP checks) and a Coverage line (median RSRP, % weak / very weak / no cell); dropped verdict names the outages. v0.2: row 🔎 anchors on the dashboard's own Get App Logs control (not table structure); prefill from the FILTER box or the single visible row only; server reply shown when a mission has no archive. Pull a mission's log archives straight from the Mission Dashboard (no download → unzip → hunt) and extract what matters: LTE link health (modem registration, TCP/ping checks, signal, cell handovers, RTK-stream gaps), mission event timeline (stages, aborts, go-to-base), DAA aircraft with closest approach to the drone, warnings/errors by process. v0.1 (#286): POC on percepto.app/dashboard — 🔎 per mission row + floating launcher; engine (fetch → gunzip → untar → extractors) is self-contained for the later Fleet Tools site/date sweep.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        *://qa.percepto.app/*
@@ -40,7 +40,7 @@
     if (window !== window.top) return;
 
     const SCRIPT_ID = 'aim-mission-logs';
-    const SCRIPT_VERSION = '0.93';
+    const SCRIPT_VERSION = '0.94';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     // v0.93 — where are we? 'dash' = Mission Dashboard · 'log' = a site's Mission Log · 'playback' = Mission Playback · null = any other page (stay out of the way)
     const ON_DASH = /^\/dashboard/.test(location.pathname);
@@ -724,6 +724,271 @@
         return { ratioThr, sampThr, stretches, judged, stats, alertEscs, verdict };
     }
 
+    // ===================== [AIM_ML_INCIDENT] ===========================
+    // Flight-controller log (ArduPilot DataFlash .bin) decode + incident checks. No DOM.
+    // DataFlash is self-describing: every record starts A3 95 <type>; type 128 (FMT) defines the others.
+    const ML_DF_SIZE = { a: 64, b: 1, B: 1, h: 2, H: 2, i: 4, I: 4, f: 4, d: 8, n: 4, N: 16, Z: 64, c: 2, C: 2, e: 4, E: 4, L: 4, M: 1, q: 8, Q: 8 };
+    // Only these messages / columns are kept (the log is tens of MB). where = keep rows with that column value only.
+    const ML_DF_WANT = {
+        GPS: { cols: ['TimeUS', 'Status', 'GMS', 'GWk', 'Spd'], where: ['I', 0] },
+        POS: { cols: ['TimeUS', 'Lat', 'Lng', 'Alt'] },
+        ATT: { cols: ['TimeUS', 'DesRoll', 'Roll', 'DesPitch', 'Pitch'] },
+        IMU: { cols: ['TimeUS', 'AccX', 'AccY', 'AccZ'], where: ['I', 0] },
+        CTUN: { cols: ['TimeUS', 'ThO'] },
+        RCOU: { cols: ['TimeUS', 'C1', 'C2', 'C3', 'C4', 'C5', 'C6', 'C7', 'C8', 'C9', 'C10', 'C11', 'C12', 'C13', 'C14'] },
+        MSG: { cols: ['TimeUS', 'Message'] },
+        PARM: { cols: ['Name', 'Value'] },
+    };
+    function mlDfParse(u8) {
+        const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength), n = u8.length;
+        const str = (off, len) => { let s = ''; for (let k = 0; k < len; k++) { const c = u8[off + k]; if (!c) break; s += String.fromCharCode(c); } return s; };
+        const read = (ch, o) => {
+            switch (ch) {
+                case 'b': return dv.getInt8(o); case 'B': case 'M': return dv.getUint8(o);
+                case 'h': return dv.getInt16(o, true); case 'H': return dv.getUint16(o, true);
+                case 'i': return dv.getInt32(o, true); case 'I': return dv.getUint32(o, true);
+                case 'f': return dv.getFloat32(o, true); case 'd': return dv.getFloat64(o, true);
+                case 'c': return dv.getInt16(o, true) * 0.01; case 'C': return dv.getUint16(o, true) * 0.01;
+                case 'e': return dv.getInt32(o, true) * 0.01; case 'E': return dv.getUint32(o, true) * 0.01;
+                case 'L': return dv.getInt32(o, true) * 1e-7;
+                case 'q': return Number(dv.getBigInt64(o, true)); case 'Q': return Number(dv.getBigUint64(o, true));
+                case 'n': return str(o, 4); case 'N': return str(o, 16); case 'Z': return str(o, 64);
+                default: return null;
+            }
+        };
+        const defs = new Array(256).fill(null);
+        defs[128] = { name: 'FMT', len: 89 };
+        const out = {}, seen = {};
+        let i = 0, bad = 0, records = 0;
+        while (i < n - 3) {
+            if (u8[i] !== 0xA3 || u8[i + 1] !== 0x95) { i++; bad++; continue; }
+            const t = u8[i + 2], d = defs[t];
+            if (!d) { i++; bad++; continue; }
+            if (i + d.len > n) break;
+            if (t === 128) {
+                const type = u8[i + 3], len = u8[i + 4], name = str(i + 5, 4), fmt = str(i + 9, 16), cols = str(i + 25, 64).split(',');
+                let size = 3, ok = len >= 3 && cols.length === fmt.length;
+                const fields = [];
+                for (let k = 0; k < fmt.length && ok; k++) { const sz = ML_DF_SIZE[fmt[k]]; if (!sz) { ok = false; break; } fields.push({ name: cols[k], ch: fmt[k], off: size }); size += sz; }
+                if (ok && size === len && type !== 128) {
+                    const def = { name, len, pick: null, where: null, out: null };
+                    const want = ML_DF_WANT[name];
+                    if (want) {
+                        def.pick = fields.filter(f => want.cols.includes(f.name));
+                        if (want.where) { const wf = fields.find(f => f.name === want.where[0]); if (wf) def.where = { f: wf, v: want.where[1] }; }
+                        def.out = out[name] || (out[name] = {});
+                        for (const f of def.pick) if (!def.out[f.name]) def.out[f.name] = [];
+                    }
+                    defs[type] = def; seen[name] = 0;
+                }
+            } else {
+                records++; seen[d.name]++;
+                if (d.pick && (!d.where || read(d.where.f.ch, i + d.where.f.off) === d.where.v)) for (const f of d.pick) d.out[f.name].push(read(f.ch, i + f.off));
+            }
+            i += d.len;
+        }
+        // UTC: GPS week + ms-of-week (GPS time runs 18 s ahead of UTC since 2017)
+        let utcOff = null;
+        const G = out.GPS;
+        if (G && G.TimeUS) for (let k = 0; k < G.TimeUS.length; k++) if (G.Status[k] >= 3 && G.GWk[k] > 1000) { utcOff = Date.UTC(1980, 0, 6) + G.GWk[k] * 604800000 + G.GMS[k] - 18000 - G.TimeUS[k] / 1000; break; }
+        if (utcOff != null) for (const m of Object.keys(out)) if (out[m].TimeUS) out[m].t = out[m].TimeUS.map(us => utcOff + us / 1000);
+        return { msgs: out, utcOff, bad, records, seen };
+    }
+
+    const ML_G = 9.80665;
+    const ML_INC = { stopFromMs: 5, stopDropMs: 4, forceG: 0.8, dragG: 0.1, slowMs: 4, upsetDeg: 60, devDeg: 25, impactG: 4, motorFullPwm: 1900, motorWeakFrac: 0.8, motorStallPwm: 1500, motorStallFrac: 0.35 };
+    const mlMean = (arr, a, b) => { let s = 0; for (let k = a; k < b; k++) s += arr[k]; return b > a ? s / (b - a) : NaN; };
+
+    // Cheap signals from the mission events already parsed — decides whether the red card shows.
+    function mlIncidentSignals(events, escData) {
+        const to = events.takeoff && events.takeoff.t ? events.takeoff.t.getTime() : null;
+        const inFlight = (e) => e.t && (to == null || e.t.getTime() >= to);
+        const first = (re) => events.all.find(e => re.test(e.type) && inFlight(e)) || null;
+        const defs = [
+            ['parachute', /parachuteReleased/i, 'strong', 'Parachute released'],
+            ['landInPlace', /safetyInit_landInPlace/i, 'strong', 'Land-in-place: it was told to come straight down where it was'],
+            ['hardRestriction', /siteHardRestrictions/i, 'strong', 'Left the allowed flight area (hard limit)'],
+            ['motorAlarm', /escMotorAlert/i, 'strong', 'Motor / ESC alarm'],
+            ['batteryCritical', /batteryCritical/i, 'weak', 'Battery critical'],
+            ['restriction', /droneErr_siteRestrictions|safetyInit_goToBreach/i, 'weak', 'Left its flight path / zone (soft limit)'],
+            ['safetySwitch', /safetySwitch/i, 'weak', 'Control taken over the backup safety link'],
+        ];
+        const signals = [];
+        for (const [id, re, weight, text] of defs) { const e = first(re); if (e) signals.push({ id, weight, text, t: e.t.getTime(), type: e.type }); }
+        if (to != null && !events.touchdown) signals.push({ id: 'noTouchdown', weight: 'weak', text: 'No normal touchdown recorded after takeoff', t: null, type: null });
+        if (escData && escData.alerts && escData.alerts.length && !signals.some(s => s.id === 'motorAlarm') && escData.alerts[0].t != null && (to == null || escData.alerts[0].t >= to)) signals.push({ id: 'motorAlarm', weight: 'strong', text: 'Motor / ESC alarm (drone log)', t: escData.alerts[0].t, type: null });
+        signals.sort((a, b) => (a.t == null ? Infinity : a.t) - (b.t == null ? Infinity : b.t));
+        const strong = signals.filter(s => s.weight === 'strong').length;
+        // why did it leave its plan? = the first safety action / drone error in flight
+        const why = events.all.find(e => inFlight(e) && /safetyInit|droneErr_(?!gimbal|ai_)/i.test(e.type)) || null;
+        return { show: strong > 0 || signals.length >= 2, strong, signals, firstTrigger: why ? { t: why.t.getTime(), type: why.type } : null };
+    }
+
+    // Deep review. df = mlDfParse() result; escData = mlExtractEsc() result (may be absent); signals = mlIncidentSignals().
+    function mlIncidentDeep(df, escData, signals) {
+        const M = df.msgs, need = ['GPS', 'POS', 'ATT', 'IMU'];
+        const missing = need.filter(k => !M[k] || !M[k].t || M[k].t.length < 20);
+        if (df.utcOff == null) return { ok: false, note: 'The flight-controller log has no GPS time, so its records cannot be placed on the clock.' };
+        if (missing.length) return { ok: false, note: `The flight-controller log is missing ${missing.join(', ')} records (seen: ${Object.keys(df.seen).length} message types).` };
+        const G = M.GPS, P = M.POS, A = M.ATT, I = M.IMU, C = M.CTUN, R = M.RCOU;
+        const at = (S, col, t) => { const k = Math.min(S.t.length - 1, Math.max(0, mlLowerBound(S.t, t))); return S[col][k]; };
+        const posAt = (t) => ({ lat: at(P, 'Lat', t), lon: at(P, 'Lng', t), alt: at(P, 'Alt', t) });
+        // --- airborne window: height above the starting height ---
+        // (POS.Alt = height above sea level. RelHomeAlt is no use here: Percepto moves the home height after start-up.)
+        const alt0 = P.Alt.slice(0, Math.min(50, P.t.length)).sort((x, y) => x - y)[Math.min(25, P.t.length >> 1)];
+        let a0 = -1;
+        for (let k = 0; k < P.t.length; k++) if (P.Alt[k] - alt0 > 5) { a0 = k; break; }
+        if (a0 < 0) return { ok: false, note: 'The flight-controller log never shows the drone more than 15 ft above where it started.' };
+        const tAir0 = P.t[a0], tLog1 = P.t[P.t.length - 1];
+        // --- body-frame horizontal force, smoothed over ~0.12 s (kills vibration, keeps a real shove) ---
+        const nI = I.t.length, bx = new Float64Array(nI), by = new Float64Array(nI), tot = new Float64Array(nI);
+        { let lo = 0, sx = 0, sy = 0;
+            for (let k = 0; k < nI; k++) {
+                sx += I.AccX[k]; sy += I.AccY[k];
+                while (I.t[k] - I.t[lo] > 120) { sx -= I.AccX[lo]; sy -= I.AccY[lo]; lo++; }
+                bx[k] = sx / (k - lo + 1) / ML_G; by[k] = sy / (k - lo + 1) / ML_G;
+                tot[k] = Math.hypot(I.AccX[k], I.AccY[k], I.AccZ[k]) / ML_G;
+            } }
+        const iA0 = mlLowerBound(I.t, tAir0 + 3000);
+        // --- hard impact: first raw reading at or above impactG while airborne ---
+        let impact = null;
+        for (let k = iA0; k < nI; k++) if (tot[k] >= ML_INC.impactG) {
+            let peak = tot[k]; for (let j = k; j < nI && I.t[j] - I.t[k] < 1000; j++) if (tot[j] > peak) peak = tot[j];
+            impact = Object.assign({ t: I.t[k], peakG: peak }, posAt(I.t[k])); break;
+        }
+        const tStopScan = impact ? impact.t : tLog1;
+        // --- jolts: smoothed body-horizontal force at or above joltG, before any impact ---
+        const jolts = [];
+        for (let k = iA0; k < nI && I.t[k] < tStopScan - 200; k++) {
+            const h = Math.hypot(bx[k], by[k]);
+            if (h < ML_INC.forceG) continue;
+            const last = jolts[jolts.length - 1];
+            if (last && I.t[k] - last.to < 1000) { last.to = I.t[k]; if (h > last.peakG) { last.peakG = h; last.peakT = I.t[k]; last.bx = bx[k]; last.by = by[k]; } }
+            else jolts.push({ from: I.t[k], to: I.t[k], peakG: h, peakT: I.t[k], bx: bx[k], by: by[k] });
+        }
+        // --- sudden stop: lost stopDropMs within 1 s from stopFromMs or faster, with a body-frame shove in the same second ---
+        // (a drone that brakes on its own tilts back and pushes with its props: that shows as almost no force along the body)
+        let stop = null;
+        for (let k = mlLowerBound(G.t, tAir0); k < G.t.length && G.t[k] < tStopScan && !stop; k++) {
+            if (G.Spd[k] < ML_INC.stopFromMs) continue;
+            const j = mlLowerBound(G.t, G.t[k] + 1000);
+            if (j >= G.t.length || G.Spd[k] - G.Spd[j] < ML_INC.stopDropMs) continue;
+            const jl = jolts.find(x => x.to >= G.t[k] - 300 && x.from <= G.t[j] + 300);
+            if (!jl) continue;
+            // speed just before the shove and where it settled just after
+            let kb = mlLowerBound(G.t, jl.from - 400); kb = Math.max(0, Math.min(G.t.length - 1, kb));
+            let ka = mlLowerBound(G.t, jl.to + 400); ka = Math.min(G.t.length - 1, ka);
+            stop = Object.assign({ from: jl.from, to: jl.to, spdS: (G.t[ka] - G.t[kb]) / 1000, peakG: jl.peakG, peakT: jl.peakT, bx: jl.bx, by: jl.by, spdBefore: G.Spd[kb], spdAfter: G.Spd[ka], pitch: at(A, 'Pitch', jl.peakT), roll: at(A, 'Roll', jl.peakT) }, posAt(jl.peakT));
+        }
+        // --- attitude: stopped following commands / tipped over ---
+        let deviation = null, upset = null;
+        for (let k = mlLowerBound(A.t, tAir0 + 3000), run = -1; k < A.t.length && A.t[k] < tStopScan; k++) {
+            const dev = Math.max(Math.abs(A.Roll[k] - A.DesRoll[k]), Math.abs(A.Pitch[k] - A.DesPitch[k]));
+            if (dev >= ML_INC.devDeg) { if (run < 0) run = k; if (!deviation && A.t[k] - A.t[run] >= 200) deviation = { t: A.t[run], dev, roll: A.Roll[k], pitch: A.Pitch[k] }; } else run = -1;
+            if (!upset && Math.max(Math.abs(A.Roll[k]), Math.abs(A.Pitch[k])) >= ML_INC.upsetDeg) upset = { t: A.t[k], roll: A.Roll[k], pitch: A.Pitch[k], alt: at(P, 'Alt', A.t[k]) };
+            if (deviation && upset) break;
+        }
+        // --- steady push along the body while almost stationary (towing / dragging something, or a damaged airframe) ---
+        const slowMean = (tFrom, tTo) => {
+            let sx = 0, sy = 0, n = 0, ms = 0;
+            for (let k = mlLowerBound(G.t, tFrom); k < G.t.length - 1 && G.t[k] < tTo; k++) {
+                if (G.Spd[k] >= ML_INC.slowMs) continue;
+                const ia = mlLowerBound(I.t, G.t[k]), ib = mlLowerBound(I.t, G.t[k + 1]);
+                for (let q = ia; q < ib; q++) { sx += I.AccX[q]; sy += I.AccY[q]; n++; }
+                ms += G.t[k + 1] - G.t[k];
+            }
+            return n ? { g: Math.hypot(sx / n, sy / n) / ML_G, bx: sx / n / ML_G, by: sy / n / ML_G, s: ms / 1000 } : null;
+        };
+        const thrShare = (tFrom, tTo) => { if (!C || !C.t) return null; const a = mlLowerBound(C.t, tFrom), b = mlLowerBound(C.t, tTo); if (b - a < 5) return null; let hi = 0; for (let k = a; k < b; k++) if (C.ThO[k] >= 0.95) hi++; return { mean: mlMean(C.ThO, a, b), fullPct: 100 * hi / (b - a) }; };
+        let drag = null;
+        if (stop) {
+            const tTo = Math.min(tStopScan, upset ? upset.t : Infinity);
+            const after = slowMean(stop.to + 3000, tTo), before = slowMean(tAir0 + 5000, stop.from - 2000);
+            if (after && after.s >= 10) drag = { from: stop.to + 3000, to: tTo, after, before: before && before.s >= 10 ? before : null, thrAfter: thrShare(stop.to + 3000, tTo), thrBefore: thrShare(tAir0 + 5000, stop.from - 2000), flagged: after.g >= ML_INC.dragG && (!before || before.s < 10 || after.g >= before.g + 0.08) };
+        }
+        // --- parachute: the autopilot's own release command (servo function 27) ---
+        let chute = null;
+        if (M.PARM && R && R.t) {
+            for (let k = 0; k < M.PARM.Name.length && !chute; k++) {
+                const m = /^SERVO(\d+)_FUNCTION$/.exec(M.PARM.Name[k]);
+                if (!m || Math.round(M.PARM.Value[k]) !== 27) continue;
+                const col = R['C' + m[1]];
+                if (!col) { chute = { ch: +m[1], t: null, note: 'channel not logged' }; break; }
+                chute = { ch: +m[1], t: null };
+                for (let q = 1; q < col.length; q++) if (Math.abs(col[q] - col[0]) >= 300) { chute.t = R.t[q]; chute.from = col[0]; chute.toPwm = col[q]; break; }
+            }
+        }
+        // --- motors: commanded near full, turning far slower than that motor managed earlier (ESC telemetry) ---
+        const motors = [];
+        if (escData && escData.present) {
+            // healthy rpm per volt at full command, pooled over every motor for the whole flight
+            const pool = [];
+            for (const name of escData.names) { const s = escData.series[name]; for (let k = mlLowerBound(s.t, tAir0), b = mlLowerBound(s.t, tLog1); k < b; k++) if (s.throttle_out[k] >= ML_INC.motorFullPwm && s.throttle_out[k] <= 2100 && s.voltage[k] > 5) pool.push(s.rpm[k] / s.voltage[k]); }
+            pool.sort((x, y) => x - y);
+            const kRef = pool.length >= 20 ? pool[pool.length >> 1] : null;
+            for (const name of (kRef ? escData.names : [])) {
+                const s = escData.series[name], T = s.t, a = mlLowerBound(T, tAir0), b = mlLowerBound(T, tLog1);
+                if (b - a < 50) continue;
+                // weak = commanded full, turning under motorWeakFrac of what a healthy motor does at that battery voltage; stall = commanded above hover, barely turning
+                let hit = null; const recent = [];
+                for (let k = a; k < b && !hit; k++) {
+                    const thr = s.throttle_out[k], v = s.voltage[k];
+                    if (!(v > 5) || !(thr <= 2100) || s.rpm[k] !== s.rpm[k]) continue;
+                    const kk = s.rpm[k] / v;
+                    const kind = thr >= ML_INC.motorStallPwm && kk < ML_INC.motorStallFrac * kRef ? 'stall' : thr >= ML_INC.motorFullPwm && kk < ML_INC.motorWeakFrac * kRef ? 'weak' : null;
+                    if (!kind) continue;
+                    recent.push(k);
+                    while (T[k] - T[recent[0]] > 2000) recent.shift();
+                    if (recent.length >= 5) { const q = recent[0]; let sr = 0, sc = 0, sv = 0; for (const z of recent) { sr += s.rpm[z]; sc += s.current[z]; sv += s.voltage[z]; } hit = { esc: name, t: T[q], kind, rpm: sr / recent.length, cur: sc / recent.length, expect: kRef * sv / recent.length * (kind === 'weak' ? 1 : (s.throttle_out[q] - 1000) / 1000) }; }
+                }
+                if (hit) { hit.inAir = !impact || hit.t < impact.t; motors.push(hit); }
+            }
+            motors.sort((x, y) => x.t - y.t);
+        }
+        // --- the autopilot's own text messages ---
+        const msgs = [];
+        if (M.MSG && M.MSG.t) for (let k = 0; k < M.MSG.t.length; k++) if (M.MSG.t[k] >= tAir0) msgs.push({ t: M.MSG.t[k], text: M.MSG.Message[k], flag: /thrust loss|crash|ekf|failsafe|parachute|vibration|err|bad|lost|emergency|yaw imbalance|glitch|unhealthy/i.test(M.MSG.Message[k]) });
+        // --- ordered findings ---
+        const F = [];
+        const mph = (ms) => Math.round(ms * 2.23694);
+        const dir = (x, y) => Math.abs(x) >= Math.abs(y) ? (x < 0 ? 'from the front (pushing it backwards)' : 'from behind') : (y < 0 ? 'from the right side' : 'from the left side');
+        if (stop) F.push({ t: stop.from, id: 'stop', level: 'red', title: 'Stopped by an outside force', text: `Went from ${mph(stop.spdBefore)} to ${mph(stop.spdAfter)} mph in ${stop.spdS.toFixed(1)} s while a force of ${stop.peakG.toFixed(1)} g hit it ${dir(stop.bx, stop.by)}. A drone that brakes on its own tilts back and pushes with its propellers, which shows almost no force along the body, so this push came from outside the drone.`, at: { lat: stop.lat, lon: stop.lon } });
+        { const rest = jolts.filter(j => !stop || j.from !== stop.from);
+            if (rest.length === 1) F.push({ t: rest[0].from, id: 'jolt', level: 'amber', title: 'Jolt', text: `A ${rest[0].peakG.toFixed(1)} g shove ${dir(rest[0].bx, rest[0].by)}.` });
+            else if (rest.length) F.push({ t: rest[0].from, id: 'jolt', level: 'amber', title: `${rest.length} more jolts`, text: `Shoves of ${Math.min(...rest.map(j => j.peakG)).toFixed(1)}–${Math.max(...rest.map(j => j.peakG)).toFixed(1)} g kept coming until ${mlHms(new Date(rest[rest.length - 1].to))}.` }); }
+        if (drag && drag.flagged) F.push({ t: drag.from, id: 'drag', level: 'red', title: 'Held back by something', text: `For the next ${Math.round(drag.after.s)} s it was almost stationary yet felt a steady ${drag.after.g.toFixed(2)} g push along its body${drag.before ? ` (earlier in this flight, when slow, it was ${drag.before.g.toFixed(2)} g)` : ''}${drag.thrAfter ? `, with the throttle at full ${Math.round(drag.thrAfter.fullPct)}% of the time${drag.thrBefore ? ` (before: ${Math.round(drag.thrBefore.fullPct)}%)` : ''}` : ''}. That is what towing or dragging something looks like; a healthy drone at that speed feels almost none.` });
+        if (deviation) F.push({ t: deviation.t, id: 'deviation', level: 'amber', title: 'Stopped following its own commands', text: `Its tilt was ${Math.round(deviation.dev)}° away from what the autopilot asked for (roll ${Math.round(deviation.roll)}°, pitch ${Math.round(deviation.pitch)}°).` });
+        if (upset) F.push({ t: upset.t, id: 'upset', level: 'red', title: 'Lost control', text: `Tipped past ${ML_INC.upsetDeg}° (roll ${Math.round(upset.roll)}°, pitch ${Math.round(upset.pitch)}°), at a height ${Math.round((upset.alt - alt0) * 3.28084)} ft above the takeoff point.` });
+        for (const m of motors) F.push({ t: m.t, id: 'motor', level: m.inAir ? 'red' : 'm', title: `${m.esc} lost speed${m.inAir ? ' in the air' : ' (after the impact)'}`, text: `${m.kind === 'weak' ? 'Commanded at full' : 'Commanded well above hover'}, it turned ${Math.round(m.rpm)} rpm at ${Math.round(m.cur)} A; a healthy motor on this drone turns about ${Math.round(m.expect / 100) * 100} rpm there. A motor that draws current but cannot turn is jammed, fouled or damaged.` });
+        if (impact) F.push({ t: impact.t, id: 'impact', level: 'red', title: 'Hard impact', text: `${impact.peakG.toFixed(1)} g${upset ? `, ${((impact.t - upset.t) / 1000).toFixed(0)} s after it lost control` : ''}.`, at: { lat: impact.lat, lon: impact.lon } });
+        if (chute && chute.t != null) F.push({ t: chute.t, id: 'chute', level: 'amber', title: 'Autopilot commanded the parachute', text: `Release channel ${chute.ch} switched${impact ? (chute.t > impact.t ? ` ${((chute.t - impact.t) / 1000).toFixed(1)} s AFTER the hard impact — this command did not open a parachute in the air` : ` ${((impact.t - chute.t) / 1000).toFixed(1)} s before the hard impact`) : ''}. This is the command only; the log cannot see the canopy itself.` });
+        { const groups = new Map();
+            for (const m of msgs) {
+                if (!m.flag || /alignment complete|origin set|is using|initiali[sz]ed/i.test(m.text)) continue;
+                const key = m.text.replace(/[\d(): ]+$/, '').replace(/\(\d+\)/g, '').trim();
+                const g = groups.get(key); if (g) { g.n++; g.last = m.t; } else groups.set(key, { key, t: m.t, last: m.t, n: 1, text: m.text });
+            }
+            for (const g of groups.values()) F.push({ t: g.t, id: 'msg', level: 'm', title: 'Autopilot message', text: g.n > 1 ? `“${g.key}” — ${g.n} times, the last at ${mlHms(new Date(g.last))}` : `“${g.text}”` }); }
+        for (const s of (signals ? signals.signals : [])) if (s.t != null) F.push({ t: s.t, id: 'sig', level: 'm', title: 'Drone app', text: s.text });
+        if (escData && escData.alerts) for (const al of escData.alerts) if (al.t != null && al.t >= tAir0) F.push({ t: al.t, id: 'escAlarm', level: 'm', title: 'Motor / ESC alarm raised', text: al.esc ? `${al.esc}, value ${al.value} > ${al.limit}` : 'see the Motors card' });
+        F.sort((x, y) => x.t - y.t);
+        const physical = F.filter(f => /^(stop|jolt|drag|deviation|upset|motor|impact)$/.test(f.id) && f.level !== 'm');
+        const first = physical[0] || null;
+        const escAl = escData && escData.alerts && escData.alerts.find(al => al.t != null && al.t >= tAir0);
+        const notes = [];
+        if (first && escAl) notes.push(escAl.t > first.t ? `The motor / ESC alarm came ${Math.round((escAl.t - first.t) / 1000)} s AFTER the first abnormal moment, so it is a result of what happened, not the start of it.` : `The motor / ESC alarm came ${Math.round((first.t - escAl.t) / 1000)} s BEFORE the first physical sign, so the motors are where to look first.`);
+        if (signals && signals.firstTrigger && first) notes.push(signals.firstTrigger.t < first.t ? `It had already left its plan ${Math.round((first.t - signals.firstTrigger.t) / 1000)} s earlier (${signals.firstTrigger.type.replace(/^edge\.notify\.drone_/, '').replace(/_/g, ' ')}); that is why it was heading home, not why it came down.` : '');
+        if (!chute) notes.push('No parachute release channel is configured in this autopilot log, so a parachute command cannot be checked.');
+        else if (chute.t == null) notes.push(`The autopilot never switched its parachute channel (${chute.ch}) in this log.`);
+        // --- chart series: 30 s before the first abnormal moment → end ---
+        const cFrom = Math.max(tAir0, (first ? first.t : (impact ? impact.t : tLog1)) - 30000), cTo = Math.min(tLog1, (impact ? impact.t : tLog1) + 8000);
+        const cut = (S, cols) => { const a = mlLowerBound(S.t, cFrom), b = mlLowerBound(S.t, cTo); const o = { t: S.t.slice(a, b) }; for (const c of cols) o[c] = S[c].slice(a, b); return o; };
+        const ia = mlLowerBound(I.t, cFrom), ib = mlLowerBound(I.t, cTo);
+        const chart = { from: cFrom, to: cTo, gps: cut(G, ['Spd']), att: cut(A, ['Roll', 'Pitch']), thr: C && C.t ? cut(C, ['ThO']) : null, imu: { t: I.t.slice(ia, ib), bx: Array.from(bx.subarray(ia, ib)) } };
+        return { ok: true, tAir0, tLog1, alt0, stop, jolts, drag, deviation, upset, impact, chute, motors, msgs, findings: F, first, notes: notes.filter(Boolean), chart, stats: { records: df.records, bad: df.bad, imuHz: Math.round(nI / ((I.t[nI - 1] - I.t[0]) / 1000)) } };
+    }
+    // ===================== end [AIM_ML_INCIDENT] =======================
+
     // Top-level: everything about one mission from its archives (+ optional server JSON).
     async function mlAnalyze(files, extra) {
         const roles = mlClassify(files);
@@ -737,7 +1002,10 @@
             const sv = mlSummariesToTrack(extra.positionsSummaries);
             if (sv.length) { const seen = new Set(droneTrack.map(p => p.t)); droneTrack = droneTrack.concat(sv.filter(p => !seen.has(p.t))).sort((a, b) => a.t - b.t); }
         }
-        const abortEv = events.aborts.find(e => /droneErr|safetyInit/.test(e.type)) || events.aborts[0] || null;
+        // v0.94 — an error raised on the base before takeoff is not why the flight was cut short
+        const tTakeoff = events.takeoff && events.takeoff.t ? events.takeoff.t.getTime() : null;
+        const flightAborts = tTakeoff == null ? events.aborts : events.aborts.filter(e => e.t && e.t.getTime() >= tTakeoff);
+        const abortEv = flightAborts.find(e => /droneErr_(?!gimbal|ai_)|safetyInit/.test(e.type)) || flightAborts.find(e => /droneErr|safetyInit/.test(e.type)) || flightAborts[0] || null;
         const daa = mlExtractDaa(roles, droneTrack, abortEv && abortEv.t ? abortEv.t.getTime() : null);
         const fromMs = events.takeoff && events.takeoff.t ? events.takeoff.t.getTime() - 60000 : null;
         const toMs = events.touchdown && events.touchdown.t ? events.touchdown.t.getTime() + 30000 : null;
@@ -756,7 +1024,10 @@
         try { escData = mlExtractEsc(files, roles); }
         catch (e) { escData = { present: false, error: true, note: 'ESC telemetry could not be parsed: ' + (e && e.message || e), alerts: [], actions: [], mainLogs: [] }; }
         const escAnalysis = escData.present ? mlEscAnalyze(escData, ML_ESC_RATIO_THR, ML_ESC_SAMP_THR) : null;
-        return { roles, files, meta, events, lte, daa, droneTrack, warnings, abortEv, esc: escData, escAnalysis, extra: extra || {}, syslogLineCount: syslogLines.length };
+        let incident;
+        try { incident = mlIncidentSignals(events, escData); }
+        catch (e) { console.error(`${TAG} incident signals failed:`, e); incident = { show: false, strong: 0, signals: [], firstTrigger: null, error: String(e && e.message || e) }; }
+        return { roles, files, meta, events, lte, daa, droneTrack, warnings, abortEv, flightAborts, incident, incidentDeep: null, esc: escData, escAnalysis, extra: extra || {}, syslogLineCount: syslogLines.length };
     }
     // ===================== end [AIM_ML_ENGINE] =========================
 
@@ -837,6 +1108,10 @@
             .aim-ml-esc-h{margin:8px 0 2px}
             canvas[data-aim-ml-esc-cv]{display:block;width:100%;height:230px;cursor:crosshair;touch-action:none;user-select:none}
             tr[data-aim-ml-esc-zoom]:hover td{background:rgba(122,223,230,.07)}
+            .aim-ml-card.inc{border-color:#6a2a2a}
+            .aim-ml-card.inc>h4{color:#ff7a7a;border-bottom-color:#4a2222}
+            canvas[data-aim-ml-inc-cv]{display:block;width:100%;height:430px;cursor:crosshair}
+            .aim-ml-inc-ro{min-height:18px;font-size:11.5px;margin:8px 0 2px}
             .aim-ml-mono{font-family:ui-monospace,Consolas,monospace;font-size:11px;white-space:pre-wrap;word-break:break-all;color:#bbb}
         `;
         document.head.appendChild(st);
@@ -854,6 +1129,7 @@
                 <label class="m">Mission ID <input id="aim-ml-id" type="text" inputmode="numeric" placeholder="237893"></label>
                 <label class="m" title="Also fetch the DAA (ADS-B / radar) archive"><input id="aim-ml-daa" type="checkbox" checked> DAA</label>
                 <button id="aim-ml-run">Analyze</button>
+                <button id="aim-ml-zip" disabled title="Save this mission's app-log archive (.tar.gz) to your computer — the same file as “Get App Logs”">⬇ Logs</button>
                 <button id="aim-ml-export" disabled title="Save this analysis as one HTML file you can open, send or print — no dashboard or login needed">⬇ Report</button>
                 <button id="aim-ml-close" title="Close">✕</button>
             </div>
@@ -864,6 +1140,10 @@
         p.querySelector('#aim-ml-close').addEventListener('click', () => { p.style.display = 'none'; });
         p.querySelector('#aim-ml-run').addEventListener('click', () => { const v = p.querySelector('#aim-ml-id').value.trim(); if (/^\d+$/.test(v)) analyzeMission(v); else setStatus('Mission ID must be a number.', 'red'); });
         p.querySelector('#aim-ml-id').addEventListener('keydown', (e) => { if (e.key === 'Enter') p.querySelector('#aim-ml-run').click(); });
+        p.querySelector('#aim-ml-zip').addEventListener('click', () => {
+            try { downloadArchive(lastResult, 0); }
+            catch (e) { console.error(`${TAG} archive download failed:`, e); setStatus(`Archive download failed: ${esc(e.message || e)}`, 'red'); }
+        });
         p.querySelector('#aim-ml-export').addEventListener('click', () => {
             try { exportHtmlReport(); }
             catch (e) { console.error(`${TAG} HTML report failed:`, e); setStatus(`HTML report failed: ${esc(e.message || e)}`, 'red'); }
@@ -874,7 +1154,7 @@
         // ESC charts size themselves from the canvas box — redraw when a <details> opens (toggle does not bubble → capture) or the window resizes
         ui.body.addEventListener('toggle', () => escRedrawAll(), true);
         let escResizeTimer = null;
-        window.addEventListener('resize', () => { clearTimeout(escResizeTimer); escResizeTimer = setTimeout(escRedrawAll, 150); });
+        window.addEventListener('resize', () => { clearTimeout(escResizeTimer); escResizeTimer = setTimeout(() => { escRedrawAll(); incRedraw(); }, 150); });
         // drag
         const head = p.querySelector('#aim-ml-head');
         let drag = null;
@@ -930,6 +1210,8 @@
             setStatus(`Downloading app logs…`);
             const appBytes = await mlFetchBinary(appLink.download_link, (l, t) => setStatus(`Downloading app logs… ${fmtMB(l)}${t ? ' / ' + fmtMB(t) : ''}`));
             setStatus(`Unpacking app logs (${fmtMB(appBytes.length)} compressed)…`);
+            const archName = (link, fallback) => { try { const b = decodeURIComponent(new URL(link, location.href).pathname.split('/').pop() || ''); return /\.(tar\.gz|tgz|zip)$/i.test(b) ? b : fallback; } catch (e) { console.warn(`${TAG} archive name not readable from its link:`, e); return fallback; } };
+            const archives = [{ label: 'App logs', name: archName(appLink.download_link, `apps__${missionId}.tar.gz`), bytes: appBytes }];
             let files = mlUntar(await mlGunzip(appBytes));
             if (wantDaa) {
                 try {
@@ -938,6 +1220,7 @@
                     if (daaLink && daaLink.download_link) {
                         const daaBytes = await mlFetchBinary(daaLink.download_link, (l, t) => setStatus(`Downloading DAA logs… ${fmtMB(l)}${t ? ' / ' + fmtMB(t) : ''}`));
                         files = files.concat(mlUntar(await mlGunzip(daaBytes)));
+                        archives.push({ label: 'DAA logs', name: archName(daaLink.download_link, `daa__${missionId}.tar.gz`), bytes: daaBytes });
                     } else extra.daaNote = 'no DAA archive link for this mission';
                 } catch (e) { console.warn(`${TAG} DAA archive skipped:`, e); extra.daaNote = 'DAA archive unavailable: ' + (e.message || e); }
             }
@@ -949,6 +1232,7 @@
             await new Promise(r => setTimeout(r, 0));
             const res = await mlAnalyze(files, extra);
             res.missionId = missionId;
+            res.archives = archives;
             escResetUi();
             render(res);
             const secs = ((performance.now() - t0) / 1000).toFixed(1);
@@ -976,6 +1260,10 @@
         const addCard = (key, html) => { adv[key] = html; parts.push(html); };
         lastResult = res;
         setExportEnabled(true);
+        // --- v0.94: possible incident (both views, always first) ---
+        let incHtml = '';
+        try { incHtml = incCard(res); } catch (e) { console.error(`${TAG} incident card failed:`, e); incHtml = card('🚨 Possible incident', `<span class="r">This card could not be built: ${esc(e.message || e)}</span>`); }
+        if (incHtml) parts.push(incHtml);
         // --- mission header ---
         const mj = meta.json || {}, m = extra.mission || {};
         const durS = m.duration != null ? Math.round(Number(m.duration) / 1000) : null;   // server duration is milliseconds (Fleet Tools convention)
@@ -1047,9 +1335,14 @@
         addCard('warnings', card(`⚠ Warnings / errors in the flight window (${warnings.reduce((s, w) => s + w.n, 0)})`, wInner, copyBtn('warnings')));
         // --- raw files ---
         const dl = Object.entries(res.roles).filter(([k, f]) => f && !/ardupilot/.test(k)).map(([k, f]) => `<button class="aim-ml-btn" data-aim-ml-dl="${esc(f.name)}" title="${esc(f.name)}">⬇ ${esc(k)} <span class="m">${fmtMB(f.bytes.length)}</span></button>`).join(' ');
-        addCard('files', card('🗂 Files', `<div style="display:flex;flex-wrap:wrap;gap:6px">${dl}</div><div class="m" style="margin-top:6px">Full result object: <code>window.__aimMissionLogs</code> in the console.</div>`));
-        ui.body.innerHTML = viewMode === 'advanced' ? parts.join('') : renderSimple(res, adv);
+        const arch = (res.archives || []).map((a, i) => `<button class="aim-ml-btn" data-aim-ml-arch="${i}" title="${esc(a.name)}">⬇ ${esc(a.label)} archive <span class="m">${fmtMB(a.bytes.length)}</span></button>`).join(' ');
+        addCard('files', card('🗂 Files', `${arch ? `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">${arch}</div>` : ''}<div style="display:flex;flex-wrap:wrap;gap:6px">${dl}</div><div class="m" style="margin-top:6px">Full result object: <code>window.__aimMissionLogs</code> in the console.</div>`));
+        ui.body.innerHTML = viewMode === 'advanced' ? parts.join('') : incHtml + renderSimple(res, adv);
         try { escWire(res); } catch (e) { console.error(`${TAG} ESC card wiring failed:`, e); }
+        try { incWire(res); } catch (e) { console.error(`${TAG} incident card wiring failed:`, e); }
+        ui.body.querySelectorAll('[data-aim-ml-arch]').forEach(b => b.addEventListener('click', () => {
+            try { downloadArchive(res, +b.getAttribute('data-aim-ml-arch')); } catch (e) { console.error(`${TAG} archive download failed:`, e); setStatus(`Archive download failed: ${esc(e.message || e)}`, 'red'); }
+        }));
         ui.body.querySelectorAll('[data-aim-ml-dl]').forEach(b => b.addEventListener('click', () => {
             const f = res.files.find(x => x.name === b.getAttribute('data-aim-ml-dl')); if (!f) return;
             const blob = new Blob([f.bytes], { type: 'application/octet-stream' }); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = f.base; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
@@ -1454,8 +1747,9 @@
             if (meta.events.navigationFail) flags.push(`<b>Navigation failed ${meta.events.navigationFail} time(s).</b>`);
             if (meta.events.safetySwitch) flags.push(`<b>The safety switch tripped ${meta.events.safetySwitch} time(s).</b>`);
         }
-        const ended = abort ? `It was <b>cut short at ${mlHms(abort.t)} UTC</b> because ${abortPlain(abort.type)}, and it flew home.` : (td ? 'It flew its plan and landed normally.' : 'No landing was recorded in these logs.');
-        out.push(simpleCard(`🛸 Mission ${esc(res.missionId)}${m.app && m.app.name ? ' · ' + esc(m.app.name) : ''}`, abort ? 'amber' : 'green',
+        const inc = res.incident && res.incident.show;
+        const ended = abort ? `It was <b>cut short at ${mlHms(abort.t)} UTC</b> because ${abortPlain(abort.type)}${inc ? '. <b>It did not get home normally</b> — see “Possible incident” above.' : ', and it flew home.'}` : (td ? 'It flew its plan and landed normally.' : 'No landing was recorded in these logs.');
+        out.push(simpleCard(`🛸 Mission ${esc(res.missionId)}${m.app && m.app.name ? ' · ' + esc(m.app.name) : ''}`, inc ? 'red' : abort ? 'amber' : 'green',
             `${esc(droneName)} flew <b>${esc(site)}</b>${airMin != null ? ` for about <b>${airMin} minute${airMin === 1 ? '' : 's'}</b>` : ''}${to ? ` (took off ${mlHms(to)} UTC)` : ''}. ${ended}`,
             [`Pilot: <b>${esc(m.created_by && (m.created_by.full_name || m.created_by.username) || '—')}</b>. Drone software ${esc(mj.app_version || '—')}.`, ...flags], tech('mission', adv)));
 
@@ -1503,10 +1797,10 @@
         const stalls = events.all.filter(e => /mainLoopStall/.test(e.type)).length;
         const evBullets = [];
         if (to) evBullets.push(`Took off <b>${mlHms(to)}</b> UTC${td ? `, landed <b>${mlHms(td)}</b>` : ''}${airMin != null ? ` (${airMin} min in the air)` : ''}.`);
-        if (abort) evBullets.push(`<b>${mlHms(abort.t)}:</b> mission stopped because ${abortPlain(abort.type)}${events.aborts.length > 1 ? `; then ${events.aborts.slice(1).map(a => `${mlHms(a.t)} ${abortPlain(a.type)}`).join('; ')}` : ''}.`);
+        if (abort) evBullets.push(`<b>${mlHms(abort.t)}:</b> mission stopped because ${abortPlain(abort.type)}${(() => { const later = (res.flightAborts || []).filter(a => a !== abort && !/_warn_/.test(a.type)); return later.length ? `; then ${later.map(a => `${mlHms(a.t)} ${abortPlain(a.type)}`).join('; ')}` : ''; })()}.`);
         const warnEv = events.all.filter(e => /_warn_/.test(e.type) && !/mainLoopStall/.test(e.type));
         if (warnEv.length) evBullets.push(`Other warnings from the drone: ${Array.from(new Set(warnEv.map(e => abortPlain(e.type)))).slice(0, 5).map(esc).join(', ')}.`);
-        out.push(simpleCard('🧭 What happened', abort ? 'amber' : 'green', abort ? `The mission <b>did not finish</b>: ${abortPlain(abort.type)} at ${mlHms(abort.t)} UTC and the drone returned to base.` : `The mission <b>ran start to finish</b> with no safety events.`, evBullets, tech('events', adv), copyBtn('events')));
+        out.push(simpleCard('🧭 What happened', inc ? 'red' : abort ? 'amber' : 'green', abort ? `The mission <b>did not finish</b>: ${abortPlain(abort.type)} at ${mlHms(abort.t)} UTC${inc ? ', and the drone did not get home normally.' : ' and the drone returned to base.'}` : `The mission <b>ran start to finish</b> with no safety events.`, evBullets, tech('events', adv), copyBtn('events')));
 
         // --- ESC ---
         out.push(escCardSimple(res, adv));
@@ -1570,17 +1864,184 @@
         } catch (e) { console.warn(`${TAG} clipboard failed`, e); btn.textContent = '✗ clipboard'; }
     }
 
+    // ---------------- v0.94 — 🚨 Possible incident card + incident review ----------------
+    function downloadArchive(res, i) {
+        const a0 = res && res.archives && res.archives[i];
+        if (!a0) { setStatus('No archive in memory — analyze the mission first.', 'amber'); return; }
+        const blob = new Blob([a0.bytes], { type: 'application/gzip' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob); a.download = a0.name; a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+        console.log(`${TAG} archive saved: ${a0.name} (${fmtMB(a0.bytes.length)})`);
+        setStatus(`Saved ${esc(a0.name)} (${fmtMB(a0.bytes.length)})`, 'green');
+    }
+    const incT = (ms) => mlHmsMs(ms).slice(0, 10);
+    function incCard(res) {
+        const inc = res.incident;
+        if (!inc || !inc.show) return '';
+        const deep = res.incidentDeep, bin = res.roles.ardupilot;
+        const sigRows = inc.signals.map(s => `<li>${s.t != null ? `<span class="m">${mlHms(new Date(s.t))}</span> ` : ''}<b class="${s.weight === 'strong' ? 'r' : 'a'}">${esc(s.text)}</b></li>`).join('');
+        const trig = inc.firstTrigger;
+        let inner = `<div class="aim-ml-bottom r"><b>This flight did not end normally.</b> ${inc.signals.length} warning sign${inc.signals.length === 1 ? '' : 's'} in the drone's own event log (times are UTC):</div>
+            <ul class="aim-ml-plain">${sigRows}</ul>
+            ${trig ? `<div style="margin-top:6px">It first left its plan at <b>${mlHms(new Date(trig.t))}</b> because ${esc(abortPlain(trig.type))}.</div>` : ''}`;
+        if (!deep) {
+            inner += `<div class="m" style="margin-top:6px">The first alarm is often a result, not the cause. The incident review reads the flight controller's own log for the first abnormal moment: a sudden stop, jolts, loss of control, a stalled motor, a hard impact, the parachute command.</div>
+                <div style="margin-top:8px">${bin ? `<button class="aim-ml-btn" data-aim-ml-inc-run style="border-color:#ff5f5f;color:#ff9a9a;font-weight:700;padding:5px 12px">🚨 Run incident review <span class="m">(${fmtMB(bin.bytes.length)} flight-controller log)</span></button>` : '<span class="a">⚠ No flight-controller log (ardupilot.log.bin) in this archive, so the incident review cannot run.</span>'}</div>`;
+        } else if (!deep.ok) {
+            inner += `<div class="a" style="margin-top:8px">⚠ Incident review could not run: ${esc(deep.note)}</div>`;
+        } else {
+            const f1 = deep.first;
+            const shown = deep.findings;
+            let n = 0;
+            inner += `<div class="aim-ml-bottom ${f1 ? 'r' : 'g'}" style="margin-top:10px">${f1 ? `First abnormal moment: <b>${incT(f1.t)} UTC — ${esc(f1.title)}</b>` : 'The flight controller recorded no sudden stop, jolt, loss of control, stalled motor or hard impact.'}</div>
+                ${deep.notes.length ? `<ul class="aim-ml-plain">${deep.notes.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}
+                <table class="aim-ml" style="margin-top:6px"><tr><th>#</th><th>UTC</th><th>What</th><th>Detail</th></tr>${shown.map(f => { const mark = f.level === 'red' || f.level === 'amber'; if (mark) n++; return `<tr><td class="m">${mark ? n : ''}</td><td class="m" style="white-space:nowrap">${incT(f.t)}</td><td class="${lv(f.level)}" style="white-space:nowrap"><b>${esc(f.title)}</b></td><td>${esc(f.text)}${f.at ? pin(f.at) : ''}</td></tr>`; }).join('')}</table>
+                <div class="aim-ml-inc-ro" data-aim-ml-inc-ro><span class="m" data-aim-ml-live>Move the cursor over the chart for exact values.</span></div>
+                <canvas data-aim-ml-inc-cv></canvas>
+                <div class="m" style="margin-top:6px">Chart: 30 s before the first abnormal moment to 8 s after the impact. Numbered lines are the red and orange rows above. “Push along the body” is the force the drone felt front-to-back apart from its own propellers; near zero is normal.</div>
+                <div class="m" style="margin-top:6px">This review reports what the sensors recorded. It cannot see what the drone touched or whether a parachute canopy was out — check the video and the airframe. Source: ${esc(bin ? bin.base : '')} · ${deep.stats.records.toLocaleString()} records${deep.stats.bad ? ` · ${deep.stats.bad} unreadable bytes skipped` : ''}.</div>`;
+        }
+        return `<div class="aim-ml-card inc"><h4>🚨 Possible incident<span class="sp"></span></h4><div>${inner}</div></div>`;
+    }
+    function incRun(res) {
+        const bin = res.roles.ardupilot;
+        if (!bin) { setStatus('No flight-controller log in this archive.', 'amber'); return; }
+        if (ui.busy) { setStatus('Busy — wait for the current step.', 'amber'); return; }
+        ui.busy = true;
+        setStatus(`Reading the flight-controller log (${fmtMB(bin.bytes.length)})…`);
+        setTimeout(() => {
+            const t0 = performance.now();
+            try {
+                const df = mlDfParse(bin.bytes);
+                res.incidentDeep = mlIncidentDeep(df, res.esc, res.incident);
+                console.log(`${TAG} incident review done in ${((performance.now() - t0) / 1000).toFixed(1)} s`, res.incidentDeep);
+                setStatus(res.incidentDeep.ok ? `Incident review done · ${df.records.toLocaleString()} flight-controller records · ${((performance.now() - t0) / 1000).toFixed(1)} s` : `Incident review could not run: ${esc(res.incidentDeep.note)}`, res.incidentDeep.ok ? 'red' : 'amber');
+            } catch (e) {
+                console.error(`${TAG} incident review failed:`, e);
+                res.incidentDeep = { ok: false, note: `the log could not be decoded (${e && e.message || e})` };
+                setStatus(`Incident review failed: ${esc(e.message || e)}`, 'red');
+            } finally { ui.busy = false; }
+            if (lastResult === res) render(res);
+        }, 30);
+    }
+    // One canvas, four stacked plots sharing the time axis.
+    const INC_PLOTS = [
+        { key: 'spd', label: 'Ground speed (mph)', series: [['#7adfe6', 'speed']] },
+        { key: 'bx', label: 'Push along the body (g) — negative = pushed backwards', series: [['#7adfe6', 'push']] },
+        { key: 'thr', label: 'Throttle (%)', series: [['#7adfe6', 'throttle']] },
+        { key: 'att', label: 'Tilt (°)', series: [['#7adfe6', 'roll'], ['#ffb347', 'pitch']] },
+    ];
+    function incSeries(deep) {
+        const c = deep.chart;
+        return {
+            spd: [{ t: c.gps.t, v: c.gps.Spd.map(x => x * 2.23694) }],
+            bx: [{ t: c.imu.t, v: c.imu.bx }],
+            thr: [c.thr ? { t: c.thr.t, v: c.thr.ThO.map(x => x * 100) } : { t: [], v: [] }],
+            att: [{ t: c.att.t, v: c.att.Roll }, { t: c.att.t, v: c.att.Pitch }],
+        };
+    }
+    function incDraw(cv, res, hoverT) {
+        const deep = res.incidentDeep;
+        const W = cv.clientWidth, H = cv.clientHeight;
+        if (!deep || !deep.ok || !W || !H) return;
+        const dpr = window.devicePixelRatio || 1;
+        cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+        const g = cv.getContext('2d');
+        g.setTransform(dpr, 0, 0, dpr, 0, 0);
+        g.clearRect(0, 0, W, H);
+        g.font = '10px system-ui,sans-serif';
+        const S = cv._aimSeries || (cv._aimSeries = incSeries(deep));
+        const x0 = deep.chart.from, x1 = deep.chart.to, L = 40, R = 8, pw = Math.max(10, W - L - R);
+        const top0 = 16, gap = 18, ph = (H - top0 - 18 - gap * (INC_PLOTS.length - 1)) / INC_PLOTS.length;
+        const X = (t) => L + (t - x0) / (x1 - x0) * pw;
+        const marks = deep.findings.filter(f => f.level === 'red' || f.level === 'amber');
+        INC_PLOTS.forEach((p, pi) => {
+            const y = top0 + pi * (ph + gap), ser = S[p.key];
+            let lo = Infinity, hi = -Infinity;
+            for (const s of ser) for (const v of s.v) { if (v < lo) lo = v; if (v > hi) hi = v; }
+            if (!isFinite(lo)) { lo = 0; hi = 1; }
+            if (p.key === 'spd' || p.key === 'thr') lo = 0;
+            if (p.key === 'thr') hi = 100;
+            if (p.key === 'bx' || p.key === 'att') { const m = Math.max(Math.abs(lo), Math.abs(hi), p.key === 'bx' ? 0.5 : 30); lo = -m; hi = m; }
+            if (hi - lo < 1e-9) hi = lo + 1;
+            const Y = (v) => y + ph - (v - lo) / (hi - lo) * ph;
+            g.fillStyle = '#0b0e12'; g.fillRect(L, y, pw, ph);
+            g.fillStyle = 'rgba(255,255,255,.12)'; if (lo < 0) g.fillRect(L, Y(0), pw, 1);
+            g.save(); g.beginPath(); g.rect(L, y, pw, ph); g.clip();
+            ser.forEach((s, si) => { g.strokeStyle = p.series[si][0]; g.lineWidth = 1.4; g.beginPath(); for (let k = 0; k < s.t.length; k++) { const px = X(s.t[k]), py = Y(s.v[k]); if (k) g.lineTo(px, py); else g.moveTo(px, py); } g.stroke(); });
+            g.restore();
+            const fmt = (v) => Math.abs(hi - lo) < 5 ? v.toFixed(1) : String(Math.round(v));
+            g.fillStyle = '#888'; g.textAlign = 'right'; g.textBaseline = 'middle';
+            g.fillText(fmt(hi), L - 4, y + 5); g.fillText(fmt(lo), L - 4, y + ph - 5); if (lo < 0) g.fillText('0', L - 4, Y(0));
+            g.textAlign = 'left'; g.fillStyle = 'rgba(255,255,255,.6)';
+            let lx = L + 4; g.fillText(p.label, lx, y - 7); lx += g.measureText(p.label).width + 12;
+            if (p.series.length > 1) for (const [color, name] of p.series) { g.fillStyle = color; g.fillRect(lx, y - 9, 10, 3); g.fillStyle = 'rgba(255,255,255,.6)'; g.fillText(name, lx + 14, y - 7); lx += g.measureText(name).width + 28; }
+        });
+        const yTop = top0, yBot = H - 18;
+        // time axis
+        const spanS = (x1 - x0) / 1000, step = [1, 2, 5, 10, 15, 30, 60, 120].find(v => spanS / v <= 8) || 300;
+        g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillStyle = '#888';
+        for (let t = Math.ceil(x0 / (step * 1000)) * step * 1000; t <= x1; t += step * 1000) { g.fillStyle = 'rgba(255,255,255,.06)'; g.fillRect(X(t), yTop, 1, yBot - yTop); g.fillStyle = '#888'; g.fillText(mlHms(new Date(t)), X(t), H - 8); }
+        // numbered event lines (same numbers as the table); labels step down so neighbours do not overlap
+        let lastX = -99, row = 0;
+        marks.forEach((f, i) => {
+            if (f.t < x0 || f.t > x1) return;
+            const x = X(f.t), col = f.level === 'red' ? '#ff5f5f' : '#ffb347';
+            g.fillStyle = col; g.globalAlpha = 0.7; g.fillRect(x, yTop, 1, yBot - yTop); g.globalAlpha = 1;
+            row = x - lastX < 14 ? row + 1 : 0; lastX = x;
+            const ly = yTop + 7 + (row % 4) * 12;
+            g.fillStyle = '#0e1115'; g.fillRect(x + 2, ly - 6, 13, 12); g.fillStyle = col; g.textAlign = 'left'; g.fillText(String(i + 1), x + 4, ly);
+        });
+        if (hoverT != null && hoverT >= x0 && hoverT <= x1) { g.fillStyle = 'rgba(255,255,255,.5)'; g.fillRect(X(hoverT), yTop, 1, yBot - yTop); }
+        cv._aim = { x0, x1, L, pw };
+    }
+    function incRedraw() {
+        const res = lastResult;
+        if (!res || !ui.body) return;
+        try { ui.body.querySelectorAll('canvas[data-aim-ml-inc-cv]').forEach(cv => incDraw(cv, res, null)); }
+        catch (e) { console.error(`${TAG} incident chart draw failed:`, e); }
+    }
+    function incWire(res) {
+        ui.body.querySelectorAll('[data-aim-ml-inc-run]').forEach(b => b.addEventListener('click', () => incRun(res)));
+        const cv = ui.body.querySelector('canvas[data-aim-ml-inc-cv]');
+        if (!cv || !res.incidentDeep || !res.incidentDeep.ok) return;
+        incDraw(cv, res, null);
+        const ro = ui.body.querySelector('[data-aim-ml-inc-ro]'), idle = ro ? ro.innerHTML : '';
+        const near = (s, t) => { if (!s.t.length) return null; let k = mlLowerBound(s.t, t); if (k >= s.t.length || (k > 0 && t - s.t[k - 1] < s.t[k] - t)) k--; return s.v[k]; };
+        let raf = 0, pending = null;
+        cv.addEventListener('pointermove', (ev) => {
+            const a = cv._aim; if (!a) return;
+            const r = cv.getBoundingClientRect(), x = Math.min(a.L + a.pw, Math.max(a.L, ev.clientX - r.left));
+            pending = a.x0 + (x - a.L) / a.pw * (a.x1 - a.x0);
+            if (raf) return;
+            raf = requestAnimationFrame(() => {
+                raf = 0;
+                try {
+                    const t = pending, S = cv._aimSeries;
+                    incDraw(cv, res, t);
+                    const n = (v, d) => v == null || !isFinite(v) ? '—' : v.toFixed(d);
+                    if (ro && S) ro.innerHTML = `<b>${incT(t)} UTC</b> &nbsp; speed <b>${n(near(S.spd[0], t), 0)}</b> mph &nbsp;│&nbsp; push <b>${n(near(S.bx[0], t), 2)}</b> g &nbsp;│&nbsp; throttle <b>${n(near(S.thr[0], t), 0)}</b>% &nbsp;│&nbsp; roll <b>${n(near(S.att[0], t), 0)}</b>° &nbsp;│&nbsp; pitch <b>${n(near(S.att[1], t), 0)}</b>°`;
+                } catch (e) { console.error(`${TAG} incident chart hover failed:`, e); }
+            });
+        });
+        cv.addEventListener('pointerleave', () => { try { incDraw(cv, res, null); if (ro) ro.innerHTML = idle; } catch (e) { console.error(`${TAG} incident chart redraw failed:`, e); } });
+    }
+
     // ---------------- v0.92 — ⬇ Report: the analysis on screen as one HTML file ----------------
     function setExportEnabled(on) {
         const b = ui.panel && ui.panel.querySelector('#aim-ml-export');
         if (b) b.disabled = !on;
+        const z = ui.panel && ui.panel.querySelector('#aim-ml-zip');
+        if (z) z.disabled = !(on && lastResult && lastResult.archives && lastResult.archives.length);
     }
     // Charts are canvases — a saved page cannot redraw them, so each becomes a picture.
     // A canvas inside a closed "Technical details" has no size and was never drawn: open those
     // for the capture, then put them back the way the user had them (all in one task, no flicker).
     function exportChartImages() {
         const closed = [];
-        for (const cv of escCanvases()) {
+        const all = () => Array.from(ui.body.querySelectorAll('canvas[data-aim-ml-esc-cv], canvas[data-aim-ml-inc-cv]'));
+        for (const cv of all()) {
             for (let d = cv.closest('details'); d; d = d.parentElement && d.parentElement.closest('details')) {
                 if (!d.open) { d.open = true; closed.push(d); }
             }
@@ -1588,10 +2049,10 @@
         const shots = [];
         try {
             if (closed.length) escRedrawAll();
-            for (const cv of escCanvases()) {
+            for (const cv of all()) {
                 let url = null;
                 try { if (cv.width && cv.height && cv._aim) url = cv.toDataURL('image/png'); }
-                catch (e) { console.warn(`${TAG} chart capture failed for ${cv.getAttribute('data-aim-ml-esc-cv')}:`, e); }
+                catch (e) { console.warn(`${TAG} chart capture failed for ${cv.getAttribute('data-aim-ml-esc-cv') || 'incident'}:`, e); }
                 shots.push(url);
             }
         } finally { for (const d of closed) d.open = false; }
@@ -1602,22 +2063,22 @@
         if (!res || !ui.body || !ui.body.children.length) { setStatus('Nothing to export yet — analyze a mission first.', 'amber'); return; }
         const shots = exportChartImages();
         const clone = ui.body.cloneNode(true);
-        const cvs = Array.from(clone.querySelectorAll('canvas[data-aim-ml-esc-cv]'));
+        const cvs = Array.from(clone.querySelectorAll('canvas[data-aim-ml-esc-cv], canvas[data-aim-ml-inc-cv]'));
         let missing = 0;
         cvs.forEach((cv, i) => {
             const url = shots[i];
             if (!url) { missing++; const d = document.createElement('div'); d.className = 'a'; d.textContent = '⚠ This chart could not be captured — open the mission in AIM Mission Logs to see it.'; cv.replaceWith(d); return; }
             const img = document.createElement('img');
-            img.src = url; img.alt = `${cv.getAttribute('data-aim-ml-esc-cv')} chart`; img.className = 'aim-ml-chart';
+            img.src = url; img.alt = `${cv.getAttribute('data-aim-ml-esc-cv') || 'incident'} chart`; img.className = 'aim-ml-chart';
             cv.replaceWith(img);
         });
         // live-only pieces: raw-file downloads, buttons, chart controls, hover readout, "click here" hints
         const filesCard = clone.querySelector('[data-aim-ml-dl]');
         if (filesCard && filesCard.closest('.aim-ml-card')) filesCard.closest('.aim-ml-card').remove();
-        clone.querySelectorAll('button, .aim-ml-esc-ctl, [data-aim-ml-esc="readout"]').forEach(el => el.remove());
+        clone.querySelectorAll('button, .aim-ml-esc-ctl, [data-aim-ml-esc="readout"], [data-aim-ml-inc-ro]').forEach(el => el.remove());
         clone.querySelectorAll('[data-aim-ml-live]').forEach(el => { const li = el.closest('li'); el.remove(); if (li && !li.textContent.trim()) li.remove(); });
         clone.querySelectorAll('[data-aim-ml-ll], [data-aim-ml-esc-zoom]').forEach(el => { el.removeAttribute('title'); el.style.cursor = ''; });
-        const zoomed = !!escUi.view && cvs.length > 0;
+        const zoomed = !!escUi.view && clone.querySelectorAll('img.aim-ml-chart').length > (res.incidentDeep ? 1 : 0);
 
         const mj = res.meta.json || {}, m = res.extra.mission || {};
         const site = mj.site_name || (m.site && m.site.name) || '';

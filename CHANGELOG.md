@@ -1,3 +1,11 @@
+## 2026-11-25 — 🔎 AIM Mission Logs latest v0.94 (latest only) — 🚨 Possible incident + ⬇ Logs
+
+- **New: 🚨 Possible incident card** at the top of the analysis when a flight did not end normally (feature #348). It lists the warning signs from the drone's own event log in time order (parachute, land-in-place, hard limit, motor alarm and so on) and says when and why the drone first left its plan.
+- **New: Run incident review** on that card. It reads the flight controller's own log and reports the first abnormal moment: a sudden stop by an outside force, jolts, being held back, loss of control, a motor that stopped turning, a hard impact, and when the autopilot commanded the parachute. A chart shows speed, push along the body, throttle and tilt around the event. It also says whether a motor alarm came before or after the first abnormal moment.
+- **New: ⬇ Logs** in the panel header saves the mission's app-log archive. The Files card has the same button, plus one for the DAA archive when it was fetched.
+- **Fix:** an error raised on the base before takeoff is no longer reported as the reason the flight was cut short.
+- ⬇ Report includes the incident card and its chart.
+
 ## 2026-11-25 — 🔎 AIM Mission Logs latest v0.93 (latest only) — on a site's Mission Log and Mission Playback
 
 - **New: 🔎 AIM on every row of a site's Mission Log.** Click it to analyze that mission's logs in place, the same panel as on the dashboard, with ⬇ Report.
