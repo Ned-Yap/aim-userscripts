@@ -1,3 +1,8 @@
+## 2026-11-25 — 🔎 AIM Mission Logs latest v0.92 (latest only) — ⬇ Report
+
+- **New: ⬇ Report button** in the panel header (feature #347). It saves the analysis on screen as one HTML file that opens in any browser with no login, so it can be sent or printed instead of screenshotted. Simple view saves the plain-English cards with "Technical details" folded under each; Advanced view saves the full cards.
+- The motor charts are saved as pictures, zoomed the way they were on screen. Buttons, chart controls and raw-file downloads are left out. Printing opens every folded section and switches to a white page.
+
 ## 2026-11-24 — 🌐 AIM Fleet Tools latest v1.04 (latest only) — ⏱ Hours & Cycle: completed runs, outages, per base
 
 - **Fix: a mission only counts as done when its run was completed** (feature #346). A mission flown over several battery flights is one run. Before, any single flight counted, which made cycles look shorter than they were on sites that fly multi-flight missions.

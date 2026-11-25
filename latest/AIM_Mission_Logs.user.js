@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Logs
 // @namespace    http://tampermonkey.net/
-// @version      0.91
+// @version      0.92
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Logs.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Logs.user.js
-// @description  v0.91: deep link — /dashboard/?aim-ml=<mission id> opens the panel and analyzes that mission (used by the Fleet Tools ⚙ ESC Sweep rows). v0.9: ⚙ Motors / ESC card — reads the ESC telemetry log + the main drone log and says whether the drone's critical_current_rpm_ratio alert was a false positive (motor-controller readings arriving under 3 per second) or real; interactive per-ESC charts (drag to zoom all, double-click to reset, hover for values, switch the top chart between ratio / rpm / current / throttle / voltage / temperatures), editable thresholds, stretch table, per-ESC stats, Sheets copy. v0.8: Signal KML points, pins and track sit at the drone's flown altitude (absolute MSL, extruded to the ground) instead of clamped to the ground. v0.7: names the CARRIER from the LTE bands the modem camped on (B13 = Verizon-only spectrum, B14/B17/B29/B30 = AT&T, B71/B41/B25/B26 = T-Mobile; shared bands prove nothing); every outage, handover and the worst-signal sample now carries the drone's position at that moment (click 📍 to copy lat,lng — paste into Map Nav 🧭); 📍 Signal KML button exports the flown track with each signal sample colored Good/Fair/Weak/Edge plus outage and handover pins (open in Google Earth or Fleet Tools → KML Layers) to see WHERE the link was bad. v0.6: outage detection now also uses 100%-loss ping runs, IP-lease loss (udhcpc deconfigured→bound) and LTE-manager restarts — a reconnect the TCP checks never saw (238589) was reported as 'dropped 0 times' in red; outages are tagged before takeoff / in flight / after landing and the Simple card downgrades a drop that happened on the base to amber. v0.5: Simple / Advanced view toggle (remembered) — Simple is plain English for pilots and customers: one bold bottom line per card + bullets (signal as bars, response time, packet loss, blips, tower hopping, what to do) with the full technical card under 'Technical details ▸'. v0.4: reads the older EM7565 modem's status fields (RSRP_(dBm) / PCC_RxM_RSSI / Tx_Power) — v0.3 saw no RSRP and flagged a false 33-min outage; a sample is lost only with no band / stuck handover / no cell+no RSRP; isolated 10 s TCP blips = amber POOR link (loss %, avg/worst rtt) not red; unknown formats raise a ⚠ with lte.rawSample; mission duration is ms. v0.3: LTE card gains an Outages line (each loss window with start → recovery and duration, from no-cell / stuck-handover samples and failing TCP checks) and a Coverage line (median RSRP, % weak / very weak / no cell); dropped verdict names the outages. v0.2: row 🔎 anchors on the dashboard's own Get App Logs control (not table structure); prefill from the FILTER box or the single visible row only; server reply shown when a mission has no archive. Pull a mission's log archives straight from the Mission Dashboard (no download → unzip → hunt) and extract what matters: LTE link health (modem registration, TCP/ping checks, signal, cell handovers, RTK-stream gaps), mission event timeline (stages, aborts, go-to-base), DAA aircraft with closest approach to the drone, warnings/errors by process. v0.1 (#286): POC on percepto.app/dashboard — 🔎 per mission row + floating launcher; engine (fetch → gunzip → untar → extractors) is self-contained for the later Fleet Tools site/date sweep.
+// @description  v0.92: ⬇ Report — saves the analysis on screen as one self-contained HTML file (charts included as pictures; opens anywhere, no login). v0.91: deep link — /dashboard/?aim-ml=<mission id> opens the panel and analyzes that mission (used by the Fleet Tools ⚙ ESC Sweep rows). v0.9: ⚙ Motors / ESC card — reads the ESC telemetry log + the main drone log and says whether the drone's critical_current_rpm_ratio alert was a false positive (motor-controller readings arriving under 3 per second) or real; interactive per-ESC charts (drag to zoom all, double-click to reset, hover for values, switch the top chart between ratio / rpm / current / throttle / voltage / temperatures), editable thresholds, stretch table, per-ESC stats, Sheets copy. v0.8: Signal KML points, pins and track sit at the drone's flown altitude (absolute MSL, extruded to the ground) instead of clamped to the ground. v0.7: names the CARRIER from the LTE bands the modem camped on (B13 = Verizon-only spectrum, B14/B17/B29/B30 = AT&T, B71/B41/B25/B26 = T-Mobile; shared bands prove nothing); every outage, handover and the worst-signal sample now carries the drone's position at that moment (click 📍 to copy lat,lng — paste into Map Nav 🧭); 📍 Signal KML button exports the flown track with each signal sample colored Good/Fair/Weak/Edge plus outage and handover pins (open in Google Earth or Fleet Tools → KML Layers) to see WHERE the link was bad. v0.6: outage detection now also uses 100%-loss ping runs, IP-lease loss (udhcpc deconfigured→bound) and LTE-manager restarts — a reconnect the TCP checks never saw (238589) was reported as 'dropped 0 times' in red; outages are tagged before takeoff / in flight / after landing and the Simple card downgrades a drop that happened on the base to amber. v0.5: Simple / Advanced view toggle (remembered) — Simple is plain English for pilots and customers: one bold bottom line per card + bullets (signal as bars, response time, packet loss, blips, tower hopping, what to do) with the full technical card under 'Technical details ▸'. v0.4: reads the older EM7565 modem's status fields (RSRP_(dBm) / PCC_RxM_RSSI / Tx_Power) — v0.3 saw no RSRP and flagged a false 33-min outage; a sample is lost only with no band / stuck handover / no cell+no RSRP; isolated 10 s TCP blips = amber POOR link (loss %, avg/worst rtt) not red; unknown formats raise a ⚠ with lte.rawSample; mission duration is ms. v0.3: LTE card gains an Outages line (each loss window with start → recovery and duration, from no-cell / stuck-handover samples and failing TCP checks) and a Coverage line (median RSRP, % weak / very weak / no cell); dropped verdict names the outages. v0.2: row 🔎 anchors on the dashboard's own Get App Logs control (not table structure); prefill from the FILTER box or the single visible row only; server reply shown when a mission has no archive. Pull a mission's log archives straight from the Mission Dashboard (no download → unzip → hunt) and extract what matters: LTE link health (modem registration, TCP/ping checks, signal, cell handovers, RTK-stream gaps), mission event timeline (stages, aborts, go-to-base), DAA aircraft with closest approach to the drone, warnings/errors by process. v0.1 (#286): POC on percepto.app/dashboard — 🔎 per mission row + floating launcher; engine (fetch → gunzip → untar → extractors) is self-contained for the later Fleet Tools site/date sweep.
 // @author       Payden
 // @match        *://percepto.app/dashboard*
 // @match        *://qa.percepto.app/dashboard*
@@ -36,7 +36,7 @@
     if (window !== window.top) return;
 
     const SCRIPT_ID = 'aim-mission-logs';
-    const SCRIPT_VERSION = '0.91';
+    const SCRIPT_VERSION = '0.92';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const IS_QA = location.hostname === 'qa.percepto.app' || location.hostname.endsWith('.qa.percepto.app');
 
@@ -792,6 +792,7 @@
             #aim-ml-head input{width:110px;background:#0b0e12;color:#eee;border:1px solid #2a3240;border-radius:4px;padding:3px 6px;font:12px system-ui}
             #aim-ml-head button,.aim-ml-btn{background:#1b2230;color:#ddd;border:1px solid #2a3240;border-radius:4px;padding:3px 8px;cursor:pointer;font:12px system-ui}
             #aim-ml-head button:hover,.aim-ml-btn:hover{border-color:#7adfe6;color:#fff}
+            #aim-ml-head button:disabled{opacity:.4;cursor:default;border-color:#2a3240;color:#ddd}
             .aim-ml-seg{display:inline-flex;border:1px solid #2a3240;border-radius:6px;overflow:hidden}
             .aim-ml-seg button{background:#0b0e12;color:#999;border:0;border-right:1px solid #2a3240;padding:3px 10px;cursor:pointer;font:12px system-ui}
             .aim-ml-seg button:last-child{border-right:0}
@@ -843,6 +844,7 @@
                 <label class="m">Mission ID <input id="aim-ml-id" type="text" inputmode="numeric" placeholder="237893"></label>
                 <label class="m" title="Also fetch the DAA (ADS-B / radar) archive"><input id="aim-ml-daa" type="checkbox" checked> DAA</label>
                 <button id="aim-ml-run">Analyze</button>
+                <button id="aim-ml-export" disabled title="Save this analysis as one HTML file you can open, send or print — no dashboard or login needed">⬇ Report</button>
                 <button id="aim-ml-close" title="Close">✕</button>
             </div>
             <div id="aim-ml-status">Enter a mission ID (or click 🔎 on a table row) and press Analyze.</div>
@@ -852,6 +854,10 @@
         p.querySelector('#aim-ml-close').addEventListener('click', () => { p.style.display = 'none'; });
         p.querySelector('#aim-ml-run').addEventListener('click', () => { const v = p.querySelector('#aim-ml-id').value.trim(); if (/^\d+$/.test(v)) analyzeMission(v); else setStatus('Mission ID must be a number.', 'red'); });
         p.querySelector('#aim-ml-id').addEventListener('keydown', (e) => { if (e.key === 'Enter') p.querySelector('#aim-ml-run').click(); });
+        p.querySelector('#aim-ml-export').addEventListener('click', () => {
+            try { exportHtmlReport(); }
+            catch (e) { console.error(`${TAG} HTML report failed:`, e); setStatus(`HTML report failed: ${esc(e.message || e)}`, 'red'); }
+        });
         p.querySelector('#aim-ml-daa').addEventListener('change', (e) => { wantDaa = !!e.target.checked; });
         p.querySelectorAll('#aim-ml-mode button').forEach(b => b.addEventListener('click', () => setViewMode(b.getAttribute('data-mode'))));
         setViewMode(viewMode);
@@ -899,6 +905,8 @@
         if (ui.busy) { setStatus('Already running — wait for the current analysis.', 'amber'); return; }
         ui.busy = true;
         ui.body.innerHTML = '';
+        lastResult = null;
+        setExportEnabled(false);
         const t0 = performance.now();
         try {
             setStatus(`Mission ${missionId}: asking Percepto for the app-log archive link…`);
@@ -954,6 +962,7 @@
         const adv = {};
         const addCard = (key, html) => { adv[key] = html; parts.push(html); };
         lastResult = res;
+        setExportEnabled(true);
         // --- mission header ---
         const mj = meta.json || {}, m = extra.mission || {};
         const durS = m.duration != null ? Math.round(Number(m.duration) / 1000) : null;   // server duration is milliseconds (Fleet Tools convention)
@@ -1124,7 +1133,7 @@
             <td class="${x.minMsg != null && x.minMsg < an.sampThr ? 'a' : ''}">${escNum(x.minMsg, 2)}</td>
             <td>${x.low ? escTag('Low sampling', 'a') : escTag('Normal sampling', 'g')}</td></tr>`).join('');
         return `<table class="aim-ml"><tr>${['ESC', 'Start UTC', 'End', 'Duration', 'Peak ratio', 'Min samples/s', 'Seconds below', 'Min msg_in_sec', 'Sampling'].map(c => `<th>${c}</th>`).join('')}</tr>${rows}</table>
-            ${sorted.length > ESC_MAX_ROWS ? `<div class="m">+${sorted.length - ESC_MAX_ROWS} more stretch(es) — 📋 Sheets copies all of them.</div>` : ''}`;
+            ${sorted.length > ESC_MAX_ROWS ? `<div class="m">+${sorted.length - ESC_MAX_ROWS} more stretch(es)<span data-aim-ml-live> — 📋 Sheets copies all of them</span>.</div>` : ''}`;
     }
 
     function escStatsHtml(res) {
@@ -1463,8 +1472,8 @@
         if (lte.avgRtt != null) lteBullets.push(`<b>Response time:</b> ${lag} (about ${lte.avgRtt} ms per round trip; a good site is near 150 ms, worst moment ${lte.worstRtt} ms).`);
         const lossShare = lte.lossShare != null ? lte.lossShare : (lte.pings.length ? Math.round(100 * lte.lossyPings.length / lte.pings.length) : 0);
         if (lte.pings.length) lteBullets.push(`<b>Packet loss:</b> ${lossShare}% of the test pings lost something${lossShare >= 25 ? ' — that is a lot' : lossShare ? ' — minor' : ' — clean'}.`);
-        if (lte.outages.length && lte.verdict.level !== 'red') lteBullets.push(`<b>Blips:</b> ${lte.outages.map(w => `${mlHms(w.from)} (${w.s} s)${pin(w.at)}`).join(', ')} — came back on its own each time. Click 📍 to copy where it happened.`);
-        if (lte.outages.some(w => w.at) || lte.handovers.some(h => h.at)) lteBullets.push(`<b>Where:</b> 📍 Signal KML (top right of this card) maps every signal reading along the flight, colored good → weak, with the blips and tower switches pinned — open it in Google Earth or Fleet Tools → KML Layers.`);
+        if (lte.outages.length && lte.verdict.level !== 'red') lteBullets.push(`<b>Blips:</b> ${lte.outages.map(w => `${mlHms(w.from)} (${w.s} s)${pin(w.at)}`).join(', ')} — came back on its own each time.<span data-aim-ml-live> Click 📍 to copy where it happened.</span>`);
+        if (lte.outages.some(w => w.at) || lte.handovers.some(h => h.at)) lteBullets.push(`<span data-aim-ml-live><b>Where:</b> 📍 Signal KML (top right of this card) maps every signal reading along the flight, colored good → weak, with the blips and tower switches pinned — open it in Google Earth or Fleet Tools → KML Layers.</span>`);
         if (lte.handovers.length > 6) lteBullets.push(`<b>Tower hopping:</b> switched cell towers ${lte.handovers.length} times. Flying between overlapping towers usually means momentary stalls at each switch.`);
         if (lte.modes.includes('ENDC')) lteBullets.push(`<b>5G</b> was available for part of the flight.`);
         if (lte.resetCount > 1) lteBullets.push(`<b>The modem restarted</b> during the flight.`);
@@ -1546,6 +1555,104 @@
             else await navigator.clipboard.writeText(tsv);
             const old = btn.textContent; btn.textContent = '✓ copied'; setTimeout(() => { btn.textContent = old; }, 1500);
         } catch (e) { console.warn(`${TAG} clipboard failed`, e); btn.textContent = '✗ clipboard'; }
+    }
+
+    // ---------------- v0.92 — ⬇ Report: the analysis on screen as one HTML file ----------------
+    function setExportEnabled(on) {
+        const b = ui.panel && ui.panel.querySelector('#aim-ml-export');
+        if (b) b.disabled = !on;
+    }
+    // Charts are canvases — a saved page cannot redraw them, so each becomes a picture.
+    // A canvas inside a closed "Technical details" has no size and was never drawn: open those
+    // for the capture, then put them back the way the user had them (all in one task, no flicker).
+    function exportChartImages() {
+        const closed = [];
+        for (const cv of escCanvases()) {
+            for (let d = cv.closest('details'); d; d = d.parentElement && d.parentElement.closest('details')) {
+                if (!d.open) { d.open = true; closed.push(d); }
+            }
+        }
+        const shots = [];
+        try {
+            if (closed.length) escRedrawAll();
+            for (const cv of escCanvases()) {
+                let url = null;
+                try { if (cv.width && cv.height && cv._aim) url = cv.toDataURL('image/png'); }
+                catch (e) { console.warn(`${TAG} chart capture failed for ${cv.getAttribute('data-aim-ml-esc-cv')}:`, e); }
+                shots.push(url);
+            }
+        } finally { for (const d of closed) d.open = false; }
+        return shots;
+    }
+    function exportHtmlReport() {
+        const res = lastResult;
+        if (!res || !ui.body || !ui.body.children.length) { setStatus('Nothing to export yet — analyze a mission first.', 'amber'); return; }
+        const shots = exportChartImages();
+        const clone = ui.body.cloneNode(true);
+        const cvs = Array.from(clone.querySelectorAll('canvas[data-aim-ml-esc-cv]'));
+        let missing = 0;
+        cvs.forEach((cv, i) => {
+            const url = shots[i];
+            if (!url) { missing++; const d = document.createElement('div'); d.className = 'a'; d.textContent = '⚠ This chart could not be captured — open the mission in AIM Mission Logs to see it.'; cv.replaceWith(d); return; }
+            const img = document.createElement('img');
+            img.src = url; img.alt = `${cv.getAttribute('data-aim-ml-esc-cv')} chart`; img.className = 'aim-ml-chart';
+            cv.replaceWith(img);
+        });
+        // live-only pieces: raw-file downloads, buttons, chart controls, hover readout, "click here" hints
+        const filesCard = clone.querySelector('[data-aim-ml-dl]');
+        if (filesCard && filesCard.closest('.aim-ml-card')) filesCard.closest('.aim-ml-card').remove();
+        clone.querySelectorAll('button, .aim-ml-esc-ctl, [data-aim-ml-esc="readout"]').forEach(el => el.remove());
+        clone.querySelectorAll('[data-aim-ml-live]').forEach(el => { const li = el.closest('li'); el.remove(); if (li && !li.textContent.trim()) li.remove(); });
+        clone.querySelectorAll('[data-aim-ml-ll], [data-aim-ml-esc-zoom]').forEach(el => { el.removeAttribute('title'); el.style.cursor = ''; });
+        const zoomed = !!escUi.view && cvs.length > 0;
+
+        const mj = res.meta.json || {}, m = res.extra.mission || {};
+        const site = mj.site_name || (m.site && m.site.name) || '';
+        const drone = mj.vehicle_name || (m.drone && m.drone.name) || '';
+        const appName = m.app && m.app.name ? m.app.name : '';
+        const start = mj.start_time || m.when || '';
+        const now = new Date();
+        const made = `${now.getFullYear()}-${mlPad(now.getMonth() + 1)}-${mlPad(now.getDate())} ${mlPad(now.getHours())}:${mlPad(now.getMinutes())}`;
+        const title = `Mission ${res.missionId}${appName ? ' · ' + appName : ''} — log report`;
+        const styleEl = document.getElementById('aim-ml-style');
+        const css = (styleEl ? styleEl.textContent : '') + `
+            html,body{margin:0;background:#0e1115;color:#ddd;font:12px/1.45 system-ui,sans-serif}
+            #aim-ml-report{max-width:980px;margin:0 auto;padding:18px 16px 40px}
+            #aim-ml-report>header{margin-bottom:12px}
+            #aim-ml-report h1{margin:0 0 4px;font-size:18px;color:#7adfe6;font-weight:700}
+            #aim-ml-report .sub{color:#aaa}
+            #aim-ml-report #aim-ml-body{overflow:visible;padding:0}
+            img.aim-ml-chart{display:block;width:100%;height:auto;border-radius:4px}
+            @media print{
+                html,body{background:#fff;color:#111}
+                #aim-ml-report h1,.aim-ml-card>h4,.aim-ml-tech>summary,.c{color:#0b6a72}
+                .aim-ml-card,.aim-ml-bottom,.aim-ml-verdict{background:#fff !important;border-color:#bbb !important;break-inside:avoid}
+                .aim-ml-card>h4,table.aim-ml th,table.aim-ml td{border-color:#ccc}
+                .aim-ml-plain b{color:#000}
+                .g{color:#1a7f1a}.a{color:#a05a00}.r{color:#c01818}.m,#aim-ml-report .sub,table.aim-ml th,.aim-ml-kv span:nth-child(odd){color:#666}
+                .aim-ml-mono{color:#333}
+            }`;
+        const html = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${esc(title)}</title>
+<style>${css}</style></head>
+<body><div id="aim-ml-report">
+<header><h1>${esc(title)}</h1>
+<div class="sub">${[site, drone, start ? 'started ' + start + ' UTC' : ''].filter(Boolean).map(esc).join(' · ')}</div>
+<div class="sub">All times are UTC. ${viewMode === 'advanced' ? 'Advanced view.' : 'Simple view — open “Technical details” under a section for the full numbers.'}${cvs.length ? ` Charts are pictures${zoomed ? ', zoomed the way they were on screen when this was saved' : ''}.` : ''}</div>
+<div class="sub">Saved ${esc(made)} from AIM Mission Logs v${SCRIPT_VERSION}${IS_QA ? ' (QA server)' : ''}.</div></header>
+<div id="aim-ml-body">${clone.innerHTML}</div>
+</div>
+<script>addEventListener('beforeprint',function(){document.querySelectorAll('details').forEach(function(d){d.open=true;});});<\/script>
+</body></html>`;
+        const safe = (x) => String(x).replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40);
+        const name = ['Mission', res.missionId, safe(site), 'log_report'].filter(Boolean).join('_') + '.html';
+        const blob = new Blob([html], { type: 'text/html' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob); a.download = name; a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+        console.log(`${TAG} HTML report saved: ${name} (${fmtMB(blob.size)}, ${cvs.length - missing}/${cvs.length} charts)`);
+        setStatus(`Saved ${esc(name)} (${fmtMB(blob.size)})${missing ? ` — ${missing} chart(s) could not be captured, see console` : ''}`, missing ? 'amber' : 'green');
     }
 
     // ---------------- dashboard injection ----------------
