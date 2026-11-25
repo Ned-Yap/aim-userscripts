@@ -1,3 +1,7 @@
+## 2026-11-25 — 🔎 AIM Mission Logs latest v0.96 (latest only) — no overlapping button on the Mission Log
+
+- **Fix:** the floating 🔎 Logs button no longer shows on a site's Mission Log, where it covered the Mission Log Summary button. Use 🔎 AIM on a row; the panel still has the Mission ID box for any other mission. The floating button stays on Mission Playback and the dashboard.
+
 ## 2026-11-25 — 🔎 AIM Mission Logs latest v0.95 (latest only) — incident review: "Where it happened" map
 
 - **New: a map in the incident review** (feature #348). It shows the flown track around the event (blue before the first abnormal moment, orange after), the numbered moments from the table, and the site's planned flight paths, FFZs and NFZs as the drone carried them on that flight. Hover the track for the time, speed and height at that point.
